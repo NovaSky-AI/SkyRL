@@ -13,11 +13,10 @@ from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from skyrl.tinker.types import LoraConfig
-from skyrl.tx.layers.lora import init_lora_adapter
+from skyrl.tx.layers.lora import FusedLoRALinear, init_lora_adapter
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.utils import models
-from skyrl.tx.layers.lora import FusedLoRALinear
 from skyrl.tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,

@@ -12,10 +12,9 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock,
 )
 
-from skyrl.tx.layers.lora import LoRAMixin
+from skyrl.tx.layers.lora import FusedLoRALinear, LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.layers.lora import FusedLoRALinear
 from tests.tx.models.conftest import load_model
 
 
