@@ -64,7 +64,7 @@ from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
 )
 
-_DATA_PLANE_RETRIES = 3
+_DATA_PLANE_RETRIES = 30
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -206,9 +206,7 @@ class RemoteInferenceClient:
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
                 logger.warning(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                # Back off so the connector can purge stale connections before
-                # the next attempt grabs another dead socket from the pool.
-                await asyncio.sleep(0.1 * 2**attempt)  # 0.1s, 0.2s, 0.4s
+                await asyncio.sleep(1)
                 continue
         raise last_exc  # type: ignore[misc]
 
