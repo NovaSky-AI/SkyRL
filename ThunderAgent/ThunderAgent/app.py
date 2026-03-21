@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from .config import Config, get_config
@@ -220,6 +220,12 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
                 },
             }
         )
+
+    @app.get("/router_state")
+    async def get_router_state(since_seq: int = Query(default=0, ge=0)):
+        """Return structured router state and recent lifecycle events."""
+        return JSONResponse(ta_router.get_observability_snapshot(since_seq=since_seq))
+
 
 # =============================================================================
 # Standalone Application

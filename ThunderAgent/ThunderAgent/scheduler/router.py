@@ -4,6 +4,8 @@ import json
 import logging
 import math
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable, Awaitable, Tuple
 
 import httpx
@@ -30,6 +32,22 @@ class PausedInfo:
     total_tokens: int
     paused_at: float
     origin_backend: Optional[str]  # None for new programs that haven't been assigned yet
+    step_count: int
+
+
+@dataclass
+class RouterEvent:
+    """A lightweight structured event for observability and post-run analysis."""
+
+    seq: int
+    timestamp: float
+    event_type: str
+    program_id: str
+    backend_url: Optional[str]
+    origin_backend: Optional[str]
+    status: str
+    state: str
+    total_tokens: int
     step_count: int
 
 
@@ -114,6 +132,64 @@ class MultiBackendRouter:
         # Initial value is 5.0 (1 token ≈ 5 chars), updated with momentum after each request
         self.char_to_token_ratio: float = 5.0
         self._ratio_initialized: bool = False
+        self._event_seq: int = 0
+        self._recent_events: deque[RouterEvent] = deque(maxlen=50000)
+        self._event_counters: Dict[str, int] = {
+            "created": 0,
+            "paused": 0,
+            "resumed": 0,
+            "released": 0,
+            "marked_for_pause": 0,
+        }
+
+    def _record_event(
+        self,
+        event_type: str,
+        *,
+        program_id: str,
+        backend_url: Optional[str],
+        origin_backend: Optional[str],
+        status: str,
+        state: str,
+        total_tokens: int,
+        step_count: int,
+    ) -> None:
+        self._event_seq += 1
+        self._recent_events.append(
+            RouterEvent(
+                seq=self._event_seq,
+                timestamp=time.time(),
+                event_type=event_type,
+                program_id=program_id,
+                backend_url=backend_url,
+                origin_backend=origin_backend,
+                status=status,
+                state=state,
+                total_tokens=total_tokens,
+                step_count=step_count,
+            )
+        )
+
+    def get_recent_events(self, since_seq: int = 0) -> List[Dict[str, Any]]:
+        """Return structured router events newer than the provided sequence number."""
+
+        return [
+            {
+                "seq": event.seq,
+                "timestamp": event.timestamp,
+                "event_type": event.event_type,
+                "program_id": event.program_id,
+                "backend_url": event.backend_url,
+                "origin_backend": event.origin_backend,
+                "status": event.status,
+                "state": event.state,
+                "total_tokens": event.total_tokens,
+                "step_count": event.step_count,
+            }
+            for event in self._recent_events
+            if event.seq > since_seq
+        ]
+
     async def start(self):
         """Start the router."""
         logger.info(f"Started router with {len(self.backends)} backend(s): {list(self.backends.keys())}")
@@ -240,6 +316,17 @@ class MultiBackendRouter:
             )
             # Token estimation is done in update_program_before_request
             self.programs[program_id] = state
+            self._event_counters["created"] += 1
+            self._record_event(
+                "created",
+                program_id=program_id,
+                backend_url=state.backend_url,
+                origin_backend=state.origin_backend,
+                status=state.status.value,
+                state=state.state.value,
+                total_tokens=state.total_tokens,
+                step_count=state.step_count,
+            )
             logger.debug(f"Created program {program_id}")
         
         return self.programs[program_id]
@@ -451,6 +538,17 @@ class MultiBackendRouter:
             state.marked_for_pause = False
         
         state.state = ProgramState.TERMINATED
+        self._event_counters["released"] += 1
+        self._record_event(
+            "released",
+            program_id=program_id,
+            backend_url=state.backend_url or state.origin_backend,
+            origin_backend=state.origin_backend,
+            status=state.status.value,
+            state=state.state.value,
+            total_tokens=state.total_tokens,
+            step_count=state.step_count,
+        )
         
         # Remove from programs dict
         del self.programs[program_id]
@@ -566,6 +664,18 @@ class MultiBackendRouter:
             state.waiting_event = asyncio.Event()
         else:
             state.waiting_event.clear()
+        
+        self._event_counters["paused"] += 1
+        self._record_event(
+            "paused",
+            program_id=program_id,
+            backend_url=state.origin_backend,
+            origin_backend=state.origin_backend,
+            status=state.status.value,
+            state=state.state.value,
+            total_tokens=state.total_tokens,
+            step_count=state.step_count,
+        )
         logger.info(f"Paused program {program_id} from {state.origin_backend} (tokens={state.total_tokens})")
 
     def _mark_program_for_pause(self, program_id: str, state: Program) -> None:
@@ -579,6 +689,17 @@ class MultiBackendRouter:
         
         state.marked_for_pause = True
         backend.future_paused_tokens += state.total_tokens
+        self._event_counters["marked_for_pause"] += 1
+        self._record_event(
+            "marked_for_pause",
+            program_id=program_id,
+            backend_url=state.backend_url,
+            origin_backend=state.origin_backend,
+            status=state.status.value,
+            state=state.state.value,
+            total_tokens=state.total_tokens,
+            step_count=state.step_count,
+        )
         logger.info(f"Marked program {program_id} for pause (tokens={state.total_tokens}, future_paused={backend.future_paused_tokens})")
 
     def _clear_mark_and_pause(self, program_id: str, state: Program) -> None:
@@ -631,6 +752,18 @@ class MultiBackendRouter:
         if state.waiting_event:
             state.waiting_event.set()
             state.waiting_event = None
+        
+        self._event_counters["resumed"] += 1
+        self._record_event(
+            "resumed",
+            program_id=state.program_id,
+            backend_url=backend.url,
+            origin_backend=origin_backend.url if origin_backend else None,
+            status=state.status.value,
+            state=state.state.value,
+            total_tokens=state.total_tokens,
+            step_count=state.step_count,
+        )
         logger.info(f"Resumed program {state.program_id} to {backend.url} (status={state.status.value}, tokens={state.total_tokens}, active={backend.active_program_tokens})")
 
     async def _claim_specific_paused(
@@ -890,6 +1023,22 @@ class MultiBackendRouter:
             "paused": paused,
             "marked_for_pause": marked,
             "per_backend": per_backend,
+        }
+
+    def get_observability_snapshot(self, since_seq: int = 0) -> Dict[str, Any]:
+        """Return current router state plus recent lifecycle events."""
+
+        paused_counts = self.get_paused_counts_by_backend()
+        return {
+            "timestamp": time.time(),
+            "event_seq": self._event_seq,
+            "counters": dict(self._event_counters),
+            "program_stats": self.get_program_stats(),
+            "backends": {
+                url: backend.to_dict(paused_program_count=paused_counts.get(url, 0))
+                for url, backend in self.backends.items()
+            },
+            "recent_events": self.get_recent_events(since_seq=since_seq),
         }
 
     # -------------------------------------------------------------------------
