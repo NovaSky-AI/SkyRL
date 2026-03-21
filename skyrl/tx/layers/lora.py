@@ -277,9 +277,7 @@ class FusedLoRALinear(LoRALinear):
         """Interleave per-component arrays into a single fused tensor (inverse of ``split``)."""
         *batch, _ = arrays[0].shape
         num_groups = arrays[0].shape[-1] // group_sizes[0]
-        concat = jnp.concatenate(
-            [arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1
-        )
+        concat = jnp.concatenate([arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1)
         return concat.reshape(*batch, -1)
 
     @staticmethod

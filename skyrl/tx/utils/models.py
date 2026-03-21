@@ -143,8 +143,6 @@ def get_fused_info(model: nnx.Module) -> dict[str, tuple[tuple[str, ...], tuple[
     }
 
 
-
-
 def _require_weights(
     tensors: dict[str, np.ndarray], keys: list[str], checkpoint_dir: str | os.PathLike
 ) -> list[np.ndarray]:
