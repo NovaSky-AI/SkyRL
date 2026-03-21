@@ -270,17 +270,28 @@ class FusedLoRALinear(LoRALinear):
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, ...]:
         fused = super().__call__(x, adapter_indices)
-        return self._split(fused)
+        return self.split(fused, self.group_sizes)
 
-    def _split(self, fused: jax.Array) -> tuple[jax.Array, ...]:
-        """Split fused output into per-component tensors."""
+    @staticmethod
+    def fuse(*arrays: jax.Array, group_sizes: tuple[int, ...]) -> jax.Array:
+        """Interleave per-component arrays into a single fused tensor (inverse of ``split``)."""
+        *batch, _ = arrays[0].shape
+        num_groups = arrays[0].shape[-1] // group_sizes[0]
+        concat = jnp.concatenate(
+            [arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1
+        )
+        return concat.reshape(*batch, -1)
+
+    @staticmethod
+    def split(fused: jax.Array, group_sizes: tuple[int, ...]) -> tuple[jax.Array, ...]:
+        """Split a fused tensor into per-component tensors by undoing group interleaving."""
         *batch, total = fused.shape
-        gs = sum(self.group_sizes)
+        gs = sum(group_sizes)
         num_groups = total // gs
         fused = fused.reshape(*batch, num_groups, gs)
         results: list[jax.Array] = []
         offset = 0
-        for g in self.group_sizes:
+        for g in group_sizes:
             results.append(fused[..., offset : offset + g].reshape(*batch, num_groups * g))
             offset += g
         return tuple(results)

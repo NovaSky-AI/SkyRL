@@ -15,7 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.utils.models import pack_fused
+from skyrl.tx.layers.lora import FusedLoRALinear
 from tests.tx.models.conftest import load_model
 
 
@@ -264,7 +264,7 @@ def test_qwen3_lora():
                     jax_proj,
                     adapter_idx=adapter_idx,
                     lora_A_weights=hf_projs[0].lora_A["default"].weight.detach().numpy().T,
-                    lora_B_weights=pack_fused(
+                    lora_B_weights=FusedLoRALinear.fuse(
                         *(p.lora_B["default"].weight.detach().numpy().T for p in hf_projs),
                         group_sizes=group_sizes,
                     ),

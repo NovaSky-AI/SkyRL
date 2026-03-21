@@ -17,11 +17,11 @@ from skyrl.tx.layers.lora import init_lora_adapter
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.utils import models
+from skyrl.tx.layers.lora import FusedLoRALinear
 from skyrl.tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,
     is_stacked_path,
-    unpack_fused,
 )
 from skyrl.utils.storage import download_and_unpack
 
@@ -72,7 +72,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     expected_lora_A = np.array(qkv_proj.lora_A[...][adapter_index, :, :rank].T)
     # For lora_B, we need to unpack the fused output and get just the q portion
     fused_lora_B = np.array(qkv_proj.lora_B[...][adapter_index, :rank, :])
-    q_lora_B, _, _ = unpack_fused(fused_lora_B, group_sizes=qkv_proj.group_sizes)
+    q_lora_B, _, _ = FusedLoRALinear.split(fused_lora_B, qkv_proj.group_sizes)
     expected_lora_B = q_lora_B.T
 
     # Save and verify checkpoint exists

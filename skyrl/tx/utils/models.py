@@ -143,24 +143,6 @@ def get_fused_info(model: nnx.Module) -> dict[str, tuple[tuple[str, ...], tuple[
     }
 
 
-def pack_fused(*arrays: np.ndarray, group_sizes: tuple[int, ...]) -> np.ndarray:
-    """Pack weight arrays by interleaving groups."""
-    leading_dim = arrays[0].shape[0]
-    num_groups = arrays[0].shape[-1] // group_sizes[0]
-    reshaped = [arr.reshape(leading_dim, num_groups, g) for arr, g in zip(arrays, group_sizes)]
-    return np.concatenate(reshaped, axis=2).reshape(leading_dim, -1)
-
-
-def unpack_fused(array: np.ndarray, group_sizes: tuple[int, ...]) -> tuple[np.ndarray, ...]:
-    """Unpack a fused tensor by de-interleaving groups."""
-    leading_dim = array.shape[0]
-    num_groups = array.shape[-1] // sum(group_sizes)
-    reshaped = array.reshape(leading_dim, num_groups, sum(group_sizes))
-    results, offset = [], 0
-    for g in group_sizes:
-        results.append(reshaped[:, :, offset : offset + g].reshape(leading_dim, -1))
-        offset += g
-    return tuple(results)
 
 
 def _require_weights(
@@ -204,6 +186,7 @@ def load_safetensors(
     When adapter_index and rank are provided, loads LoRA weights into a specific
     adapter slot instead of replacing the full parameter.
     """
+    from skyrl.tx.layers.lora import FusedLoRALinear
     from skyrl.tx.layers.stacked import unstack_state
 
     fused_info = get_fused_info(model)
@@ -237,7 +220,7 @@ def load_safetensors(
             if path[-1] == "lora_A":
                 tensor = _get_shared_lora_A(weights)
             else:
-                tensor = pack_fused(*weights, group_sizes=group_sizes)
+                tensor = np.asarray(FusedLoRALinear.fuse(*weights, group_sizes=group_sizes))
         elif key not in tensors:
             raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
@@ -269,6 +252,7 @@ def save_safetensors(
     When adapter_index and rank are provided, extracts a single adapter's LoRA
     weights instead of saving the full parameter.
     """
+    from skyrl.tx.layers.lora import FusedLoRALinear
     from skyrl.tx.layers.stacked import unstack_state
 
     fused_info = get_fused_info(model)
@@ -301,7 +285,7 @@ def save_safetensors(
                 for k in keys:
                     tensors[k] = param.T
             else:
-                for k, p in zip(keys, unpack_fused(param, group_sizes=group_sizes)):
+                for k, p in zip(keys, FusedLoRALinear.split(param, group_sizes)):
                     tensors[k] = p.T
             continue
         tensors[key] = param if "embed_tokens" in path else param.T
