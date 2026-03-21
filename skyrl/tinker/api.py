@@ -200,7 +200,7 @@ async def create_future(
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data.model_dump(),
+        request_data=request_data.model_dump(mode="json"),
         status=RequestStatus.PENDING,
     )
     session.add(future_db)
@@ -318,7 +318,7 @@ class ImageChunk(BaseModel):
     expected_tokens: int | None = None
 
     def to_types(self) -> types.ImageChunk:
-        return types.ImageChunk(
+        return types.ImageChunk.model_construct(
             data=self.data,
             format=self.format,
             expected_tokens=self.expected_tokens,
