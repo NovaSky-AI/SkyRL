@@ -284,9 +284,9 @@ def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
 )
 def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
-    Check that forward_backward produces similar losses with and without
-    router replay (same weights, so routing decisions should nearly match).
-    Requires full 8xH100 setup.
+    Check that forward_backward with router replay completes without error.
+    Uses dummy expert routing indices (no vLLM engine needed).
+    Non-zero advantages / action_log_probs verify the loss is actually computed.
     """
     try:
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
