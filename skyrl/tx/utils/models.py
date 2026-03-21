@@ -143,7 +143,6 @@ def get_fused_info(model: nnx.Module) -> dict[str, tuple[tuple[str, ...], tuple[
     }
 
 
-
 def _get_shared_lora_A(arrays: list[np.ndarray]) -> np.ndarray:
     """Return shared LoRA A matrix, validating all arrays are identical."""
     if not all(np.allclose(arrays[0], arr) for arr in arrays[1:]):
