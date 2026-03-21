@@ -101,13 +101,8 @@ def load_lora_weights(
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    padded_lora_A = np.zeros(jax_module.lora_A[...].shape[1:], dtype=lora_A_weights.dtype)
-    padded_lora_B = np.zeros(jax_module.lora_B[...].shape[1:], dtype=lora_B_weights.dtype)
-    padded_lora_A[..., : lora_A_weights.shape[-1]] = lora_A_weights
-    padded_lora_B[..., : lora_B_weights.shape[-2], :] = lora_B_weights
-
-    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(padded_lora_A))
-    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(padded_lora_B))
+    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(lora_A_weights))
+    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(lora_B_weights))
     jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[adapter_idx].set(scaling)
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
