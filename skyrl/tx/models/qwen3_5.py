@@ -8,7 +8,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from skyrl.tx.layers.attention import dot_product_attention
-from skyrl.tx.layers.lora import LoRAEmbed, LoRALinear
+from skyrl.tx.layers.lora import FusedLoRALinear, LoRAEmbed, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
 from skyrl.tx.layers.util import Param
 from skyrl.tx.models.configs import Qwen3_5Config
@@ -297,40 +297,18 @@ class Qwen3_5Attention(nnx.Module):
         self.rotary_dim = rotary_dim - (rotary_dim % 2)
         self.rope_theta = rope_theta
 
-        self.q_proj = LoRALinear(
+        q_per_kv = self.num_heads // self.num_kv_heads
+        self.qkv_proj = FusedLoRALinear(
             in_features=config.hidden_size,
-            out_features=self.num_heads * self.head_dim * 2,
+            out_features=(self.num_heads * 2 + 2 * self.num_kv_heads) * self.head_dim,
+            components=("q_proj", "k_proj", "v_proj"),
+            group_sizes=(q_per_kv * 2 * self.head_dim, self.head_dim, self.head_dim),
             sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
+            use_bias=config.attention_bias,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=config.attention_bias,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.k_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            sharding=("fsdp", tp_shard),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=config.attention_bias,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.v_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            sharding=("fsdp", tp_shard),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=config.attention_bias,
-            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -359,15 +337,14 @@ class Qwen3_5Attention(nnx.Module):
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         bsz, seq_len, _ = x.shape
 
-        q_all = self.q_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_heads, self.head_dim * 2)
+        q_raw, k_raw, v_raw = self.qkv_proj(x, adapter_indices=adapter_indices)
+        q_all = q_raw.reshape(bsz, seq_len, self.num_heads, self.head_dim * 2)
         q, gate = jnp.split(q_all, 2, axis=-1)
         gate = gate.reshape(bsz, seq_len, self.num_heads * self.head_dim)
 
         q = self.q_norm(q)
-        k = self.k_norm(
-            self.k_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
-        )
-        v = self.v_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        k = self.k_norm(k_raw.reshape(bsz, seq_len, self.num_kv_heads, self.head_dim))
+        v = v_raw.reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_partial_rope(q, k, positions, self.rotary_dim, self.rope_theta)
 
@@ -584,28 +561,17 @@ class Qwen3_5MLP(nnx.Module):
         hidden_size = config.hidden_size
         intermediate_size = intermediate_size or config.intermediate_size
 
-        self.gate_proj = LoRALinear(
+        self.gate_up_proj = FusedLoRALinear(
             hidden_size,
-            intermediate_size,
+            2 * intermediate_size,
+            components=("gate_proj", "up_proj"),
+            group_sizes=(1, 1),
             sharding=("fsdp", "tp"),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.up_proj = LoRALinear(
-            hidden_size,
-            intermediate_size,
-            sharding=("fsdp", "tp"),
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
@@ -622,9 +588,8 @@ class Qwen3_5MLP(nnx.Module):
         )
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        return self.down_proj(
-            nnx.silu(self.gate_proj(x, adapter_indices)) * self.up_proj(x, adapter_indices), adapter_indices
-        )
+        gate_out, up_out = self.gate_up_proj(x, adapter_indices=adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices=adapter_indices)
 
 
 class Qwen3_5DecoderLayer(nnx.Module):
