@@ -350,11 +350,19 @@ def _get_model_chunk_type(v: Any) -> str:
     if isinstance(v, dict):
         if "type" in v:
             return v["type"]
-        if "tokens" in v:
+        is_encoded_text = "tokens" in v
+        is_image_asset_pointer = "location" in v
+        is_image = "data" in v
+
+        if sum([is_encoded_text, is_image_asset_pointer, is_image]) > 1:
+            raise ValueError(
+                "Ambiguous model chunk type: must be exactly one of 'encoded_text', 'image_asset_pointer', or 'image'"
+            )
+        if is_encoded_text:
             return "encoded_text"
-        if "location" in v:
+        if is_image_asset_pointer:
             return "image_asset_pointer"
-        if "data" in v:
+        if is_image:
             return "image"
     return getattr(v, "type", "encoded_text")
 
