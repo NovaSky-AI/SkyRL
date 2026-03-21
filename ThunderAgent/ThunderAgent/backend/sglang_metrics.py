@@ -114,23 +114,15 @@ class SGLangMetricsClient(MetricsClient):
         self._monitor_task: Optional[asyncio.Task] = None
         self._monitor_stop = False
 
-    @staticmethod
-    def _strip_v1(url: str) -> str:
-        """Strip /v1 suffix from URL since metrics/info are root-level endpoints."""
-        base = url.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
-        return base
-
     @property
     def metrics_url(self) -> str:
-        """Prometheus metrics endpoint (root-level, not under /v1)."""
-        return f"{self._strip_v1(self.url)}/metrics"
+        """Prometheus metrics endpoint."""
+        return f"{self.url}/metrics"
 
     @property
     def server_info_url(self) -> str:
-        """SGLang server info endpoint (root-level, not under /v1)."""
-        return f"{self._strip_v1(self.url)}/get_server_info"
+        """SGLang server info endpoint (capacity information)."""
+        return f"{self.url}/get_server_info"
 
     @property
     def latest_metrics(self) -> Optional[SGLangMetrics]:
