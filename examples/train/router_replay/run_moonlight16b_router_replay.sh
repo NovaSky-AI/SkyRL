@@ -16,10 +16,10 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 NUM_NODES=1
 NUM_GPUS=8
 
-MEGATRON_TP=1
-MEGATRON_PP=2
-MEGATRON_CP=2
-MEGATRON_EP=4
+MEGATRON_TP=4
+MEGATRON_PP=1
+MEGATRON_CP=1
+MEGATRON_EP=8
 MEGATRON_ETP=1
 
 NUM_INFERENCE_ENGINES=1
@@ -30,7 +30,7 @@ INFERENCE_ENGINE_TP=8
 FLASH_ATTN=false
 
 # router replay (r3)
-ROUTER_REPLAY=false
+ROUTER_REPLAY=true
 DISTRIBUTED_EXECUTION_BACKEND="mp"
 
 SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile -m skyrl.train.entrypoints.main_base \
@@ -41,7 +41,6 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
-  trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP \
@@ -79,7 +78,7 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_router_replay" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_moonlight16b-a3b_without_router_replay" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_moonlight16b-a3b_with_router_replay" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt_without_router_replay" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@
