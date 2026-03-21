@@ -201,10 +201,10 @@ def load_safetensors(
             num_experts = config.get_num_experts()
             assert num_experts is not None
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
-            missing_keys = [k for k in expert_keys if k not in tensors]
+            missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
             if missing_keys:
                 raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-            tensor = np.stack([tensors[k].T for k in expert_keys], axis=0)
+            tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
         elif path[-2] in fused_info:
             components, group_sizes = fused_info[path[-2]]
             keys = [get_param_key((*path[:-2], name, path[-1])) for name in components]
