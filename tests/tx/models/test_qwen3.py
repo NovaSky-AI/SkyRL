@@ -250,7 +250,6 @@ def test_qwen3_lora():
 
         # Load layer LoRA weights
         _, qkv_group_sizes = get_fused_components("qkv_proj", config)
-        scaling = lora_config.lora_alpha / lora_config.r
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
@@ -269,7 +268,7 @@ def test_qwen3_lora():
                         *(p.lora_B["default"].weight.detach().numpy().T for p in hf_projs),
                         group_sizes=group_sizes,
                     ),
-                    scaling=scaling,
+                    scaling=lora_config.lora_alpha / lora_config.r,
                     rank=lora_config.r,
                 )
 
