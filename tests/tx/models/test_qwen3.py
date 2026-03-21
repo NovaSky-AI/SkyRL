@@ -122,15 +122,6 @@ def share_hf_lora_A(hf_modules: list) -> None:
         m.lora_A["default"].weight.data.copy_(first_A)
 
 
-def load_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, rank, group_sizes=(1,)):
-    """Load LoRA weights from HF modules into a JAX projection (fused or single)."""
-    if len(hf_projs) == 1:
-        lora_B = get_hf_lora_B(hf_projs[0])
-    else:
-        lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
-    load_lora_weights(jax_proj, adapter_idx, get_hf_lora_A(hf_projs[0]), lora_B, scaling, rank)
-
-
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_qwen3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
@@ -278,7 +269,8 @@ def test_qwen3_lora():
                 (jax_layer.mlp.gate_up_proj, [hf_mlp.gate_proj, hf_mlp.up_proj], (1, 1)),
                 (jax_layer.mlp.down_proj, [hf_mlp.down_proj], (1,)),
             ]:
-                load_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, lora_config.r, group_sizes)
+                lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
+                load_lora_weights(jax_proj, adapter_idx, get_hf_lora_A(hf_projs[0]), lora_B, scaling, lora_config.r)
 
     # Use different adapter indices for each input
     adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)
