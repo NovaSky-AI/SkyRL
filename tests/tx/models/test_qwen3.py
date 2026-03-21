@@ -107,14 +107,6 @@ def load_lora_weights(
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
 
-def get_hf_lora_A(hf_module) -> np.ndarray:
-    return hf_module.lora_A["default"].weight.detach().numpy().T
-
-
-def get_hf_lora_B(hf_module) -> np.ndarray:
-    return hf_module.lora_B["default"].weight.detach().numpy().T
-
-
 def share_hf_lora_A(hf_modules: list) -> None:
     """Set all lora_A matrices in a group to be identical (copy from first)."""
     first_A = hf_modules[0].lora_A["default"].weight.data
@@ -269,8 +261,17 @@ def test_qwen3_lora():
                 (jax_layer.mlp.gate_up_proj, [hf_mlp.gate_proj, hf_mlp.up_proj], (1, 1)),
                 (jax_layer.mlp.down_proj, [hf_mlp.down_proj], (1,)),
             ]:
-                lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
-                load_lora_weights(jax_proj, adapter_idx, get_hf_lora_A(hf_projs[0]), lora_B, scaling, lora_config.r)
+                load_lora_weights(
+                    jax_proj,
+                    adapter_idx=adapter_idx,
+                    lora_A_weights=hf_projs[0].lora_A["default"].weight.detach().numpy().T,
+                    lora_B_weights=pack_fused(
+                        *(p.lora_B["default"].weight.detach().numpy().T for p in hf_projs),
+                        group_sizes=group_sizes,
+                    ),
+                    scaling=scaling,
+                    rank=lora_config.r,
+                )
 
     # Use different adapter indices for each input
     adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)
