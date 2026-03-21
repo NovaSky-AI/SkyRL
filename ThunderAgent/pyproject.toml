@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ThunderAgent"
+version = "0.1.0"
+description = "agentic scheduler with program state tracking"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "uvicorn",
+]
+
+[project.scripts]
+thunderagent = "ThunderAgent.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["ThunderAgent*"]
