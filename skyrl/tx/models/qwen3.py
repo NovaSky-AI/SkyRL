@@ -6,7 +6,7 @@ from jax.sharding import get_abstract_mesh
 from skyrl.tx.layers.attention import dot_product_attention
 from skyrl.tx.layers.connectors import LoRAConnector
 from skyrl.tx.layers.layernorm import RMSNorm
-from skyrl.tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from skyrl.tx.layers.lora import FusedLoRALinear, LoRAEmbed, LoRAExpert, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
 from skyrl.tx.layers.stacked import StackedDecoderLayers
 from skyrl.tx.layers.util import prepare_routing, shard_map_ep
@@ -33,20 +33,19 @@ class Qwen3Attention(nnx.Module):
         ), f"num_heads={self.num_heads} must be divisible by num_kv_heads={self.num_kv_heads}"
         tp_shard = "tp" if shard_attention_heads else None
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
-        self.q_per_kv_head = self.num_heads // self.num_kv_heads
-        q_out_features = self.num_heads * self.head_dim
-        kv_out_features = self.num_kv_heads * self.head_dim
+        q_per_kv = self.num_heads // self.num_kv_heads
 
-        self.qkv_proj = LoRALinear(
+        self.qkv_proj = FusedLoRALinear(
             in_features=config.hidden_size,
-            out_features=q_out_features + 2 * kv_out_features,
+            out_features=(self.num_heads + 2 * self.num_kv_heads) * self.head_dim,
+            components=("q_proj", "k_proj", "v_proj"),
+            group_sizes=(q_per_kv * self.head_dim, self.head_dim, self.head_dim),
             sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -76,15 +75,10 @@ class Qwen3Attention(nnx.Module):
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
-        # Project once, then reinterpret the fused output as grouped-query blocks:
-        # [q_0, ..., q_{g-1}, k, v] for each KV head group.
-        qkv = self.qkv_proj(x, adapter_indices=adapter_indices)
-        qkv = qkv.reshape(B, T, self.num_kv_heads, self.q_per_kv_head + 2, self.head_dim)
-        q = qkv[:, :, :, : self.q_per_kv_head, :].reshape(B, T, self.num_heads, self.head_dim)
-        k = qkv[:, :, :, self.q_per_kv_head, :]
-        v = qkv[:, :, :, self.q_per_kv_head + 1, :]
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q, k, v = self.qkv_proj(x, adapter_indices=adapter_indices)
+        q = self.q_norm(q.reshape(B, T, self.num_heads, self.head_dim))
+        k = self.k_norm(k.reshape(B, T, self.num_kv_heads, self.head_dim))
+        v = v.reshape(B, T, self.num_kv_heads, self.head_dim)
 
         # Apply RoPE
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
@@ -106,17 +100,17 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.intermediate_size = config.intermediate_size
-        self.gate_up_proj = LoRALinear(
+        self.gate_up_proj = FusedLoRALinear(
             config.hidden_size,
             2 * config.intermediate_size,
+            components=("gate_proj", "up_proj"),
+            group_sizes=(1, 1),
             sharding=("fsdp", "tp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
@@ -133,10 +127,7 @@ class Qwen3MLP(nnx.Module):
         )
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        gate_up = self.gate_up_proj(x, adapter_indices=adapter_indices)
-        gate_up = gate_up.reshape(*gate_up.shape[:-1], self.intermediate_size, 2)
-        gate_out = gate_up[..., 0]
-        up_out = gate_up[..., 1]
+        gate_out, up_out = self.gate_up_proj(x, adapter_indices=adapter_indices)
         return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices=adapter_indices)
 
 
