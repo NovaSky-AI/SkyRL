@@ -143,15 +143,6 @@ def get_fused_info(model: nnx.Module) -> dict[str, tuple[tuple[str, ...], tuple[
     }
 
 
-def _require_weights(
-    tensors: dict[str, np.ndarray], keys: list[str], checkpoint_dir: str | os.PathLike
-) -> list[np.ndarray]:
-    """Get transposed weight tensors for keys, raising if any are missing."""
-    missing = [k for k in keys if k not in tensors]
-    if missing:
-        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing}")
-    return [tensors[k].T for k in keys]
-
 
 def _get_shared_lora_A(arrays: list[np.ndarray]) -> np.ndarray:
     """Return shared LoRA A matrix, validating all arrays are identical."""
@@ -210,11 +201,17 @@ def load_safetensors(
             num_experts = config.get_num_experts()
             assert num_experts is not None
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
-            tensor = np.stack(_require_weights(tensors, expert_keys, checkpoint_dir), axis=0)
+            missing_keys = [k for k in expert_keys if k not in tensors]
+            if missing_keys:
+                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+            tensor = np.stack([tensors[k].T for k in expert_keys], axis=0)
         elif path[-2] in fused_info:
             components, group_sizes = fused_info[path[-2]]
             keys = [get_param_key((*path[:-2], name, path[-1])) for name in components]
-            weights = _require_weights(tensors, keys, checkpoint_dir)
+            missing_keys = [k for k in keys if k not in tensors]
+            if missing_keys:
+                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+            weights = [tensors[k].T for k in keys]
             if path[-1] == "lora_A":
                 tensor = _get_shared_lora_A(weights)
             else:
