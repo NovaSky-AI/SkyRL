@@ -122,8 +122,12 @@ def share_hf_lora_A(hf_modules: list) -> None:
         m.lora_A["default"].weight.data.copy_(first_A)
 
 
-def load_fused_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, rank, group_sizes):
-    lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
+def load_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, rank, group_sizes=(1,)):
+    """Load LoRA weights from HF modules into a JAX projection (fused or single)."""
+    if len(hf_projs) == 1:
+        lora_B = get_hf_lora_B(hf_projs[0])
+    else:
+        lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
     load_lora_weights(jax_proj, adapter_idx, get_hf_lora_A(hf_projs[0]), lora_B, scaling, rank)
 
 
@@ -263,44 +267,18 @@ def test_qwen3_lora():
 
         # Load layer LoRA weights
         _, qkv_group_sizes = get_fused_components("qkv_proj", config)
+        scaling = lora_config.lora_alpha / lora_config.r
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
             hf_attn, hf_mlp = hf_layer.self_attn, hf_layer.mlp
-
-            scaling = lora_config.lora_alpha / lora_config.r
-            load_fused_hf_lora(
-                jax_layer.self_attn.qkv_proj,
-                [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj],
-                adapter_idx,
-                scaling,
-                lora_config.r,
-                qkv_group_sizes,
-            )
-            load_lora_weights(
-                jax_layer.self_attn.o_proj,
-                adapter_idx,
-                get_hf_lora_A(hf_attn.o_proj),
-                get_hf_lora_B(hf_attn.o_proj),
-                scaling,
-                lora_config.r,
-            )
-            load_fused_hf_lora(
-                jax_layer.mlp.gate_up_proj,
-                [hf_mlp.gate_proj, hf_mlp.up_proj],
-                adapter_idx,
-                scaling,
-                lora_config.r,
-                (1, 1),
-            )
-            load_lora_weights(
-                jax_layer.mlp.down_proj,
-                adapter_idx,
-                get_hf_lora_A(hf_mlp.down_proj),
-                get_hf_lora_B(hf_mlp.down_proj),
-                scaling,
-                lora_config.r,
-            )
+            for jax_proj, hf_projs, group_sizes in [
+                (jax_layer.self_attn.qkv_proj, [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj], qkv_group_sizes),
+                (jax_layer.self_attn.o_proj, [hf_attn.o_proj], (1,)),
+                (jax_layer.mlp.gate_up_proj, [hf_mlp.gate_proj, hf_mlp.up_proj], (1, 1)),
+                (jax_layer.mlp.down_proj, [hf_mlp.down_proj], (1,)),
+            ]:
+                load_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, lora_config.r, group_sizes)
 
     # Use different adapter indices for each input
     adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)
