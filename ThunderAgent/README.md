@@ -8,7 +8,7 @@ Fast, simple and program-aware agentic inference system.
 </h3>
 
 <p align="center">
-| <a href="https://deepwiki.com/HaoKang-Timmy/ThunderAgent"><b>Wiki</b></a> | <a href="https://thunderagent.ai"><b>Blog</b></a> | <a href="https://arxiv.org/pdf/2602.13692"><b>Paper</b></a> |
+| <a href="https://github.com/HaoKang-Timmy/ThunderAgent/tree/main/wiki"><b>Wiki</b></a> | <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://thunderagent.ai"><b>Blog</b></a> | <a href="https://arxiv.org/pdf/2602.13692"><b>Paper</b></a> |
 </p>
 
 
@@ -47,10 +47,6 @@ ThunderAgent improves vLLM throughput by **1.5–3.6×** across diverse agentic 
 <p align="center">
   <img alt="Inference Pipeline Results" src="assets/logos/infer_pipeline.png" width=90%>
 </p>
-
-## Demo
-
-https://github.com/user-attachments/assets/751d8fc3-a9d8-482c-a90c-6fe29e53008f
 
 ## Getting Started
 
@@ -118,3 +114,5 @@ For enterprises interested in adopting or deploying ThunderAgent at scale, inclu
 
 ## License
 This repository is available under the MIT license. See the [LICENSE.md](https://github.com/ThunderAgent-org/ThunderAgent/blob/main/LICENSE.md) file for details.
+
+
