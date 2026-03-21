@@ -279,9 +279,9 @@ class FusedLoRALinear(LoRALinear):
         *batch, _ = arrays[0].shape
         num_groups = arrays[0].shape[-1] // group_sizes[0]
         for arr, g in zip(arrays, group_sizes):
-            assert arr.shape[-1] == num_groups * g, (
-                f"array last dim {arr.shape[-1]} != num_groups({num_groups}) * group_size({g})"
-            )
+            assert (
+                arr.shape[-1] == num_groups * g
+            ), f"array last dim {arr.shape[-1]} != num_groups({num_groups}) * group_size({g})"
         concat = jnp.concatenate([arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1)
         return concat.reshape(*batch, -1)
 
