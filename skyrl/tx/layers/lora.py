@@ -275,8 +275,13 @@ class FusedLoRALinear(LoRALinear):
     @staticmethod
     def fuse(*arrays: jax.Array, group_sizes: tuple[int, ...]) -> jax.Array:
         """Interleave per-component arrays into a single fused tensor (inverse of ``split``)."""
+        assert len(arrays) == len(group_sizes), f"got {len(arrays)} arrays but {len(group_sizes)} group_sizes"
         *batch, _ = arrays[0].shape
         num_groups = arrays[0].shape[-1] // group_sizes[0]
+        for arr, g in zip(arrays, group_sizes):
+            assert arr.shape[-1] == num_groups * g, (
+                f"array last dim {arr.shape[-1]} != num_groups({num_groups}) * group_size({g})"
+            )
         concat = jnp.concatenate([arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1)
         return concat.reshape(*batch, -1)
 
@@ -285,6 +290,7 @@ class FusedLoRALinear(LoRALinear):
         """Split a fused tensor into per-component tensors by undoing group interleaving."""
         *batch, total = fused.shape
         gs = sum(group_sizes)
+        assert total % gs == 0, f"last dim {total} not divisible by sum(group_sizes)={gs}"
         num_groups = total // gs
         fused = fused.reshape(*batch, num_groups, gs)
         results: list[jax.Array] = []
