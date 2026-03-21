@@ -204,6 +204,94 @@ class ThunderAgentRouter:
                 headers=dict(response.headers),
             )
 
+        @app.post("/v1/completions")
+        async def completions(request: Request):
+            start_time = time.perf_counter()
+            try:
+                payload = await request.json()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+            program_id = get_program_id(payload)
+            program_state = ta_router.get_or_create_program(program_id)
+
+            if program_state.profile:
+                program_state.profile.on_request_arrive()
+
+            await ta_router.update_program_before_request(program_id, program_state, payload)
+
+            if program_state.profile:
+                program_state.profile.on_request_start()
+
+            backend = ta_router.get_backend_for_program(program_id)
+            headers = self._forward_headers(request)
+            forward_payload = {k: v for k, v in payload.items() if k != "program_id"}
+
+            if self._proxy_client is None:
+                raise HTTPException(status_code=503, detail="Router proxy client is not initialized")
+
+            usage_received = False
+
+            try:
+                response = await self._proxy_client.request(
+                    method="POST",
+                    url=f"{backend.url}/v1/completions",
+                    headers=headers,
+                    json=forward_payload,
+                )
+                try:
+                    response_payload = response.json()
+                except Exception:
+                    response_payload = None
+
+                usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
+                if isinstance(usage, dict):
+                    total_tokens = usage.get("total_tokens")
+                    prompt_tokens = usage.get("prompt_tokens")
+                    if isinstance(total_tokens, int) and isinstance(prompt_tokens, int):
+                        usage_received = True
+                        ta_router.update_program_after_request(program_id, program_state, total_tokens, prompt_tokens)
+                        if program_state.profile:
+                            try:
+                                cached_tokens = 0
+                                prompt_details = usage.get("prompt_tokens_details")
+                                if isinstance(prompt_details, dict):
+                                    cached = prompt_details.get("cached_tokens")
+                                    if isinstance(cached, int):
+                                        cached_tokens = cached
+                                program_state.profile.on_request_end(prompt_tokens, cached_tokens)
+                            except Exception:
+                                logger.exception(
+                                    "ThunderAgent profiling failed at completion request end for program_id=%s",
+                                    program_id,
+                                )
+            except Exception:
+                if not usage_received:
+                    ta_router.update_program_after_request(program_id, program_state, 0, 0)
+                self._access_logger.exception(
+                    "/v1/completions program_id=%s backend=%s failed after %.1fms",
+                    program_id,
+                    backend.url,
+                    (time.perf_counter() - start_time) * 1000.0,
+                )
+                raise
+
+            if not usage_received:
+                ta_router.update_program_after_request(program_id, program_state, 0, 0)
+
+            self._access_logger.info(
+                "/v1/completions program_id=%s backend=%s status=%s latency_ms=%.1f",
+                program_id,
+                backend.url,
+                response.status_code,
+                (time.perf_counter() - start_time) * 1000.0,
+            )
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
+
         @app.post("/tokenize")
         async def tokenize(request: Request):
             return await self._proxy_request_to_backend(
