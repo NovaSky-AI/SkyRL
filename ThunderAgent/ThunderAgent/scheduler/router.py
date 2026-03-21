@@ -4,7 +4,6 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable, Awaitable, Tuple
 
 import httpx
@@ -102,7 +101,7 @@ class MultiBackendRouter:
         self.scheduling_enabled = scheduling_enabled
 
         self.client = httpx.AsyncClient(
-            timeout=900.0,
+            timeout=1800.0,
             limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
         )
         
@@ -110,12 +109,11 @@ class MultiBackendRouter:
         self._scheduler_task: Optional[asyncio.Task] = None
         self._scheduler_stop = False
         self._scheduler_interval = scheduler_interval
-        
+
         # Global char-to-token ratio for token estimation
         # Initial value is 5.0 (1 token ≈ 5 chars), updated with momentum after each request
         self.char_to_token_ratio: float = 5.0
         self._ratio_initialized: bool = False
-
     async def start(self):
         """Start the router."""
         logger.info(f"Started router with {len(self.backends)} backend(s): {list(self.backends.keys())}")
@@ -301,7 +299,7 @@ class MultiBackendRouter:
         # Update context_len and estimate total_tokens using char_to_token_ratio
         state.context_len = len(json.dumps(payload, ensure_ascii=False))
         state.total_tokens = int(state.context_len / self.char_to_token_ratio)
-        
+
         # ---------------------------------------------------------------------
         # Default mode: pure proxy, no scheduling
         # ---------------------------------------------------------------------
@@ -568,7 +566,6 @@ class MultiBackendRouter:
             state.waiting_event = asyncio.Event()
         else:
             state.waiting_event.clear()
-        
         logger.info(f"Paused program {program_id} from {state.origin_backend} (tokens={state.total_tokens})")
 
     def _mark_program_for_pause(self, program_id: str, state: Program) -> None:
@@ -582,7 +579,6 @@ class MultiBackendRouter:
         
         state.marked_for_pause = True
         backend.future_paused_tokens += state.total_tokens
-        
         logger.info(f"Marked program {program_id} for pause (tokens={state.total_tokens}, future_paused={backend.future_paused_tokens})")
 
     def _clear_mark_and_pause(self, program_id: str, state: Program) -> None:
@@ -635,7 +631,6 @@ class MultiBackendRouter:
         if state.waiting_event:
             state.waiting_event.set()
             state.waiting_event = None
-        
         logger.info(f"Resumed program {state.program_id} to {backend.url} (status={state.status.value}, tokens={state.total_tokens}, active={backend.active_program_tokens})")
 
     async def _claim_specific_paused(
@@ -843,10 +838,10 @@ class MultiBackendRouter:
                     f"(reasoning={reasoning_resumed}, new={new_resumed}, acting={acting_resumed})"
                 )
 
-    async def _wait_for_resume(self, program_id: str, state: Program, timeout: float = 1800.0) -> None:
+    async def _wait_for_resume(self, program_id: str, state: Program, timeout: float = 800.0) -> None:
         """Wait for a paused program to be resumed.
         
-        If timeout (30 min), force resume the program regardless of capacity.
+        If timeout (800s), force resume the program regardless of capacity.
         """
         if state.waiting_event is None:
             return
@@ -920,7 +915,7 @@ class MultiBackendRouter:
         backend: BackendState,
         payload: Dict[str, Any],
         *,
-        on_usage: Callable[[int, Optional[int], Optional[int], Optional[int]], Awaitable[None]] | None = None,
+        on_usage: Callable[[int, int, int], Awaitable[None]] | None = None,
         on_first_token: Callable[[], None] | None = None,
         on_token: Callable[[], None] | None = None,
         on_token_progress: Callable[[int], None] | None = None,
@@ -930,7 +925,7 @@ class MultiBackendRouter:
         Args:
             backend: Target backend
             payload: Request payload
-            on_usage: Callback with (total_tokens, prompt_tokens, completion_tokens, cached_tokens)
+            on_usage: Callback with (total_tokens, prompt_tokens, cached_tokens)
             on_first_token: Callback when first token is received (streaming only)
             on_token: Callback for each token (streaming only)
             on_token_progress: Callback with delta token count at intervals (streaming only)
