@@ -145,16 +145,18 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
-    def preextract_decode(self):
-        """Pre-extract per-layer parameters for efficient decode.
+    def preextract_decode(self) -> tuple[nnx.GraphDef, list[nnx.GraphState]]:
+        """Pre-extract per-layer states for efficient decode.
 
         Call this ONCE outside the while_loop, then pass the result via
         decode_layers kwarg to __call__ to avoid re-slicing every step.
         """
         graphdef, state = nnx.split(self._stacked)
-        flat_state, treedef = jax.tree_util.tree_flatten(state)
-        per_layer_flat = [[p[i] for p in flat_state] for i in range(self.num_layers)]
-        return graphdef, per_layer_flat, treedef
+        layers_state = [
+            jax.tree_util.tree_map(lambda x: x[i], state)
+            for i in range(self.num_layers)
+        ]
+        return graphdef, layers_state
 
     def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
         """Transform _stacked paths to per-layer paths with ArrayRef.
@@ -232,29 +234,17 @@ class StackedDecoderLayers(nnx.Module):
             # cache array on each layer (16MB per layer). XLA can't prove the buffer can be
             # donated since it doesn't know the slices are non-overlapping. With a Python
             # loop and list format, each layer's KV array is independent and can be donated.
-            if decode_layers is not None:
-                # Use pre-extracted parameters (hoisted from while_loop)
-                graphdef, per_layer_flat, treedef = decode_layers
-            else:
-                graphdef, state = nnx.split(self._stacked)
-                flat_state, treedef = jax.tree_util.tree_flatten(state)
-                per_layer_flat = None
+            graphdef, layers_state = decode_layers or self.preextract_decode()
 
             all_hidden_states: list[jax.Array] = []
             updated_keys: list[jax.Array] = []
             updated_values: list[jax.Array] = []
 
-            for layer_idx in range(self.num_layers):
+            for layer_idx, layer_state in enumerate(layers_state):
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
 
-                # Extract this layer's parameters
-                if per_layer_flat is not None:
-                    layer_params_flat = per_layer_flat[layer_idx]
-                else:
-                    layer_params_flat = [p[layer_idx] for p in flat_state]
-                layer_params = jax.tree_util.tree_unflatten(treedef, layer_params_flat)
-                layer = nnx.merge(graphdef, layer_params)
+                layer = nnx.merge(graphdef, layer_state)
 
                 # Get this layer's KV cache
                 layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
