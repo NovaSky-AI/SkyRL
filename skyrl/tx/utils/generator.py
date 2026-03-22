@@ -239,7 +239,7 @@ class GeneratorMixin:
 
         # Pre-extract per-layer parameters once (outside while_loop) to avoid
         # re-slicing stacked weights every decode step.
-        decode_layers = model._preextract_decode_layers() if hasattr(model, '_preextract_decode_layers') else None
+        decode_kwargs = model.get_decode_kwargs()
 
         def cond_fn(s: DecodeState) -> jax.Array:
             """Continue while any sequence is still generating."""
@@ -277,15 +277,14 @@ class GeneratorMixin:
             batch_idx = jnp.arange(s.attention_mask.shape[0])
             next_attention_mask = s.attention_mask.at[batch_idx, s.kv_cache.cache_position].set(1)
 
-            model_kwargs = dict(
+            outputs = model(
+                next_token,
                 attention_mask=next_attention_mask,
                 positions=s.last_positions + 1,
                 kv_cache=s.kv_cache,
                 adapter_indices=adapter_indices,
+                **decode_kwargs,
             )
-            if decode_layers is not None:
-                model_kwargs["decode_layers"] = decode_layers
-            outputs = model(next_token, **model_kwargs)
             # Compute logits for the next token
             next_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)[:, 0, :]
             return DecodeState(

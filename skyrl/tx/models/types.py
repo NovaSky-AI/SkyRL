@@ -17,6 +17,16 @@ class ModelForCausalLM:
     def get_model_config(self) -> ModelConfig:
         return self.config
 
+    def get_decode_kwargs(self) -> dict:
+        """Return extra kwargs for the forward pass during decode.
+
+        Called once outside the while_loop; the returned dict is unpacked
+        into every decode-step ``model(...)`` call.  Override in subclasses
+        that benefit from hoisting work out of the loop (e.g. pre-extracting
+        stacked layer parameters).
+        """
+        return {}
+
     def is_lora_param(self, path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to trainable LoRA/connector weights."""
         is_lora = any(name in path for name in ("lora_A", "lora_B"))
