@@ -8,10 +8,10 @@ set -x
 
 : "${LOGGER:=wandb}"
 : "${NUM_GPUS:=1}"
-: "${BATCH_SIZE:=4}"
-: "${NUM_STEPS:=500}"
-: "${MAX_LENGTH:=2048}"
-: "${EVAL_INTERVAL:=50}"
+: "${BATCH_SIZE:=32}"
+: "${NUM_STEPS:=2000}"
+: "${MAX_LENGTH:=4096}"
+: "${EVAL_INTERVAL:=250}"
 : "${WANDB_PROJECT:=alphaxiv-page-labels}"
 : "${WANDB_RUN_NAME:=sft-qwen2.5-0.5b}"
 
