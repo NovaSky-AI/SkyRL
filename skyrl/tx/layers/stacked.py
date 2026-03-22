@@ -152,10 +152,7 @@ class StackedDecoderLayers(nnx.Module):
         decode_layers kwarg to __call__ to avoid re-slicing every step.
         """
         graphdef, state = nnx.split(self._stacked)
-        layers_state = [
-            jax.tree_util.tree_map(lambda x: x[i], state)
-            for i in range(self.num_layers)
-        ]
+        layers_state = [jax.tree_util.tree_map(lambda x: x[i], state) for i in range(self.num_layers)]
         return graphdef, layers_state
 
     def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
