@@ -145,6 +145,17 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
+    def preextract_decode(self):
+        """Pre-extract per-layer parameters for efficient decode.
+
+        Call this ONCE outside the while_loop, then pass the result via
+        decode_layers kwarg to __call__ to avoid re-slicing every step.
+        """
+        graphdef, state = nnx.split(self._stacked)
+        flat_state, treedef = jax.tree_util.tree_flatten(state)
+        per_layer_flat = [[p[i] for p in flat_state] for i in range(self.num_layers)]
+        return graphdef, per_layer_flat, treedef
+
     def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
         """Transform _stacked paths to per-layer paths with ArrayRef.
 
@@ -209,7 +220,9 @@ class StackedDecoderLayers(nnx.Module):
         if self.num_layers == 0:
             return hidden_states, [], kv_cache
 
-        graphdef, state = nnx.split(self._stacked)
+        # Pop decode_layers before forwarding remaining layer_kwargs to layers
+        decode_layers = layer_kwargs.pop("decode_layers", None)
+
         is_decode = kv_cache is not None
 
         if is_decode:
@@ -219,7 +232,14 @@ class StackedDecoderLayers(nnx.Module):
             # cache array on each layer (16MB per layer). XLA can't prove the buffer can be
             # donated since it doesn't know the slices are non-overlapping. With a Python
             # loop and list format, each layer's KV array is independent and can be donated.
-            flat_state, treedef = jax.tree_util.tree_flatten(state)
+            if decode_layers is not None:
+                # Use pre-extracted parameters (hoisted from while_loop)
+                graphdef, per_layer_flat, treedef = decode_layers
+            else:
+                graphdef, state = nnx.split(self._stacked)
+                flat_state, treedef = jax.tree_util.tree_flatten(state)
+                per_layer_flat = None
+
             all_hidden_states: list[jax.Array] = []
             updated_keys: list[jax.Array] = []
             updated_values: list[jax.Array] = []
@@ -229,7 +249,10 @@ class StackedDecoderLayers(nnx.Module):
                     all_hidden_states.append(hidden_states)
 
                 # Extract this layer's parameters
-                layer_params_flat = [p[layer_idx] for p in flat_state]
+                if per_layer_flat is not None:
+                    layer_params_flat = per_layer_flat[layer_idx]
+                else:
+                    layer_params_flat = [p[layer_idx] for p in flat_state]
                 layer_params = jax.tree_util.tree_unflatten(treedef, layer_params_flat)
                 layer = nnx.merge(graphdef, layer_params)
 
@@ -250,6 +273,8 @@ class StackedDecoderLayers(nnx.Module):
             return hidden_states, all_hidden_states, new_kv_cache
 
         # Prefill/training mode: use scan for efficiency
+        graphdef, state = nnx.split(self._stacked)
+
         def body_fn(carry, layer_params):
             hs = carry
 
