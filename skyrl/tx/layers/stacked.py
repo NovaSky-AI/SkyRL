@@ -196,6 +196,7 @@ class StackedDecoderLayers(nnx.Module):
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        decode_layers=None,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         """Forward pass through all layers.
 
@@ -211,6 +212,8 @@ class StackedDecoderLayers(nnx.Module):
             output_hidden_states: Whether to return intermediate hidden states.
             gradient_checkpointing: Whether to use gradient checkpointing.
             is_training: Whether in training mode. Skips KV cache to save memory.
+            decode_layers: Pre-extracted per-layer parameters from preextract_decode().
+                Pass this to avoid re-slicing stacked weights inside a while_loop.
 
         Returns:
             Tuple of (final_hidden_states, all_hidden_states, kv_cache).
@@ -219,9 +222,6 @@ class StackedDecoderLayers(nnx.Module):
         # Handle empty layer case - pass through inputs unchanged
         if self.num_layers == 0:
             return hidden_states, [], kv_cache
-
-        # Pop decode_layers before forwarding remaining layer_kwargs to layers
-        decode_layers = layer_kwargs.pop("decode_layers", None)
 
         is_decode = kv_cache is not None
 
