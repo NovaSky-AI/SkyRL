@@ -34,7 +34,7 @@ def _gpu_used_bytes() -> int:
 def _create_engine_and_measure_sleep():
     """Create a vLLM engine with sleep mode, sleep it, return memory stats.
 
-    Returns (model_bytes, cumem_freed_bytes, total_freed_bytes, residual_bytes).
+    Returns (model_and_cache_bytes, cumem_usage_before_sleep_bytes, total_freed_bytes, residual_bytes).
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     import vllm
