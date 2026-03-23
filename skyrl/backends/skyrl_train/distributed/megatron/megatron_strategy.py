@@ -214,15 +214,19 @@ class MegatronStrategy(DistributedStrategy):
         )
 
         with io.local_work_dir(ckpt_dir) as work_dir:
-            # TODO(tgriggs): Support configurable async saves.
-            async_save_request = dist_checkpointing.save(
+            async_request = dist_checkpointing.save(
                 sharded_state_dict=sharded_state_dict,
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
-                async_sharded_save=False,
+                async_sharded_save=True,
                 validate_access_integrity=True,
             )
-            assert async_save_request is None, "Async save is not yet supported for Megatron"
+            # Route through async_calls (persistent=True) so that the checkpoint
+            # write runs inside a spawn-ed worker process instead of inline.
+            # This avoids os.fork() from the memory-heavy Ray worker which OOMs.
+            # We block until completion to keep save semantics synchronous.
+            ckpt_base.async_calls.schedule_async_request(async_request)
+            ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
