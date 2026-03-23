@@ -413,17 +413,16 @@ class TestRenderChatCompletion:
         }
         result = await client.render_chat_completion(request_payload)
 
-        assert "request_id" in result
-        assert "token_ids" in result
-        assert "sampling_params" in result
-        assert "model" in result
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(10))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
         assert result["model"] == "test"
-
-        assert isinstance(result["token_ids"], list)
-        assert len(result["token_ids"]) > 0
-        assert all(isinstance(t, int) for t in result["token_ids"])
-
         assert result["features"] is None
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
 
     @pytest.mark.asyncio
     async def test_render_chat_completion_multimodal(self, client):
@@ -447,39 +446,20 @@ class TestRenderChatCompletion:
         }
         result = await client.render_chat_completion(request_payload)
 
-        assert "request_id" in result
-        assert "token_ids" in result
-        assert "sampling_params" in result
-        assert "model" in result
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(110))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
         assert result["model"] == "test-vlm"
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
 
-        assert isinstance(result["token_ids"], list)
-        assert len(result["token_ids"]) > 0
-        assert all(isinstance(t, int) for t in result["token_ids"])
-
-        features = result["features"]
-        assert features is not None
-
-        assert "mm_hashes" in features
-        assert "image" in features["mm_hashes"]
-        image_hashes = features["mm_hashes"]["image"]
-        assert isinstance(image_hashes, list)
-        assert len(image_hashes) > 0
-        assert all(isinstance(h, str) for h in image_hashes)
-
-        assert "mm_placeholders" in features
-        assert "image" in features["mm_placeholders"]
-        image_placeholders = features["mm_placeholders"]["image"]
-        assert isinstance(image_placeholders, list)
-        assert len(image_placeholders) > 0
-        for p in image_placeholders:
-            assert "offset" in p
-            assert "length" in p
-            assert isinstance(p["offset"], int)
-            assert isinstance(p["length"], int)
-            assert p["length"] > 0
-
-        assert p["offset"] + p["length"] <= len(result["token_ids"])
+        assert result["features"] == {
+            "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+            "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+        }
 
 
 class TestContextManager:
