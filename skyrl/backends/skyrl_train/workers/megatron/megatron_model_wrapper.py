@@ -297,8 +297,8 @@ class MegatronModelWrapper:
 
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                            "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                            "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist(),
+                            "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist(),
                         }
                     )
 
@@ -351,7 +351,7 @@ class MegatronModelWrapper:
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist(),
                     }
                 )
 
