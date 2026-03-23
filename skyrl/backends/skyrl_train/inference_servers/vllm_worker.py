@@ -39,8 +39,8 @@ def _patch_vllm_sleep_mode():
 
         import os
 
-        from vllm.v1.worker.gpu_worker import Worker
         from vllm.config import set_current_vllm_config
+        from vllm.v1.worker.gpu_worker import Worker
 
         def _patched_load_model(self) -> None:
             eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"

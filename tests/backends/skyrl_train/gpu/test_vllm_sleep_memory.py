@@ -92,9 +92,7 @@ def test_sleep_frees_model_weights():
     # Import the monkey-patch — this is what we're testing
     import skyrl.backends.skyrl_train.inference_servers.vllm_worker  # noqa: F401
 
-    model_and_cache, cumem_usage, total_freed, residual = (
-        _create_engine_and_measure_sleep()
-    )
+    model_and_cache, cumem_usage, total_freed, residual = _create_engine_and_measure_sleep()
 
     freed_pct = total_freed / model_and_cache * 100 if model_and_cache > 0 else 0
     residual_pct = residual / model_and_cache * 100 if model_and_cache > 0 else 0
