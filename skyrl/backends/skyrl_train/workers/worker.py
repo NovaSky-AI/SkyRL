@@ -176,7 +176,7 @@ class DistributedTorchRayActor:
         return self._master_addr, self._master_port
 
     # TODO(tgriggs): For numa affinity, pass in the Worker._local_rank for the second arg here. Distinguish 'rank' and 'local_rank' differ here.
-    def _set_numa_affinity(self, rank):
+    def _set_numa_affinity(self, rank):  # noqa: ARG002 — rank kept for API compat, binding uses self._local_rank
         def local_rank_to_real_gpu_id(local_rank):
             cuda_visible_devices = [
                 int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
@@ -224,7 +224,8 @@ class DistributedTorchRayActor:
         LIBNUMA.numa_set_preferred.argtypes = [c_int]
 
         real_gpu_id = local_rank_to_real_gpu_id(self._local_rank)
-        num_gpus_per_numa = max(1, 8 // real_numa_nodes)  # e.g. 8//2 = 4
+        total_gpus = len(os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(","))
+        num_gpus_per_numa = max(1, total_gpus // real_numa_nodes)
         # Clamp to [0, max_node] — guaranteed safe
         target_nid = min(max_node, real_gpu_id // num_gpus_per_numa)
 
