@@ -577,6 +577,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
+    # env_vars["UV_CACHE_DIR"] = "/mnt/local_storage/uv_cache"
+    env_vars["HF_HOME"] = "/mnt/local_storage/hf_cache"
+    env_vars["TRANSFORMERS_CACHE"] = "/mnt/local_storage/hf_cache"
+    env_vars["HF_DATASETS_CACHE"] = "/mnt/local_storage/hf_cache"
+
     if cfg.trainer.strategy == "megatron":
         # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
         env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
