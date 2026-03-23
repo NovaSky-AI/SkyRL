@@ -2,6 +2,7 @@ import copy
 import math
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -1061,8 +1062,9 @@ class RayPPOTrainer:
         """
         Execute training step for FSDP strategy using forward_backward + optim_step.
 
-        The trainer loops over epochs and mini-batches. Workers handle micro-batching
-        internally for gradient accumulation (memory efficiency).
+        Dispatches individual micro-batches to workers for per-micro-batch progress
+        visibility. Gradients accumulate on workers across micro-batches; optim_step
+        is called once per mini-batch to scale and apply.
 
         Uses staged data approach: the full batch is put in Ray object store once,
         and workers fetch + slice locally to avoid repeated serialization.
@@ -1081,6 +1083,12 @@ class RayPPOTrainer:
         else:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
+        # Micro-batch size per dispatch = micro_bs_per_gpu * dp_size
+        # so each worker gets exactly micro_train_batch_size_per_gpu samples
+        micro_bs_per_gpu = self.cfg.trainer.micro_train_batch_size_per_gpu
+        dp_size = self.dispatch.get_dp_size(model)
+        micro_dispatch_size = micro_bs_per_gpu * dp_size
+
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
         # Stage full batch in object store ONCE to avoid repeated serialization
@@ -1090,16 +1098,42 @@ class RayPPOTrainer:
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             num_mini_batches = len(data) // mini_batch_size
             for local_step in range(num_mini_batches):
-                start_idx = local_step * mini_batch_size
-                end_idx = (local_step + 1) * mini_batch_size
+                mb_start_idx = local_step * mini_batch_size
+                mb_end_idx = (local_step + 1) * mini_batch_size
 
-                # Workers fetch from object store and slice locally
-                status = self.dispatch.forward_backward_from_staged(model, data_ref, start_idx, end_idx)
-                for k, v in status.items():
-                    all_metrics[k].append(v)
+                # Dispatch individual micro-batches for progress visibility
+                num_micro_batches = math.ceil((mb_end_idx - mb_start_idx) / micro_dispatch_size)
+                t0 = time.time()
+                logger.info(
+                    f"[{model}] mini-batch {local_step + 1}/{num_mini_batches}: "
+                    f"dispatching {num_micro_batches} micro-batches "
+                    f"(micro_bs={micro_bs_per_gpu}, dp={dp_size})"
+                )
+
+                for ub_idx in range(num_micro_batches):
+                    ub_start = mb_start_idx + ub_idx * micro_dispatch_size
+                    ub_end = min(ub_start + micro_dispatch_size, mb_end_idx)
+
+                    ub_t0 = time.time()
+                    status = self.dispatch.forward_backward_from_staged(model, data_ref, ub_start, ub_end)
+                    ub_elapsed = time.time() - ub_t0
+
+                    elapsed_total = time.time() - t0
+                    avg_per_ub = elapsed_total / (ub_idx + 1)
+                    remaining = avg_per_ub * (num_micro_batches - ub_idx - 1)
+                    logger.info(
+                        f"[{model}] micro-batch {ub_idx + 1}/{num_micro_batches} "
+                        f"{ub_elapsed:.1f}s | elapsed {elapsed_total:.1f}s | ~{remaining:.0f}s left"
+                    )
+
+                    for k, v in status.items():
+                        all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
+                logger.info(f"[{model}] starting optim_step...")
+                optim_t0 = time.time()
                 grad_norm = self.dispatch.optim_step(model)
+                logger.info(f"[{model}] optim_step completed in {time.time() - optim_t0:.1f}s, grad_norm={grad_norm}")
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
 
