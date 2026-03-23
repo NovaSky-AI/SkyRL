@@ -46,6 +46,9 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         """Return the model configuration required by LogitsProcessorMixin."""
         return cast(ModelConfig, self.config)
 
+    def get_decode_kwargs(self) -> dict:
+        return {}
+
     def __call__(
         self,
         input_ids,
