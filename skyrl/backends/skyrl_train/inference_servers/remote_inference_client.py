@@ -10,7 +10,7 @@ Architecture:
 This client is responsible for BOTH data plane and control plane operations:
 
 1. Data Plane (routed through proxy_url):
-   - generate, chat_completion, completion, tokenize, detokenize
+   - generate, chat_completion, completion, tokenize, detokenize, render
    - Uses proxy_url which points to a router (vllm-router, sglang-router, InferenceRouter)
    - Router handles load balancing and session-aware routing
 
