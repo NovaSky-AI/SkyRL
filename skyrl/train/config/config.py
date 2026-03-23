@@ -128,6 +128,7 @@ class MegatronTorchProfilerConfig(BaseConfig):
 @dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
+    merge_lora: bool = True
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {

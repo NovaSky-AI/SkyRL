@@ -867,7 +867,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        if self._is_lora:
+        if self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora:
             lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client)
         else:

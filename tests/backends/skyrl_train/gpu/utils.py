@@ -519,6 +519,11 @@ class InferenceEngineState:
                 cli_args.enable_lora = True
                 if active_lora_name is None:
                     active_lora_name = "skyrl-lora"
+            else:
+                # Override build_vllm_cli_args which auto-enables LoRA based
+                # on lora rank in the config.  For merged weight sync the
+                # inference engine must NOT have LoRA wrapping enabled.
+                cli_args.enable_lora = False
             server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,

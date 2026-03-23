@@ -31,6 +31,7 @@ def get_test_actor_config(
     colocate_all: bool = False,
     weight_sync_backend: str = "nccl",
     tp_size: int = 2,
+    merge_lora: bool = True,
 ) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
@@ -48,6 +49,7 @@ def get_test_actor_config(
     if strategy == "megatron":
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
 
     if enable_lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(
@@ -61,25 +63,29 @@ def get_test_actor_config(
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size", "merge_lora"),
     [
-        pytest.param(False, "nccl", "fsdp", 2),
-        pytest.param(True, "nccl", "fsdp", 2),
-        pytest.param(False, "nccl", "fsdp2", 2),
-        pytest.param(True, "nccl", "fsdp2", 2),
-        pytest.param(False, "nccl", "megatron", 2, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "fsdp", 2, True),
+        pytest.param(True, "nccl", "fsdp", 2, True),
+        pytest.param(False, "nccl", "fsdp2", 2, True),
+        pytest.param(True, "nccl", "fsdp2", 2, True),
+        pytest.param(False, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "megatron", 2, False, marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, False, marks=pytest.mark.megatron),
     ],
     ids=[
         "no_colocate_nccl_fsdp",
         "colocate_nccl_fsdp",
         "no_colocate_nccl_fsdp2",
         "colocate_nccl_fsdp2",
-        "no_colocate_nccl_megatron",
-        "colocate_nccl_megatron",
+        "no_colocate_nccl_megatron_merged",
+        "colocate_nccl_megatron_merged",
+        "no_colocate_nccl_megatron_adapter",
+        "colocate_nccl_megatron_adapter",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
+def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size, merge_lora):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -89,7 +95,14 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         colocate_all=colocate_all,
         weight_sync_backend=weight_sync_backend,
         tp_size=tp_size,
+        merge_lora=merge_lora,
     )
+
+    # Only enable LoRA on the vLLM side when adapters are loaded separately.
+    # When merge_lora=True the bridge merges LoRA into the full weights, so
+    # vLLM receives plain weights and must NOT have enable_lora (which wraps
+    # modules and changes named_parameters(), breaking load_weights).
+    needs_vllm_lora = not (strategy == "megatron" and merge_lora)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     with InferenceEngineState.create(
@@ -99,8 +112,8 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
-        sleep_level=1,  # since we explicitly sync weights
-        enable_lora=True,  # Enable LoRA for this test
+        sleep_level=1 if needs_vllm_lora else 2,
+        enable_lora=needs_vllm_lora,
     ) as engines:
         client, pg = engines.client, engines.pg
 
