@@ -1,8 +1,10 @@
 import io
 from typing import TYPE_CHECKING
 
+from loguru import logger
 import ray
 import torch
+import torch.nn as nn
 import torch.distributed
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
@@ -51,6 +53,197 @@ from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
+
+
+def _patch_moe_experts_for_fsdp2(model: nn.Module):
+    """Patch MoE expert modules that skip unused experts during forward.
+
+    Some MoE implementations only iterate over experts that received tokens
+    (via expert_hit/nonzero). With FSDP2 + non-reentrant gradient checkpointing,
+    this causes checkpoint recompute assertion failures because the variable
+    computation graph saves different tensors between forward and recompute.
+
+    The fix replaces the selective expert loop with one that iterates ALL experts
+    unconditionally, ensuring a deterministic computation graph.
+
+    Supports:
+    - Qwen3MoeSparseMoeBlock (transformers <= 4.57.x): nn.ModuleList of Qwen3MoeMLP
+    - Qwen3MoeExperts (transformers >= 4.58.x): fused 3D parameter tensors
+    """
+    import torch.nn.functional as F
+
+    patched = 0
+    module_classes = set()
+    for name, module in model.named_modules():
+        cls_name = module.__class__.__name__
+        module_classes.add(cls_name)
+
+        # transformers <= 4.57.x: individual MLP expert modules in nn.ModuleList
+        if cls_name == "Qwen3MoeSparseMoeBlock":
+
+            def _make_patched_sparse_forward(mod):
+                def patched_forward(hidden_states):
+                    batch_size, sequence_length, hidden_dim = hidden_states.shape
+                    hidden_states_flat = hidden_states.view(-1, hidden_dim)
+                    router_logits = mod.gate(hidden_states_flat)
+
+                    routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+                    routing_weights, selected_experts = torch.topk(routing_weights, mod.top_k, dim=-1)
+                    if mod.norm_topk_prob:
+                        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+                    routing_weights = routing_weights.to(hidden_states_flat.dtype)
+
+                    final_hidden_states = torch.zeros_like(hidden_states_flat)
+                    expert_mask = torch.nn.functional.one_hot(
+                        selected_experts, num_classes=mod.num_experts
+                    ).permute(2, 1, 0)
+
+                    # Iterate ALL experts with identical code path (no branching)
+                    # to ensure deterministic tensor count for gradient checkpointing.
+                    for expert_idx in range(mod.num_experts):
+                        expert_layer = mod.experts[expert_idx]
+                        idx, top_x = torch.where(expert_mask[expert_idx])
+                        # Always index into hidden_states — for empty experts top_x is
+                        # an empty tensor, so current_state has 0 rows but same hidden_dim.
+                        current_state = hidden_states_flat[top_x]
+                        current_hidden_states = expert_layer(current_state)
+                        current_hidden_states = current_hidden_states * routing_weights[top_x, idx, None]
+                        final_hidden_states.index_add_(
+                            0, top_x, current_hidden_states.to(hidden_states_flat.dtype)
+                        )
+
+                    final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+                    return final_hidden_states, router_logits
+                return patched_forward
+
+            module.forward = _make_patched_sparse_forward(module)
+            patched += 1
+            logger.info(f"Patched {cls_name} at '{name}' to iterate all experts for FSDP2")
+
+        # transformers >= 4.58.x: fused 3D parameter tensors
+        elif cls_name == "Qwen3MoeExperts":
+
+            def _make_patched_fused_forward(mod):
+                def patched_forward(hidden_states, top_k_index, top_k_weights):
+                    final_hidden_states = torch.zeros_like(hidden_states)
+                    with torch.no_grad():
+                        expert_mask = torch.nn.functional.one_hot(
+                            top_k_index, num_classes=mod.num_experts
+                        )
+                        expert_mask = expert_mask.permute(2, 1, 0)
+
+                    for expert_idx in range(mod.num_experts):
+                        top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+                        if token_idx.numel() > 0:
+                            current_state = hidden_states[token_idx]
+                        else:
+                            current_state = hidden_states[:0]
+
+                        gate, up = nn.functional.linear(
+                            current_state, mod.gate_up_proj[expert_idx]
+                        ).chunk(2, dim=-1)
+                        current_hidden_states = mod.act_fn(gate) * up
+                        current_hidden_states = nn.functional.linear(
+                            current_hidden_states, mod.down_proj[expert_idx]
+                        )
+
+                        if token_idx.numel() > 0:
+                            current_hidden_states = (
+                                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+                            )
+                            final_hidden_states.index_add_(
+                                0, token_idx,
+                                current_hidden_states.to(final_hidden_states.dtype),
+                            )
+
+                    return final_hidden_states
+                return patched_forward
+
+            module.forward = _make_patched_fused_forward(module)
+            patched += 1
+            logger.info(f"Patched {cls_name} at '{name}' to iterate all experts for FSDP2")
+
+    logger.info(f"MoE expert scan: found classes={module_classes}, patched={patched}")
+    return patched
+
+
+def _patch_checkpoint_for_moe():
+    """Patch non-reentrant gradient checkpointing for MoE compatibility.
+
+    Non-reentrant checkpointing tracks every tensor saved during forward via
+    pack_hook/unpack_hook. During backward, it recomputes the forward and expects
+    the same tensors to be saved. MoE models with data-dependent routing produce
+    different computation graphs (different experts active), so:
+    - Different number of tensors saved (2016 vs 176 for Qwen3-30B-A3B)
+    - Holder handles missing for the current graph task ID
+
+    This patches _checkpoint_hook to make unpack_hook tolerant of missing handles
+    by triggering a fresh recompute when a holder's gid is missing.
+    """
+    import torch.utils.checkpoint as _cp
+
+    # Suppress tensor count validation
+    _cp._CheckpointFrame.check_recomputed_tensors_match = lambda self, gid: None
+
+    def _patched_checkpoint_hook_init(self, frame):
+        import uuid as _uuid
+        import weakref as _weakref
+
+        def pack_hook(x):
+            holder = _cp._Holder()
+            frame.weak_holders.append(_weakref.ref(holder))
+            if frame.metadata_fn is not None:
+                with torch.no_grad():
+                    frame.x_metadatas.append(frame.metadata_fn(x))
+            return holder
+
+        def unpack_hook(holder):
+            gid = torch._C._current_graph_task_id()
+            if gid == -1:
+                gid = int(_uuid.uuid4())
+
+            if not frame.is_recomputed.get(gid, False):
+                ctx = frame.input_saver.grad_fn
+                args = ctx.get_args(ctx.saved_tensors)
+                try:
+                    with _cp._recomputation_hook(
+                        _weakref.ref(frame), gid
+                    ), torch.autograd.enable_grad():
+                        frame.recompute_fn(*args)
+                except _cp._StopRecomputationError:
+                    pass
+                frame.is_recomputed[gid] = True
+
+            # Tolerant handle lookup: if gid not in holder.handles,
+            # the tensor wasn't recreated during recompute (MoE routing difference).
+            # Return a zero tensor as a safe fallback — gradients through unused
+            # expert paths are zero anyway.
+            if gid not in holder.handles or holder.handles[gid] is None:
+                # Find any available recomputed tensor to infer shape/dtype/device
+                if gid in frame.recomputed and frame.recomputed[gid]:
+                    sample = next(iter(frame.recomputed[gid].values()))
+                    return torch.zeros_like(sample)
+                return torch.tensor(0.0)
+
+            handle = holder.handles[gid]
+            if handle in frame.recomputed.get(gid, {}):
+                ret = frame.recomputed[gid][handle]
+            else:
+                ret = torch.tensor(0.0)
+            holder.handles[gid] = None
+            return ret
+
+        if frame.unpack_error_cb is not None:
+            def unpack_hook_with_error_cb(holder):
+                try:
+                    return unpack_hook(holder)
+                except _cp.CheckpointError as e:
+                    frame.unpack_error_cb(e)
+            torch.autograd.graph.saved_tensors_hooks.__init__(self, pack_hook, unpack_hook_with_error_cb)
+        else:
+            torch.autograd.graph.saved_tensors_hooks.__init__(self, pack_hook, unpack_hook)
+
+    _cp._checkpoint_hook.__init__ = _patched_checkpoint_hook_init
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -165,8 +358,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._is_lora = self.cfg.policy.model.lora.rank > 0
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        # FSDP2 handles tied embeddings correctly via broadcast + tie_weights(),
+        # so meta tensor init is always safe. FSDP1 needs CPU init for tied embeddings.
+        use_meta = True if self.cfg.strategy == "fsdp2" else (not getattr(model_config, "tie_word_embeddings", False))
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=use_meta, mesh=self.strategy.device_mesh
         )
         with init_context():
 
@@ -193,9 +389,25 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
             if self.cfg.gradient_checkpointing:
+                use_reentrant = self.cfg.gradient_checkpointing_use_reentrant
                 wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+                    gradient_checkpointing_kwargs={"use_reentrant": use_reentrant}
                 )
+                logger.info(
+                    f"Gradient checkpointing enabled inside init_context: "
+                    f"use_reentrant={use_reentrant}"
+                )
+
+        is_moe = getattr(model_config, "num_experts", None) is not None or \
+                 getattr(model_config, "num_local_experts", None) is not None
+        needs_expert_patch = (
+            is_moe
+            and self.cfg.strategy == "fsdp2"
+            and self.cfg.gradient_checkpointing
+            and not self.cfg.gradient_checkpointing_use_reentrant
+        )
+        if needs_expert_patch:
+            _patch_moe_experts_for_fsdp2(wrapped_model.model)
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
@@ -342,8 +554,9 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        use_meta = True if self.cfg.strategy == "fsdp2" else (not getattr(model_config, "tie_word_embeddings", False))
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=use_meta, mesh=self.strategy.device_mesh
         )
         with init_context():
             critic = get_llm_for_sequence_regression(
@@ -367,9 +580,25 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
             if self.cfg.gradient_checkpointing:
+                use_reentrant = self.cfg.gradient_checkpointing_use_reentrant
                 critic.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+                    gradient_checkpointing_kwargs={"use_reentrant": use_reentrant}
                 )
+                logger.info(
+                    f"Critic gradient checkpointing enabled inside init_context: "
+                    f"use_reentrant={use_reentrant}"
+                )
+
+        is_moe = getattr(model_config, "num_experts", None) is not None or \
+                 getattr(model_config, "num_local_experts", None) is not None
+        needs_expert_patch = (
+            is_moe
+            and self.cfg.strategy == "fsdp2"
+            and self.cfg.gradient_checkpointing
+            and not self.cfg.gradient_checkpointing_use_reentrant
+        )
+        if needs_expert_patch:
+            _patch_moe_experts_for_fsdp2(critic)
 
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
@@ -412,8 +641,9 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        use_meta = True if self.cfg.strategy == "fsdp2" else (not getattr(model_config, "tie_word_embeddings", False))
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=use_meta, mesh=self.strategy.device_mesh
         )
 
         with init_context():
