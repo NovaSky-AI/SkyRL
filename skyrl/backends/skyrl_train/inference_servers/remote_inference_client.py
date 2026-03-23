@@ -347,6 +347,33 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/v1/chat/completions"
         return await self._post(url, json=body, headers=headers)
 
+    async def render_chat_completion(
+        self,
+        request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Render a chat completion (apply chat template + tokenize) via /v1/chat/completions/render.
+
+        Args:
+            request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
+                The request body should be OpenAI-compatible chat completion request.
+                session_id can be included in json for consistent routing.
+
+        Returns:
+            Rendered chat completion response (template-applied prompt and token IDs).
+        """
+        body = request_payload.get("json", {})
+
+        # Extract session_id for routing (same as InferenceEngineClient)
+        session_id = body.pop("session_id", None)
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        url = f"{self.proxy_url}/v1/chat/completions/render"
+        return await self._post(url, json=body, headers=headers)
+
     async def completion(
         self,
         request_payload: Dict[str, Any],
