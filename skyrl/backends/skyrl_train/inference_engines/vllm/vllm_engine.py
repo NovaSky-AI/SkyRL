@@ -653,8 +653,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         if "model" not in request_json:
             return {"error": {"message": "The field `model` is required", "type": "invalid_request_error"}}
-        if "messages" not in request_json or not request_json["messages"]:
-            return {"error": {"message": "The field `messages` is required and cannot be empty", "type": "invalid_request_error"}}
+        messages = request_json.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return {"error": {"message": "The field `messages` is required, must be a non-empty list", "type": "invalid_request_error"}}
 
         try:
             openai_request = {
@@ -700,6 +701,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             openai_response = await self.chat_completion(payload)
 
             if "error" in openai_response or openai_response.get("object") == "error":
+                # Normalize to Anthropic error schema for consistent HTTP handler detection
+                if "error" not in openai_response:
+                    openai_response = {"error": {
+                        "message": openai_response.get("message", "Unknown upstream error"),
+                        "type": openai_response.get("type", "internal_error"),
+                        "code": openai_response.get("code"),
+                    }}
                 return openai_response
 
             finish_reason = openai_response["choices"][0].get("finish_reason", "stop")
@@ -717,7 +725,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 message_content = ""
 
             anthropic_response = {
-                "id": openai_response.get("id", "msg-" + str(int(time.time()))),
+                "id": openai_response.get("id") or f"msg-{uuid4()}",
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "text", "text": message_content}],

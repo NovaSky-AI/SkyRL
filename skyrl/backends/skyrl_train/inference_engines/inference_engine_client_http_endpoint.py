@@ -316,9 +316,10 @@ def create_app() -> fastapi.FastAPI:
                     content={"error": {"message": "The field `model` is required", "type": "invalid_request_error"}},
                     status_code=HTTPStatus.BAD_REQUEST.value,
                 )
-            if "messages" not in request_json or not request_json["messages"]:
+            messages = request_json.get("messages")
+            if not isinstance(messages, list) or not messages:
                 return JSONResponse(
-                    content={"error": {"message": "The field `messages` is required and cannot be empty", "type": "invalid_request_error"}},
+                    content={"error": {"message": "The field `messages` is required, must be a non-empty list", "type": "invalid_request_error"}},
                     status_code=HTTPStatus.BAD_REQUEST.value,
                 )
 
@@ -328,9 +329,21 @@ def create_app() -> fastapi.FastAPI:
             }
             anthropic_response = await _global_inference_engine_client.anthropic_messages(payload)
 
-            if "error" in anthropic_response:
-                error_type = anthropic_response["error"].get("type", "internal_error")
-                status_code = HTTPStatus.BAD_REQUEST.value if error_type == "invalid_request_error" else HTTPStatus.INTERNAL_SERVER_ERROR.value
+            if "error" in anthropic_response or anthropic_response.get("object", "") == "error":
+                if "error" in anthropic_response:
+                    error = anthropic_response["error"]
+                    error_code = error.get("code")
+                    error_type = error.get("type", "internal_error")
+                else:
+                    error_code = anthropic_response.get("code")
+                    error_type = anthropic_response.get("type", "internal_error")
+                # Prefer numeric error code if available, fall back to type-based mapping
+                if isinstance(error_code, int):
+                    status_code = error_code
+                elif isinstance(error_code, str) and error_code.isdigit():
+                    status_code = int(error_code)
+                else:
+                    status_code = HTTPStatus.BAD_REQUEST.value if error_type == "invalid_request_error" else HTTPStatus.INTERNAL_SERVER_ERROR.value
                 return JSONResponse(content=anthropic_response, status_code=status_code)
 
             return JSONResponse(content=anthropic_response)
