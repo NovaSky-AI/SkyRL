@@ -193,7 +193,7 @@ class FSDPStrategy(DistributedStrategy):
         non_finite = grad_norm is not None and not torch.isfinite(grad_norm)
         if non_finite:
             logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}, zeroing grads before step")
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
         t0 = _time.time()
         optimizer.step()

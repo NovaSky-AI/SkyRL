@@ -306,11 +306,13 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         """Broadcast current batch and distribute to shards."""
         if not batch_tensors:
             return
-        pg = dist.distributed_c10d._get_default_group()
-        if len(batch_tensors) > 1:
+        # Use coalesced broadcast when available (private API), fall back to per-tensor
+        if len(batch_tensors) > 1 and hasattr(dist, "_broadcast_coalesced"):
+            pg = dist.distributed_c10d._get_default_group()
             dist._broadcast_coalesced(pg, batch_tensors, BATCH_SIZE_BYTES, 0)
         else:
-            dist.broadcast(batch_tensors[0], src=0)
+            for t in batch_tensors:
+                dist.broadcast(t, src=0)
 
         for name, full_tensor in zip(batch_names, batch_tensors):
             sharded_param = meta_sharded_sd[name]

@@ -407,6 +407,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             and not self.cfg.gradient_checkpointing_use_reentrant
         )
         if needs_expert_patch:
+            _patch_checkpoint_for_moe()
             _patch_moe_experts_for_fsdp2(wrapped_model.model)
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
@@ -598,6 +599,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             and not self.cfg.gradient_checkpointing_use_reentrant
         )
         if needs_expert_patch:
+            _patch_checkpoint_for_moe()
             _patch_moe_experts_for_fsdp2(critic)
 
         # prepare models/optimizers...
