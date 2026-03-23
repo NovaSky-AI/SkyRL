@@ -297,8 +297,12 @@ class MegatronModelWrapper:
 
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
-                            "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                            "logprobs": (
+                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
+                            "elementwise_loss": (
+                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
                         }
                     )
 
