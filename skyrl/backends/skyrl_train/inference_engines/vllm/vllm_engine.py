@@ -458,6 +458,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             return None
 
+    async def abort_generation(self) -> None:
+        """Abort all running and waiting requests."""
+        engine = self._get_engine()
+        unfinished_request_ids = self._get_unfinished_request_ids(engine.output_processor)
+        if unfinished_request_ids:
+            await engine.abort(unfinished_request_ids)
+        await self.reset_prefix_cache()  # avoid KV-cache pollution
+        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
+
     async def _load_lora_from_disk(self, lora_path: str):
         """Swap LoRA adapter: abort in-flight requests, remove old, add new, reset cache."""
         await self.abort_generation()
@@ -469,7 +478,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             except Exception as e:
                 logger.error(f"Failed removing old LoRA: {e}")
 
-        new_id = int(time.time_ns() % 0x7FFFFFFF)
+        new_id = uuid4().int & 0x7FFFFFFF
 
         await self.llm.add_lora(
             LoRARequest(

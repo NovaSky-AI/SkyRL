@@ -262,8 +262,7 @@ def transitions_to_training_data(
             reset_accumulator()
             delta_ob_tokens = ob_tokens
 
-        if not transition_has_valid_logprobs and has_valid_logprobs:
-            has_valid_logprobs = False
+        has_valid_logprobs = has_valid_logprobs and transition_has_valid_logprobs
 
         # Accumulate tokens (pad logprobs with 0.0 when invalid — safe since has_valid_logprobs gates usage)
         full_sequence.extend(delta_ob_tokens)
