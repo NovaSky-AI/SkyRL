@@ -257,6 +257,8 @@ generator:
   # Inject context status line into observations (e.g., "[Context: 24K/48K tokens (50%)]")
   # Useful for training models to use context management tools
   inject_context_status: false
+  # When context usage exceeds this %, append an urgent warning to submit final_answer
+  context_warning_threshold: 0.90
 
   # chat template configuration for SkyRLGymGenerator.
   # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say

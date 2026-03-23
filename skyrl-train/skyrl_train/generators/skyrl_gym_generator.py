@@ -332,6 +332,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             done=False,
         )
 
+        # Track whether we've already injected the context warning
+        context_warning_injected = False
+
         # Track trajectory start time for timeout
         trajectory_start_time = time.time()
 
@@ -454,6 +457,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     step_metadata = env_step_output.get("metadata", {})
                     current_turn = step_metadata.get("turn", 0)
                     status_line = f"\n[Context: {current_tokens:,}/{max_input_length:,} tokens ({percentage}%), Turn {current_turn}/{self.generator_cfg.max_turns}]"
+
+                    threshold = getattr(self.generator_cfg, "context_warning_threshold", 0.75)
+                    if percentage / 100 >= threshold and not context_warning_injected:
+                        status_line += "\n⚠️ WARNING: Context is running low. You should wrap up your work and submit your final_answer now. If you run out of context, your answer will not be recorded."
+                        context_warning_injected = True
+
                     # Append to last observation's content
                     if isinstance(new_obs[-1], dict) and "content" in new_obs[-1]:
                         new_obs[-1]["content"] += status_line
