@@ -128,7 +128,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     return batch
 
 
-def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=100):
+def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=10000):
     sample = random.sample(val_tokenized, min(num_eval_samples, len(val_tokenized)))
 
     token_id_0 = tokenizer.encode("0", add_special_tokens=False)[0]
