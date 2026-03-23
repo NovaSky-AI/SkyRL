@@ -40,7 +40,7 @@ SYSTEM_PROMPT = (
     "Output 1 if the page is relevant to answering the query, or 0 if it is not."
 )
 
-EVAL_MD_PATH = Path(__file__).parent / "EVAL.md"
+EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
 
 
 def get_sft_config() -> SkyRLTrainConfig:
