@@ -131,7 +131,7 @@ class MultiModalPlaceholder(BaseModel):
 class RenderedModelInput(BaseModel):
     prompt_ids: list[int]
     multi_modal_kwargs: dict[str, bytes] | None = None
-    mm_placeholders: list[MultiModalPlaceholder] | None = None
+    multi_modal_placeholders: list[MultiModalPlaceholder] | None = None
 
 
 class TensorData(BaseModel):
