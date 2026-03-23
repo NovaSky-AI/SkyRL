@@ -4,6 +4,20 @@ from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 
+def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
+    """Return True when the trainer syncs LoRA adapters (not merged weights).
+
+    FSDP always syncs LoRA adapters when ``lora.rank > 0``.
+    Megatron merges LoRA into the base weights by default
+    (``merge_lora=True``), so the inference engine should not enable LoRA.
+    """
+    if cfg.trainer.policy.model.lora.rank <= 0:
+        return False
+    if cfg.trainer.strategy == "megatron":
+        return not cfg.trainer.policy.megatron_config.lora_config.merge_lora
+    return True
+
+
 # TODO: Add a test for validation
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
@@ -48,12 +62,16 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     for key, value in overrides.items():
         setattr(args, key, value)
 
-    # Add LoRA params if enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    # Enable LoRA on the inference engine only when the trainer will sync
+    # LoRA adapters (not merged weights).  Megatron merges by default
+    # (merge_lora=True), so the inference engine must NOT have LoRA wrapping.
+    if _uses_lora_weight_sync(cfg):
         args.enable_lora = True
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+    else:
+        args.enable_lora = False
 
     # Add any extra engine_init_kwargs
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
