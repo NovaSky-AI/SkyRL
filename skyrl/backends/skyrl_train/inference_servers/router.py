@@ -15,6 +15,7 @@ import itertools
 import logging
 import threading
 import time
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import httpx
@@ -106,8 +107,17 @@ class InferenceRouter:
 
     def _build_app(self) -> FastAPI:
         """Build the FastAPI app with proxy routes."""
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            yield
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+
         app = FastAPI(
             title="SkyRL Inference Router",
+            lifespan=lifespan,
             docs_url=None,
             redoc_url=None,
             openapi_url=None,
@@ -254,13 +264,6 @@ class InferenceRouter:
             if self._server_thread.is_alive():
                 logger.warning("Router thread did not exit gracefully, forcing server socket closure")
                 self._force_close_server_sockets()
-
-        if self._client:
-            try:
-                asyncio.get_event_loop().run_until_complete(self._client.aclose())
-            except Exception:
-                pass
-            self._client = None
 
         self._server = None
         self._server_thread = None

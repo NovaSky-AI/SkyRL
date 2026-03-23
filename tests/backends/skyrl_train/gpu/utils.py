@@ -160,7 +160,7 @@ def init_worker_with_type(
         cfg = get_test_actor_config()
 
     if shared_pg is not None:
-        pg = shared_pg
+        pg = ResolvedPlacementGroup(shared_pg)
         num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
@@ -577,7 +577,7 @@ class InferenceEngineState:
             )
             if sleep:
                 asyncio.run(client.wake_up())
-        return cls(client=client, pg=shared_pg, router=router, server_group=server_group)
+        return cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(
