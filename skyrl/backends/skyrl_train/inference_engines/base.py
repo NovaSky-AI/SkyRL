@@ -119,6 +119,11 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle Anthropic Messages API (/v1/messages). Payload: {"json": <body>, "headers": <headers>}."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def wake_up(self, *args: Any, **kwargs: Any):
         raise NotImplementedError
 

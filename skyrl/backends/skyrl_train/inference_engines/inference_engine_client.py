@@ -214,6 +214,17 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         return await self.engines[engine_idx].chat_completion(request_payload)
 
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Route Anthropic Messages API requests to engines.
+        Similar to chat_completion, routes based on session_id for sticky routing.
+        """
+        session_id = request_payload["json"].pop("session_id", None)
+        if session_id is not None:
+            assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/v1/messages`"
+        engine_idx = self._select_engine_idx(session_id)
+        logger.info(f"[InferenceEngineClient] Routing /v1/messages to engine {engine_idx}/{len(self.engines)}")
+        return await self.engines[engine_idx].anthropic_messages(request_payload)
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Handles an OpenAI /completions request.
