@@ -19,7 +19,6 @@ from pydantic import (
     Discriminator,
     Field,
     Tag,
-    field_validator,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -328,15 +327,8 @@ class ImageChunk(BaseModel):
 class ImageAssetPointerChunk(BaseModel):
     type: Literal["image_asset_pointer"] = "image_asset_pointer"
     format: Literal["png", "jpeg"]
-    location: str
+    location: str = Field(min_length=1)
     expected_tokens: int | None = None
-
-    @field_validator("location")
-    @classmethod
-    def validate_location(cls, v: str) -> str:
-        if not v:
-            raise ValueError("location must not be empty")
-        return v
 
     def to_types(self) -> types.ImageAssetPointerChunk:
         return types.ImageAssetPointerChunk(
