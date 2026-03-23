@@ -240,6 +240,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
@@ -291,6 +292,8 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
@@ -309,6 +312,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     endpoints = ["chat_completions", "completions"]
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -465,6 +469,8 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 @pytest.mark.parametrize(
@@ -562,6 +568,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
 def test_structured_generation(ray_init_fixture):
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
@@ -615,6 +622,8 @@ def test_structured_generation(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
@@ -626,6 +635,7 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
@@ -781,6 +791,8 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 @pytest.mark.parametrize("use_custom_template", [False, True])
@@ -791,6 +803,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
@@ -868,6 +881,8 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_served_model_name(ray_init_fixture):
@@ -887,6 +902,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -960,6 +976,8 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_context_length_error_returns_400(ray_init_fixture):
@@ -979,6 +997,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
@@ -1076,3 +1095,5 @@ def test_context_length_error_returns_400(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()

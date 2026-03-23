@@ -107,8 +107,7 @@ class Trainer:
         try:
             NCCLWeightTransferEngine.trainer_send_weights(
                 iterator=iter(params),
-                group=self.pg,
-                packed=True,
+                trainer_args={"group": self.pg, "packed": True},
             )
             torch.cuda.synchronize()
             print("[Trainer.broadcast_weights] Send complete")

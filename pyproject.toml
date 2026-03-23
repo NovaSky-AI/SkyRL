@@ -97,11 +97,11 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.16.0; sys_platform == 'linux'",
+    "vllm==0.18.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -109,13 +109,13 @@ megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.16.0; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.18.0; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -175,7 +175,7 @@ required-environments = [
 ]
 
 constraint-dependencies = [
-    "flashinfer-jit-cache==0.6.3",
+    "flashinfer-jit-cache==0.6.6",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -217,7 +217,10 @@ transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tool
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
 [tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+# NOTE: FLASH_ATTENTION_SKIP_CUDA_BUILD was removed for torch 2.10.0.
+# flash-attn 2.8.3 only ships prebuilt wheels up to torch 2.9, so uv must
+# build from source for torch 2.10+.
+# flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
