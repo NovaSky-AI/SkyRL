@@ -38,8 +38,8 @@ def _extract_loss_fn_outputs_sft(
 
         loss_fn_outputs.append(
             {
-                "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist(),
-                "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist(),
+                "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
             }
         )
     return loss_fn_outputs
@@ -69,7 +69,7 @@ def _extract_loss_fn_outputs_rl(
     for i, valid_len in enumerate(valid_lens):
         loss_fn_outputs.append(
             {
-                "logprobs": detached_log_probs[i, -valid_len:].tolist(),
+                "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
             }
         )
     return loss_fn_outputs
@@ -199,6 +199,33 @@ class TestLossFnOutputsSlicing:
         outputs = _extract_loss_fn_outputs_sft(action_log_probs, elementwise_loss, action_mask, None)
         assert outputs[0]["logprobs"] == pytest.approx([-5.0])
         assert outputs[0]["elementwise_loss"] == pytest.approx([5.0])
+
+    def test_zero_valid_len_returns_empty(self):
+        """Edge case: valid_len=0 (fully padded sequence) must return empty lists, not the full tensor.
+
+        In Python, -0 == 0, so tensor[-0:] == tensor[0:] which returns the entire
+        tensor. The guard `if valid_len > 0 else []` prevents this.
+        """
+        action_log_probs = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],  # fully padded
+            ]
+        )
+        elementwise_loss = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        action_mask = torch.tensor([[0, 0, 0, 0, 0]])  # no valid tokens
+
+        # SFT path
+        sft_outputs = _extract_loss_fn_outputs_sft(action_log_probs, elementwise_loss, action_mask, None)
+        assert sft_outputs[0]["logprobs"] == []
+        assert sft_outputs[0]["elementwise_loss"] == []
+
+        # RL path
+        rl_outputs = _extract_loss_fn_outputs_rl(action_log_probs, action_mask, None)
+        assert rl_outputs[0]["logprobs"] == []
 
     def test_no_mask_returns_full_sequence(self):
         """When both masks are None, return the full sequence."""

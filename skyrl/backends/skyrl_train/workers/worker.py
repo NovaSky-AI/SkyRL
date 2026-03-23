@@ -856,8 +856,8 @@ class PolicyWorkerBase(Worker):
 
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                        "elementwise_loss": elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
                     }
                 )
 
@@ -913,7 +913,7 @@ class PolicyWorkerBase(Worker):
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, -valid_len:].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
