@@ -355,7 +355,7 @@ class RemoteInferenceClient:
         Render a chat completion (apply chat template + tokenize) via /v1/chat/completions/render.
 
         Args:
-            request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
+            request_payload: Dict with {"json": <request-body>}.
                 The request body should be OpenAI-compatible chat completion request.
                 session_id can be included in json for consistent routing.
 
