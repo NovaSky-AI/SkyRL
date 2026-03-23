@@ -18,6 +18,46 @@ import warnings
 
 import torch
 
+
+def _patch_vllm_sleep_mode():
+    """Fix vLLM v0.16.0 bug: gpu_worker.load_model() uses `and` instead of `,`
+    between context managers, causing CuMemAllocator pool to never be entered
+    for weight allocations. This means model weights are never tracked by the
+    allocator and cannot be freed during sleep.
+
+    In Python, `with A and B:` only enters B (A is evaluated but __enter__ is
+    never called). The fix is `with A, B:` which enters both.
+
+    Fixed upstream in https://github.com/vllm-project/vllm/pull/32947 (v0.17.0+).
+    This monkey-patch applies only to vLLM 0.16.x.
+    """
+    try:
+        import vllm
+
+        if not vllm.__version__.startswith("0.16"):
+            return
+
+        import os
+
+        from vllm.v1.worker.gpu_worker import Worker
+        from vllm.config import set_current_vllm_config
+
+        def _patched_load_model(self) -> None:
+            eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+            # Use comma (,) instead of `and` to properly enter BOTH context managers
+            with (
+                self._maybe_get_memory_pool_context(tag="weights"),
+                set_current_vllm_config(self.vllm_config),
+            ):
+                self.model_runner.load_model(eep_scale_up=eep_scale_up)
+
+        Worker.load_model = _patched_load_model
+    except Exception as e:
+        warnings.warn(f"Failed to patch vLLM sleep mode: {e}")
+
+
+_patch_vllm_sleep_mode()
+
 # Path to this worker extension class for use in CLI args (derived from module path)
 VLLM_WORKER_EXTENSION_CLS = f"{__name__}.WorkerWrap"
 
