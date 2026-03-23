@@ -113,30 +113,3 @@ def test_sleep_frees_model_weights():
         f"Model weights are likely NOT tracked by CuMemAllocator. "
         f"Ensure the vLLM sleep patch is applied."
     )
-
-
-def test_context_manager_and_vs_comma():
-    """Verify the Python semantics that caused the bug: `and` skips first ctx."""
-    from contextlib import contextmanager
-
-    entered = []
-
-    @contextmanager
-    def ctx_a():
-        entered.append("a")
-        yield
-
-    @contextmanager
-    def ctx_b():
-        entered.append("b")
-        yield
-
-    entered.clear()
-    with ctx_a() and ctx_b():
-        pass
-    assert entered == ["b"], f"Expected ['b'] with `and`, got {entered}"
-
-    entered.clear()
-    with ctx_a(), ctx_b():
-        pass
-    assert entered == ["a", "b"], f"Expected ['a', 'b'] with `,`, got {entered}"
