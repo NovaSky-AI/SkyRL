@@ -1,7 +1,10 @@
+import logging
 from argparse import Namespace
 
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+
+logger = logging.getLogger(__name__)
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -70,6 +73,17 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+
+        if not cfg.trainer.placement.colocate_all:
+            lora_path = cfg.trainer.policy.model.lora.lora_sync_path
+            logger.warning(
+                "LoRA weight sync is enabled but training and inference are not "
+                "colocated (placement.colocate_all=false). The trainer saves LoRA "
+                "adapters to disk for the inference engine to load, so both must "
+                "share a filesystem. Set trainer.policy.model.lora.lora_sync_path "
+                "to a shared mount (current value: %s).",
+                lora_path,
+            )
     else:
         args.enable_lora = False
 
