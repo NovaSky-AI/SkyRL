@@ -824,6 +824,7 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]

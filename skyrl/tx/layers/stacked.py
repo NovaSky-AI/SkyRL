@@ -340,6 +340,10 @@ class MultiStackedDecoderLayers(nnx.Module):
 
         return result
 
+    def preextract_decode(self) -> list[tuple[nnx.GraphDef, list[nnx.GraphState]]]:
+        """Pre-extract per-layer states for all groups."""
+        return [group.preextract_decode() for group in self.layer_groups]
+
     @staticmethod
     def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache, ...]:
         boundaries = [0, *split_points, len(kv_cache.keys)]
@@ -370,6 +374,7 @@ class MultiStackedDecoderLayers(nnx.Module):
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        decode_layers=None,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         all_hidden_states: list[jax.Array] = []
 
@@ -383,8 +388,10 @@ class MultiStackedDecoderLayers(nnx.Module):
         else:
             kv_caches = (None,) * len(self.layer_groups)
 
+        group_decode_layers = decode_layers or [None] * len(self.layer_groups)
+
         kv_results: list[KVCache] = []
-        for group, group_kv_cache in zip(self.layer_groups, kv_caches):
+        for group, group_kv_cache, group_dl in zip(self.layer_groups, kv_caches, group_decode_layers):
             hidden_states, layer_hidden_states, layer_kv_cache = group(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -394,6 +401,7 @@ class MultiStackedDecoderLayers(nnx.Module):
                 output_hidden_states=output_hidden_states,
                 gradient_checkpointing=gradient_checkpointing,
                 is_training=is_training,
+                decode_layers=group_dl,
             )
             all_hidden_states.extend(layer_hidden_states)
             if not is_training:
