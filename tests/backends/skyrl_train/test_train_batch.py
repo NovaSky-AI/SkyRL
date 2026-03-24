@@ -227,8 +227,8 @@ def test_train_batch_pickle_uint_dtypes():
 
     Without the __reduce__ patch in training_batch.py, pickle's default dict-subclass protocol
     separately serializes raw dict items through torch's storage-level pickle,
-    which fails for uint16 (UntypedStorage has no .dtype attribute). This tests 
-    that we are correctly skipping the default dict-subclass protocol and 
+    which fails for uint16 (UntypedStorage has no .dtype attribute). This tests
+    that we are correctly skipping the default dict-subclass protocol and
     using the custom __reduce__ method to serialize the TensorBatch object.
     """
     batch_size = 3
