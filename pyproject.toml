@@ -161,9 +161,6 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = {attr = "skyrl.__version__"}
 
-[project.entry-points."vllm.general_plugins"]
-skyrl_ipc_engine = "skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine:register_ipc_engine"
-
 [project.scripts]
 # The following is for supporting the skyrl-train dependency
 
