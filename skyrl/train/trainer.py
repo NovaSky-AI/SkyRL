@@ -15,7 +15,7 @@ from loguru import logger
 from ray import ObjectRef
 from ray.util.placement_group import placement_group
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_scheduler
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -42,8 +42,6 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from transformers import get_scheduler
-
 from skyrl.train.config import OptimizerConfig, SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (

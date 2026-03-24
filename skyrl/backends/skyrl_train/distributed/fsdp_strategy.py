@@ -17,6 +17,7 @@ from torch import distributed as dist
 from torch import optim
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -578,7 +579,6 @@ class FSDPStrategy(DistributedStrategy):
                 if optimizer is not None and load_optimizer_states and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
-
 
         # Load RNG state for reproducibility
         if "rng" in extra_state_dict:
