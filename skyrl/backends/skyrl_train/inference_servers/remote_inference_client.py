@@ -422,7 +422,7 @@ class RemoteInferenceClient:
             List of token ID lists.
         """
         if self.tokenizer is not None:
-            return [self.tokenizer.encode(text, add_special_tokens=add_special_tokens) for text in texts]
+            return self.tokenizer(texts, add_special_tokens=add_special_tokens)["input_ids"]
 
         url = f"{self.proxy_url}/tokenize"
 
@@ -455,7 +455,7 @@ class RemoteInferenceClient:
             List of decoded texts.
         """
         if self.tokenizer is not None:
-            return [self.tokenizer.decode(ids) for ids in token_ids]
+            return self.tokenizer.batch_decode(token_ids)
 
         url = f"{self.proxy_url}/detokenize"
 
