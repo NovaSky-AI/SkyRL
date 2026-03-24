@@ -18,7 +18,6 @@ import warnings
 
 import torch
 
-
 # Path to this worker extension class for use in CLI args (derived from module path)
 VLLM_WORKER_EXTENSION_CLS = f"{__name__}.WorkerWrap"
 
