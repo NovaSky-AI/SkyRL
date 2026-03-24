@@ -34,7 +34,6 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
 
@@ -592,28 +591,3 @@ def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState)
 
     decoded = asyncio.run(client.detokenize([token_ids]))[0]
     assert decoded == text
-
-
-@pytest.mark.vllm
-@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="Render API only supported with new inference client")
-def test_client_render_chat_completion(vllm_server: InferenceEngineState):
-    """Test render_chat_completion via RemoteInferenceClient against real vLLM."""
-    client = vllm_server.client
-    messages = [{"role": "user", "content": "Hello world!"}]
-    request_payload = {
-        "json": {
-            "messages": messages,
-        },
-        "headers": {},
-    }
-    result = asyncio.run(client.render_chat_completion(request_payload))
-    # vLLM returns [conversation, engine_prompts]
-    assert isinstance(result, list)
-    assert len(result) == 2
-    conversation, engine_prompts = result
-    # engine_prompts should have prompt_token_ids matching local tokenizer output
-    assert len(engine_prompts) > 0
-    assert "prompt_token_ids" in engine_prompts[0]
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
-    expected_token_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-    assert engine_prompts[0]["prompt_token_ids"] == expected_token_ids

@@ -17,7 +17,6 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     PauseMode,
     RemoteInferenceClient,
 )
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -64,15 +63,6 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return {"choices": [{"message": {"content": f"Chat from server {server_id}"}}]}
-
-    @app.post("/v1/chat/completions/render")
-    async def render_chat_completion(request: Request):
-        body = await request.json()
-        messages = body.get("messages", [])
-        return [
-            messages,  # conversation (echo back)
-            [{"prompt": "rendered prompt", "prompt_token_ids": [1, 2, 3]}],  # engine_prompts
-        ]
 
     @app.post("/tokenize")
     async def tokenize(request: Request):
@@ -250,27 +240,6 @@ class TestDataPlane:
         }
         result = await client.completion(request_payload)
         assert "choices" in result
-
-    @pytest.mark.asyncio
-    @pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="Render API only supported with new inference client")
-    async def test_render_chat_completion(self, client):
-        """Test render_chat_completion method."""
-        messages = [{"role": "user", "content": "Hello"}]
-        request_payload = {
-            "json": {
-                "model": "test",
-                "messages": messages,
-            },
-            "headers": {},
-        }
-        result = await client.render_chat_completion(request_payload)
-        assert isinstance(result, list)
-        assert len(result) == 2
-        conversation, engine_prompts = result
-        assert conversation == messages
-        assert len(engine_prompts) == 1
-        assert engine_prompts[0]["prompt_token_ids"] == [1, 2, 3]
-        assert engine_prompts[0]["prompt"] == "rendered prompt"
 
     @pytest.mark.asyncio
     async def test_tokenize(self, client):

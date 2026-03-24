@@ -447,40 +447,6 @@ class RemoteInferenceClient:
             raise_for_status(resp, response)
             return response
 
-    async def render_chat_completion(
-        self,
-        request_payload: Dict[str, Any],
-    ) -> List[Any]:
-        """
-        Render chat messages into a tokenized prompt via /v1/chat/completions/render.
-
-        Applies the model's chat template and tokenizes without generating text.
-
-        Args:
-            request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
-                The request body should contain messages and optional chat template params.
-                session_id can be included in json for consistent routing.
-
-        Returns:
-            List of [conversation, engine_prompts] where engine_prompts contains
-            dicts with "prompt" and "prompt_token_ids".
-        """
-        body = request_payload.get("json", {})
-
-        session_id = body.pop("session_id", None)
-
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = str(session_id)
-
-        session = await self._get_session()
-        url = f"{self.proxy_url}/v1/chat/completions/render"
-
-        async with session.post(url, json=body, headers=headers) as resp:
-            response = await resp.json()
-            raise_for_status(resp, response)
-            return response
-
     async def completion(
         self,
         request_payload: Dict[str, Any],
