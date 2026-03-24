@@ -70,7 +70,7 @@ def wait_for_url(url: str, timeout: float = 180.0) -> bool:
 
 
 @pytest.fixture(scope="class")
-def server_group_and_router(ray_init_fixture):
+def server_group_and_router(class_scoped_ray_init_fixture):
     """Create 2 vLLM servers (TP=2 each) + router."""
     cli_args = make_vllm_cli_args(MODEL, tp_size=2)
     start_port = get_open_port()

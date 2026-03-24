@@ -117,7 +117,7 @@ class Trainer:
 
 
 @pytest_asyncio.fixture(scope="class")
-async def weight_update_env(ray_init_fixture):
+async def weight_update_env(class_scoped_ray_init_fixture):
     """
     Create environment for weight update testing.
 
@@ -329,7 +329,7 @@ class IpcTrainer:
 
 
 @pytest_asyncio.fixture(scope="class")
-async def ipc_weight_update_env(ray_init_fixture):
+async def ipc_weight_update_env(class_scoped_ray_init_fixture):
     """
     Create environment for colocated IPC weight update testing.
 
