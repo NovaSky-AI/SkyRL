@@ -98,7 +98,10 @@ skyrl-train = [
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.18.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    # Prefer a prebuilt wheel for Linux x86_64 + Python 3.12 + Torch 2.10 to
+    # avoid long local CUDA builds in CI. Fallback to PyPI spec elsewhere.
+    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -218,8 +221,9 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 
 [tool.uv.extra-build-variables]
 # NOTE: FLASH_ATTENTION_SKIP_CUDA_BUILD was removed for torch 2.10.0.
-# flash-attn 2.8.3 only ships prebuilt wheels up to torch 2.9, so uv must
-# build from source for torch 2.10+.
+# Official flash-attn 2.8.3 wheels only ship up to torch 2.9, so uv would
+# otherwise build from source for torch 2.10+ unless a compatible wheel is
+# provided via a direct URL dependency.
 # flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [[tool.uv.index]]
