@@ -128,6 +128,9 @@ class RemoteInferenceClient:
     active_lora_name: Optional[str] = None
     """Name of the active LoRA adapter. If set, generation requests use this adapter instead of the base model."""
 
+    tokenizer: Optional[Any] = None
+    """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
+
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
@@ -407,7 +410,9 @@ class RemoteInferenceClient:
         add_special_tokens: bool = True,
     ) -> List[List[int]]:
         """
-        Tokenize texts via /tokenize.
+        Tokenize texts.
+
+        Uses the local tokenizer if available, otherwise falls back to HTTP /tokenize.
 
         Args:
             texts: List of texts to tokenize.
@@ -416,6 +421,9 @@ class RemoteInferenceClient:
         Returns:
             List of token ID lists.
         """
+        if self.tokenizer is not None:
+            return [self.tokenizer.encode(text, add_special_tokens=add_special_tokens) for text in texts]
+
         url = f"{self.proxy_url}/tokenize"
 
         # vLLM /tokenize expects individual requests, batch them
@@ -436,7 +444,9 @@ class RemoteInferenceClient:
         token_ids: List[List[int]],
     ) -> List[str]:
         """
-        Detokenize token IDs via /detokenize.
+        Detokenize token IDs.
+
+        Uses the local tokenizer if available, otherwise falls back to HTTP /detokenize.
 
         Args:
             token_ids: List of token ID lists.
@@ -444,6 +454,9 @@ class RemoteInferenceClient:
         Returns:
             List of decoded texts.
         """
+        if self.tokenizer is not None:
+            return [self.tokenizer.decode(ids) for ids in token_ids]
+
         url = f"{self.proxy_url}/detokenize"
 
         # vLLM /detokenize expects individual requests, batch them

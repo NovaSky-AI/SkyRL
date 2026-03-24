@@ -386,6 +386,7 @@ class BasePPOExp:
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
+            tokenizer=self.tokenizer,
         )
 
     def _setup_trainer(self):
