@@ -11,7 +11,7 @@ from jaxtyping import Float, Integer
 DictType = TypeVar("DictType")
 
 
-def _rebuild_tensor_batch(cls, state):
+def _rebuild_tensor_batch(cls, state: Dict[str, Any]):
     """Module-level helper for unpickling TensorBatch (must be importable by name)."""
     obj = dict.__new__(cls)
     obj.__setstate__(state)
