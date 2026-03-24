@@ -222,6 +222,42 @@ def test_train_batch_pickle_bfloat16():
     assert unpickled.metadata == data.metadata
 
 
+def test_train_batch_pickle_uint_dtypes():
+    """Test pickle serialization with uint8/uint16 tensors.
+
+    Without the __reduce__ patch in training_batch.py, pickle's default dict-subclass protocol
+    separately serializes raw dict items through torch's storage-level pickle,
+    which fails for uint16 (UntypedStorage has no .dtype attribute).
+    """
+    batch_size = 3
+    seq_len = 4
+    num_layers = 2
+    topk = 2
+
+    data = TensorBatch(
+        {
+            "sequences": torch.randn(batch_size, seq_len),
+            "rollout_expert_indices_u16": torch.randint(
+                0, 256, (batch_size, seq_len, num_layers, topk), dtype=torch.uint16
+            ),
+            "rollout_expert_indices_u8": torch.randint(
+                0, 128, (batch_size, seq_len, num_layers, topk), dtype=torch.uint8
+            ),
+        }
+    )
+    data.metadata = {"dtype_test": "uint"}
+
+    pickled = pickle.dumps(data)
+    unpickled = pickle.loads(pickled)
+
+    assert unpickled["rollout_expert_indices_u16"].dtype == torch.uint16
+    assert unpickled["rollout_expert_indices_u8"].dtype == torch.uint8
+    assert torch.equal(unpickled["rollout_expert_indices_u16"], data["rollout_expert_indices_u16"])
+    assert torch.equal(unpickled["rollout_expert_indices_u8"], data["rollout_expert_indices_u8"])
+    assert torch.equal(unpickled["sequences"], data["sequences"])
+    assert unpickled.metadata == data.metadata
+
+
 def test_train_batch_setitem():
     batch_size = 3
     seq_len = 4
