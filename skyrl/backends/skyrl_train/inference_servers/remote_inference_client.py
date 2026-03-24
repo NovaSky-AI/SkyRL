@@ -152,7 +152,7 @@ class RemoteInferenceClient:
         SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines.
         """
         current_loop = asyncio.get_running_loop()
-        if self._gen_sem is None or self._sem_loop is not current_loop:
+        if self._sem_loop is not current_loop:
             if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0:
                 concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls)
                 self._gen_sem = asyncio.Semaphore(concurrency)
