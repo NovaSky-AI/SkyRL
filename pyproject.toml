@@ -98,8 +98,8 @@ skyrl-train = [
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.18.0; sys_platform == 'linux'",
-    # Prefer a prebuilt wheel for Linux x86_64 + Python 3.12 + Torch 2.10 to
-    # avoid long local CUDA builds in CI. Fallback to PyPI spec elsewhere.
+    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
+    # flash-attn wheels), drop the custom wheel URL
     "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "torch==2.10.0; sys_platform == 'linux'",
