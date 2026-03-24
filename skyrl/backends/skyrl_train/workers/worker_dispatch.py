@@ -309,7 +309,6 @@ class WorkerDispatch:
         model: str,
         ckpt_dir: str,
         load_optimizer_states: bool = True,
-        load_lr_scheduler_states: bool = True,
     ) -> None:
         """Load checkpoint for model."""
         self._ensure_on_gpu(model, need_optimizer=load_optimizer_states, need_model=True)
@@ -320,7 +319,6 @@ class WorkerDispatch:
                 "load_checkpoint",
                 ckpt_dir=ckpt_dir,
                 load_optimizer_states=load_optimizer_states,
-                load_lr_scheduler_states=load_lr_scheduler_states,
             )
         )
 
