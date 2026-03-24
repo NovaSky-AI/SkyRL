@@ -1103,10 +1103,9 @@ class RayPPOTrainer:
         scheduler = self._lr_schedulers.get(model)
         if scheduler is None:
             return self._get_optimizer_config(model).lr
-        # Read LR from the dummy optimizer's param group, then advance the schedule
-        lr = scheduler.optimizer.param_groups[0]["lr"]
+        # Advance the schedule first, then read the LR
         scheduler.step()
-        return lr
+        return scheduler.optimizer.param_groups[0]["lr"]
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
