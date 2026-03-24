@@ -260,7 +260,9 @@ class RemoteInferenceClient:
         # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
         gen_sem, detok_sem = self._get_semaphores()
         batch_size = len(prompt_token_ids)
-        concurrency = self._gen_sem._value if self._gen_sem is not None else "unlimited"
+        concurrency = (
+            SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls) if self._gen_sem is not None else "unlimited"
+        )
         logger.info(
             f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
             f"(shared across all concurrent generate() calls)"
@@ -581,9 +583,6 @@ class RemoteInferenceClient:
     async def wake_up(self, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Wake up all backends (load weights back to GPU).
-
-        Recreates the HTTP session to discard stale keep-alive connections
-        that the server may have closed during sleep.
 
         Args:
             tags: Optional list of tags to wake up specific resources.
