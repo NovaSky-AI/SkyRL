@@ -223,11 +223,7 @@ transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tool
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
 [tool.uv.extra-build-variables]
-# NOTE: FLASH_ATTENTION_SKIP_CUDA_BUILD was removed for torch 2.10.0.
-# Official flash-attn 2.8.3 wheels only ship up to torch 2.9, so uv would
-# otherwise build from source for torch 2.10+ unless a compatible wheel is
-# provided via a direct URL dependency.
-# flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
