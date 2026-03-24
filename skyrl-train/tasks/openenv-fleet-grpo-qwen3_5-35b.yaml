@@ -34,7 +34,7 @@ num_nodes: 2
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL.git
-  ref: deniz/context-warning-35b
+  ref: main
 
 envs:
   WANDB_API_KEY: ""
