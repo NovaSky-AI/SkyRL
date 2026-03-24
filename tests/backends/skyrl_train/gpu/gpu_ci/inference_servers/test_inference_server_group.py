@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.utils.tok import get_tokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -99,6 +100,7 @@ def server_group_and_router(ray_init_fixture):
         proxy_url=router_url,
         server_urls=server_urls,
         model_name=MODEL,
+        tokenizer=get_tokenizer(MODEL),
     )
 
     yield {

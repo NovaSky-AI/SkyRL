@@ -95,10 +95,9 @@ def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, Inferen
     proxy_url = router.start()
 
     # Client
+    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
     client = RemoteInferenceClient(
-        proxy_url=proxy_url,
-        server_urls=server_urls,
-        model_name=SERVED_MODEL_NAME,
+        proxy_url=proxy_url, server_urls=server_urls, model_name=SERVED_MODEL_NAME, tokenizer=tokenizer
     )
 
     return client, router, server_group
