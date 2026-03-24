@@ -86,10 +86,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
-    # flash-attn wheels), drop the custom wheel URL
-    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
-    "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
+    "flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "fastapi",
@@ -223,11 +220,7 @@ transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tool
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
 [tool.uv.extra-build-variables]
-# NOTE: FLASH_ATTENTION_SKIP_CUDA_BUILD was removed for torch 2.10.0.
-# Official flash-attn 2.8.3 wheels only ship up to torch 2.9, so uv would
-# otherwise build from source for torch 2.10+ unless a compatible wheel is
-# provided via a direct URL dependency.
-# flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
