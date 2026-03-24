@@ -176,8 +176,7 @@ def convert_prompts_responses_to_batch_tensors(
             # downcast to uint8 if possible, otherwise int16 to save memory
             if rollout_expert_indices_tensor.max().item() < 2**8:
                 rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
-            else:
-                # this should handle num_experts <= 2**15
+            elif rollout_expert_indices_tensor.max().item() < 2**15:
                 rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
 
     return (
