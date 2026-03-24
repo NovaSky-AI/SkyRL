@@ -165,13 +165,20 @@ def convert_prompts_responses_to_batch_tensors(
         if first_non_empty:
             num_layers = len(first_non_empty[0])
             topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
-            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.uint16)
+            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.int32)
             for i, sample_indices in enumerate(rollout_expert_indices):
                 if sample_indices:
                     left_pad = max_total - (prompt_token_lens[i] + response_token_lens[i])
                     n = min(len(sample_indices), max_total - left_pad)
-                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.uint16)
+                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
             rollout_expert_indices_tensor = padded
+
+        # downcast to uint8 if possible, otherwise int16 to save memory
+        if rollout_expert_indices_tensor.max().item() < 2**8:
+            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
+        else:
+            # this should handle num_experts <= 2**15, which seems like a safe limit for number of experts in an MoE layer (god willing)
+            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
 
     return (
         sequences,
