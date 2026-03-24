@@ -25,6 +25,9 @@ CUDA_ENV=""
 SET_ULIMIT=false
 NO_PYTORCH_ALLOC_CONF=false
 NCCL_HEARTBEAT=""
+ENTRYPOINT="integrations.fleet.entrypoints.main_fleet"
+ENV_CLASS="fleet_task"
+DATA_DIR_NAME=""
 HYDRA_OVERRIDES=()
 
 # Parse args
@@ -37,6 +40,9 @@ while [[ $# -gt 0 ]]; do
     --set-ulimit) SET_ULIMIT=true; shift ;;
     --no-pytorch-alloc-conf) NO_PYTORCH_ALLOC_CONF=true; shift ;;
     --nccl-heartbeat) NCCL_HEARTBEAT="$2"; shift 2 ;;
+    --entrypoint) ENTRYPOINT="$2"; shift 2 ;;
+    --env-class) ENV_CLASS="$2"; shift 2 ;;
+    --data-dir-name) DATA_DIR_NAME="$2"; shift 2 ;;
     --) shift; HYDRA_OVERRIDES=("$@"); break ;;
     *) echo "ERROR: Unknown arg: $1"; exit 1 ;;
   esac
@@ -53,9 +59,13 @@ fi
 if [ -z "$CKPT_ROOT" ]; then
   CKPT_ROOT="$DATA_ROOT"
 fi
+DATA_DIR_NAME="${DATA_DIR_NAME:-$MODALITY}"
 
 echo "=== Fleet Common Run ==="
+echo "Entrypoint: $ENTRYPOINT"
+echo "Env class: $ENV_CLASS"
 echo "Data root: $DATA_ROOT"
+echo "Data dir name: $DATA_DIR_NAME"
 echo "Ckpt root: $CKPT_ROOT"
 
 cd skyrl-train
@@ -83,7 +93,7 @@ mkdir -p "$TMP_DIR"
 export TMPDIR="$TMP_DIR"
 
 TASKS_FILE="${DATA_ROOT}/data/fleet/tasks_${MODALITY}.json"
-DATA_DIR="${DATA_ROOT}/data/fleet/${MODALITY}"
+DATA_DIR="${DATA_ROOT}/data/fleet/${DATA_DIR_NAME}"
 
 # --- System diagnostics ---
 echo "=== System Diagnostics ==="
@@ -222,17 +232,24 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
   # Build training command
   CMD_ARGS=()
   if [ "$USE_PYTHON_DIRECT" = true ]; then
-    CMD_ARGS=(python -m integrations.fleet.entrypoints.main_fleet)
+    CMD_ARGS=(python -m "$ENTRYPOINT")
   else
-    CMD_ARGS=(uv run --isolated --extra "$INFERENCE_BACKEND" -m integrations.fleet.entrypoints.main_fleet)
+    CMD_ARGS=(uv run --isolated --extra "$INFERENCE_BACKEND" -m "$ENTRYPOINT")
   fi
 
   # Common hydra overrides (data paths, placement, strategy, checkpoints)
   CMD_ARGS+=(
     "data.train_data=['${DATA_DIR}/train.parquet']"
     "data.val_data=['${DATA_DIR}/validation.parquet']"
-    environment.env_class=fleet_task
-    "environment.skyrl_gym.fleet_task.tasks_file=$TASKS_FILE"
+    "environment.env_class=$ENV_CLASS"
+  )
+
+  # fleet_task-specific: pass tasks_file path
+  if [ "$ENV_CLASS" = "fleet_task" ]; then
+    CMD_ARGS+=("environment.skyrl_gym.fleet_task.tasks_file=$TASKS_FILE")
+  fi
+
+  CMD_ARGS+=(
     trainer.placement.colocate_all=true
     trainer.strategy=fsdp2
     "trainer.placement.policy_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE"

@@ -38,7 +38,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "causal-conv1d>=1.6.0",
+    # causal-conv1d installed separately via fleet-qwen35-extra-setup.sh (requires nvcc)
     "flash-linear-attention",
     "polars",
     "s3fs",

@@ -122,6 +122,34 @@ environment:
 | `_orch.reset()` fails | Warning logged, continues with empty observation |
 | `call_tool()` fails | Error returned in observation, episode continues |
 
+## Task Generation (GRPO)
+
+RL-based task generation: trains Qwen3.5-9B to produce (prompt, verifier) pairs for Fleet environments using GRPO.
+
+**Reward formula**: `R(task) = gate * (base_quality + alpha * var(raw_scores) + (p_hint - p_raw))`
+
+- `gate`: LLM judge validity (0/1), currently disabled (gate=1.0)
+- `base_quality`: 0.1 for tasks passing sandbox+judge gate (creates GRPO variance between valid/invalid)
+- `var(raw_scores)`: Bernoulli variance from k raw evaluator rollouts
+- `p_hint - p_raw`: Hint gap — solvable with hints but not without
+- `alpha`: Weight for variance vs hint gap (default 0.5)
+
+### Dataset Preparation
+
+`prepare_task_gen_dataset.py` builds GRPO training data by:
+1. Loading validated tasks from S3 (`all_tool_use.json`)
+2. Discovering tool schemas from live Fleet environments via OpenEnv MCP
+3. Fetching DB schemas from Supabase `seed_versions` -> S3 `schema.sql`
+4. Storing env context (tools, schema, env_variables) in each parquet record
+
+### Training Runs & Fixes
+
+See [fleet-research/threads/task-rl/](https://github.com/fleet-ai/fleet-research/tree/main/threads/task-rl) for:
+- [runs.md](https://github.com/fleet-ai/fleet-research/blob/main/threads/task-rl/runs.md) — detailed per-iteration analysis
+- [changelog.md](https://github.com/fleet-ai/fleet-research/blob/main/threads/task-rl/changelog.md) — concise fix history
+
+Fix log: [changelog.md](https://github.com/fleet-ai/fleet-research/blob/main/threads/task-rl/changelog.md)
+
 ## Dependencies
 
 - **OpenEnv**: `pip install openenv[fleet]` or add to PYTHONPATH

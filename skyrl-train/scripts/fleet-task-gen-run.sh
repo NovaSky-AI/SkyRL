@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Task-gen specific run: calls common run with task-gen entrypoint and hydra overrides
+#
+# Usage (from SkyPilot YAML run block):
+#   bash skyrl-train/scripts/fleet-task-gen-run.sh
+#
+# Required env vars: WANDB_API_KEY, MODALITY, INFERENCE_BACKEND, LOGGER,
+#   MAX_TURNS, MAX_INPUT_LENGTH, MAX_GENERATE_LENGTH, NUM_EPOCHS,
+#   JUDGE_MODEL, K_ROLLOUTS, ALPHA, MAX_EVAL_STEPS
+# SkyPilot env vars: SKYPILOT_NUM_GPUS_PER_NODE, SKYPILOT_NODE_IPS
+set -euo pipefail
+
+# Task-gen GRPO training via shared run script
+# --entrypoint: task-gen entrypoint (not main_fleet)
+# --env-class: task_gen environment (not fleet_task)
+# --data-dir-name: parquet files are in data/fleet/task_gen/ (not data/fleet/tool_use/)
+# TP=2: 4 engines × 2 GPUs each (task-gen has smaller batches, needs more GPU memory for evaluator)
+bash skyrl-train/scripts/fleet-common-run.sh \
+  --use-python-direct --cuda-env "$HOME/.cuda_env" \
+  --set-ulimit --no-pytorch-alloc-conf \
+  --entrypoint integrations.fleet.entrypoints.main_task_gen \
+  --env-class task_gen \
+  --data-dir-name task_gen -- \
+  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.policy.model.path="Qwen/Qwen3.5-9B" \
+  trainer.flash_attn=false \
+  trainer.use_sample_packing=false \
+  generator.num_inference_engines=4 \
+  generator.inference_engine_tensor_parallel_size=2 \
+  trainer.epochs=${NUM_EPOCHS} \
+  trainer.eval_batch_size=12 \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=20 \
+  trainer.update_epochs_per_batch=1 \
+  trainer.train_batch_size=12 \
+  trainer.use_hybrid_env_sampling=true \
+  trainer.min_samples_per_env=1 \
+  trainer.policy_mini_batch_size=12 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.loss_chunk_size=4096 \
+  trainer.ckpt_interval=10 \
+  trainer.max_prompt_length=4096 \
+  generator.max_input_length=$MAX_INPUT_LENGTH \
+  generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+  generator.sampling_params.temperature=0.9 \
+  generator.sampling_params.top_p=0.95 \
+  'generator.sampling_params.stop=["</tool_call>", "</task>"]' \
+  'generator.eval_sampling_params.stop=["</tool_call>", "</task>"]' \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.algorithm.use_kl_loss=true \
+  generator.max_turns=$MAX_TURNS \
+  generator.backend=$INFERENCE_BACKEND \
+  generator.run_engines_locally=true \
+  generator.weight_sync_backend=nccl \
+  generator.async_engine=true \
+  generator.batched=false \
+  generator.trajectory_timeout_seconds=1800 \
+  generator.use_conversation_multi_turn=true \
+  generator.n_samples_per_prompt=8 \
+  generator.eval_n_samples_per_prompt=3 \
+  generator.gpu_memory_utilization=0.15 \
+  trainer.logger="$LOGGER" \
+  trainer.project_name="task-gen-grpo" \
+  trainer.run_name="task_gen_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+  trainer.resume_mode=latest \
+  trainer.ckpt_path="$HOME/ckpts/task_gen" \
+  trainer.dump_data_batch=true \
+  ++environment.skyrl_gym.task_gen.max_turns=$MAX_TURNS \
+  ++environment.skyrl_gym.task_gen.judge_model="$JUDGE_MODEL" \
+  ++environment.skyrl_gym.task_gen.k_rollouts=$K_ROLLOUTS \
+  ++environment.skyrl_gym.task_gen.alpha=$ALPHA \
+  ++environment.skyrl_gym.task_gen.max_eval_steps=$MAX_EVAL_STEPS \
+  ++environment.skyrl_gym.task_gen.evaluator_model="${EVALUATOR_MODEL:-anthropic/claude-sonnet-4.5}"

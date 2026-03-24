@@ -1,0 +1,93 @@
+# Task Generation GRPO Training via SkyPilot - Qwen3.5-9B
+# Usage: sky launch tasks/task-gen-grpo-qwen3_5-9b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Reward: R(task) = llm_validity * (alpha * var(raw_scores) + (p_hint - p_raw))
+#   llm_validity:    LLM-as-a-judge binary gate (valid task? 0/1)
+#   var(raw_scores): Variance of k raw evaluator rollouts (difficulty calibration)
+#   p_hint - p_raw:  Hint gap — solvable with hints but not without (learnability)
+#   alpha:           Weight balancing variance vs hint gap (default 0.5)
+#
+# Model: Qwen/Qwen3.5-9B (9B params, GatedDeltaNet, 262K native context)
+# GPUs: 8x B200/H200 (text-only fits like 8B)
+# Multi-turn: model explores seed DB via describe_db/query_db before generating task
+#
+# Requires vLLM >= 0.17.0 (native Qwen3.5/GDN support)
+
+name: task-gen-grpo-qwen3-5-9b
+
+resources:
+  disk_size: 512
+  ports: 6479
+  any_of:
+    - accelerators: H200:8
+      cloud: gcp
+      memory: 1500+
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: B200:8
+      cloud: lambda
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: runpod
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: primeintellect
+      memory: 1500+
+    - accelerators: H200-SXM:8
+      cloud: lambda
+      memory: 1500+
+    - accelerators: H200-SXM:8
+      cloud: runpod
+      memory: 1500+
+    - accelerators: H200-SXM:8
+      cloud: vast
+      memory: 1500+
+    - accelerators: H200-SXM:8
+      cloud: primeintellect
+      memory: 1500+
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL.git
+  ref: deniz/multi-turn-task-gen
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  OPENROUTER_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v55"
+  MODALITY: "tool_use"
+  # Multi-turn: exploration + generation (DB queries + tool calls + task)
+  MAX_TURNS: 10
+  MAX_INPUT_LENGTH: 64000
+  MAX_GENERATE_LENGTH: 8192
+  NUM_EPOCHS: 20
+  RUN_ID: ""
+  MAX_TASKS: ""
+  # Excluded: forums-homes (Zillow 404s), wallst (Excel bugs, empty dataroom)
+  ENV_KEYS: "booking,budget,carlisle,outlook,reddit,rops-mail,ticketmaster,zillow"
+  EVAL_RATIO: "0.005"
+  # Evaluator config (hint-based: k raw + k hinted rollouts via FleetTaskEnv)
+  JUDGE_MODEL: "anthropic/claude-sonnet-4-6"
+  K_ROLLOUTS: 4
+  ALPHA: "0.5"
+  MAX_EVAL_STEPS: 30
+  EVALUATOR_MODEL: "anthropic/claude-sonnet-4.5"
+  # Supabase (for DB schema discovery - read-only service role key)
+  SUPABASE_URL: "https://ehefoavidbttssbleuyv.supabase.co"
+  SUPABASE_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVoZWZvYXZpZGJ0dHNzYmxldXl2Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTY4Nzg5ODYyMiwiZXhwIjoyMDAzNDc0NjIyfQ.lQRJ0hBuuvK1YLplS2zk_2n9MB1dJV1vv9OWHVOoQQ8"
+  # AWS / S3
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+
+setup: |
+  bash skyrl-train/scripts/fleet-task-gen-setup.sh
+
+run: |
+  bash skyrl-train/scripts/fleet-task-gen-run.sh

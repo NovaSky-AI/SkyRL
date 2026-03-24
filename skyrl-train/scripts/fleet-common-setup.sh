@@ -16,6 +16,8 @@ OPENENV_BRANCH="deniz/fleet_client"
 EXTRA_SETUP=""
 DATA_ROOT=""
 SKIP_UV_ISOLATED=false
+EXTRA_PIP=""
+SKIP_PREPARE=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -24,6 +26,8 @@ while [[ $# -gt 0 ]]; do
     --extra-setup) EXTRA_SETUP="$2"; shift 2 ;;
     --data-root) DATA_ROOT="$2"; shift 2 ;;
     --skip-uv-isolated) SKIP_UV_ISOLATED=true; shift ;;
+    --extra-pip) EXTRA_PIP="$2"; shift 2 ;;
+    --skip-prepare) SKIP_PREPARE=true; shift ;;
     *) echo "ERROR: Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -86,6 +90,12 @@ uv sync --extra vllm
 uv pip install wandb boto3 awscli
 uv pip install "litellm>=1.75.5" fleet-python logfire "mcp>=1.0.0"
 
+# --- Extra pip packages (installed before extra-setup to avoid dependency downgrades) ---
+if [ -n "$EXTRA_PIP" ]; then
+  echo "Installing extra pip packages: $EXTRA_PIP"
+  uv pip install $EXTRA_PIP
+fi
+
 # --- Extra setup hook (model-specific dependencies) ---
 if [ -n "$EXTRA_SETUP" ]; then
   echo "Running extra setup: $EXTRA_SETUP"
@@ -105,10 +115,14 @@ TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['
 echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
 # --- Prepare dataset (parquet files) ---
-DATA_DIR="${DATA_ROOT}/data/fleet/${MODALITY}"
-PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
-[ -n "${ENV_KEYS:-}" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
-[ -n "${DIFFICULTY:-}" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
-eval "$PREPARE_CMD"
+if [ "$SKIP_PREPARE" = true ]; then
+  echo "Skipping prepare_dataset (--skip-prepare). Caller handles preparation."
+else
+  DATA_DIR="${DATA_ROOT}/data/fleet/${MODALITY}"
+  PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  [ -n "${ENV_KEYS:-}" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "${DIFFICULTY:-}" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
+  eval "$PREPARE_CMD"
+fi
 
 echo "=== Fleet Common Setup Complete ==="
