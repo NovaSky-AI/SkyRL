@@ -165,12 +165,12 @@ def convert_prompts_responses_to_batch_tensors(
         if first_non_empty:
             num_layers = len(first_non_empty[0])
             topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
-            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.int32)
+            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.uint16)
             for i, sample_indices in enumerate(rollout_expert_indices):
                 if sample_indices:
                     left_pad = max_total - (prompt_token_lens[i] + response_token_lens[i])
                     n = min(len(sample_indices), max_total - left_pad)
-                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
+                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.uint16)
             rollout_expert_indices_tensor = padded
 
     return (
