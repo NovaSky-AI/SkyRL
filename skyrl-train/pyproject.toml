@@ -38,7 +38,6 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn",
     "causal-conv1d>=1.6.0",
     "flash-linear-attention",
     "polars",
@@ -84,12 +83,9 @@ override-dependencies = [
     "megatron-core==0.15.0"
 ]
 [tool.uv.extra-build-dependencies]
-flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
@@ -127,7 +123,7 @@ sandboxes = [
 ]
 vllm = [
     "vllm==0.17.0",
-    "flash-attn==2.8.3",
+    # flash-attn installed separately via prebuilt wheel in fleet-qwen35-extra-setup.sh
     "torch==2.10.0",
     "flashinfer-python",
     "torchvision"
@@ -135,13 +131,13 @@ vllm = [
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
     "flashinfer-python",
-    "flash-attn==2.8.3",
+    # flash-attn installed separately via prebuilt wheel
     "torch==2.7.1",
     "torchvision",
 ]
 mcore = [
   "transformer-engine[pytorch]==2.10.0",
-  "flash-attn==2.8.1",
+  # flash-attn installed separately via prebuilt wheel
   "vllm==0.13.0",
   "torch==2.9.0",
   "flashinfer-python==0.5.3",
@@ -154,7 +150,7 @@ mcore = [
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
-    "flash-attn==2.8.3",
+    # flash-attn installed separately via prebuilt wheel
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
