@@ -148,7 +148,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
-    def init_model(self, model_path, num_training_steps: int = None):
+    def init_model(self, model_path, num_training_steps: int = None, freeze_vision_encoder: bool = False):
         assert self.cfg.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.policy.fsdp_config,
@@ -188,6 +188,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 rope_scaling=get_rope_scaling_config(self.cfg),
                 rope_theta=get_rope_theta_config(self.cfg),
                 model_config_kwargs=self.cfg.policy.model_config_kwargs,
+                freeze_vision_encoder=freeze_vision_encoder,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)

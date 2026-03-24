@@ -123,6 +123,7 @@ class HFModelWrapper(nn.Module):
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
         model_config_kwargs: dict = {},
+        freeze_vision_encoder: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -149,14 +150,19 @@ class HFModelWrapper(nn.Module):
             else:
                 nf4_config = None
 
+            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
                 model_class = AutoLigerKernelForCausalLM
             else:
-                model_class = AutoModelForCausalLM
-
-            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+                arch = (model_config.architectures or [None])[0] if hasattr(model_config, "architectures") else None
+                if arch and arch.endswith("ForConditionalGeneration"):
+                    from transformers import AutoModelForImageTextToText
+                    model_class = AutoModelForImageTextToText
+                else:
+                    model_class = AutoModelForCausalLM
 
             self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
             if self.is_vlm:
@@ -183,6 +189,15 @@ class HFModelWrapper(nn.Module):
                 device_map=device_map,
                 **rope_scaling_kwargs,
             )
+
+            if freeze_vision_encoder:
+                visual = getattr(self.model, "visual", None) or getattr(getattr(self.model, "model", None), "visual", None)
+                if visual is not None:
+                    frozen_count = 0
+                    for param in visual.parameters():
+                        param.requires_grad = False
+                        frozen_count += 1
+                    logger.info(f"Froze {frozen_count} vision encoder parameters ({sum(p.numel() for p in visual.parameters()) / 1e6:.1f}M params)")
 
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):

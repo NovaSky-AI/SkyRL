@@ -139,7 +139,8 @@ def apply_monkey_patch(
     else:
         module = sys.modules[model.__module__]
 
-    num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+    config = model.config.text_config if hasattr(model.config, "text_config") else model.config
+    num_attention_heads, num_key_value_heads = config.num_attention_heads, config.num_key_value_heads
     assert (
         num_attention_heads % ulysses_sp_size == 0
     ), f"num_attention_heads {num_attention_heads} must be divisible by ulysses_sp_size {ulysses_sp_size}"
