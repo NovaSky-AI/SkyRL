@@ -1,9 +1,34 @@
 #!/usr/bin/env bash
 # Single source of truth for Qwen3.5-35B-A3B GRPO training config.
 # Called by the SkyPilot YAML and by fleet-research run.sh.
-# Expects env vars (FLEET_API_KEY, WANDB_API_KEY, AWS creds, etc.) exported before calling.
+#
+# Required env vars: FLEET_API_KEY, WANDB_API_KEY
+# Optional: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (for S3 checkpoints)
 set -euo pipefail
 cd "$(dirname "$0")/../.."  # cd to SkyRL root
+
+# Defaults for vars normally set by SkyPilot YAML envs block
+export LOGGER="${LOGGER:-wandb}"
+export INFERENCE_BACKEND="${INFERENCE_BACKEND:-vllm}"
+export DATA_VERSION="${DATA_VERSION:-v55}"
+export MODALITY="${MODALITY:-tool_use}"
+export NUM_EPOCHS="${NUM_EPOCHS:-20}"
+export MAX_TURNS="${MAX_TURNS:-50}"
+export MAX_INPUT_LENGTH="${MAX_INPUT_LENGTH:-96000}"
+export MAX_GENERATE_LENGTH="${MAX_GENERATE_LENGTH:-4096}"
+export NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-8}"
+export ENV_KEYS="${ENV_KEYS:-}"
+export DIFFICULTY="${DIFFICULTY:-}"
+export RUN_ID="${RUN_ID:-}"
+export MAX_TASKS="${MAX_TASKS:-}"
+export RESUME_RUN_NAME="${RESUME_RUN_NAME:-}"
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+export S3_DATASET_BUCKET="${S3_DATASET_BUCKET:-fleet-internal-datasets}"
+export S3_CHECKPOINT_BUCKET="${S3_CHECKPOINT_BUCKET:-skyrl-checkpoints}"
+export S3_TRAJECTORY_BUCKET="${S3_TRAJECTORY_BUCKET:-skyrl-trajectories}"
+
+: "${FLEET_API_KEY:?Set FLEET_API_KEY before running}"
+: "${WANDB_API_KEY:?Set WANDB_API_KEY before running}"
 
 bash skyrl-train/scripts/fleet-common-run.sh \
   --use-python-direct --cuda-env "$HOME/.cuda_env" \
@@ -11,6 +36,8 @@ bash skyrl-train/scripts/fleet-common-run.sh \
   --nccl-heartbeat 1800 -- \
   environment.skyrl_gym.fleet_task.ttl_seconds=900 \
   environment.skyrl_gym.fleet_task.partial_reward=true \
+  environment.skyrl_gym.fleet_task.enable_hints=true \
+  environment.skyrl_gym.fleet_task.n_hint_samples=2 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
   trainer.flash_attn=true \
