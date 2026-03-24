@@ -183,9 +183,6 @@ class RemoteInferenceClient:
                 keepalive_timeout=2,
             )
             self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
-        logger.info(
-            f"Number of connections for session: conns={len(self._session.connector._conns)}, acquired={len(self._session.connector._acquired)}"
-        )
         return self._session
 
     async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
