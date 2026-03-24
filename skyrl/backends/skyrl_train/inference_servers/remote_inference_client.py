@@ -811,7 +811,6 @@ def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
             if tsock is not None:
                 fd = tsock.fileno()
                 if fd != -1:
-                if fd != -1:
                     try:
                         tsock.close()
                     except OSError:
