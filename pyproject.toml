@@ -86,7 +86,6 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "fastapi",
