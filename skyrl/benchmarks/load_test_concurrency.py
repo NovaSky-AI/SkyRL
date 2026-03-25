@@ -71,7 +71,7 @@ def get_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def start_servers(cfg: SkyRLTrainConfig, router_type: str = "internal") -> Tuple[RemoteInferenceClient, object, ServerGroup]:
+def start_servers(cfg: SkyRLTrainConfig, router_type: str = "default") -> Tuple[RemoteInferenceClient, object, ServerGroup]:
     """Start vLLM server group, router, and build a `RemoteInferenceClient`."""
     cli_args = build_vllm_cli_args(cfg)
     ie_cfg = cfg.generator.inference_engine
@@ -290,9 +290,15 @@ def parse_args():
     parser.add_argument(
         "--router",
         type=str,
-        default="internal",
-        choices=["internal", "vllm-router"],
-        help="Router type: 'internal' (Python InferenceRouter) or 'vllm-router' (Rust subprocess). Default: internal.",
+        default="default",
+        choices=["default", "vllm-router"],
+        help="Router type: 'default' (Python InferenceRouter) or 'vllm-router' (Rust subprocess). Default: default.",
+    )
+    parser.add_argument(
+        "--num-engines",
+        type=int,
+        default=1,
+        help="Number of vLLM server engines (default: 1). Each uses 1 GPU.",
     )
 
     args = parser.parse_args()
@@ -305,12 +311,12 @@ def parse_args():
     if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
         parser.error("--max-workers is not supported for e2e mode")
 
-    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.router
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.router, args.num_engines
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    num_prompts, modes, max_tokens, qps, max_workers, router_type = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers, router_type, num_engines = parse_args()
 
     print("Load test config:")
     print(f"  model={MODEL}")
@@ -320,10 +326,12 @@ def main():
     print(f"  qps={qps}")
     print(f"  max_workers={max_workers}")
     print(f"  router={router_type}")
+    print(f"  num_engines={num_engines}")
     print()
     print("Starting servers...")
 
     cfg = get_config()
+    cfg.generator.inference_engine.num_engines = num_engines
     if not ray.is_initialized():
         initialize_ray(cfg)
 
