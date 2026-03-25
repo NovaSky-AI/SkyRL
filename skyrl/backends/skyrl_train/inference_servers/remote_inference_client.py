@@ -203,6 +203,7 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
+                        last_exc = e
                         logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                         await asyncio.sleep(1)
                         continue
