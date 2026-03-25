@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -389,7 +390,13 @@ class BasePPOExp:
         )
 
         if is_colocated:
-            asyncio.run(client.sleep())
+            # This method is called from both sync (BasePPOExp.run) and async
+            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
+            # event loop avoids the "cannot call asyncio.run() from a running
+            # event loop" error that occurs in the async case.
+            thread = threading.Thread(target=lambda: asyncio.run(client.sleep()))
+            thread.start()
+            thread.join()
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
