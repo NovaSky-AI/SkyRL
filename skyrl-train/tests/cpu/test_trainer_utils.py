@@ -1332,6 +1332,68 @@ def test_hybrid_env_sampler_dataloader_integration():
         assert count >= min_samples_per_env, f"Environment {env} has {count} samples, expected >= {min_samples_per_env}"
 
 
+def test_hybrid_env_sampler_uses_data_source_over_env_class():
+    """Test that HybridEnvSampler groups by data_source when available.
+
+    Regression test: task_gen datasets have env_class="task_gen" for all records
+    but data_source="booking"/"reddit"/etc. The sampler must balance across
+    data_source, not env_class, otherwise one SaaS env dominates the batch.
+    """
+    # All records share env_class="task_gen" but have different data_source
+    dataset = MockPromptDataset({"task_gen": 0})  # empty, we'll fill manually
+    dataset.dataframe = []
+    for i in range(100):
+        dataset.dataframe.append({"env_class": "task_gen", "data_source": "booking", "prompt": f"booking_{i}"})
+    for i in range(20):
+        dataset.dataframe.append({"env_class": "task_gen", "data_source": "reddit", "prompt": f"reddit_{i}"})
+    for i in range(10):
+        dataset.dataframe.append({"env_class": "task_gen", "data_source": "zillow", "prompt": f"zillow_{i}"})
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=12,
+        min_samples_per_env=1,
+        generator=torch.Generator().manual_seed(42),
+        drop_last=True,
+    )
+
+    # Sampler should see 3 envs (booking, reddit, zillow), not 1 (task_gen)
+    assert sampler.num_envs == 3, f"Expected 3 envs, got {sampler.num_envs}: {sampler.env_classes}"
+    assert "booking" in sampler.env_classes
+    assert "reddit" in sampler.env_classes
+    assert "zillow" in sampler.env_classes
+
+    # Each batch should have at least 1 sample from each env
+    first_batch = next(iter(sampler))
+    env_counts = {"booking": 0, "reddit": 0, "zillow": 0}
+    for idx in first_batch:
+        ds = dataset.dataframe[idx]["data_source"]
+        env_counts[ds] += 1
+
+    for env, count in env_counts.items():
+        assert count >= 1, f"{env} has {count} samples in batch, expected >= 1"
+
+    assert len(first_batch) == 12
+
+
+def test_hybrid_env_sampler_falls_back_to_env_class_without_data_source():
+    """Test that HybridEnvSampler falls back to env_class when data_source is absent."""
+    dataset = MockPromptDataset({"booking": 50, "reddit": 30})
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=10,
+        min_samples_per_env=1,
+        generator=torch.Generator().manual_seed(42),
+        drop_last=True,
+    )
+
+    # Should group by env_class since no data_source field
+    assert sampler.num_envs == 2
+    assert "booking" in sampler.env_classes
+    assert "reddit" in sampler.env_classes
+
+
 def test_hybrid_env_sampler_wrong_usage_fails():
     """
     Demonstrate that using sampler= instead of batch_sampler= fails.

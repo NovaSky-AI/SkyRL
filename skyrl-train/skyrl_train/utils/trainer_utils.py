@@ -718,12 +718,14 @@ class HybridEnvSampler(torch.utils.data.Sampler):
         self.generator = generator
         self.drop_last = drop_last
 
-        # Build index mapping: env_class -> list of sample indices
+        # Build index mapping: group_key -> list of sample indices
+        # Prefer data_source (e.g. "booking", "reddit") over env_class (e.g. "task_gen")
+        # so that the sampler balances across actual environments, not just gym env types.
         self.env_to_indices: Dict[str, List[int]] = defaultdict(list)
         for idx in range(len(dataset)):
-            # Access the underlying dataframe to get env_class without full __getitem__
-            env_class = dataset.dataframe[idx].get(dataset.env_class_key, "unknown")
-            self.env_to_indices[env_class].append(idx)
+            row = dataset.dataframe[idx]
+            group = row.get("data_source") or row.get(dataset.env_class_key, "unknown")
+            self.env_to_indices[group].append(idx)
 
         self.env_classes = list(self.env_to_indices.keys())
         self.num_envs = len(self.env_classes)
