@@ -150,8 +150,8 @@ class SearchToolGroup(ToolGroup):
                 session = requests.Session()
                 # Configure connection pooling
                 adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=20,  # Number of connection pools
-                    pool_maxsize=20,  # Max connections per pool
+                    pool_connections=256,  # Number of connection pools
+                    pool_maxsize=256,  # Max connections per pool
                     max_retries=0,  # We handle retries ourselves
                     pool_block=False,  # Don't block if pool is full
                 )
