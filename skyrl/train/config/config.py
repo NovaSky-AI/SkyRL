@@ -481,7 +481,7 @@ class InferenceEngineConfig(BaseConfig):
     router_type: str = "default"
     """Router type for data-plane load balancing.
     ``"default"`` uses the built-in Python InferenceRouter.
-    ``"vllm-router"`` uses the external vllm-router binary (requires ``pip install vllm-router``).
+    ``"vllm-router"`` uses the external vllm-router binary (requires `vllm-router` extra).
     Only relevant when SkyRL creates its own router (i.e., when ``external_proxy_url`` is not set)."""
 
 
