@@ -327,6 +327,9 @@ async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             model=MODEL_QWEN2_5,
             sleep_level=2,  # since we explicitly sync weights
         )
+        if getattr(engines, "_needs_wake_up", False):
+            await engines.client.wake_up()
+            engines._needs_wake_up = False
         client, pg = engines.client, engines.pg
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
@@ -1016,6 +1019,9 @@ async def test_context_length_error_returns_400(ray_init_fixture):
             sleep_level=1,
             engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
         )
+        if getattr(engines, "_needs_wake_up", False):
+            await engines.client.wake_up()
+            engines._needs_wake_up = False
         client = engines.client
 
         server_thread, server_port = set_up_http_server(client)

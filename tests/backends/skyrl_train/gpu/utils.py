@@ -447,6 +447,9 @@ class InferenceEngineState:
         return False
 
     async def __aenter__(self):
+        if getattr(self, "_needs_wake_up", False):
+            await self.client.wake_up()
+            self._needs_wake_up = False
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -593,8 +596,18 @@ class InferenceEngineState:
                 eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
             )
             if sleep:
-                asyncio.run(client.wake_up())
-        return cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+                try:
+                    asyncio.get_running_loop()
+                    # Inside an async context (e.g. pytest-asyncio) - defer wake_up to __aenter__
+                    needs_wake_up = True
+                except RuntimeError:
+                    asyncio.run(client.wake_up())
+                    needs_wake_up = False
+            else:
+                needs_wake_up = False
+        state = cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+        state._needs_wake_up = needs_wake_up
+        return state
 
 
 def init_remote_inference_servers(
