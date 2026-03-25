@@ -10129,6 +10129,9 @@ tinker = [
 tpu = [
     { name = "jax", extra = ["tpu"], marker = "(sys_platform == 'linux' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu')" },
 ]
+vllm-router = [
+    { name = "vllm-router" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -10228,9 +10231,10 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'skyrl-train'" },
     { name = "vllm", marker = "sys_platform == 'linux' and extra == 'fsdp'", specifier = "==0.18.0" },
     { name = "vllm", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
+    { name = "vllm-router", marker = "extra == 'vllm-router'" },
     { name = "wandb", marker = "extra == 'skyrl-train'" },
 ]
-provides-extras = ["gpu", "tpu", "tinker", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "flashrl", "miniswe", "harbor", "dev"]
+provides-extras = ["gpu", "tpu", "tinker", "vllm-router", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "flashrl", "miniswe", "harbor", "dev"]
 
 [[package]]
 name = "skyrl-gym"
@@ -11880,6 +11884,24 @@ sdist = { url = "https://files.pythonhosted.org/packages/39/a9/ed48c497572a41552
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/f8/d677aef63536b54d8d0268241dc50a4fe01efcf162ef26190b9ed4bed109/vllm-0.18.0-cp38-abi3-manylinux_2_31_aarch64.whl", hash = "sha256:66a2c5bcf1bdf8de3e63b9fee067754068108cd510c65ffba70ff4368c33cba8", size = 385589729, upload-time = "2026-03-20T22:16:38.734Z" },
     { url = "https://files.pythonhosted.org/packages/4f/e9/59cf9b8939b51e859d2166ac3336b353f52ec4f9ceda34228aae7b386840/vllm-0.18.0-cp38-abi3-manylinux_2_31_x86_64.whl", hash = "sha256:0bc51491598f4bcd161b693b27cbe2864082d6c49fa9065965d94b371f6ae8ef", size = 433215727, upload-time = "2026-03-20T22:16:00.336Z" },
+]
+
+[[package]]
+name = "vllm-router"
+version = "0.1.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "fastapi" },
+    { name = "orjson" },
+    { name = "requests" },
+    { name = "setproctitle" },
+    { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/6c/00d2b31db5d751e3a0a0fd6b1f477a2d42873ee89683f75a0de7f17616ce/vllm_router-0.1.12.tar.gz", hash = "sha256:717fe9ea7b3ffe496cbf3425fde40c0b85cd3f2da372bbe90063fe160be2e459", size = 247851, upload-time = "2026-03-06T09:46:59.641Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/02/48a3188cf499111029f77d9ddce83082717adba5d1b0e96071106dbf770d/vllm_router-0.1.12-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:28d3e1dcd2a6f30949157a0daae3b80a90429c0547c49273b165ea74c89096c3", size = 11320417, upload-time = "2026-03-06T09:46:55.163Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/b8/9ce36a665b11765c33f9ac8d47665d782dab637c140f79e5c2c865b00b6f/vllm_router-0.1.12-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:27658c1bb294e02a500b5cb4303b430e5d5d9f2f805f18babd2ade2dbdb36554", size = 11611763, upload-time = "2026-03-06T09:46:57.473Z" },
 ]
 
 [[package]]
