@@ -199,7 +199,7 @@ class RemoteInferenceClient:
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
-                    body = await resp.json()
+                    body = await resp.json(content_type=None)
                     raise_for_status(resp, body)
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
