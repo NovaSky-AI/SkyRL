@@ -70,6 +70,10 @@ class WorkerDispatch:
         # GPU state tracking (only matters when colocated)
         self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
 
+    def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
+        self._actor_groups[model] = actor_group
+        self._gpu_state[model] = GPUState()
+
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
         import math
@@ -287,6 +291,11 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
+
+    def set_algorithm_config(self, model: str, **kwargs) -> None:
+        """Update algorithm config fields on all workers for a model."""
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""

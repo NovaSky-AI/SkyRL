@@ -244,6 +244,10 @@ class Worker(DistributedTorchRayActor):
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
 
+    def set_algorithm_config(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self.cfg.algorithm, key, value)
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
 

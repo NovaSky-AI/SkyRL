@@ -546,11 +546,13 @@ class JaxBackendImpl(AbstractBackend):
         """Check if a model is registered with the backend."""
         return model_id in self.models
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         """Create a new model in the backend.
 
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
+        if model_role != "policy":
+            raise ValueError(f"JaxBackend only supports model_role='policy', got {model_role!r}")
         # Allocate adapter index for this model_id (find first available slot)
         # Index 0 is reserved for base model, so user models use indices 1 to max_lora_adapters-1
         used_indices = {m.adapter_index for m in self.models.values()}
@@ -615,6 +617,8 @@ class JaxBackendImpl(AbstractBackend):
         """
         if not prepared_batch.all_model_inputs:
             return {}
+        if "ppo_critic" in prepared_batch.all_loss_fns:
+            raise ValueError("ppo_critic is only supported by the SkyRL-Train backend")
 
         results = {}
 
@@ -1105,8 +1109,8 @@ class JaxBackend(JaxBackendImpl):
             )
         return getattr(super(), method)(**kwargs)
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config, model_role=model_role)
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
         return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)

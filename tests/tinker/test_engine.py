@@ -83,23 +83,28 @@ def test_cleanup_stale_sessions():
 
 
 @pytest.mark.parametrize(
-    ("loss_fn", "loss_fn_config", "advantages", "logprobs"),
+    ("loss_fn", "loss_fn_config", "advantages", "logprobs", "values", "returns"),
     [
         pytest.param(
             "ppo",
             {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
             [],
             [],
+            [],
+            [],
             id="ppo_with_loss_fn_config",
         ),
-        pytest.param("cross_entropy", None, [], [], id="cross_entropy_default_config"),
+        pytest.param("cross_entropy", None, [], [], [], [], id="cross_entropy_default_config"),
         pytest.param(
             "cispo",
             {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
             [0.1, 0.2, 0.3],
             [-1.1, -1.0, -0.9],
+            [],
+            [],
             id="cispo",
         ),
+        pytest.param("ppo_critic", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_critic"),
     ],
 )
 def test_prepare_model_pass_batch_loss_fn_and_config(
@@ -107,6 +112,8 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     loss_fn_config: dict[str, float] | None,
     advantages: list[float],
     logprobs: list[float],
+    values: list[float],
+    returns: list[float],
 ):
     """Test that prepare_model_pass_batch preserves loss_fn and loss_fn_config values."""
     datum = types.Datum(
@@ -116,6 +123,8 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
             weights=types.TensorData(data=[1.0, 1.0, 1.0]),
             advantages=types.TensorData(data=advantages),
             logprobs=types.TensorData(data=logprobs),
+            values=types.TensorData(data=values),
+            returns=types.TensorData(data=returns),
         ),
     )
 
@@ -134,3 +143,5 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     assert batch.all_loss_fns == [loss_fn]
     assert batch.all_loss_fn_configs == [loss_fn_config]
     assert batch.all_model_inputs == [datum.model_input]
+    assert batch.all_values == [values]
+    assert batch.all_returns == [returns]

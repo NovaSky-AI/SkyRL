@@ -78,12 +78,23 @@ def cispo_loss(
     return -safe_loss_mask(cispo_objective, loss_mask)
 
 
+def ppo_critic_loss(
+    _target_logprobs: jax.Array,
+    _loss_mask: jax.Array,
+    _sampling_logprobs: jax.Array,
+    _advantages: jax.Array,
+    _loss_fn_config: LossFnConfig,
+) -> jax.Array:
+    raise NotImplementedError("ppo_critic is only supported by the SkyRL-Train backend")
+
+
 # Map from string names to loss functions
 LOSS_FUNCTION_MAP = {
     "cross_entropy": cross_entropy_loss,
     "importance_sampling": importance_sampling_loss,
     "ppo": ppo_loss,
     "cispo": cispo_loss,
+    "ppo_critic": ppo_critic_loss,
 }
 
 # Build list of functions indexed by LOSS_TYPES values (for jax.lax.switch)

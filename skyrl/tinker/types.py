@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import Base64Bytes, BaseModel, Discriminator
+from pydantic import Base64Bytes, BaseModel, Discriminator, Field
 
 
 class RequestType(str, Enum):
@@ -74,6 +74,7 @@ class LoraConfig(BaseModel):
 
 class CreateModelInput(BaseModel):
     lora_config: LoraConfig
+    model_role: str = "policy"
 
 
 class CreateModelOutput(BaseModel):
@@ -143,6 +144,8 @@ class LossFnInputs(BaseModel):
     weights: TensorData
     advantages: TensorData
     logprobs: TensorData
+    values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
+    returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
 
 
 class Datum(BaseModel):
@@ -152,7 +155,7 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
     loss_fn_config: dict[str, float] | None = None
 
 
@@ -264,6 +267,8 @@ class PreparedModelPassBatch(BaseModel):
     all_token_weights: list[list[float]]
     all_sampling_logprobs: list[list[float]]
     all_advantages: list[list[float]]
+    all_values: list[list[float]]
+    all_returns: list[list[float]]
 
     # Per-example scalars
     all_model_ids: list[str]
@@ -300,4 +305,5 @@ LOSS_TYPES = {
     "importance_sampling": 1,
     "ppo": 2,
     "cispo": 3,
+    "ppo_critic": 4,
 }
