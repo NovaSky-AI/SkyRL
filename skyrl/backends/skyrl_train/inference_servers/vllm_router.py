@@ -6,6 +6,7 @@ providing the same interface as InferenceRouter. Requires ``pip install vllm-rou
 """
 
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -104,10 +105,14 @@ class VLLMRouter:
         cmd = self._build_cmd()
         logger.info(f"Starting vllm-router: {' '.join(cmd)}")
 
+        env = os.environ.copy()
+        env.setdefault("RUST_LOG", "warn")
+
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
 
         # Drain subprocess output to prevent pipe buffer blocking
