@@ -46,11 +46,11 @@ EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
 def get_sft_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
 
-    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-2B-Base"
     cfg.trainer.placement.policy_num_gpus_per_node = int(os.environ.get("NUM_GPUS", "1"))
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
-    cfg.trainer.micro_train_batch_size_per_gpu = 16
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
 
     validate_cfg(cfg)
     return cfg
@@ -77,7 +77,9 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> di
     messages = build_chat_messages(example)
     completion = str(example["label"])
 
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
     full_text = prompt_text + completion
 
     full_tokens = tokenizer(full_text, add_special_tokens=False)
@@ -139,15 +141,13 @@ def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samp
     all_preds = []
     all_labels = []
 
-    for i in range(0, len(sample), batch_size):
+    num_total_batches = (len(sample) + batch_size - 1) // batch_size
+    for i in tqdm(range(0, len(sample), batch_size), total=num_total_batches, desc="Validation"):
         batch_examples = sample[i : i + batch_size]
         if not batch_examples:
             continue
 
         batch = collate_sft_batch(batch_examples, tokenizer)
-        metrics = dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
-        loss = metrics.get("final_loss", metrics.get("loss", 0.0))
-        total_loss += loss
         num_batches += 1
 
         examples_0 = [{**ex, "input_ids": ex["input_ids"][:-1] + [token_id_0]} for ex in batch_examples]
@@ -161,6 +161,11 @@ def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samp
         preds = (logp_1 > logp_0).int().tolist()
         if isinstance(preds, int):
             preds = [preds]
+
+        # Compute cross-entropy from the two log-probs per example
+        labels_t = torch.tensor([ex["label"] for ex in batch_examples], dtype=torch.float32)
+        correct_logp = labels_t * logp_1 + (1 - labels_t) * logp_0
+        total_loss += (-correct_logp.mean()).item()
 
         all_preds.extend(preds)
         all_labels.extend(ex["label"] for ex in batch_examples)
