@@ -394,9 +394,21 @@ class BasePPOExp:
             # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
             # event loop avoids the "cannot call asyncio.run() from a running
             # event loop" error that occurs in the async case.
-            thread = threading.Thread(target=lambda: asyncio.run(client.sleep()))
+            exc_holder = [None]
+
+            def _sleep_engines():
+                try:
+                    asyncio.run(client.sleep())
+                except Exception as e:
+                    exc_holder[0] = e
+
+            thread = threading.Thread(target=_sleep_engines)
             thread.start()
             thread.join()
+
+            if exc_holder[0] is not None:
+                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
+
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
