@@ -596,6 +596,8 @@ class InferenceEngineState:
                 eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
             )
             if sleep:
+                # NOTE: this is a hacky fix to allow creation from both sync and async contexts
+                # TODO: simplify this when old inference path is removed and unify on async context
                 try:
                     asyncio.get_running_loop()
                     # Inside an async context (e.g. pytest-asyncio) - defer wake_up to __aenter__
