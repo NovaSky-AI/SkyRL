@@ -310,9 +310,7 @@ async def test_megatron_forward(
 
         return attention_mask.to("cpu").detach(), action_log_probs.to("cpu").detach(), num_actions
 
-    attention_mask, action_log_probs, num_actions = ray.get(
-        run_hf_forward.remote(batch, model_name)
-    )
+    attention_mask, action_log_probs, num_actions = ray.get(run_hf_forward.remote(batch, model_name))
 
     #### Compare results ####
     # compare just non-padding tokens
