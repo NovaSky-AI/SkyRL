@@ -74,6 +74,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _extract_session_id_and_body(
+    request_payload: Dict[str, Any],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Extract session_id and a clean body from an OpenAI-style request payload.
+
+    Returns (session_id, body) where body is a shallow copy without the session_id key.
+    """
+    body = request_payload.get("json", {})
+    session_id = body.get("session_id")
+    clean_body = {k: v for k, v in body.items() if k != "session_id"}
+    return session_id, clean_body
+
+
 class PauseMode(Enum):
     """
     Pause mode for inference servers.
@@ -335,10 +348,7 @@ class RemoteInferenceClient:
         Returns:
             OpenAI-compatible chat completion response.
         """
-        body = request_payload.get("json", {})
-
-        # Extract session_id for routing (same as InferenceEngineClient)
-        session_id = body.pop("session_id", None)
+        session_id, body = _extract_session_id_and_body(request_payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -362,10 +372,7 @@ class RemoteInferenceClient:
         Returns:
             Rendered chat completion response (template-applied prompt and token IDs).
         """
-        body = request_payload.get("json", {})
-
-        # Extract session_id for routing (same as InferenceEngineClient)
-        session_id = body.pop("session_id", None)
+        session_id, body = _extract_session_id_and_body(request_payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -389,10 +396,7 @@ class RemoteInferenceClient:
         Returns:
             OpenAI-compatible completion response.
         """
-        body = request_payload.get("json", {})
-
-        # Extract session_id for routing (same as InferenceEngineClient)
-        session_id = body.pop("session_id", None)
+        session_id, body = _extract_session_id_and_body(request_payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
