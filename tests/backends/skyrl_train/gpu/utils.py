@@ -541,12 +541,9 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            if ie_cfg.router_type == "vllm-router":
-                from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 
-                router = VLLMRouter(server_urls=server_urls)
-            else:
-                router = InferenceRouter(server_urls=server_urls)
+            router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
