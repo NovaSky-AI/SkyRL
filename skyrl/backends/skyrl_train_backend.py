@@ -268,9 +268,13 @@ class SkyRLTrainBackend(AbstractBackend):
             self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
             if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                    PolicyWorker,
+                )
             elif self._cfg.trainer.strategy == "megatron":
-                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                    PolicyWorker,
+                )
             else:
                 raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
@@ -280,7 +284,9 @@ class SkyRLTrainBackend(AbstractBackend):
             if "policy" not in self._model_ids.values():
                 raise ValueError("Create a policy model before creating a critic model")
             if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import CriticWorker
+                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                    CriticWorker,
+                )
             elif self._cfg.trainer.strategy == "megatron":
                 raise NotImplementedError("Critic model support is not implemented for the Megatron backend yet")
             else:
@@ -627,7 +633,9 @@ class SkyRLTrainBackend(AbstractBackend):
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
         model_id = next(iter(unique_models))
         if self._get_role(model_id) != "policy":
-            error = types.ErrorResponse(error=f"Sampling is only supported for policy models, got '{model_id}'", status="error")
+            error = types.ErrorResponse(
+                error=f"Sampling is only supported for policy models, got '{model_id}'", status="error"
+            )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
         # 3. Sample all prompts in parallel
