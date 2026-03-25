@@ -37,7 +37,7 @@ TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
 # Configurable knobs with defaults
-: "${USE_CONVERSATION_MULTI_TURN:=true}"
+: "${USE_CONVERSATION_MULTI_TURN:=false}"
 : "${STEP_WISE:=false}"
 
 # Build conditional args
