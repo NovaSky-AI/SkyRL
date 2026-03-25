@@ -389,8 +389,6 @@ class BasePPOExp:
         )
 
         if is_colocated:
-            import asyncio
-
             asyncio.run(client.sleep())
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
