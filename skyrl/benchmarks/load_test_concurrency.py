@@ -43,6 +43,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import ResolvedPlacementGroup, initialize_ray
@@ -70,7 +71,7 @@ def get_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, InferenceRouter, ServerGroup]:
+def start_servers(cfg: SkyRLTrainConfig, router_type: str = "internal") -> Tuple[RemoteInferenceClient, object, ServerGroup]:
     """Start vLLM server group, router, and build a `RemoteInferenceClient`."""
     cli_args = build_vllm_cli_args(cfg)
     ie_cfg = cfg.generator.inference_engine
@@ -91,7 +92,10 @@ def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, Inferen
     server_urls = [info.url for info in server_infos]
 
     # Router
-    router = InferenceRouter(server_urls=server_urls)
+    if router_type == "vllm-router":
+        router = VLLMRouter(server_urls=server_urls)
+    else:
+        router = InferenceRouter(server_urls=server_urls)
     proxy_url = router.start()
 
     # Client
@@ -283,6 +287,13 @@ def parse_args():
         default=math.inf,
         help="Submit requests at a steady rate (requests/sec). Default: inf (all requests fired at time 0).",
     )
+    parser.add_argument(
+        "--router",
+        type=str,
+        default="internal",
+        choices=["internal", "vllm-router"],
+        help="Router type: 'internal' (Python InferenceRouter) or 'vllm-router' (Rust subprocess). Default: internal.",
+    )
 
     args = parser.parse_args()
 
@@ -294,12 +305,12 @@ def parse_args():
     if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
         parser.error("--max-workers is not supported for e2e mode")
 
-    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.router
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    num_prompts, modes, max_tokens, qps, max_workers = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers, router_type = parse_args()
 
     print("Load test config:")
     print(f"  model={MODEL}")
@@ -308,6 +319,7 @@ def main():
     print(f"  modes={modes}")
     print(f"  qps={qps}")
     print(f"  max_workers={max_workers}")
+    print(f"  router={router_type}")
     print()
     print("Starting servers...")
 
@@ -315,7 +327,7 @@ def main():
     if not ray.is_initialized():
         initialize_ray(cfg)
 
-    client, router, server_group = start_servers(cfg)
+    client, router, server_group = start_servers(cfg, router_type=router_type)
 
     try:
         proxy_url = client.proxy_url
@@ -335,7 +347,7 @@ def main():
 
         if "router" in modes:
             print("=" * 60)
-            print("Mode: router - through `InferenceRouter`")
+            print(f"Mode: router - through `{type(router).__name__}`")
             print("=" * 60)
             result = run_chat_completions(proxy_url, num_prompts, SERVED_MODEL_NAME, max_tokens, qps, max_workers)
             print_result(result)

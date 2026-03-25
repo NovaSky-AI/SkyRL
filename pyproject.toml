@@ -44,6 +44,10 @@ tinker = [
     "psycopg2-binary",
 ]
 
+vllm-router = [
+    "vllm-router",
+]
+
 aws = [
     "cloudpathlib[s3]",
 ]

@@ -478,6 +478,11 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
+    router_type: str = "internal"
+    """Router type for data-plane load balancing.
+    ``"internal"`` uses the built-in Python InferenceRouter.
+    ``"vllm-router"`` uses the external vllm-router binary (requires ``pip install vllm-router``).
+    Only relevant when SkyRL creates its own router (i.e., when ``external_proxy_url`` is not set)."""
 
 
 # ---------------------------------------------------------------------------
