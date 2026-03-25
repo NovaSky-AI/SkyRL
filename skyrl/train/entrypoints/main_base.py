@@ -381,12 +381,20 @@ class BasePPOExp:
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        return RemoteInferenceClient(
+        client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
         )
+
+        if is_colocated:
+            import asyncio
+
+            asyncio.run(client.sleep())
+            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+
+        return client
 
     def _setup_trainer(self):
         """Setup and return the trainer.
