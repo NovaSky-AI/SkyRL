@@ -77,6 +77,12 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.pop("ROCR_VISIBLE_DEVICES", None)
         os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        # Ensure RAY_ADDRESS is set so that vLLM's EngineCore subprocess can
+        # connect back to the Ray cluster and query placement group state.
+        # Without this, the subprocess fails with KeyError: 'bundles' when
+        # accessing placement_group_table() because it can't reach the GCS.
+        if "RAY_ADDRESS" not in os.environ:
+            os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
     elif noset_visible_devices:
         # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
         # when the distributed_executor_backend is not ray/mp and

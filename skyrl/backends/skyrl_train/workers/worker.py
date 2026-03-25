@@ -3,7 +3,7 @@ import logging
 import os
 import socket
 from collections import defaultdict
-from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
+from ctypes import CDLL, c_int
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
@@ -176,26 +176,18 @@ class DistributedTorchRayActor:
         return self._master_addr, self._master_port
 
     # TODO(tgriggs): For numa affinity, pass in the Worker._local_rank for the second arg here. Distinguish 'rank' and 'local_rank' differ here.
-    def _set_numa_affinity(self, rank):
+    def _set_numa_affinity(self, rank):  # noqa: ARG002 — rank kept for API compat, binding uses self._local_rank
         def local_rank_to_real_gpu_id(local_rank):
             cuda_visible_devices = [
                 int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
             ]
-            return cuda_visible_devices[local_rank]
-
-        rank = local_rank_to_real_gpu_id(rank)
+            return cuda_visible_devices[local_rank % len(cuda_visible_devices)]
 
         global _SET_AFFINITY
         if _SET_AFFINITY:
             return
 
         from ctypes.util import find_library
-
-        class bitmask_t(Structure):
-            _fields_ = [
-                ("size", c_ulong),
-                ("maskp", POINTER(c_ulong)),
-            ]
 
         try:
             LIBNUMA = CDLL(find_library("numa"))
@@ -204,26 +196,48 @@ class DistributedTorchRayActor:
             _SET_AFFINITY = True
             return
 
-        LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
-        LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
-        LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_run_on_node_mask.restype = c_int
-        LIBNUMA.numa_set_membind.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_set_membind.restype = c_void_p
-        LIBNUMA.numa_num_configured_nodes.argtypes = []
-        LIBNUMA.numa_num_configured_nodes.restype = c_int
+        # Check NUMA is actually functional
+        LIBNUMA.numa_available.restype = c_int
+        LIBNUMA.numa_available.argtypes = []
+        if LIBNUMA.numa_available() < 0:
+            logger.warning("NUMA not available on this system, skipping affinity")
+            _SET_AFFINITY = True
+            return
 
-        def numa_bind(nid: int):
-            bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
-            LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+        # Use numa_max_node() NOT numa_num_configured_nodes().
+        # On NVLink/GB200 systems, numa_num_configured_nodes() incorrectly counts
+        # virtual NVLink NUMA IDs (e.g. 2,10,18,26) giving wrong total (e.g. 4).
+        # numa_max_node() returns the real highest physical NUMA node index (e.g. 1).
+        LIBNUMA.numa_max_node.restype = c_int
+        LIBNUMA.numa_max_node.argtypes = []
+        max_node = LIBNUMA.numa_max_node()  # e.g. 1 → real nodes are 0 and 1
+        if max_node < 0:
+            logger.warning("numa_max_node() returned <0, skipping affinity")
+            _SET_AFFINITY = True
+            return
+        real_numa_nodes = max_node + 1  # e.g. 2
 
-        numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if numa_nodes <= 0:
-            numa_nodes = 1
-        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
-        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
-        numa_bind(target_nid)
+        # Use integer API — avoids bitmask pointer corruption that causes segfaults
+        LIBNUMA.numa_run_on_node.restype = c_int
+        LIBNUMA.numa_run_on_node.argtypes = [c_int]
+        LIBNUMA.numa_set_preferred.restype = None
+        LIBNUMA.numa_set_preferred.argtypes = [c_int]
+
+        real_gpu_id = local_rank_to_real_gpu_id(self._local_rank)
+        total_gpus = len(os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(","))
+        num_gpus_per_numa = max(1, total_gpus // real_numa_nodes)
+        # Clamp to [0, max_node] — guaranteed safe
+        target_nid = min(max_node, real_gpu_id // num_gpus_per_numa)
+
+        logger.info(
+            f"NUMA affinity: local_rank={self._local_rank}, real_gpu={real_gpu_id}, "
+            f"real_numa_nodes={real_numa_nodes}, max_node={max_node}, target={target_nid}"
+        )
+
+        ret = LIBNUMA.numa_run_on_node(target_nid)
+        if ret != 0:
+            logger.warning(f"numa_run_on_node({target_nid}) returned {ret}, may not have bound")
+        LIBNUMA.numa_set_preferred(target_nid)
         _SET_AFFINITY = True
 
 

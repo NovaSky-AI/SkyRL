@@ -16,6 +16,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 
+from skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch import set_ulysses_position_ids
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
@@ -319,6 +320,12 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
+        # Store position_ids in module-level globals (safe: single-threaded Ray worker process)
+        # for architectures that don't propagate position_ids through decoder layers.
+        # Must be set here (outside the model) to survive gradient checkpointing backward recompute.
+        if self.sequence_parallel_size > 1:
+            set_ulysses_position_ids(position_ids_fwd)
+
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
         if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
@@ -478,6 +485,9 @@ def _get_critic_model(
                 input_ids_fwd, position_ids_fwd, attention_mask_fwd, pad_size = ulysses_pad_and_slice_inputs(
                     input_ids_fwd, position_ids_fwd, attention_mask_fwd, self.sequence_parallel_size
                 )
+
+            if self.sequence_parallel_size > 1:
+                set_ulysses_position_ids(position_ids_fwd)
 
             if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
                 outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
