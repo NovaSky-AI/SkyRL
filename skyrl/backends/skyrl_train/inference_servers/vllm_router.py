@@ -83,7 +83,7 @@ class VLLMRouter:
     def _drain_stream(stream, log_fn):
         """Read lines from a subprocess stream and forward to logger."""
         for line in iter(stream.readline, b""):
-            log_fn(f"[vllm-router] {line.decode().rstrip()}")
+            log_fn(f"[vllm-router] {line.decode('utf-8', errors='replace').rstrip()}")
         stream.close()
 
     def start(self) -> str:
