@@ -419,7 +419,7 @@ class InferenceEngineState:
     router: Optional[InferenceRouter]
     server_group: Optional[ServerGroup]
 
-    def close(self):
+    async def close(self):
         """Shutdown all engine resources: router, server_group, and Ray actors.
 
         For local engines (InferenceEngineClient wrapping RayWrappedInferenceEngines),
@@ -436,12 +436,21 @@ class InferenceEngineState:
                 if hasattr(engine, "inference_engine_actor"):
                     ray.kill(engine.inference_engine_actor)
             self.client.engines.clear()
+        else:
+            await self.client.aclose()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        asyncio.run(self.close())
+        return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
         return False
 
     @classmethod

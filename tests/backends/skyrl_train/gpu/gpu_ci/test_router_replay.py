@@ -3,8 +3,6 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_router_replay.py
 """
 
-import asyncio
-
 import pytest
 import ray
 import torch
@@ -104,9 +102,10 @@ def build_training_input_from_text_samples(
     return training_input
 
 
+@pytest.mark.asyncio
 @pytest.mark.megatron
 @pytest.mark.skip(reason="Skipping router replay test for now due to size constraints")
-def test_logprobs(ray_init_fixture):
+async def test_logprobs(ray_init_fixture):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
     """
@@ -126,7 +125,7 @@ def test_logprobs(ray_init_fixture):
 
         tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
 
-        with InferenceEngineState.create(
+        async with InferenceEngineState.create(
             cfg=cfg,
             model=MOE_MODEL_NAME,
             use_local=True,
@@ -136,7 +135,7 @@ def test_logprobs(ray_init_fixture):
             gpu_memory_utilization=0.9,
         ) as engines:
             client, pg = engines.client, engines.pg
-            asyncio.run(client.wake_up())
+            await client.wake_up()
 
             generator = SkyRLGymGenerator(
                 generator_cfg=cfg.generator,
@@ -165,7 +164,7 @@ def test_logprobs(ray_init_fixture):
             )
 
             with Timer("generate_with_router_replay"):
-                generator_output = asyncio.run(generator.generate(input_batch))
+                generator_output = await generator.generate(input_batch)
 
             indices = generator_output["rollout_expert_indices"]
             responses = generator_output["response_ids"]
@@ -175,7 +174,7 @@ def test_logprobs(ray_init_fixture):
             assert len(indices) == len(
                 responses
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
-            asyncio.run(client.sleep())
+            await client.sleep()
 
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):

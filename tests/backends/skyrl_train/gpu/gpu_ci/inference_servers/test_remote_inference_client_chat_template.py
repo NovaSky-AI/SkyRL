@@ -7,7 +7,6 @@ NOTE: This test is separate from `test_new_inference_generation.py` because we u
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -39,8 +38,9 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
 
 
 @pytest.mark.vllm
+@pytest.mark.asyncio
 @pytest.mark.parametrize("use_custom_template", [False, True])
-def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
+async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
     """Test custom chat template via RemoteInferenceClient."""
     engines = None
     try:
@@ -79,10 +79,7 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
             "return_token_ids": True,
         }
 
-        async def _run():
-            return await client.chat_completion({"json": payload})
-
-        data = asyncio.run(_run())
+        data = await client.chat_completion({"json": payload})
 
         # 3. Check output
         assert "choices" in data and len(data["choices"]) > 0
@@ -104,4 +101,4 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
 
     finally:
         if engines is not None:
-            engines.close()
+            await engines.close()

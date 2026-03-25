@@ -6,7 +6,6 @@ Run with:
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engines/test_inference_engine_client.py
 """
 
-import asyncio
 import random
 from http import HTTPStatus
 from unittest.mock import patch
@@ -170,10 +169,11 @@ def _make_min_cfg():
     )
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])
 @pytest.mark.parametrize("with_session_id", [True, False])
 @pytest.mark.parametrize("num_engines", [1, 3, 4, 8, 16])
-def test_completion_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
+async def test_completion_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
     """
     In InferenceEngineClient.completion, when the request is batched, we distribute the batch
     and route to engines. If session_id is provided, we map to the corresponding engine; if unprovided,
@@ -248,7 +248,7 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
         "headers": {"Content-Type": "application/json"},
     }
 
-    resp = asyncio.run(client.completion(request_payload))
+    resp = await client.completion(request_payload)
 
     assert resp.get("object") != "error"
     assert "choices" in resp and len(resp["choices"]) == len(prompts)
@@ -276,10 +276,11 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
 # --------------------------------------------
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])
 @pytest.mark.parametrize("with_session_id", [True, False])
 @pytest.mark.parametrize("num_engines", [1, 3, 4, 8, 16])
-def test_generate_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
+async def test_generate_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
     """
     See the `test_completion_batched_routing_and_order_preservation` test for more details.
     Essentially `InferenceEngineClient.generate` does the same routing and aggregation as
@@ -332,7 +333,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         "session_ids": session_ids,
     }
 
-    out = asyncio.run(client.generate(input_batch))
+    out = await client.generate(input_batch)
 
     # Validate reconstruction and ordering
     assert len(out["responses"]) == num_prompts

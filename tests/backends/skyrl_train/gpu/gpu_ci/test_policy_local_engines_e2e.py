@@ -3,8 +3,6 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
-import asyncio
-
 import pytest
 import ray
 from transformers import AutoTokenizer
@@ -43,6 +41,7 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
         "colocate_all",
@@ -73,7 +72,7 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "non_colocated_nccl_fsdp2_vllm_mp",
     ],
 )
-def test_policy_local_engines_e2e(
+async def test_policy_local_engines_e2e(
     ray_init_fixture,
     colocate_all,
     weight_sync_backend,
@@ -95,7 +94,7 @@ def test_policy_local_engines_e2e(
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         model=MODEL,
         cfg=cfg,
         use_local=True,
@@ -120,7 +119,7 @@ def test_policy_local_engines_e2e(
                 "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
         )
-        asyncio.run(client.reset_prefix_cache())
+        await client.reset_prefix_cache()
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
@@ -130,6 +129,6 @@ def test_policy_local_engines_e2e(
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
+        outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer)
 
         print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

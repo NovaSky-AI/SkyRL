@@ -116,7 +116,8 @@ def init_ray_inference_engines(
     return client
 
 
-def test_ep_generation():
+@pytest.mark.asyncio
+async def test_ep_generation():
     """
     Ensure vLLM generation with expert parallel enabled (EP=2) runs without errors.
     Validate that the number of outputs matches the number of inputs.
@@ -143,14 +144,15 @@ def test_ep_generation():
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
 
-        responses, reasons = asyncio.run(_run_single_generation(client, prompts, sampling_params))
+        responses, reasons = await _run_single_generation(client, prompts, sampling_params)
         assert len(responses) == len(prompts)
         assert len(reasons) == len(prompts)
     finally:
         ray.shutdown()
 
 
-def test_ep_weight_sync():
+@pytest.mark.asyncio
+async def test_ep_weight_sync():
     """
     Ensure generation works after syncing weights from training policy worker.
     """
@@ -178,19 +180,17 @@ def test_ep_weight_sync():
             shared_pg=pg,
             config=cfg,
         )
-        asyncio.run(client.wake_up())
+        await client.wake_up()
 
         # Generate before weight sync
         prompts = get_test_prompts(MODEL, num_samples=4)
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        out_before = asyncio.run(
-            client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
-        )
+        out_before = await client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
         assert len(out_before["responses"]) == len(prompts)
 
-        asyncio.run(client.sleep())
+        await client.sleep()
 
         # Initialize policy worker
         policy = init_worker_with_type(
@@ -207,18 +207,18 @@ def test_ep_weight_sync():
                 "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
         )
-        asyncio.run(client.wake_up(tags=["weights"]))
+        await client.wake_up(tags=["weights"])
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
         policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        asyncio.run(client.reset_prefix_cache())
+        await client.wake_up(tags=["kv_cache"])
+        await client.reset_prefix_cache()
 
         # Generate after weight sync
-        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)))
+        out_after = await client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
         assert len(out_after["responses"]) == len(prompts)
         assert len(out_after["stop_reasons"]) == len(prompts)
 

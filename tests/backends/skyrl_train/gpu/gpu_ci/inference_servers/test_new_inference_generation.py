@@ -89,7 +89,7 @@ def vllm_server(module_scoped_ray_init_fixture):
         use_new_inference_servers=True,
     )
     yield engines
-    engines.close()
+    asyncio.run(engines.close())
 
 
 def _check_chat_completions_outputs(
@@ -368,7 +368,8 @@ def test_context_length_error_returns_400(vllm_server):
 # NOTE : We use LiteLLM because it supports sampling params such as min_tokens, skip_special_tokens, etc.,
 # that are used in vllm/sglang, but are not supported by OpenAI.chat.completions.create().
 @pytest.mark.vllm
-def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
     """Test chat completions via LiteLLM (OpenAI API client style)."""
     base_url = _get_base_url(vllm_server)
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -377,25 +378,23 @@ def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
     num_samples = 5
     test_prompts: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
 
-    async def _run():
-        outputs = []
-        for conv in test_prompts:
-            result = await litellm_async_completion(
-                model=f"openai/{SERVED_MODEL_NAME}",
-                messages=conv,
-                api_base=base_url,
-                api_key="DUMMY_KEY",
-                **sampling_params,
-            )
-            outputs.append(result)
-        return outputs
+    outputs = []
+    for conv in test_prompts:
+        result = await litellm_async_completion(
+            model=f"openai/{SERVED_MODEL_NAME}",
+            messages=conv,
+            api_base=base_url,
+            api_key="DUMMY_KEY",
+            **sampling_params,
+        )
+        outputs.append(result)
 
-    outputs = asyncio.run(_run())
     _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
 
 
 @pytest.mark.vllm
-def test_completions_via_litellm(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_completions_via_litellm(vllm_server: InferenceEngineState):
     """Test completions via LiteLLM (OpenAI API client style)."""
     base_url = _get_base_url(vllm_server)
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -408,20 +407,17 @@ def test_completions_via_litellm(vllm_server: InferenceEngineState):
         tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False) for conv in test_prompts_conv
     ]
 
-    async def _run():
-        outputs = []
-        for prompt in text_prompts:
-            result = await litellm_async_text_completion(
-                model=f"openai/{SERVED_MODEL_NAME}",
-                prompt=[prompt],
-                api_base=base_url,
-                api_key="DUMMY_KEY",
-                **sampling_params,
-            )
-            outputs.append(result)
-        return outputs
+    outputs = []
+    for prompt in text_prompts:
+        result = await litellm_async_text_completion(
+            model=f"openai/{SERVED_MODEL_NAME}",
+            prompt=[prompt],
+            api_base=base_url,
+            api_key="DUMMY_KEY",
+            **sampling_params,
+        )
+        outputs.append(result)
 
-    outputs = asyncio.run(_run())
     _check_completions_outputs(text_prompts, outputs, "litellm", "vllm")
 
 
@@ -429,7 +425,8 @@ def test_completions_via_litellm(vllm_server: InferenceEngineState):
 # serves as a integration test with litellm's error handling. SkyRL x Harbor integration relies
 # on specific litellm errors for context length error detection.
 @pytest.mark.vllm
-def test_client_context_length_error_returns_400_via_litellm(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_context_length_error_returns_400_via_litellm(vllm_server: InferenceEngineState):
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
     # LiteLLM wraps prompt+max_tokens error as BadRequestError (not InternalServerError).
@@ -437,8 +434,8 @@ def test_client_context_length_error_returns_400_via_litellm(vllm_server: Infere
     base_url = _get_base_url(vllm_server)
     messages_medium = [{"role": "user", "content": "hello " * 500}]
 
-    async def make_litellm_call():
-        return await litellm_async_completion(
+    with pytest.raises(LiteLLMBadRequestError) as excinfo:
+        await litellm_async_completion(
             model=f"openai/{SERVED_MODEL_NAME}",
             messages=messages_medium,
             api_base=base_url,
@@ -446,9 +443,6 @@ def test_client_context_length_error_returns_400_via_litellm(vllm_server: Infere
             max_tokens=1000,
             num_retries=0,
         )
-
-    with pytest.raises(LiteLLMBadRequestError) as excinfo:
-        asyncio.run(make_litellm_call())
     exception_raised = excinfo.value
 
     assert exception_raised is not None
@@ -462,67 +456,64 @@ def test_client_context_length_error_returns_400_via_litellm(vllm_server: Infere
 
 
 @pytest.mark.vllm
-def test_client_served_model_name(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_served_model_name(vllm_server: InferenceEngineState):
     """Test that served_model_name works and model path fails (via RemoteInferenceClient)."""
     client = vllm_server.client
     messages = [{"role": "user", "content": "Hello, who are you?"}]
 
     # Request with served_model_name should succeed
-    result = asyncio.run(
-        client.chat_completion(
-            {
-                "json": {
-                    "model": SERVED_MODEL_NAME,
-                    "messages": messages,
-                    "max_tokens": 50,
-                }
+    result = await client.chat_completion(
+        {
+            "json": {
+                "model": SERVED_MODEL_NAME,
+                "messages": messages,
+                "max_tokens": 50,
             }
-        )
+        }
     )
     assert "choices" in result and len(result["choices"]) > 0
     assert result["choices"][0]["message"]["content"] is not None
 
     # Request with model path should fail (model name mismatch)
     with pytest.raises(aiohttp.ClientResponseError):
-        asyncio.run(
-            client.chat_completion(
-                {
-                    "json": {
-                        "model": MODEL_QWEN2_5,
-                        "messages": messages,
-                        "max_tokens": 50,
-                    }
+        await client.chat_completion(
+            {
+                "json": {
+                    "model": MODEL_QWEN2_5,
+                    "messages": messages,
+                    "max_tokens": 50,
                 }
-            )
+            }
         )
 
 
 @pytest.mark.vllm
-def test_client_error_handling(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_error_handling(vllm_server: InferenceEngineState):
     """Test error handling via RemoteInferenceClient (raise_for_status path)."""
     client = vllm_server.client
 
     # Missing required field (messages)
     with pytest.raises(aiohttp.ClientResponseError):
-        asyncio.run(client.chat_completion({"json": {"model": SERVED_MODEL_NAME}}))
+        await client.chat_completion({"json": {"model": SERVED_MODEL_NAME}})
 
     # Wrong model name
     with pytest.raises(aiohttp.ClientResponseError):
-        asyncio.run(
-            client.chat_completion(
-                {
-                    "json": {
-                        "model": "wrong_model",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 10,
-                    }
+        await client.chat_completion(
+            {
+                "json": {
+                    "model": "wrong_model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 10,
                 }
-            )
+            }
         )
 
 
 @pytest.mark.vllm
-def test_client_context_length_error_returns_400(vllm_server):
+@pytest.mark.asyncio
+async def test_client_context_length_error_returns_400(vllm_server):
     """Test that context length errors return HTTP 400 (via RemoteInferenceClient)."""
     client = vllm_server.client
 
@@ -530,16 +521,14 @@ def test_client_context_length_error_returns_400(vllm_server):
     messages_oversized = [{"role": "user", "content": "hello " * 1500}]
 
     with pytest.raises(aiohttp.ClientResponseError) as exc_info:
-        asyncio.run(
-            client.chat_completion(
-                {
-                    "json": {
-                        "model": SERVED_MODEL_NAME,
-                        "messages": messages_oversized,
-                        "max_tokens": 10,
-                    }
+        await client.chat_completion(
+            {
+                "json": {
+                    "model": SERVED_MODEL_NAME,
+                    "messages": messages_oversized,
+                    "max_tokens": 10,
                 }
-            )
+            }
         )
     err = exc_info.value
     assert err.status == HTTPStatus.BAD_REQUEST
@@ -548,7 +537,8 @@ def test_client_context_length_error_returns_400(vllm_server):
 
 
 @pytest.mark.vllm
-def test_client_generate(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_generate(vllm_server: InferenceEngineState):
     """Test token-in-token-out generation via RemoteInferenceClient.generate()."""
     client = vllm_server.client
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -568,7 +558,7 @@ def test_client_generate(vllm_server: InferenceEngineState):
         sampling_params=sampling_params,
     )
 
-    output = asyncio.run(client.generate(engine_input))
+    output = await client.generate(engine_input)
 
     assert len(output["responses"]) == 1
     assert len(output["response_ids"]) == 1
@@ -579,16 +569,17 @@ def test_client_generate(vllm_server: InferenceEngineState):
 
 
 @pytest.mark.vllm
-def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState):
     """Round-trip: tokenize text, detokenize back, verify."""
     # NOTE (sumanthrh): This test doesn't work for *any* tokenizer/ text because tokenization is not invertible in general.
     # but it is valid for this specific case.
     client = vllm_server.client
     text = "Hello, world!"
 
-    token_ids = asyncio.run(client.tokenize([text]))[0]
+    token_ids = (await client.tokenize([text]))[0]
     assert isinstance(token_ids, list)
     assert len(token_ids) > 0
 
-    decoded = asyncio.run(client.detokenize([token_ids]))[0]
+    decoded = (await client.detokenize([token_ids]))[0]
     assert decoded == text

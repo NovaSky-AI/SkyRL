@@ -8,6 +8,7 @@ import asyncio
 import threading
 from typing import List
 
+import pytest
 import requests
 from transformers import AutoTokenizer
 
@@ -28,7 +29,8 @@ SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
 
-def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     """
     We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
     so that in each engine, 2 run and 1 wait. We ignore eos and let model geneate 2048 tokens.
@@ -108,15 +110,15 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             t.start()
 
         # Let the requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait
-        asyncio.run(asyncio.sleep(1))
+        await asyncio.sleep(1)
 
         # Pause then resume while requests are in-flight
-        asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
+        await client.pause_generation()
+        await client.resume_generation()
         # Run for another two seconds, then pause and resume again
-        asyncio.run(asyncio.sleep(2))
-        asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
+        await asyncio.sleep(2)
+        await client.pause_generation()
+        await client.resume_generation()
 
         # Wait for all requests to finish
         for t in threads:
@@ -174,10 +176,11 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            await engines.close()
 
 
-def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     """
     Identical to `test_continue_generation_vllm_engine_chat_completion` except we use `generate()`
     instead of `/chat/completions`.
@@ -208,7 +211,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         # Request token logprobs (vLLM SamplingParams expects an int for how many to return)
         "logprobs": 1,
     }
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -251,7 +254,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             await client.resume_generation()
             return await asyncio.gather(*tasks)
 
-        outputs = asyncio.run(run_requests_then_pause())
+        outputs = await run_requests_then_pause()
 
         # 4. Validate each output: stop_reason is "length" and tokens/logprobs == max_tokens
         assert len(outputs) == num_requests, f"Expected {num_requests} outputs, got {len(outputs)}"
@@ -278,7 +281,8 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
 
-def test_pause_keep_generation_vllm_engine(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     """
     Test that keep-mode pause freezes in-flight requests and resume lets them
     complete normally.
@@ -300,7 +304,7 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     }
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -348,7 +352,7 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                 await client.resume_generation()
                 return await asyncio.gather(*tasks)
 
-            outputs = asyncio.run(run_requests_with_pause_resume())
+            outputs = await run_requests_with_pause_resume()
 
             for out in outputs:
                 assert "choices" in out and len(out["choices"]) == 1

@@ -171,8 +171,6 @@ class RemoteInferenceClient:
         current_loop = asyncio.get_running_loop()
         if self._session is not None and not self._session.closed and self._session.loop != current_loop:
             # Event loop changed - the old session is unusable (bound to a dead loop).
-            # Force-close the connector to release socket FDs immediately.
-            _force_close_connector(self._session.connector)
             self._session = None
         if self._session is None or self._session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive
@@ -785,41 +783,14 @@ class RemoteInferenceClient:
         self._detok_sem = None
         self._sem_loop = None
 
-
-def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
-    """Release socket FDs held by a connector whose event loop is already closed.
-
-    asyncio's normal transport.close() schedules a connection_lost() callback
-    on the loop, which raises RuntimeError when the loop is closed. We instead
-    close the raw file descriptors via os.close(fileno()) and then manually
-    clear aiohttp's internal connection pools.
-
-    Note: this uses aiohttp internals (_conns, _acquired, _closed). These are
-    stable across aiohttp 3.x but may change in 4.x.
-    """
-    if connector is None or connector.closed:
-        return
-
-    def _release(proto: aiohttp.client_proto.ResponseHandler) -> None:
-        if proto.transport is not None:
-            tsock = proto.transport.get_extra_info("socket")
-            if tsock is not None:
-                fd = tsock.fileno()
-                if fd != -1:
-                    try:
-                        tsock.close()
-                    except OSError:
-                        pass
-
-    for proto_list in connector._conns.values():
-        for proto, _ in proto_list:
-            _release(proto)
-    for proto in list(connector._acquired):
-        _release(proto)
-
-    connector._conns.clear()
-    connector._acquired.clear()
-    connector._closed = True
+    async def aclose(self):
+        if self._session is not None:
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning(f"Encountered exception {e} while closing client session")
+                pass
+            self._session = None
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

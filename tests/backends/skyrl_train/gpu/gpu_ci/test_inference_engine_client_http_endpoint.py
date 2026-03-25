@@ -299,7 +299,8 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm. Therefore, we instead use LiteLLM.
-def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
 
@@ -345,7 +346,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                 "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
         )
-        asyncio.run(client.reset_prefix_cache())
+        await client.reset_prefix_cache()
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
@@ -364,7 +365,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
-        def _generate_outputs(test_type, endpoint):
+        async def _generate_outputs(test_type, endpoint):
             def payload_builder(session_id, prompt):
                 if endpoint == "chat_completions":
                     return {
@@ -421,7 +422,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                         responses = await asyncio.gather(*output_tasks)
                         return [await response.json() for response in responses]
 
-                outputs = asyncio.run(generate_outputs_async())
+                outputs = await generate_outputs_async()
 
             elif test_type == "litellm":
 
@@ -449,7 +450,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
                     return await asyncio.gather(*tasks)
 
-                outputs = asyncio.run(generate_outputs_async())
+                outputs = await generate_outputs_async()
 
             else:
                 raise ValueError(f"Invalid test type: {test_type}")
@@ -458,7 +459,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
         for test_type in test_types:
             for endpoint in endpoints:
-                outputs = _generate_outputs(test_type, endpoint)
+                outputs = await _generate_outputs(test_type, endpoint)
                 if endpoint == "chat_completions":
                     _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
                 else:
@@ -470,7 +471,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            await engines.close()
 
 
 @pytest.mark.parametrize(
@@ -480,7 +481,8 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     ],
     ids=["tp2"],
 )
-def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
+@pytest.mark.asyncio
+async def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -508,7 +510,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
-        def _generate_outputs(endpoint):
+        async def _generate_outputs(endpoint):
             if endpoint == "chat_completions":
                 sampling_params = _get_test_sampling_params(cfg, "chat_completions")
                 prompt_iterable = test_prompts_conv_list
@@ -517,34 +519,31 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
                 prompt_iterable = test_prompts_half_str_half_tokens_list
 
             # Default concurrency limit is 100 due to HTTP client pool capacity.
-            async def generate_outputs_async():
-                async def generate_output(session_id, prompt):
-                    if endpoint == "chat_completions":
-                        return await litellm_async_completion(
-                            model=f"openai/{MODEL_QWEN2_5}",
-                            messages=prompt,
-                            api_base=base_url,
-                            api_key="DUMMY_KEY",
-                            session_id=session_id,
-                            **sampling_params,
-                        )
-                    else:
-                        return await litellm_async_text_completion(
-                            model=f"openai/{MODEL_QWEN2_5}",
-                            prompt=[prompt],
-                            api_base=base_url,
-                            api_key="DUMMY_KEY",
-                            session_id=[session_id],
-                            **sampling_params,
-                        )
+            async def generate_output(session_id, prompt):
+                if endpoint == "chat_completions":
+                    return await litellm_async_completion(
+                        model=f"openai/{MODEL_QWEN2_5}",
+                        messages=prompt,
+                        api_base=base_url,
+                        api_key="DUMMY_KEY",
+                        session_id=session_id,
+                        **sampling_params,
+                    )
+                else:
+                    return await litellm_async_text_completion(
+                        model=f"openai/{MODEL_QWEN2_5}",
+                        prompt=[prompt],
+                        api_base=base_url,
+                        api_key="DUMMY_KEY",
+                        session_id=[session_id],
+                        **sampling_params,
+                    )
 
-                tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
-                return await asyncio.gather(*tasks)
-
-            return asyncio.run(generate_outputs_async())
+            tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
+            return await asyncio.gather(*tasks)
 
         for endpoint in endpoints:
-            outputs = _generate_outputs(endpoint)
+            outputs = await _generate_outputs(endpoint)
             if endpoint == "chat_completions":
                 _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
             else:
@@ -980,7 +979,8 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             engines.close()
 
 
-def test_context_length_error_returns_400(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_context_length_error_returns_400(ray_init_fixture):
     """
     Test that context length errors return HTTP 400 (Bad Request), not 500.
 
@@ -1081,7 +1081,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
             )
 
         with pytest.raises(LiteLLMBadRequestError) as excinfo:
-            asyncio.run(make_litellm_call())
+            await make_litellm_call()
         exception_raised = excinfo.value
 
         assert exception_raised is not None
@@ -1096,4 +1096,4 @@ def test_context_length_error_returns_400(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            await engines.close()
