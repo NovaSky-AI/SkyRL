@@ -535,6 +535,7 @@ class InferenceEngineState:
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
+        needs_wake_up = False
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
