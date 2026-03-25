@@ -75,9 +75,6 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
             # We test aborting 2 running requests and 1 waiting requests
             max_num_seqs=max_num_seqs,
         )
-        if getattr(engines, "_needs_wake_up", False):
-            await engines.client.wake_up()
-            engines._needs_wake_up = False
         client = engines.client
 
         def run_server():

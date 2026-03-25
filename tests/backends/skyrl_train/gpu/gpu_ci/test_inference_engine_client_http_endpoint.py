@@ -293,7 +293,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            asyncio.run(engines.close())
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
@@ -625,7 +625,7 @@ def test_structured_generation(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            asyncio.run(engines.close())
 
 
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
@@ -794,7 +794,7 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            asyncio.run(engines.close())
 
 
 @pytest.mark.parametrize("use_custom_template", [False, True])
@@ -884,7 +884,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            asyncio.run(engines.close())
 
 
 def test_http_endpoint_served_model_name(ray_init_fixture):
@@ -979,7 +979,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            engines.close()
+            asyncio.run(engines.close())
 
 
 @pytest.mark.asyncio
