@@ -708,3 +708,24 @@ def get_rope_scaling_config(trainer_cfg: TrainerConfig) -> dict[str, Any]:
 
 def get_rope_theta_config(trainer_cfg: TrainerConfig) -> int | None:
     return trainer_cfg.rope_theta
+
+
+def reduce_metrics_across_minibatches(metrics: Dict[str, List[float]]) -> Dict[str, float]:
+    """
+    Reduce metrics across mini-batches and epochs for logging.
+    All metrics (including _loss) are averaged, since the worker-level reduction
+    already handles summing _loss keys across micro-batches.
+    """
+    reduced_metrics = dict()
+    for k, v in metrics.items():
+        assert len(v) > 0, f"No metrics for key {k}"
+        if not all(isinstance(x, (int, float)) for x in v):
+            print(f"Metrics for key {k} are not all numbers: {v}")
+            continue
+        if k.endswith("_max"):
+            reduced_metrics[k] = max(v)
+        elif k.endswith("_min"):
+            reduced_metrics[k] = min(v)
+        else:
+            reduced_metrics[k] = sum(v) / len(v)
+    return reduced_metrics

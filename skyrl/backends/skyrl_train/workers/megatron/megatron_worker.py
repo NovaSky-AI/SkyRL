@@ -47,7 +47,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BatchIterator,
     all_reduce_metrics,
-    reduce_metrics,
+    reduce_metrics_across_microbatches,
 )
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
@@ -730,7 +730,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Reduce and all-reduce metrics across DP ranks only
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
-        status = reduce_metrics(dict(all_metrics))
+        status = reduce_metrics_across_microbatches(dict(all_metrics))
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
         group = mpu.get_data_parallel_group(with_context_parallel=True)
         status = all_reduce_metrics(status, self.strategy, group=group)

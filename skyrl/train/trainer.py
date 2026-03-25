@@ -40,7 +40,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.train.utils.trainer_utils import reduce_metrics_across_minibatches
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
@@ -1129,7 +1129,7 @@ class RayPPOTrainer:
         # Reduce metrics across all mini-batches and epochs
         # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
         all_metrics.pop("loss_fn_outputs", None)
-        reduced_metrics = reduce_metrics(all_metrics)
+        reduced_metrics = reduce_metrics_across_minibatches(all_metrics)
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

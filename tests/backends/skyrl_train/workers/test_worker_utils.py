@@ -10,7 +10,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
-    reduce_metrics,
+    reduce_metrics_across_microbatches as reduce_metrics,
 )
 
 

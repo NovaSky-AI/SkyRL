@@ -1003,7 +1003,7 @@ def apply_loss_reduction_to_advantages_minibatch(
     micro_batch_size: int,
     max_seq_len: int,
 ) -> torch.Tensor:
-    """Scale advantages so that reduce_loss (a simple sum) produces the desired loss reduction.
+    """Scale advantages so that summing produces the desired loss reduction.
 
     Args:
         advantages: Advantage tensor of shape (minibatch_size, seq_len).

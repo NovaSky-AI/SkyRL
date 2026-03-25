@@ -52,7 +52,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BatchIterator,
     all_reduce_metrics,
-    reduce_metrics,
+    reduce_metrics_across_microbatches,
 )
 from skyrl.env_vars import (
     _SKYRL_USE_NEW_INFERENCE,
@@ -715,7 +715,7 @@ class PolicyWorkerBase(Worker):
                 all_metrics[k].append(v)
 
         # reduce metrics across micro batches (sum, mean, min, max)
-        result = reduce_metrics(dict(all_metrics))
+        result = reduce_metrics_across_microbatches(dict(all_metrics))
 
         # all reduce metrics across DP workers
         dp_group = self.device_mesh.get_group("dp")
@@ -871,7 +871,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": loss.item(),
+                "loss": unscaled_loss.item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
@@ -928,8 +928,8 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "final_loss": loss.item(),
-                "policy_loss": policy_loss.item() * loss_scale,
+                "final_loss": unscaled_loss.item(),
+                "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
@@ -1070,7 +1070,7 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        return reduce_metrics_across_microbatches(dict(all_metrics))
 
     def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
         """

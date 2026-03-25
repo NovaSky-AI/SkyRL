@@ -6,9 +6,17 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.dataset.replay_buffer import Experience
 
 
-def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
-    """
-    Reduce scalar metrics from a list of entries per key by averaging.
+def reduce_metrics_across_microbatches(metrics: Dict[str, List[float]]) -> Dict[str, float]:
+    """Reduce metrics across micro-batches within a single mini-batch.
+
+    NOTE: Metrics ending in `_loss` are summed, not averaged, because the scaling
+    is already done at the advantage level.
+    See `apply_loss_reduction_to_advantages_minibatch` for more details.
+
+
+    Args:
+        metrics: Dictionary of metrics with keys as metric names and values as lists of metric values.
+            The list of values corresponds to micro-batches within a single mini-batch.
     """
     reduced_metrics = dict()
     for k, v in metrics.items():
