@@ -20,6 +20,29 @@ DATA_DIR="$HOME/data/searchR1"
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
+# Configurable knobs with defaults
+: "${USE_CONVERSATION_MULTI_TURN:=true}"
+: "${STEP_WISE:=false}"
+
+# Build conditional args
+MULTI_TURN_ARGS=""
+if [ "$USE_CONVERSATION_MULTI_TURN" = "true" ]; then
+  MULTI_TURN_ARGS="generator.use_conversation_multi_turn=true generator.append_eos_token_after_stop_str_in_multi_turn=true"
+else
+  MULTI_TURN_ARGS="generator.use_conversation_multi_turn=false"
+fi
+
+STEP_WISE_ARGS=""
+if [ "$STEP_WISE" = "true" ]; then
+  STEP_WISE_ARGS="generator.step_wise_trajectories=true"
+  # Step-wise requires conversation multi-turn
+  if [ "$USE_CONVERSATION_MULTI_TURN" != "true" ]; then
+    echo "WARNING: STEP_WISE=true requires USE_CONVERSATION_MULTI_TURN=true. Enabling it automatically."
+    MULTI_TURN_ARGS="generator.use_conversation_multi_turn=true generator.append_eos_token_after_stop_str_in_multi_turn=true"
+  fi
+fi
+
+
 RUN_NAME=skyrl-search_4turns_maxgeneratelen_500-fully-async-TIS_2.0-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
 
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
@@ -59,13 +82,13 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.sampling_params.max_generate_length=500 \
   generator.inference_engine.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=true \
+  $MULTI_TURN_ARGS \
+  $STEP_WISE_ARGS \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
-  generator.append_eos_token_after_stop_str_in_multi_turn=true \
   environment.env_class="search" \
   environment.skyrl_gym.max_env_workers=256 \
   environment.skyrl_gym.search.log_requests=false \
