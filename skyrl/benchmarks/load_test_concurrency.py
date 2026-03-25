@@ -43,8 +43,8 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import ResolvedPlacementGroup, initialize_ray
 
@@ -71,7 +71,9 @@ def get_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def start_servers(cfg: SkyRLTrainConfig, router_type: str = "default") -> Tuple[RemoteInferenceClient, object, ServerGroup]:
+def start_servers(
+    cfg: SkyRLTrainConfig, router_type: str = "default"
+) -> Tuple[RemoteInferenceClient, object, ServerGroup]:
     """Start vLLM server group, router, and build a `RemoteInferenceClient`."""
     cli_args = build_vllm_cli_args(cfg)
     ie_cfg = cfg.generator.inference_engine

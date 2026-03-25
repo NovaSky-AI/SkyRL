@@ -155,6 +155,7 @@ class RemoteInferenceClient:
         if self._sem_loop is not current_loop:
             if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0:
                 concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls)
+                logger.info(f"Capping concurrency for generation to a maximum of {concurrency} requests")
                 self._gen_sem = asyncio.Semaphore(concurrency)
                 self._detok_sem = asyncio.Semaphore(concurrency)
             else:
@@ -199,12 +200,17 @@ class RemoteInferenceClient:
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
-                    body = await resp.json(content_type=None)
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception as e:
+                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                        await asyncio.sleep(1)
+                        continue
                     raise_for_status(resp, body)
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
-                logger.warning(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                 await asyncio.sleep(1)
                 continue
         raise last_exc  # type: ignore[misc]
@@ -260,13 +266,6 @@ class RemoteInferenceClient:
         # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
         gen_sem, detok_sem = self._get_semaphores()
         batch_size = len(prompt_token_ids)
-        concurrency = (
-            SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls) if self._gen_sem is not None else "unlimited"
-        )
-        logger.info(
-            f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
-            f"(shared across all concurrent generate() calls)"
-        )
 
         async def _throttled_generate(idx: int) -> Dict[str, Any]:
             if gen_sem is None:

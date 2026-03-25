@@ -541,7 +541,9 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
 
             router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()

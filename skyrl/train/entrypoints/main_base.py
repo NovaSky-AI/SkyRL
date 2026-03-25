@@ -392,11 +392,15 @@ class BasePPOExp:
     def _create_router(server_urls, router_type: str = "default"):
         """Create a data-plane router based on ``router_type``."""
         if router_type == "vllm-router":
-            from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
 
             return VLLMRouter(server_urls=server_urls)
         else:
-            from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+            from skyrl.backends.skyrl_train.inference_servers.router import (
+                InferenceRouter,
+            )
 
             return InferenceRouter(server_urls=server_urls)
 

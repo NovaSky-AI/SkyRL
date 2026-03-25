@@ -62,10 +62,14 @@ class VLLMRouter:
         """Build the vllm-router CLI command."""
         cmd = [
             "vllm-router",
-            "--host", self._host,
-            "--port", str(self._port),
-            "--policy", self._policy,
-            "--worker-urls", *self._server_urls,
+            "--host",
+            self._host,
+            "--port",
+            str(self._port),
+            "--policy",
+            self._policy,
+            "--worker-urls",
+            *self._server_urls,
         ]
         if self._health_check_interval_secs is not None:
             cmd.extend(["--health-check-interval-secs", str(self._health_check_interval_secs)])
@@ -97,10 +101,7 @@ class VLLMRouter:
             raise ValueError("No servers available")
 
         if shutil.which("vllm-router") is None:
-            raise ImportError(
-                "vllm-router binary not found on PATH. "
-                "Install it with: pip install vllm-router"
-            )
+            raise ImportError("vllm-router binary not found on PATH. " "Install it with: pip install vllm-router")
 
         cmd = self._build_cmd()
         logger.info(f"Starting vllm-router: {' '.join(cmd)}")
@@ -145,9 +146,7 @@ class VLLMRouter:
         while time.time() - start_time < timeout:
             # Fail fast if the process exited
             if self._process.poll() is not None:
-                raise RuntimeError(
-                    f"vllm-router process exited with code {self._process.returncode}"
-                )
+                raise RuntimeError(f"vllm-router process exited with code {self._process.returncode}")
             try:
                 with httpx.Client() as client:
                     if client.get(health_url, timeout=1).status_code == 200:

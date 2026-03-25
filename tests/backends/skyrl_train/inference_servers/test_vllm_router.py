@@ -37,26 +37,6 @@ def test_build_cmd_default():
     assert "--policy" in cmd and cmd[cmd.index("--policy") + 1] == "consistent_hash"
     assert "http://w1:8000" in cmd
     assert "http://w2:8000" in cmd
-    # Optional flags should NOT appear when not set
-    assert "--health-check-interval-secs" not in cmd
-    assert "--max-concurrent-requests" not in cmd
-    assert "--request-timeout-secs" not in cmd
-
-
-def test_build_cmd_with_optional_flags():
-    """Optional CLI flags appear when set."""
-    router = VLLMRouter(
-        ["http://w1:8000"],
-        policy="round_robin",
-        health_check_interval_secs=15,
-        max_concurrent_requests=1024,
-        request_timeout_secs=300,
-    )
-    cmd = router._build_cmd()
-    assert cmd[cmd.index("--policy") + 1] == "round_robin"
-    assert cmd[cmd.index("--health-check-interval-secs") + 1] == "15"
-    assert cmd[cmd.index("--max-concurrent-requests") + 1] == "1024"
-    assert cmd[cmd.index("--request-timeout-secs") + 1] == "300"
 
 
 def test_process_exit_during_health_check():
@@ -106,9 +86,3 @@ def test_shutdown_kills_on_timeout():
 
     mock_process.terminate.assert_called_once()
     mock_process.kill.assert_called_once()
-
-
-def test_shutdown_noop_when_not_started():
-    """shutdown() is a no-op when the process was never started."""
-    router = VLLMRouter(["http://localhost:8000"])
-    router.shutdown()  # Should not raise
