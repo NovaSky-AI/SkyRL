@@ -41,7 +41,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
-MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+MOE_MODEL_NAME = "allenai/OLMoE-1B-7B-0125"
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:

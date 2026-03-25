@@ -22,7 +22,7 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
+MOE_MODEL = "allenai/OLMoE-1B-7B-0125"
 
 
 def get_test_actor_config(model: str = MODEL) -> SkyRLTrainConfig:
