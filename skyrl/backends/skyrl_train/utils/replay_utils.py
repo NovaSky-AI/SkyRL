@@ -201,7 +201,7 @@ def _pack_replay_indices(
 
 
 def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
-    """Return the current PP rank's transformer-layer range as (start_layer, 
+    """Return the current PP rank's transformer-layer range as (start_layer,
     num_layers).
 
     Prefer Megatron's own helpers so replay indexing stays aligned with the
@@ -215,6 +215,7 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     offset = get_transformer_layer_offset(model_config, pp_rank=pp_rank)
     num_layers = get_num_layers_to_build(model_config, pp_rank=pp_rank)
     return offset, num_layers
+
 
 def setup_per_microbatch_replay_forward(
     rollout_expert_indices: torch.Tensor,
