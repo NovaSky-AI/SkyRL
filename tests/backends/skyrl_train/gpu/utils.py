@@ -552,6 +552,7 @@ class InferenceEngineState:
                 server_urls=server_urls,
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 active_lora_name=active_lora_name,
+                tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:
             eps = create_ray_wrapped_inference_engines(

@@ -63,7 +63,7 @@ from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
 )
 
-_DATA_PLANE_RETRIES = 3
+_DATA_PLANE_RETRIES = 30
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -127,13 +127,41 @@ class RemoteInferenceClient:
     active_lora_name: Optional[str] = None
     """Name of the active LoRA adapter. If set, generation requests use this adapter instead of the base model."""
 
+    tokenizer: Optional[Any] = None
+    """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
+
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
+    _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
+    _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
+    _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
     # ---------------------------
     # Session Management
     # ---------------------------
+
+    def _get_semaphores(self) -> Tuple[Optional[asyncio.Semaphore], Optional[asyncio.Semaphore]]:
+        """Get or create the shared generate/detokenize semaphores for this client.
+
+        Semaphores are event-loop-bound (Python 3.10+). If the running loop has
+        changed since they were created, recreate them.
+
+        All concurrent generate() calls on the same client instance share these
+        semaphores, capping total in-flight requests at
+        SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines.
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._sem_loop is not current_loop:
+            if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0:
+                concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls)
+                self._gen_sem = asyncio.Semaphore(concurrency)
+                self._detok_sem = asyncio.Semaphore(concurrency)
+            else:
+                self._gen_sem = None
+                self._detok_sem = None
+            self._sem_loop = current_loop
+        return self._gen_sem, self._detok_sem
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the aiohttp session."""
@@ -143,9 +171,8 @@ class RemoteInferenceClient:
         current_loop = asyncio.get_running_loop()
         if self._session is not None and not self._session.closed and self._session.loop != current_loop:
             # Event loop changed - the old session is unusable (bound to a dead loop).
-            # Force-close the connector to tear down TCP connections synchronously.
-            if self._session.connector is not None:
-                self._session.connector.close()
+            # Force-close the connector to release socket FDs immediately.
+            _force_close_connector(self._session.connector)
             self._session = None
         if self._session is None or self._session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive
@@ -178,9 +205,7 @@ class RemoteInferenceClient:
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
                 logger.warning(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                # Back off so the connector can purge stale connections before
-                # the next attempt grabs another dead socket from the pool.
-                await asyncio.sleep(0.1 * 2**attempt)  # 0.1s, 0.2s, 0.4s
+                await asyncio.sleep(1)
                 continue
         raise last_exc  # type: ignore[misc]
 
@@ -228,16 +253,19 @@ class RemoteInferenceClient:
         #              generation finishes, so the GPU slot is freed immediately.
         #   detok_sem: limits concurrent detokenize calls independently.  Uses the
         #              same concurrency limit so detokenize never starves generate.
-        # Scales with number of engines so the limit fits the cluster size.
+        # Semaphores are shared across all concurrent generate() calls on this client
+        # instance, so total in-flight requests are capped at
+        # SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines regardless of how many
+        # callers invoke generate() simultaneously.
         # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
-        num_engines = len(self.server_urls)
-        concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * num_engines
-        gen_sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
-        detok_sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
+        gen_sem, detok_sem = self._get_semaphores()
         batch_size = len(prompt_token_ids)
+        concurrency = (
+            SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls) if self._gen_sem is not None else "unlimited"
+        )
         logger.info(
             f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
-            f"({SKYRL_GENERATE_CONCURRENCY_PER_ENGINE}/engine × {num_engines} engines)"
+            f"(shared across all concurrent generate() calls)"
         )
 
         async def _throttled_generate(idx: int) -> Dict[str, Any]:
@@ -380,7 +408,9 @@ class RemoteInferenceClient:
         add_special_tokens: bool = True,
     ) -> List[List[int]]:
         """
-        Tokenize texts via /tokenize.
+        Tokenize texts.
+
+        Uses the local tokenizer if available, otherwise falls back to HTTP /tokenize.
 
         Args:
             texts: List of texts to tokenize.
@@ -389,6 +419,9 @@ class RemoteInferenceClient:
         Returns:
             List of token ID lists.
         """
+        if self.tokenizer is not None:
+            return self.tokenizer(texts, add_special_tokens=add_special_tokens)["input_ids"]
+
         url = f"{self.proxy_url}/tokenize"
 
         # vLLM /tokenize expects individual requests, batch them
@@ -409,7 +442,9 @@ class RemoteInferenceClient:
         token_ids: List[List[int]],
     ) -> List[str]:
         """
-        Detokenize token IDs via /detokenize.
+        Detokenize token IDs.
+
+        Uses the local tokenizer if available, otherwise falls back to HTTP /detokenize.
 
         Args:
             token_ids: List of token ID lists.
@@ -417,6 +452,9 @@ class RemoteInferenceClient:
         Returns:
             List of decoded texts.
         """
+        if self.tokenizer is not None:
+            return self.tokenizer.batch_decode(token_ids)
+
         url = f"{self.proxy_url}/detokenize"
 
         # vLLM /detokenize expects individual requests, batch them
@@ -546,16 +584,10 @@ class RemoteInferenceClient:
         """
         Wake up all backends (load weights back to GPU).
 
-        Recreates the HTTP session to discard stale keep-alive connections
-        that the server may have closed during sleep.
-
         Args:
             tags: Optional list of tags to wake up specific resources.
                 Common tags: ["weights"], ["kv_cache"], or None for all.
         """
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
         params = {"tags": tags} if tags else {}
         return await self._call_all_servers("/wake_up", params=params)
 
@@ -740,12 +772,54 @@ class RemoteInferenceClient:
         """Exclude non-serializable fields from pickle."""
         state = self.__dict__.copy()
         state["_session"] = None
+        state["_gen_sem"] = None
+        state["_detok_sem"] = None
+        state["_sem_loop"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
         """Restore state after unpickling."""
         self.__dict__.update(state)
         self._session = None
+        self._gen_sem = None
+        self._detok_sem = None
+        self._sem_loop = None
+
+
+def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
+    """Release socket FDs held by a connector whose event loop is already closed.
+
+    asyncio's normal transport.close() schedules a connection_lost() callback
+    on the loop, which raises RuntimeError when the loop is closed. We instead
+    close the raw file descriptors via os.close(fileno()) and then manually
+    clear aiohttp's internal connection pools.
+
+    Note: this uses aiohttp internals (_conns, _acquired, _closed). These are
+    stable across aiohttp 3.x but may change in 4.x.
+    """
+    if connector is None or connector.closed:
+        return
+
+    def _release(proto: aiohttp.client_proto.ResponseHandler) -> None:
+        if proto.transport is not None:
+            tsock = proto.transport.get_extra_info("socket")
+            if tsock is not None:
+                fd = tsock.fileno()
+                if fd != -1:
+                    try:
+                        tsock.close()
+                    except OSError:
+                        pass
+
+    for proto_list in connector._conns.values():
+        for proto, _ in proto_list:
+            _release(proto)
+    for proto in list(connector._acquired):
+        _release(proto)
+
+    connector._conns.clear()
+    connector._acquired.clear()
+    connector._closed = True
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

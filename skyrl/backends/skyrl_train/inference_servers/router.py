@@ -168,6 +168,11 @@ class InferenceRouter:
                     headers=headers,
                     content=body,
                 )
+                if attempt > 0:
+                    logger.warning(
+                        f"Proxy retry {attempt}/{_PROXY_RETRIES - 1} succeeded for {path} "
+                        f"(stale keepalive connection on attempt 0: {last_exc})"
+                    )
                 return Response(
                     content=response.content,
                     status_code=response.status_code,
@@ -175,7 +180,7 @@ class InferenceRouter:
                 )
             except (httpx.ReadError, httpx.ConnectError) as e:
                 last_exc = e
-                logger.warning(f"Proxy retry {attempt + 1}/{_PROXY_RETRIES} for {path}: {e}")
+                logger.warning(f"Proxy retry {attempt + 1}/{_PROXY_RETRIES} for {path}: {type(e).__name__}: {e}")
                 continue
             except Exception as e:
                 logger.info(f"Encountered an exception while proxying a request to path {path}: {e}")
