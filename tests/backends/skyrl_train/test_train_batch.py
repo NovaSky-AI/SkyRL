@@ -405,7 +405,7 @@ def test_tensor_list_cat():
 
 def _make_mixed_batch(batch_size=4, seq_len=3):
     """Helper: create a TensorBatch with both Tensor and TensorList fields."""
-    sequences = torch.randn(batch_size, seq_len)
+    sequences = torch.randn(batch_size)
     pixel_values = TensorList([torch.randn(i + 1, 8) for i in range(batch_size)])
     return TensorBatch({"sequences": sequences, "pixel_values": pixel_values})
 

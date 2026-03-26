@@ -309,7 +309,7 @@ class TensorBatch(dict, Generic[DictType]):
                 new_batch[key] = value.repeat(repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat(repeats, *([1] * (value.dim() - 1)))
+                new_batch[key] = value.repeat(repeats)
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
@@ -333,7 +333,7 @@ class TensorBatch(dict, Generic[DictType]):
                 new_batch[key] = value.repeat_interleave(repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat_interleave(repeats, dim=0)
+                new_batch[key] = value.repeat_interleave(repeats)
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
