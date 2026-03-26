@@ -172,6 +172,10 @@ class TaskGenEnv(BaseTextEnv):
         # Lazy-init Fleet SDK client for harness evaluation
         self._fleet_client = None
 
+        # Rollout dump directory (full prompt/verifier/scores per eval)
+        self._rollout_dir = os.environ.get("ROLLOUT_DIR", "/workspace/rollouts")
+        os.makedirs(self._rollout_dir, exist_ok=True)
+
         # Base quality reward for tasks passing sandbox + judge gate.
         # Provides GRPO gradient signal even when all harness evals return 0.
         self.base_quality_reward = float(env_config.get("base_quality_reward", 0.1)) if env_config else 0.1
@@ -767,6 +771,7 @@ Generate exactly ONE task. Output it in this format:
             key=task_key,
             prompt=prompt,
             env_id=self.env_key,
+            version=self.env_version or None,
             verifier_func=verifier,
             data_id=self.data_key or None,
             data_version=self.data_version or None,
@@ -873,11 +878,68 @@ Generate exactly ONE task. Output it in this format:
                 f"hint={hint_log}"
             )
 
+            # Save full rollout to local JSONL
+            self._save_rollout(
+                task_id=task_id,
+                env_key=self.env_key,
+                data_key=self.data_key,
+                prompt=prompt,
+                verifier=verifier,
+                hint=hint_text,
+                raw_scores=raw_scores,
+                hinted_scores=hinted_scores,
+                raw_job_id=raw_job_id,
+                hinted_job_id=hinted_job_id,
+                result=result,
+                duration=duration,
+            )
+
             return result
 
         except Exception as e:
             logger.error(f"[{task_id}] Evaluation failed: {e}")
             return zero_result
+
+    def _save_rollout(
+        self,
+        task_id,
+        env_key,
+        data_key,
+        prompt,
+        verifier,
+        hint,
+        raw_scores,
+        hinted_scores,
+        raw_job_id,
+        hinted_job_id,
+        result,
+        duration,
+    ):
+        """Append full rollout data to a local JSONL file."""
+        try:
+            run_name = os.environ.get("RUN_NAME", "unknown")
+            path = os.path.join(self._rollout_dir, f"{run_name}.jsonl")
+            record = {
+                "task_id": task_id,
+                "env_key": env_key,
+                "data_key": data_key,
+                "prompt": prompt,
+                "verifier": verifier,
+                "hint": hint,
+                "raw_scores": raw_scores,
+                "hinted_scores": hinted_scores,
+                "raw_job_id": raw_job_id,
+                "hinted_job_id": hinted_job_id,
+                "var_raw": result["var_raw"],
+                "hint_gap": result["hint_gap"],
+                "total": result["total"],
+                "duration": duration,
+                "timestamp": time.time(),
+            }
+            with open(path, "a") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"[{task_id}] Failed to save rollout: {e}")
 
     async def _handle_task_generation(self, action: str) -> BaseTextEnvStepOutput:
         """Evaluate a generated task through the full pipeline.

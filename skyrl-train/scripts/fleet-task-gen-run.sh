@@ -10,6 +10,9 @@
 # SkyPilot env vars: SKYPILOT_NUM_GPUS_PER_NODE, SKYPILOT_NODE_IPS
 set -euo pipefail
 
+# Export RUN_NAME so task_gen_env can tag rollout dumps
+export RUN_NAME="task_gen_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}"
+
 # Task-gen GRPO training via shared run script
 # --entrypoint: task-gen entrypoint (not main_fleet)
 # --env-class: task_gen environment (not fleet_task)
@@ -62,7 +65,7 @@ bash skyrl-train/scripts/fleet-common-run.sh \
   generator.gpu_memory_utilization=0.75 \
   trainer.logger="$LOGGER" \
   trainer.project_name="task-gen-grpo" \
-  trainer.run_name="task_gen_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+  trainer.run_name="$RUN_NAME" \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/task_gen" \
   trainer.dump_data_batch=true \
