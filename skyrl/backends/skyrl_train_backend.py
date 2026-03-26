@@ -463,6 +463,12 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
             asyncio.run(self._inference_engine_client.sleep())
 
+    def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
+        if role == "critic" and loss_fn != "ppo_critic":
+            raise ValueError(f"Critic batches must use loss_fn='ppo_critic', got {loss_fn!r}")
+        if role != "critic" and loss_fn == "ppo_critic":
+            raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -473,10 +479,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._sleep_inference_engines()
         role = self._get_batch_role(prepared_batch.all_model_ids)
         loss_fn = prepared_batch.all_loss_fns[0]
-        if role == "critic" and loss_fn != "ppo_critic":
-            raise ValueError(f"Critic batches must use loss_fn='ppo_critic', got {loss_fn!r}")
-        if role != "critic" and loss_fn == "ppo_critic":
-            raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
+        self._validate_batch_role_and_loss(role, loss_fn)
         if role == "critic" and any(
             len(values) != len(weights) or len(returns) != len(weights)
             for values, returns, weights in zip(
@@ -520,7 +523,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
-            loss_fn_outputs = [{} for _ in range(start_idx, end_idx)]
             if "loss_fn_outputs" in data:
                 loss_fn_outputs = []
                 for i in range(start_idx, end_idx):
@@ -535,6 +537,8 @@ class SkyRLTrainBackend(AbstractBackend):
                                 "shape": [len(values)],
                             }
                     loss_fn_outputs.append(formatted_output)
+            else:
+                loss_fn_outputs = [{} for _ in range(end_idx - start_idx)]
             results[request_id] = types.ForwardBackwardOutput(
                 loss_fn_output_type="scalar",
                 loss_fn_outputs=loss_fn_outputs,
@@ -552,10 +556,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._sleep_inference_engines()
         role = self._get_batch_role(prepared_batch.all_model_ids)
         loss_fn = prepared_batch.all_loss_fns[0]
-        if role == "critic" and loss_fn != "ppo_critic":
-            raise ValueError(f"Critic batches must use loss_fn='ppo_critic', got {loss_fn!r}")
-        if role != "critic" and loss_fn == "ppo_critic":
-            raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
+        self._validate_batch_role_and_loss(role, loss_fn)
         batch = self._to_training_batch(prepared_batch, role)
         micro_bs = (
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None

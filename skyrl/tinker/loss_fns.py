@@ -85,7 +85,7 @@ def ppo_critic_loss(
     _advantages: jax.Array,
     _loss_fn_config: LossFnConfig,
 ) -> jax.Array:
-    raise NotImplementedError("ppo_critic is only supported by the SkyRL-Train backend")
+    return jnp.zeros_like(_loss_mask)
 
 
 # Map from string names to loss functions
