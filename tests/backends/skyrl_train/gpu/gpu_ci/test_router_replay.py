@@ -29,9 +29,9 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
 
-MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B"
-NUM_PROMPTS = 5
-N_SAMPLES_PER_PROMPT = 2
+MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
+NUM_PROMPTS = 10
+N_SAMPLES_PER_PROMPT = 4
 MAX_GENERATE_LENGTH = 128
 
 
