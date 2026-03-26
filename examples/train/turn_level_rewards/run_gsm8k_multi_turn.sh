@@ -2,9 +2,9 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K with turn-level rewards.
 
-# uv run examples/turn_level_rewards/gsm8k_multi_turn_dataset.py --output_dir $HOME/data/gsm8k_multi_turn
+# uv run examples/train/turn_level_rewards/gsm8k_multi_turn_dataset.py --output_dir $HOME/data/gsm8k_multi_turn
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/turn_level_rewards/run_gsm8k_multi_turn.sh
+# bash examples/train/turn_level_rewards/run_gsm8k_multi_turn.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 

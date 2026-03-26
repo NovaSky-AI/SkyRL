@@ -10,7 +10,7 @@ Architecture:
 This client is responsible for BOTH data plane and control plane operations:
 
 1. Data Plane (routed through proxy_url):
-   - generate, chat_completion, completion, tokenize, detokenize
+   - generate, chat_completion, completion, tokenize, detokenize, render
    - Uses proxy_url which points to a router (vllm-router, sglang-router, InferenceRouter)
    - Router handles load balancing and session-aware routing
 
@@ -72,6 +72,19 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_session_id_and_body(
+    request_payload: Dict[str, Any],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Extract session_id and a clean body from an OpenAI-style request payload.
+
+    Returns (session_id, body) where body is a shallow copy without the session_id key.
+    """
+    body = request_payload.get("json", {})
+    session_id = body.get("session_id")
+    clean_body = {k: v for k, v in body.items() if k != "session_id"}
+    return session_id, clean_body
 
 
 class PauseMode(Enum):
@@ -155,6 +168,7 @@ class RemoteInferenceClient:
         if self._sem_loop is not current_loop:
             if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0:
                 concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls)
+                logger.info(f"Capping concurrency for generation to a maximum of {concurrency} requests")
                 self._gen_sem = asyncio.Semaphore(concurrency)
                 self._detok_sem = asyncio.Semaphore(concurrency)
             else:
@@ -199,12 +213,18 @@ class RemoteInferenceClient:
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
-                    body = await resp.json()
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception as e:
+                        last_exc = e
+                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                        await asyncio.sleep(1)
+                        continue
                     raise_for_status(resp, body)
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
-                logger.warning(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                 await asyncio.sleep(1)
                 continue
         raise last_exc  # type: ignore[misc]
@@ -260,13 +280,6 @@ class RemoteInferenceClient:
         # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
         gen_sem, detok_sem = self._get_semaphores()
         batch_size = len(prompt_token_ids)
-        concurrency = (
-            SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * len(self.server_urls) if self._gen_sem is not None else "unlimited"
-        )
-        logger.info(
-            f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
-            f"(shared across all concurrent generate() calls)"
-        )
 
         async def _throttled_generate(idx: int) -> Dict[str, Any]:
             if gen_sem is None:
@@ -363,16 +376,37 @@ class RemoteInferenceClient:
         Returns:
             OpenAI-compatible chat completion response.
         """
-        body = request_payload.get("json", {})
-
-        # Extract session_id for routing (same as InferenceEngineClient)
-        session_id = body.pop("session_id", None)
+        session_id, body = _extract_session_id_and_body(request_payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/chat/completions"
+        return await self._post(url, json=body, headers=headers)
+
+    async def render_chat_completion(
+        self,
+        request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Render a chat completion (apply chat template + tokenize) via /v1/chat/completions/render.
+
+        Args:
+            request_payload: Dict with {"json": <request-body>}.
+                The request body should be OpenAI-compatible chat completion request.
+                session_id can be included in json for consistent routing.
+
+        Returns:
+            Rendered chat completion response (template-applied prompt and token IDs).
+        """
+        session_id, body = _extract_session_id_and_body(request_payload)
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        url = f"{self.proxy_url}/v1/chat/completions/render"
         return await self._post(url, json=body, headers=headers)
 
     async def completion(
@@ -390,10 +424,7 @@ class RemoteInferenceClient:
         Returns:
             OpenAI-compatible completion response.
         """
-        body = request_payload.get("json", {})
-
-        # Extract session_id for routing (same as InferenceEngineClient)
-        session_id = body.pop("session_id", None)
+        session_id, body = _extract_session_id_and_body(request_payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:

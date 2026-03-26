@@ -44,6 +44,10 @@ tinker = [
     "psycopg2-binary",
 ]
 
+vllm-router = [
+    "vllm-router",
+]
+
 aws = [
     "cloudpathlib[s3]",
 ]
@@ -131,7 +135,7 @@ megatron = [
 flashrl = [
     "skyrl[skyrl-train]",
     # NOTE: Custom vLLM wheel must be installed separately.
-    # See examples/flash_rl/README.md for installation instructions.
+    # See examples/train/flash_rl/README.md for installation instructions.
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.7.0; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux'",

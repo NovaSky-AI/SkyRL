@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on DAPO training data and validate on AIME 2024.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen2.5_math_7b_aime.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/algorithms/dapo/run_dapo_qwen2.5_math_7b_aime.sh
 
 # download the model from huggingface and modify the max_position_embeddings in config.json to 32768
 # hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/qwen2.5-math
