@@ -105,35 +105,31 @@ def test_policy_local_engines_e2e(
         sleep_level=2,  # since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size
+            * cfg.generator.inference_engine.num_engines
+            * cfg.generator.inference_engine.data_parallel_size,
+            cfg=cfg,
+        )
 
-        async def run():
-            policy = init_worker_with_type(
-                "policy",
-                shared_pg=pg,
-                colocate_all=cfg.trainer.placement.colocate_all,
-                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size
-                * cfg.generator.inference_engine.num_engines
-                * cfg.generator.inference_engine.data_parallel_size,
-                cfg=cfg,
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
-
-            ray.get(
-                policy.async_run_ray_method(
-                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
-                )
+        )
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
-            await client.reset_prefix_cache()
-            ray.get(
-                policy.async_run_ray_method(
-                    "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
-                )
-            )
+        )
 
-            sampling_params = get_sampling_params_for_backend(
-                cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-            )
-            outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
-            print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
-
-        asyncio.run(run())
+        print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
