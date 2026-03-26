@@ -58,6 +58,12 @@ class TensorList:
         if len(tensors) == 0:
             raise ValueError("Cannot create a TensorList with no tensors.")
         self.tensors = tensors
+        expected_device = tensors[0].device
+        for tensor in tensors:
+            if tensor.device != expected_device:
+                raise ValueError(
+                    f"All tensors must be on the same device. Expected {expected_device}, got {tensor.device}"
+                )
 
     def __len__(self) -> int:
         return len(self.tensors)
@@ -303,7 +309,7 @@ class TensorBatch(dict, Generic[DictType]):
                 new_batch[key] = value.repeat(repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat(repeats)
+                new_batch[key] = value.repeat(repeats, *([1] * (value.dim() - 1)))
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
@@ -327,7 +333,7 @@ class TensorBatch(dict, Generic[DictType]):
                 new_batch[key] = value.repeat_interleave(repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat_interleave(repeats)
+                new_batch[key] = value.repeat_interleave(repeats, dim=0)
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
