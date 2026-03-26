@@ -4,13 +4,13 @@ import asyncio
 import pickle
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -82,12 +82,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_paused": False}
 
     @app.post("/sleep")
-    async def sleep(request: Request):
-        return {"status": "sleeping", "server_id": server_id}
+    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
 
     @app.post("/wake_up")
-    async def wake_up():
-        return {"status": "awake", "server_id": server_id}
+    async def wake_up(tags: Optional[List[str]] = Query(None)):
+        return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
@@ -309,12 +309,34 @@ class TestControlPlane:
         """Test sleep fans out to all servers."""
         result = await client.sleep(level=2)
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 2
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_sleep_with_tags(self, client):
+        """Test sleep with tags produces correct repeated query params."""
+        result = await client.sleep(level=1, tags=["weights", "kv_cache"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 1
+            assert response["body"]["tags"] == ["weights", "kv_cache"]
 
     @pytest.mark.asyncio
     async def test_wake_up(self, client):
         """Test wake_up fans out to all servers."""
         result = await client.wake_up()
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_wake_up_with_tags(self, client):
+        """Test wake_up with tags produces correct repeated query params."""
+        result = await client.wake_up(tags=["weights"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
     async def test_reset_prefix_cache(self, client):
