@@ -54,7 +54,7 @@ def prepare_sample_batch(
     Returns:
         PreparedSampleBatch with all data extracted from requests
     """
-    all_prompts = []
+    all_model_inputs = []
     all_sampling_params = []
     all_model_ids = []
     all_checkpoint_ids = []
@@ -64,17 +64,16 @@ def prepare_sample_batch(
     needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
 
     for request_id, (model_id, request_data) in requests.items():
-        request_start = len(all_prompts)
+        request_start = len(all_model_inputs)
 
         # Expand requests for num_samples
-        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
         checkpoint_path = ""
         if model_id and request_data.checkpoint_id and checkpoints_base:
             checkpoint_path = str(
                 checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
             )
         for sample_idx in range(request_data.num_samples):
-            all_prompts.append(prompt_tokens)
+            all_model_inputs.append(request_data.prompt)
             # Derive a unique seed per sample so that num_samples > 1 produces
             # diverse sequences, matching vLLM's behavior (seed + index).
             sample_params = request_data.sampling_params.model_copy(
@@ -86,11 +85,11 @@ def prepare_sample_batch(
             all_checkpoint_paths.append(checkpoint_path)
 
         request_batch_slices.append(
-            (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+            (request_id, model_id, request_start, len(all_model_inputs), request_data.prompt_logprobs)
         )
 
     return types.PreparedSampleBatch(
-        all_prompts=all_prompts,
+        all_model_inputs=all_model_inputs,
         all_sampling_params=all_sampling_params,
         all_model_ids=all_model_ids,
         all_checkpoint_ids=all_checkpoint_ids,
@@ -114,7 +113,7 @@ def prepare_model_pass_batch(
     Returns:
         PreparedModelPassBatch with all data extracted from requests
     """
-    all_input_ids = []
+    all_model_inputs = []
     all_targets = []
     all_token_weights = []
     all_model_ids = []
@@ -129,10 +128,9 @@ def prepare_model_pass_batch(
             raise ValueError(
                 f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
             )
-        request_start = len(all_input_ids)
+        request_start = len(all_model_inputs)
         for item in request_data.data:
-            tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
-            all_input_ids.append(tokens)
+            all_model_inputs.append(item.model_input)
             loss_fn_inputs = item.loss_fn_inputs
             all_targets.append(loss_fn_inputs.target_tokens.data)
             all_token_weights.append(loss_fn_inputs.weights.data)
@@ -142,10 +140,10 @@ def prepare_model_pass_batch(
             all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
 
-        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+        request_batch_slices.append((request_id, model_id, request_start, len(all_model_inputs)))
 
     return types.PreparedModelPassBatch(
-        all_input_ids=all_input_ids,
+        all_model_inputs=all_model_inputs,
         all_targets=all_targets,
         all_token_weights=all_token_weights,
         all_sampling_logprobs=all_sampling_logprobs,

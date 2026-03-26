@@ -168,6 +168,11 @@ class InferenceRouter:
                     headers=headers,
                     content=body,
                 )
+                if attempt > 0:
+                    logger.warning(
+                        f"Proxy retry {attempt}/{_PROXY_RETRIES - 1} succeeded for {path} "
+                        f"(stale keepalive connection on attempt 0: {last_exc})"
+                    )
                 return Response(
                     content=response.content,
                     status_code=response.status_code,
@@ -175,7 +180,7 @@ class InferenceRouter:
                 )
             except (httpx.ReadError, httpx.ConnectError) as e:
                 last_exc = e
-                logger.warning(f"Proxy retry {attempt + 1}/{_PROXY_RETRIES} for {path}: {e}")
+                logger.warning(f"Proxy retry {attempt + 1}/{_PROXY_RETRIES} for {path}: {type(e).__name__}: {e}")
                 continue
             except Exception as e:
                 logger.info(f"Encountered an exception while proxying a request to path {path}: {e}")
@@ -183,6 +188,27 @@ class InferenceRouter:
 
         logger.error(f"Proxy to {path} failed after {_PROXY_RETRIES} retries: {last_exc}")
         raise last_exc
+
+    def _run_server(self) -> None:
+        """Build and run the server (called inside the daemon thread)."""
+        limits = httpx.Limits(
+            max_connections=SKYRL_HTTP_CONNECTION_LIMIT,
+            max_keepalive_connections=SKYRL_HTTP_CONNECTION_LIMIT,
+        )
+        transport = httpx.AsyncHTTPTransport(limits=limits)
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(None), transport=transport)
+
+        self._app = self._build_app()
+        config = uvicorn.Config(
+            app=self._app,
+            host=self._host,
+            port=self._port,
+            log_level="warning",
+            access_log=False,
+            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
+        )
+        self._server = uvicorn.Server(config)
+        asyncio.run(self._server.serve())
 
     def start(self) -> str:
         """
@@ -194,28 +220,7 @@ class InferenceRouter:
         if not self._server_urls:
             raise ValueError("No servers available")
 
-        # Create HTTP client for proxying
-        limits = httpx.Limits(
-            max_connections=SKYRL_HTTP_CONNECTION_LIMIT,
-            max_keepalive_connections=SKYRL_HTTP_CONNECTION_LIMIT,
-        )
-        transport = httpx.AsyncHTTPTransport(limits=limits)
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(None), transport=transport)
-
-        # Build FastAPI app and uvicorn server
-        self._app = self._build_app()
-        config = uvicorn.Config(
-            app=self._app,
-            host=self._host,
-            port=self._port,
-            log_level="warning",
-            access_log=False,
-            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
-        )
-        self._server = uvicorn.Server(config)
-
-        # Start server in background thread
-        self._server_thread = threading.Thread(target=asyncio.run, args=(self._server.serve(),), daemon=True)
+        self._server_thread = threading.Thread(target=self._run_server, daemon=True)
         self._server_thread.start()
 
         ip = get_node_ip()

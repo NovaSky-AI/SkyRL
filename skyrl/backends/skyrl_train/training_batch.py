@@ -95,6 +95,13 @@ class TensorList:
         return TensorList([t for tl in lists for t in tl.tensors])
 
 
+def _rebuild_tensor_batch(cls, state: Dict[str, Any]):
+    """Module-level helper for unpickling TensorBatch (must be importable by name)."""
+    obj = dict.__new__(cls)
+    obj.__setstate__(state)
+    return obj
+
+
 # NOTE (sumanthrh): This is inspired by `TensorDict` but is much simpler.
 class TensorBatch(dict, Generic[DictType]):
     """Base class for training batches
@@ -218,6 +225,17 @@ class TensorBatch(dict, Generic[DictType]):
     def device(self) -> torch.device:
         """Get the device for the tensors"""
         return self._device
+
+    def __reduce__(self):
+        """Override pickle reduce to avoid separately pickling raw dict items.
+
+        The default dict-subclass pickle calls iter(self.items()) which pickles
+        each tensor through torch's storage-level pickle. That path fails for
+        dtypes backed by UntypedStorage (e.g. uint16). By returning only
+        (__getstate__,) we force all tensor serialization through our custom
+        numpy/torch.save paths which handle every dtype.
+        """
+        return (_rebuild_tensor_batch, (type(self), self.__getstate__()))
 
     def __getstate__(self):
         """Serialize the `TensorBatch` object for pickle protocol.

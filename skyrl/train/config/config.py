@@ -478,6 +478,11 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
+    router_type: str = "default"
+    """Router type for data-plane load balancing.
+    ``"default"`` uses the built-in Python InferenceRouter.
+    ``"vllm-router"`` uses the external vllm-router binary (requires `vllm-router` extra).
+    Only relevant when SkyRL creates its own router (i.e., when ``external_proxy_url`` is not set)."""
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +731,24 @@ class SkyRLTrainConfig(BaseConfig):
             self.trainer.algorithm.max_seq_len = (
                 self.generator.max_input_length + self.generator.sampling_params.max_generate_length
             )
+
+        # TODO(devpatel): Bandaid solution, replace this once we have a better
+        # solution for LoRA performance degradation on the vLLM side
+        ie_cfg = self.generator.inference_engine
+        if (
+            self.trainer.policy.model.lora.rank > 0
+            and self.trainer.strategy != "megatron"
+            and ie_cfg.enforce_eager
+            and ie_cfg.backend == "vllm"
+        ):
+            import warnings
+
+            warnings.warn(
+                "LoRA is enabled but inference_engine.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            ie_cfg.enforce_eager = False
 
     @classmethod
     def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":
