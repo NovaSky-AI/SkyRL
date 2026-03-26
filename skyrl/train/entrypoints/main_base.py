@@ -319,7 +319,6 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
         from skyrl.backends.skyrl_train.inference_servers.server_group import (
             ServerGroup,
         )
@@ -351,7 +350,7 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created internal router over external "
@@ -372,7 +371,7 @@ class BasePPOExp:
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -386,7 +385,24 @@ class BasePPOExp:
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
+            tokenizer=self.tokenizer,
         )
+
+    @staticmethod
+    def _create_router(server_urls, router_type: str = "default"):
+        """Create a data-plane router based on ``router_type``."""
+        if router_type == "vllm-router":
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
+
+            return VLLMRouter(server_urls=server_urls)
+        else:
+            from skyrl.backends.skyrl_train.inference_servers.router import (
+                InferenceRouter,
+            )
+
+            return InferenceRouter(server_urls=server_urls)
 
     def _setup_trainer(self):
         """Setup and return the trainer.

@@ -214,11 +214,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
 
     # 4. Check loss mask exact matches
     system_prompt = tokenizer.apply_chat_template(
-        [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
+        [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], return_dict=False, tokenize=True
     )
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], return_dict=False, tokenize=True)
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, return_dict=False, tokenize=True
     )
     # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`

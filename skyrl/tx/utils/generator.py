@@ -237,6 +237,10 @@ class GeneratorMixin:
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
+        # Pre-extract per-layer parameters once (outside while_loop) to avoid
+        # re-slicing stacked weights every decode step.
+        decode_layers = model.get_decode_layers()
+
         def cond_fn(s: DecodeState) -> jax.Array:
             """Continue while any sequence is still generating."""
             all_stopped = jnp.all(s.stop_pos != -1)
@@ -279,6 +283,7 @@ class GeneratorMixin:
                 positions=s.last_positions + 1,
                 kv_cache=s.kv_cache,
                 adapter_indices=adapter_indices,
+                decode_layers=decode_layers,
             )
             # Compute logits for the next token
             next_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)[:, 0, :]

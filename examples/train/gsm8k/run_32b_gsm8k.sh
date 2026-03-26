@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-32B-Instruct on GSM8K.
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_32b_gsm8k.sh
+# bash examples/train/gsm8k/run_32b_gsm8k.sh
 
 
 DATA_DIR="$HOME/data/gsm8k"

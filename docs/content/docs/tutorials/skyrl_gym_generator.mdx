@@ -156,6 +156,7 @@ self.base_conversation = [
 self.base_conversation_token_ids = tokenizer.apply_chat_template(
   self.base_conversation,
   add_generation_prompt=False,
+  return_dict=False,
   tokenize=True,
 )
 
@@ -168,6 +169,7 @@ convert them to token IDs while following the model's chat template by:
 observation_ids = self.tokenizer.apply_chat_template(
   [*self.base_conversation, *new_obs],
   add_generation_prompt=True,
+  return_dict=False,
   tokenize=True,
 )[len(self.base_conversation_token_ids) :]
 input_ids += observation_ids

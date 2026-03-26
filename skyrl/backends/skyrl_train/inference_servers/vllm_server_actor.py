@@ -131,7 +131,6 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
         # Enable runtime LoRA loading/unloading via /v1/load_lora_adapter endpoint
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
-        os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
@@ -171,6 +170,7 @@ class VLLMServerActor(ServerActorProtocol):
         if self._use_mp_backend:
             self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
         else:
+            os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
             # Set bundle indices for this server's TP/PP workers in the placement group.
             # NOTE: This assumes single-GPU-per-bundle placement groups.
             if bundle_indices is None:

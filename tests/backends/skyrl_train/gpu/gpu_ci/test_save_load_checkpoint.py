@@ -92,6 +92,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
     if fully_reshardable:
         cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
 
+    checkpoint_dir = None
     try:
         actor_group = init_worker_with_type(
             "policy",
@@ -101,8 +102,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
             cfg=cfg,
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-        checkpoint_dir = None
         # Create dummy training batches for training steps
         dp_size = actor_group.actor_infos[0].rank.dp_size
         dummy_batch_1 = make_dummy_training_batch(batch_size=dp_size)  # First training step

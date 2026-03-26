@@ -187,8 +187,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             await asyncio.to_thread(
                 NCCLWeightTransferEngine.trainer_send_weights,
                 iterator=weight_iterator(),
-                group=self._model_update_group,
-                packed=True,
+                trainer_args={"group": self._model_update_group, "packed": True},
             )
             await update_task
         else:

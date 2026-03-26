@@ -132,6 +132,27 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     return prefix + ".".join(map(str, path))
 
 
+def get_fused_info(model: nnx.Module) -> dict[str, tuple[tuple[str, ...], tuple[int, ...]]]:
+    """Return ``{name: (components, group_sizes)}`` for every ``FusedLoRALinear`` in *model*."""
+    from skyrl.tx.layers.lora import FusedLoRALinear
+
+    return {
+        path[-1]: (m.components, m.group_sizes)
+        for path, m in nnx.graph.iter_graph(model)
+        if isinstance(m, FusedLoRALinear)
+    }
+
+
+def _get_shared_lora_A(arrays: list[np.ndarray]) -> np.ndarray:
+    """Return shared LoRA A matrix, validating all arrays are identical."""
+    if not all(np.allclose(arrays[0], arr) for arr in arrays[1:]):
+        raise RuntimeError(
+            "Cannot load split LoRA adapter into fused projection because the source "
+            "branches do not share the same lora_A matrix."
+        )
+    return arrays[0]
+
+
 def get_expert_key(path: tuple, expert_idx: int) -> str:
     "Get the safetensors key for an expert weight model path."
     path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
@@ -153,7 +174,10 @@ def load_safetensors(
     When adapter_index and rank are provided, loads LoRA weights into a specific
     adapter slot instead of replacing the full parameter.
     """
+    from skyrl.tx.layers.lora import FusedLoRALinear
     from skyrl.tx.layers.stacked import unstack_state
+
+    fused_info = get_fused_info(model)
 
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
@@ -180,9 +204,20 @@ def load_safetensors(
             if missing_keys:
                 raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
             tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
+        elif path[-2] in fused_info:
+            components, group_sizes = fused_info[path[-2]]
+            keys = [get_param_key((*path[:-2], name, path[-1])) for name in components]
+            missing_keys = [k for k in keys if k not in tensors]
+            if missing_keys:
+                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+            weights = [tensors[k].T for k in keys]
+            if path[-1] == "lora_A":
+                tensor = _get_shared_lora_A(weights)
+            else:
+                tensor = np.asarray(FusedLoRALinear.fuse(*weights, group_sizes=group_sizes))
+        elif key not in tensors:
+            raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
-            if key not in tensors:
-                raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
             tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
@@ -211,7 +246,10 @@ def save_safetensors(
     When adapter_index and rank are provided, extracts a single adapter's LoRA
     weights instead of saving the full parameter.
     """
+    from skyrl.tx.layers.lora import FusedLoRALinear
     from skyrl.tx.layers.stacked import unstack_state
+
+    fused_info = get_fused_info(model)
 
     # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
     # (layers.0.xxx) matching the checkpoint key format used by HuggingFace
@@ -234,6 +272,16 @@ def save_safetensors(
             param = param.reshape(param.shape[0], -1)
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
+        elif path[-2] in fused_info:
+            components, group_sizes = fused_info[path[-2]]
+            keys = [get_param_key((*path[:-2], name, path[-1]), prefix=prefix) for name in components]
+            if path[-1] == "lora_A":
+                for k in keys:
+                    tensors[k] = param.T
+            else:
+                for k, p in zip(keys, FusedLoRALinear.split(param, group_sizes)):
+                    tensors[k] = p.T
+            continue
         tensors[key] = param if "embed_tokens" in path else param.T
 
     # In multi-host mode, gather all shards and only save from rank 0
