@@ -441,7 +441,7 @@ BAD prompt:  "Find a designer in Mexico" (3 designers exist, verifier checks for
 FIX option 1: Make the prompt specific: "Find the designer in Mexico City who joined after 2023"
 FIX option 2: Make the verifier accept all valid answers: check that ANY designer in Mexico is returned
 
-Use `describe_db`/`query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess.
+Use `describe_db`/`query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess. You must also call at least one environment API tool to understand its input/output format before writing the task.
 
 ### Avoiding Overspecification
 A prompt is overspecified when it dictates HOW to accomplish the task rather than WHAT outcome is needed. This makes the task trivially easy (no learning signal) and doesn't test real problem-solving.
@@ -485,7 +485,7 @@ Returns the full schema: table names, columns, types.
 Runs a read-only SQL query against the seed database.
 
 ### Environment Tools
-You can also call any of the environment's API tools listed above to see how they work:
+You MUST call at least one of the environment's API tools listed above to understand their input/output formats:
 
 <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 Calls the tool and returns its result. Use this to understand input/output formats.
@@ -493,7 +493,7 @@ Calls the tool and returns its result. Use this to understand input/output forma
 ### Workflow
 1. **Explore**: Call `describe_db` to see all tables and columns.
 2. **Inspect data**: Call `query_db` with SELECT queries to inspect real data (values, ranges, row counts, patterns).
-3. **Try tools**: Optionally call environment tools to understand their behavior, input/output formats, and edge cases.
+3. **Try tools**: Call at least one environment API tool to understand its behavior, input/output formats, and edge cases.
 4. **Draft a task idea**: Think about what prompt + verifier you could write based on the data you've seen.
 5. **Validate your draft**: Before outputting the task, run `query_db` to verify your assumptions:
    - Does the data your prompt references actually exist? (e.g., "Update Jamie's email" — is there a Jamie?)
