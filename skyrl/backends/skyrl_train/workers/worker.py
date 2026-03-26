@@ -722,35 +722,6 @@ class PolicyWorkerBase(Worker):
 
         return result
 
-    def forward_backward_from_staged(
-        self,
-        data: TrainingInputBatch,
-        start_idx: int,
-        end_idx: int,
-        loss_fn: Optional[str] = None,
-        loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
-
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-            loss_fn: Optional loss function name to use instead of config default
-            loss_fn_config: Optional config overrides for the loss function
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-
     def _forward_backward_micro(
         self,
         experience: Experience,
@@ -1082,26 +1053,6 @@ class CriticWorkerBase(Worker):
                 all_metrics[k].append(v)
 
         return reduce_metrics(dict(all_metrics))
-
-    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
-
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data)
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """

@@ -1,60 +1,44 @@
 """
-uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully_async
 """
 
 import sys
 
 import ray
 import torch
-from dataclasses import dataclass
 from typing import List
 
-from skyrl.train.config import AlgorithmConfig, make_config
-from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
 from skyrl.train.entrypoints.main_base import BasePPOExp
 
 from skyrl.train.generators.base import GeneratorOutput
 
-
-@dataclass
-class DAPOAlgorithmConfig(AlgorithmConfig):
-    """Extended algorithm config with DAPO-specific overlong buffer settings."""
-
-    overlong_buffer_len: int = 512
-    overlong_buffer_penalty_factor: float = 1.0
+from examples.train.algorithms.dapo.main_dapo import DAPOConfig
 
 
-DAPOConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
-
-
-class DAPOTrainer(RayPPOTrainer):
-    """
-    Custom trainer for DAPO.
-
-    Overrides the postprocess_generator_output method to additionally apply soft overlong punishment to rewards.
-    """
-
+class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
     @torch.no_grad()
     def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
-        # NOTE (sumanthrh): Given the usage of `make_config`, the algorithm config subclass for DAPO is
-        # created dynamically and thus IDEs will not be able to resolve the attributes
-        # For better typing, you can always define a custom subclass of DAPOConfig manually.
-        # See examples/train_integrations/harbor for an example.
+        """
+        Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
+
+        Handles both sequence-level rewards (List[float]) and per-token rewards (List[List[float]]).
+
+        NOTE(Charlie): this is different from DAPOTrainer.postprocess_generator_output because we have
+        batched=false in fully async mode, so we need to handle both sequence-level rewards and per-token rewards.
+        """
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         # modify rewards here
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
-        assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
-
-        # get the response length
         response_lengths = [len(response) for response in response_ids]
-
-        # get the max context length
-        # NOTE: this is only valid for single turn generation
         max_response_length = self.cfg.generator.sampling_params.max_generate_length
+
+        # Determine if rewards are per-token (List[List[float]]) or sequence-level (List[float])
+        is_per_token = rewards and isinstance(rewards[0], list)
 
         # apply soft overlong punishment
         for i, response_length in enumerate(response_lengths):
@@ -65,11 +49,16 @@ class DAPOTrainer(RayPPOTrainer):
                 exceed_length = response_length - max_exceed_length
                 penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
 
-                rewards[i] -= penalty
-            # if the response is outside the overlong buffer, set the reward to 0
+                if is_per_token:
+                    # Subtract penalty from the last token's reward
+                    rewards[i][-1] -= penalty
+                else:
+                    rewards[i] -= penalty
             elif response_length > max_response_length:
-                # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
-                rewards[i] = 0.0
+                if is_per_token:
+                    rewards[i] = [0.0] * len(rewards[i])
+                else:
+                    rewards[i] = 0.0
 
         generator_output["rewards"] = rewards
 
@@ -77,14 +66,14 @@ class DAPOTrainer(RayPPOTrainer):
         return super().postprocess_generator_output(generator_output, uids)
 
 
-class DAPOExp(BasePPOExp):
+class FullyAsyncDAPOExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs):
-        return DAPOTrainer(*args, **kwargs)
+        return FullyAsyncDAPOTrainer(*args, **kwargs)
 
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
-    exp = DAPOExp(cfg)
+    exp = FullyAsyncDAPOExp(cfg)
     exp.run()
 
 
