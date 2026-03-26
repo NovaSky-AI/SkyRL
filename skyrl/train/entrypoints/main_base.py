@@ -412,7 +412,7 @@ class BasePPOExp:
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
-      
+
     @staticmethod
     def _create_router(server_urls, router_type: str = "default"):
         """Create a data-plane router based on ``router_type``."""
