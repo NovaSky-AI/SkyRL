@@ -441,7 +441,7 @@ BAD prompt:  "Find a designer in Mexico" (3 designers exist, verifier checks for
 FIX option 1: Make the prompt specific: "Find the designer in Mexico City who joined after 2023"
 FIX option 2: Make the verifier accept all valid answers: check that ANY designer in Mexico is returned
 
-Use `describe_db`/`query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess. You must also call at least one environment API tool to understand its input/output format before writing the task.
+Use `describe_db`/`query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess. You MUST call all three of `describe_db`, `query_db`, and at least one environment API tool before writing the task — your task will be rejected otherwise.
 
 ### Avoiding Overspecification
 A prompt is overspecified when it dictates HOW to accomplish the task rather than WHAT outcome is needed. This makes the task trivially easy (no learning signal) and doesn't test real problem-solving.
@@ -485,7 +485,9 @@ Returns the full schema: table names, columns, types.
 Runs a read-only SQL query against the seed database.
 
 ### Environment Tools
-You MUST call at least one of the environment's API tools listed above to understand their input/output formats:
+You MUST call at least one of the environment's API tools listed above to understand their input/output formats.
+
+**REQUIRED before generating a task:** You must call ALL THREE of: (1) `describe_db`, (2) `query_db`, and (3) at least one environment API tool. Your task will be rejected if any are missing.
 
 <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 Calls the tool and returns its result. Use this to understand input/output formats.
@@ -1028,37 +1030,74 @@ Generate exactly ONE task. Output it in this format:
 
         # 1. Check for <task> block → evaluation pipeline
         if "<task>" in action:
-            # Gate: require at least one DB exploration call before generating a task
-            # (unless max_turns=1, i.e., single-turn mode, or running out of turns)
-            min_exploration = 1 if self.max_turns > 1 else 0
-            total_tool_calls = self.meta_tool_calls + self.mcp_tool_calls
-            if total_tool_calls < min_exploration and not max_turns_reached:
-                observation = {
-                    "role": "user",
-                    "content": (
-                        "You must explore the database before generating a task. "
-                        "Call `describe_db` to see the schema, then use `query_db` to check "
-                        "actual data (user IDs, table contents, etc.). "
-                        "NEVER hardcode database IDs — always query to find them first."
-                    ),
-                }
-                return BaseTextEnvStepOutput(
-                    observations=[observation],
-                    reward=0.0,
-                    done=False,
-                    metadata={
-                        "env_key": self.env_key,
-                        "turn": self.turns,
-                        "rejected": "no_exploration",
-                    },
-                )
+            # Gate: require describe_db + query_db + at least one env tool call
+            # before generating a task (unless single-turn or out of turns)
+            if self.max_turns > 1 and not max_turns_reached:
+                missing = []
+                if not self.called_describe_db:
+                    missing.append("`describe_db` (to see the schema)")
+                if not self.called_query_db:
+                    missing.append("`query_db` (to inspect actual data)")
+                if self.mcp_tool_calls < 1:
+                    missing.append("at least one environment API tool (to understand input/output formats)")
+                if missing:
+                    observation = {
+                        "role": "user",
+                        "content": (
+                            "You must explore the environment before generating a task. "
+                            "You still need to call: "
+                            + "; ".join(missing)
+                            + ". NEVER hardcode database IDs — always query to find them first."
+                        ),
+                    }
+                    return BaseTextEnvStepOutput(
+                        observations=[observation],
+                        reward=0.0,
+                        done=False,
+                        metadata={
+                            "env_key": self.env_key,
+                            "turn": self.turns,
+                            "rejected": "no_exploration",
+                        },
+                    )
             return await self._handle_task_generation(action)
 
         # 2. Check for tool call → execute via Fleet orchestrator or MCP
+        # Enforce exploration sequence: describe_db → query_db → env tool
         tool_call = parse_tool_call(action)
         if tool_call and tool_call["name"] in self.callable_tools:
+            if self.max_turns > 1 and not max_turns_reached:
+                name = tool_call["name"]
+                if name == "query_db" and not self.called_describe_db:
+                    return BaseTextEnvStepOutput(
+                        observations=[{
+                            "role": "user",
+                            "content": "Call `describe_db` first to see the schema before querying data.",
+                        }],
+                        reward=0.0,
+                        done=False,
+                        metadata={"env_key": self.env_key, "turn": self.turns, "rejected": "sequence_violation"},
+                    )
+                if name not in _META_TOOLS and not self.called_query_db:
+                    return BaseTextEnvStepOutput(
+                        observations=[{
+                            "role": "user",
+                            "content": (
+                                "Call `describe_db` and `query_db` first to understand the schema and data "
+                                "before calling environment tools."
+                            ),
+                        }],
+                        reward=0.0,
+                        done=False,
+                        metadata={"env_key": self.env_key, "turn": self.turns, "rejected": "sequence_violation"},
+                    )
+
             if tool_call["name"] in _META_TOOLS:
                 self.meta_tool_calls += 1
+                if tool_call["name"] == "describe_db":
+                    self.called_describe_db = True
+                elif tool_call["name"] == "query_db":
+                    self.called_query_db = True
                 obs_content = await self._execute_meta_tool(tool_call)
             else:
                 self.mcp_tool_calls += 1
@@ -1163,6 +1202,8 @@ Generate exactly ONE task. Output it in this format:
         self.turns = 0
         self.meta_tool_calls = 0
         self.mcp_tool_calls = 0
+        self.called_describe_db = False
+        self.called_query_db = False
         self.orch = None
         self.mcp_tools = None
         self.callable_tools = set(_META_TOOLS)
