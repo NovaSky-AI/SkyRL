@@ -464,6 +464,7 @@ class InferenceEngineState:
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
         distributed_executor_backend: Optional[str] = None,
+        expert_parallel_size: Optional[int] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -495,6 +496,8 @@ class InferenceEngineState:
             ie_cfg.engine_init_kwargs = engine_init_kwargs
         if distributed_executor_backend is not None:
             ie_cfg.distributed_executor_backend = distributed_executor_backend
+        if expert_parallel_size is not None:
+            ie_cfg.expert_parallel_size = expert_parallel_size
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
@@ -562,6 +565,7 @@ class InferenceEngineState:
             eps = create_ray_wrapped_inference_engines(
                 num_inference_engines=ie_cfg.num_engines,
                 tensor_parallel_size=ie_cfg.tensor_parallel_size,
+                expert_parallel_size=ie_cfg.expert_parallel_size,
                 model_dtype="bfloat16",
                 pretrain=cfg.trainer.policy.model.path,
                 seed=42,

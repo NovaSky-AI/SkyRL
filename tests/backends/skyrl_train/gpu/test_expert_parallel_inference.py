@@ -6,31 +6,23 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 """
 
 import asyncio
-from typing import Optional
 
 import pytest
 import ray
-from ray.util.placement_group import PlacementGroup, placement_group
-from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
-    create_ray_wrapped_inference_engines,
-)
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
     are_responses_similar,
     get_available_gpus,
     get_test_actor_config,
     get_test_prompts,
     init_worker_with_type,
+    run_inference,
 )
 
 MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
@@ -78,42 +70,14 @@ def _get_test_cfg() -> SkyRLTrainConfig:
     return cfg
 
 
-async def _run_single_generation(client: InferenceEngineClient, prompts, sampling_params):
-    tasks = [client.generate(InferenceEngineInput(prompts=[p], sampling_params=sampling_params)) for p in prompts]
+async def _run_single_generation(client, prompts, sampling_params, tokenizer):
+    tasks = [run_inference(client, [p], sampling_params, tokenizer=tokenizer) for p in prompts]
     results = await asyncio.gather(*tasks)
     responses, reasons = [], []
     for r in results:
         responses.extend(r["responses"])
         reasons.extend(r["stop_reasons"])
     return responses, reasons
-
-
-def init_ray_inference_engines(
-    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLTrainConfig
-) -> InferenceEngineClient:
-    """Initialize ray-wrapped inference engines for the specified backend"""
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
-    engine = create_ray_wrapped_inference_engines(
-        num_inference_engines=1,
-        tensor_parallel_size=tp_size,
-        expert_parallel_size=config.generator.inference_engine.expert_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=MODEL,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=shared_pg,
-        gpu_memory_utilization=0.8,
-        inference_engine_enable_sleep=False,
-        async_engine=True,
-        max_num_batched_tokens=8192,
-        max_num_seqs=1024,
-        tokenizer=tokenizer,
-        backend=backend,
-    )
-    client = InferenceEngineClient(engine, tokenizer, config)
-    return client
 
 
 def test_ep_generation():
@@ -129,73 +93,50 @@ def test_ep_generation():
         cfg.generator.sampling_params.temperature = 0.0
         cfg.generator.sampling_params.top_p = 1.0
         cfg.generator.sampling_params.top_k = -1
-        initialize_ray(cfg)
 
-        client = init_ray_inference_engines(
-            backend=cfg.generator.inference_engine.backend,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            shared_pg=None,
-            config=cfg,
-        )
+        with InferenceEngineState.create(cfg, sleep_level=1) as state:
+            tokenizer = get_tokenizer(MODEL)
+            prompts = get_test_prompts(MODEL, num_samples=4)
+            sampling_params = get_sampling_params_for_backend(
+                cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+            )
 
-        prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
-
-        responses, reasons = asyncio.run(_run_single_generation(client, prompts, sampling_params))
-        assert len(responses) == len(prompts)
-        assert len(reasons) == len(prompts)
+            responses, reasons = asyncio.run(_run_single_generation(state.client, prompts, sampling_params, tokenizer))
+            assert len(responses) == len(prompts)
+            assert len(reasons) == len(prompts)
     finally:
         ray.shutdown()
 
 
-def test_ep_weight_sync():
+def test_ep_weight_sync(ray_init_fixture):
     """
     Ensure generation works after syncing weights from training policy worker.
     """
     _check_gpus(num_gpus=NUM_GPUS)
 
-    pg = None
-    try:
-        cfg = _get_test_cfg()
-        cfg.trainer.placement.colocate_all = True
-        # Deterministic sampling for robust comparisons
-        cfg.generator.sampling_params.temperature = 0.0
-        cfg.generator.sampling_params.top_p = 1.0
-        cfg.generator.sampling_params.top_k = -1
+    cfg = _get_test_cfg()
+    cfg.trainer.placement.colocate_all = True
+    # Deterministic sampling for robust comparisons
+    cfg.generator.sampling_params.temperature = 0.0
+    cfg.generator.sampling_params.top_p = 1.0
+    cfg.generator.sampling_params.top_k = -1
 
-        initialize_ray(cfg)
-
-        # Create a shared PG with 2 bundles (sufficient for two engines with tp=2 and training)
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * NUM_GPUS, strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=60)
-
-        # Spin up two inference engines with EP enabled, colocated
-        client = init_ray_inference_engines(
-            backend=cfg.generator.inference_engine.backend,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            shared_pg=pg,
-            config=cfg,
-        )
-        asyncio.run(client.wake_up())
-
+    with InferenceEngineState.create(cfg, colocate_all=True) as state:
         # Generate before weight sync
+        tokenizer = get_tokenizer(MODEL)
         prompts = get_test_prompts(MODEL, num_samples=4)
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        out_before = asyncio.run(
-            client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
-        )
+        out_before = asyncio.run(run_inference(state.client, prompts, sampling_params, tokenizer=tokenizer))
         assert len(out_before["responses"]) == len(prompts)
 
-        asyncio.run(client.sleep())
+        asyncio.run(state.client.sleep())
 
-        # Initialize policy worker
+        # Initialize policy worker on the same placement group
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
+            shared_pg=state.pg,
             colocate_all=True,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -204,21 +145,27 @@ def test_ep_weight_sync():
         # Sync weights to inference engines
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                "pass_through",
+                "init_weight_sync_state",
+                state.client,
+                cfg.generator.inference_engine,
             )
         )
-        asyncio.run(client.wake_up(tags=["weights"]))
+        asyncio.run(state.client.wake_up(tags=["weights"]))
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+                "pass_through",
+                "broadcast_to_inference_engines",
+                state.client,
+                cfg.generator.inference_engine,
             )
         )
         policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        asyncio.run(client.reset_prefix_cache())
+        asyncio.run(state.client.wake_up(tags=["kv_cache"]))
+        asyncio.run(state.client.reset_prefix_cache())
 
         # Generate after weight sync
-        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)))
+        out_after = asyncio.run(run_inference(state.client, prompts, sampling_params, tokenizer=tokenizer))
         assert len(out_after["responses"]) == len(prompts)
         assert len(out_after["stop_reasons"]) == len(prompts)
 
@@ -228,10 +175,3 @@ def test_ep_weight_sync():
                 print(
                     f"Response changed significantly after weight sync: before={out_before['responses'][i][:200]} ... after={out_after['responses'][i][:200]} ..."
                 )
-    finally:
-        if pg is not None:
-            try:
-                ray.util.remove_placement_group(pg)
-            except Exception:
-                pass
-        ray.shutdown()
