@@ -79,7 +79,8 @@ class TestReduceMetrics:
 
 
 class TestAllReduceMetrics:
-    def test_all_reduce_metrics_separates_by_suffix(self):
+    @pytest.mark.parametrize("sum_loss_metrics", [True, False])
+    def test_all_reduce_metrics_separates_by_suffix(self, sum_loss_metrics):
         """Verify metrics are correctly separated by suffix and reduced with correct ops."""
         strategy = MagicMock()
 
@@ -96,7 +97,7 @@ class TestAllReduceMetrics:
             "entropy": 0.5,
         }
 
-        _ = all_reduce_metrics(metrics, strategy, sum_loss_metrics=True)
+        _ = all_reduce_metrics(metrics, strategy, sum_loss_metrics=sum_loss_metrics)
 
         # Verify all_reduce was called 4 times
         assert strategy.all_reduce.call_count == 4
@@ -114,11 +115,17 @@ class TestAllReduceMetrics:
 
         # Verify mean metrics (entropy)
         mean_call = [c for c in ops_and_keys if c[0] == "mean"][0]
-        assert mean_call[1] == {"entropy"}
+        if sum_loss_metrics:
+            assert mean_call[1] == {"entropy"}
+        else:
+            assert mean_call[1] == {"entropy", "policy_loss"}
 
         # Verify sum metrics (explicit sum_keys)
         sum_call = [c for c in ops_and_keys if c[0] == "sum"][0]
-        assert sum_call[1] == {"policy_loss"}
+        if sum_loss_metrics:
+            assert sum_call[1] == {"policy_loss"}
+        else:
+            assert sum_call[1] == set()
 
         # Verify min metrics
         min_call = [c for c in ops_and_keys if c[0] == "min"][0]
@@ -145,7 +152,7 @@ class TestAllReduceMetrics:
         ops_and_keys = []
         for args, kwargs in strategy.all_reduce.call_args_list:
             data_dict = args[0]
-            op = kwargs.get("op", args[1])
+            op = kwargs["op"]
             if data_dict:
                 ops_and_keys.append((op, set(data_dict.keys())))
 
