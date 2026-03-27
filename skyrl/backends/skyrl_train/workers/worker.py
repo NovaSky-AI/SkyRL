@@ -806,12 +806,15 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-        loss_scale = self.mesh_rank.dp_size
+        # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+        # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+        # dp_size to recover the correct sum reduction across workers.
+        grad_sum_correction_factor = self.mesh_rank.dp_size
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
             unscaled_loss = policy_loss
-            loss = unscaled_loss * loss_scale
+            loss = unscaled_loss * grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -819,7 +822,7 @@ class PolicyWorkerBase(Worker):
                 elementwise_loss = -action_log_probs
                 if loss_mask is not None:
                     elementwise_loss = elementwise_loss * loss_mask
-                elementwise_loss = elementwise_loss * loss_scale
+                elementwise_loss = elementwise_loss * grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs (matches Tinker's ForwardBackwardOutput structure)
             # Trim to actual response length per sample (Tinker expects variable-length arrays
@@ -878,7 +881,7 @@ class PolicyWorkerBase(Worker):
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
             unscaled_loss = policy_loss + kl_loss_term - entropy_loss_term
-            loss = unscaled_loss * loss_scale
+            loss = unscaled_loss * grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Build per-sequence loss_fn_outputs with logprobs.
