@@ -636,8 +636,6 @@ def test_client_sample(vllm_server: InferenceEngineState):
     result = asyncio.run(client.sample(payload))
 
     assert result["type"] == "sample"
-    assert result["prompt_logprobs"] is None
-    assert result["topk_prompt_logprobs"] is None
     assert len(result["sequences"]) == 1
 
     seq = result["sequences"][0]

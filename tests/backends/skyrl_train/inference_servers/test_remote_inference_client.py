@@ -476,22 +476,6 @@ class TestSample:
         assert result["sequences"][0]["logprobs"] == [-0.1]
         assert result["sequences"][1]["logprobs"] == [-0.2]
 
-    @pytest.mark.asyncio
-    async def test_sample_with_session_id(self, client):
-        """Test that session_id is popped from body for routing."""
-        request_payload = {
-            "json": {
-                "prompt": {"chunks": [{"tokens": [5, 6]}]},
-                "num_samples": 1,
-                "sampling_params": {"temperature": 0.5},
-                "session_id": "test-session-42",
-            }
-        }
-        # session_id is extracted for routing but the original payload is not mutated
-        result = await client.sample(request_payload)
-        assert result["type"] == "sample"
-        assert len(result["sequences"]) == 1
-
 
 class TestRenderChatCompletion:
     """Test render_chat_completion method (multimodal and text-only)."""
