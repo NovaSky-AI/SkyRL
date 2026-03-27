@@ -13,8 +13,23 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import ray
-import vllm
 from loguru import logger
+
+import vllm
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    InferenceEngineInput,
+    InferenceEngineInterface,
+    InferenceEngineOutput,
+)
+from skyrl.backends.skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl.backends.skyrl_train.inference_servers.vllm_worker import (
+    WorkerWrap,  # noqa: F401, E402
+)
+from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from vllm import SamplingParams
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -35,21 +50,6 @@ from vllm.entrypoints.openai.models.serving import (
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-
-from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInput,
-    InferenceEngineInterface,
-    InferenceEngineOutput,
-)
-from skyrl.backends.skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
-
-# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
-# This alias preserves the old import path for existing scripts/configs.
-# TODO (Kourosh): Remove this alias once all references are updated.
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import (
-    WorkerWrap,  # noqa: F401, E402
-)
-from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 
 
 @dataclass

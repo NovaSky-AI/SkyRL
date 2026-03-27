@@ -46,12 +46,24 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
+        sp = body.get("sampling_params", {})
+        n = sp.get("n", 1)
+        # If logprobs is explicitly set (sample path), use n for num_choices.
+        # Otherwise (generate path), use len(token_ids) for per-prompt responses.
+        if "logprobs" in sp:
+            num_choices = n
+        else:
+            num_choices = max(len(body.get("token_ids", [])), 1)
 
         return {
             "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
+                {
+                    "request_id": "dummy",
+                    "token_ids": [i, i + 1, i + 2],
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"logprob": -0.1 * (i + 1)}]},
+                }
+                for i in range(num_choices)
             ]
         }
 
@@ -419,6 +431,66 @@ class TestServerInfo:
         # Second call returns cached value
         total_world_size2, _ = await client.get_world_size()
         assert total_world_size2 == 4
+
+
+class TestSample:
+    """Test sample() method (Tinker API)."""
+
+    @pytest.mark.asyncio
+    async def test_sample(self, client):
+        """Test sample with n=1 returns correct structure."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert seq["tokens"] == [0, 1, 2]
+        assert seq["logprobs"] == [-0.1]
+        assert seq["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_n2(self, client):
+        """Test sample with n=2 returns two sequences."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
+                "num_samples": 2,
+                "sampling_params": {"temperature": 1.0, "max_tokens": 32},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert len(result["sequences"]) == 2
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][1]["tokens"] == [1, 2, 3]
+        assert result["sequences"][0]["logprobs"] == [-0.1]
+        assert result["sequences"][1]["logprobs"] == [-0.2]
+
+    @pytest.mark.asyncio
+    async def test_sample_with_session_id(self, client):
+        """Test that session_id is popped from body for routing."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [5, 6]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.5},
+                "session_id": "test-session-42",
+            }
+        }
+        # session_id is extracted for routing but the original payload is not mutated
+        result = await client.sample(request_payload)
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
 
 
 class TestRenderChatCompletion:

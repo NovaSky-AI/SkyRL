@@ -136,7 +136,6 @@ def create_ray_wrapped_inference_engines(
 
     if backend == "vllm":
         import vllm
-
         from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import (
             AsyncVLLMRayActor,
             VLLMRayActor,
