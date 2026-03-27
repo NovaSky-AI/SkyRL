@@ -1054,7 +1054,8 @@ class RayPPOTrainer:
 
         return data
 
-    def normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
+    @torch.no_grad()
+    def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
         advantages = data["advantages"]
         response_mask = data["response_mask"]
 
@@ -1106,7 +1107,7 @@ class RayPPOTrainer:
         if model == "policy":
             mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
             # Normalize advantages for policy training; critic training does not need this
-            data = self.normalize_advantages(data, mini_batch_size)
+            data = self._normalize_advantages(data, mini_batch_size)
         else:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
