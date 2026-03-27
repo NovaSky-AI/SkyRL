@@ -628,7 +628,6 @@ def sapo_policy_loss(
     )
     loss_metrics.update(off_policy_metrics)
 
-    # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics

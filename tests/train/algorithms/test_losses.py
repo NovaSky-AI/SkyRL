@@ -415,7 +415,7 @@ def test_sapo_policy_loss_basic():
     # Ratios ≈ [exp(-0.5), exp(0.2), exp(-0.1)] ≈ [0.6065, 1.2214, 0.9048]
     log_probs = torch.tensor([[-1.5, -0.8, -1.1]], device=device)
 
-    # SAPO config: uses sequence_mean reduction and distinct tau_pos / tau_neg
+    # SAPO config with distinct tau_pos / tau_neg
     config = AlgorithmConfig(
         policy_loss_type="sapo",
         max_seq_len=4,
