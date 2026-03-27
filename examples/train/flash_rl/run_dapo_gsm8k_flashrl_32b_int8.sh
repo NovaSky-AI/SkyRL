@@ -3,9 +3,9 @@ set -x
 # Colocated DAPO training+generation for Qwen3-32B on GSM8K with FP8 rollouts.
 # The configuration is tested on 2 8xH100 GPUs.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/flash_rl/run_dapo_gsm8k_flashrl_32b_int8.sh
+# bash examples/train/flash_rl/run_dapo_gsm8k_flashrl_32b_int8.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=16

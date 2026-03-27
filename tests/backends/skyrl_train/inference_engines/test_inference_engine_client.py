@@ -186,6 +186,10 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
     """
 
     class MockEngine:
+
+        def dp_size(self):
+            return 1
+
         async def completion(self, request_payload):
             """
             Given input [i, j, k, ...], return output [f"{i}{i}", f"{j}{j}", f"{k}{k}", ...] with
@@ -287,6 +291,10 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
     """
 
     class MockEngine:
+
+        def dp_size(self):
+            return 1
+
         async def generate(self, input_batch):
             # input_batch["prompt_token_ids"] is a local sub-batch list of token id lists
             prompt_token_ids = input_batch["prompt_token_ids"]

@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen3-4B-Base on DAPO training data with Megatron.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/megatron/run_megatron_dapo_qwen3_4b.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/megatron/run_megatron_dapo_qwen3_4b.sh
 
 MODEL_NAME="Qwen/Qwen3-4B-Base"
 DATA_DIR="$HOME/data/dapo"

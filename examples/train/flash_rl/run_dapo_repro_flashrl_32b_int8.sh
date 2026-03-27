@@ -3,9 +3,9 @@ set -x
 # Colocated DAPO training+generation for Qwen2.5-32B on the original DAPO dataset with Int8 rollouts.
 # The configuration is tested on 2 8xH100 GPUs.
 
-# DATA_DIR=$HOME/data/dapo bash examples/algorithms/dapo/prepare_dapo_data.sh
+# DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh
+# bash examples/train/flash_rl/run_dapo_repro_flashrl_32b_int8.sh
 
 DATA_DIR="$HOME/data/dapo"
 NUM_GPUS=16

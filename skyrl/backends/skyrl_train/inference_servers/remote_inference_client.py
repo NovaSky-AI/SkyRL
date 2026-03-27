@@ -606,10 +606,10 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        body = {"level": level}
+        params: Dict[str, Any] = {"level": str(level)}
         if tags:
-            body["tags"] = tags
-        return await self._call_all_servers("/sleep", body)
+            params["tags"] = tags
+        return await self._call_all_servers("/sleep", params=params)
 
     async def wake_up(self, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -619,8 +619,8 @@ class RemoteInferenceClient:
             tags: Optional list of tags to wake up specific resources.
                 Common tags: ["weights"], ["kv_cache"], or None for all.
         """
-        body = {"tags": tags} if tags else {}
-        return await self._call_all_servers("/wake_up", body)
+        params = {"tags": tags} if tags else {}
+        return await self._call_all_servers("/wake_up", params=params)
 
     async def reset_prefix_cache(
         self,

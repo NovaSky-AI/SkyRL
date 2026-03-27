@@ -90,5 +90,8 @@ class BatchIterator:
             info={},
             # propagate metadata as is
             metadata=batch.metadata,
+            # Multi-modal vision fields (may be absent for text-only)
+            pixel_values=batch.get("pixel_values"),
+            image_grid_thw=batch.get("image_grid_thw"),
         )
         return exp

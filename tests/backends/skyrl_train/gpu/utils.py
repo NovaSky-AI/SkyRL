@@ -400,6 +400,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             from skyrl.utils.tok import get_tokenizer
 
             tokenizer = get_tokenizer(client.model_name)
+            _ensure_chat_template(tokenizer)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,

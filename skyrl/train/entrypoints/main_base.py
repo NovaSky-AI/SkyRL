@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -383,13 +384,37 @@ class BasePPOExp:
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        return RemoteInferenceClient(
+        client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
             tokenizer=self.tokenizer,
         )
+
+        if is_colocated:
+            # This method is called from both sync (BasePPOExp.run) and async
+            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
+            # event loop avoids the "cannot call asyncio.run() from a running
+            # event loop" error that occurs in the async case.
+            exc_holder = [None]
+
+            def _sleep_engines():
+                try:
+                    asyncio.run(client.sleep())
+                except Exception as e:
+                    exc_holder[0] = e
+
+            thread = threading.Thread(target=_sleep_engines)
+            thread.start()
+            thread.join()
+
+            if exc_holder[0] is not None:
+                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
+
+            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+
+        return client
 
     def _setup_trainer(self):
         """Setup and return the trainer.

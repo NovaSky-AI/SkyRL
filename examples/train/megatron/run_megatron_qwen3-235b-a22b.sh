@@ -3,9 +3,9 @@ set -x
 # Colocated GRPO training+generation for Qwen3-235B-A22B on GSM8K with Megatron.
 # Runs on 8 nodes of 8xH100s
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/megatron/run_megatron_qwen3-235b-a22b.sh
+# bash examples/train/megatron/run_megatron_qwen3-235b-a22b.sh
 
 LOGGER="wandb"  # change to "console" to print to stdout
 
