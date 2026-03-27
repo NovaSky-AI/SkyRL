@@ -138,11 +138,19 @@ class TestAllReduceMetrics:
 
         strategy.all_reduce.side_effect = mock_all_reduce
 
-        metrics = {"policy_loss": 1.5}
-        result = all_reduce_metrics(metrics, strategy, sum_loss_metrics=False)
-        assert result["policy_loss"] == 1.5
-        assert strategy.all_reduce.call_count == 1
-        assert strategy.all_reduce.call_args[0][1] == "mean"
+        metrics = {"critic_loss": 1.5, "entropy": 0.5}
+        _ = all_reduce_metrics(metrics, strategy, sum_loss_metrics=False)
+
+        # Both should be mean-reduced (critic_loss is NOT summed without the flag)
+        ops_and_keys = []
+        for args, kwargs in strategy.all_reduce.call_args_list:
+            data_dict = args[0]
+            op = kwargs.get("op", args[1])
+            if data_dict:
+                ops_and_keys.append((op, set(data_dict.keys())))
+
+        mean_call = [c for c in ops_and_keys if c[0] == "mean"][0]
+        assert mean_call[1] == {"critic_loss", "entropy"}
 
     def test_all_reduce_metrics_returns_merged_results(self):
         """Verify results from all reductions are merged correctly."""
