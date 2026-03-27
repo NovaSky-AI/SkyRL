@@ -149,7 +149,7 @@ async def weight_update_env(class_scoped_ray_init_fixture):
     }
 
     await engines.client.teardown()
-    await engines.close()
+    await engines.aclose()
 
 
 @pytest.mark.asyncio(loop_scope="class")
@@ -369,7 +369,7 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture):
     }
 
     await engines.client.teardown()
-    await engines.close()
+    await engines.aclose()
 
 
 @pytest.mark.asyncio(loop_scope="class")

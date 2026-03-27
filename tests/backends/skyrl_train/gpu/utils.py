@@ -420,8 +420,8 @@ class InferenceEngineState:
     router: Optional[InferenceRouter]
     server_group: Optional[ServerGroup]
 
-    async def close(self):
-        """Shutdown all engine resources: router, server_group, and Ray actors.
+    def _close_common(self):
+        """Shutdown router, server_group, and Ray actors (sync resources).
 
         For local engines (InferenceEngineClient wrapping RayWrappedInferenceEngines),
         kills the underlying Ray actors so their torch.distributed TCPStore sockets
@@ -437,14 +437,24 @@ class InferenceEngineState:
                 if hasattr(engine, "inference_engine_actor"):
                     ray.kill(engine.inference_engine_actor)
             self.client.engines.clear()
-        else:
+
+    def close(self):
+        """Sync close. Use from sync tests, fixtures, and finally blocks."""
+        self._close_common()
+        if isinstance(self.client, RemoteInferenceClient):
+            asyncio.run(self.client.aclose())
+
+    async def aclose(self):
+        """Async close. Use from async tests and finally blocks."""
+        self._close_common()
+        if isinstance(self.client, RemoteInferenceClient):
             await self.client.aclose()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        asyncio.run(self.close())
+        self.close()
         return False
 
     async def __aenter__(self):
@@ -454,7 +464,7 @@ class InferenceEngineState:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
+        await self.aclose()
         return False
 
     @classmethod

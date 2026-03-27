@@ -176,7 +176,7 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
         if engines is not None:
-            await engines.close()
+            await engines.aclose()
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,6 @@
 uv run --isolated --extra dev --extra fsdp --with verifiers pytest tests/backends/skyrl_train/gpu/gpu_ci/test_verifiers_generator.py
 """
 
-import asyncio
 import socket
 
 import pytest
@@ -61,7 +60,7 @@ def verifiers_runtime():
     try:
         yield {"client": engines.client, "tokenizer": tokenizer, "http_port": http_port, "model": model}
     finally:
-        asyncio.run(engines.close())
+        engines.close()
         ray.shutdown()
 
 

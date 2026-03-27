@@ -101,4 +101,4 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
 
     finally:
         if engines is not None:
-            await engines.close()
+            await engines.aclose()

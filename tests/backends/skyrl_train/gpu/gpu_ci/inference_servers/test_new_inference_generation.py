@@ -14,7 +14,6 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): Remove the tests in Group B once we migrate all generation interactions to the router's HTTP API.
 
-import asyncio
 import json
 from http import HTTPStatus
 from typing import Any, Dict, List, Literal
@@ -89,7 +88,7 @@ def vllm_server(module_scoped_ray_init_fixture):
         use_new_inference_servers=True,
     )
     yield engines
-    asyncio.run(engines.close())
+    engines.close()
 
 
 def _check_chat_completions_outputs(
