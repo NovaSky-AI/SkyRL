@@ -14,6 +14,15 @@ class EngineConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    use_ray: bool = Field(
+        default=False,
+        description="Whether to use Ray for orchestration (Ray Actors for components)",
+    )
+    ray_address: str | None = Field(
+        default=None,
+        description="Address of an existing Ray cluster to connect to. If not set, Ray will be initialized locally.",
+    )
+
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
     backend: str = Field(default="jax", description="Backend to use for training and inference")
     backend_config: dict = Field(

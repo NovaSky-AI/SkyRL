@@ -175,9 +175,14 @@ def get_backend_classes(backend_name: str):
         )
 
         return SkyRLTrainBackend, MegatronBackendOverrides
+    elif backend_name == "ray_jax":
+        from skyrl.backends.jax import JaxBackendConfig
+        from skyrl.backends.ray_jax import RayJaxBackend
+
+        return RayJaxBackend, JaxBackendConfig
     else:
         raise ValueError(
-            f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
+            f"Unknown backend: {backend_name}. Available backends: jax, ray_jax, fsdp, megatron. "
             f"Make sure the backend's dependencies are installed (e.g., pip install skyrl[jax])"
         )
 
