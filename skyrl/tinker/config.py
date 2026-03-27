@@ -8,6 +8,7 @@ from pathlib import Path
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, ConfigDict, Field
 
+from skyrl.backends.jax import JaxBackendConfig
 
 class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
@@ -18,8 +19,8 @@ class EngineConfig(BaseModel):
         default=False,
         description="Whether to use Ray for orchestration (Ray Actors for components)",
     )
-    ray_address: str | None = Field(
-        default=None,
+    ray_address: str = Field(
+        default="auto",
         description="Address of an existing Ray cluster to connect to. If not set, Ray will be initialized locally.",
     )
 
@@ -87,6 +88,10 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         model: The Pydantic model class
     """
     for name, field in model.model_fields.items():
+        if isinstance(field.annotation, type) and issubclass(field.annotation, BaseModel):
+            add_model(parser, field.annotation)
+            continue
+
         arg_name = name.replace("_", "-")
         kwargs = {
             "help": field.description,
@@ -125,6 +130,13 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
     argv = []
     for field_name, value in cfg.model_dump().items():
         field = cfg.model_fields[field_name]
+
+        if isinstance(field.annotation, type) and issubclass(field.annotation, BaseModel):
+            nested_cfg = getattr(cfg, field_name)
+            if nested_cfg is not None:
+                argv.extend(config_to_argv(nested_cfg))
+            continue
+
         arg_name = field_name.replace("_", "-")
 
         if field.annotation is bool:
@@ -136,7 +148,21 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
                 argv.append(json.dumps(value))
         else:
             # Skip None values - let them use defaults or environment variables
-            if value is not None:
                 argv.append(f"--{arg_name}")
                 argv.append(str(value))
     return argv
+
+
+class APIConfig(BaseModel):
+    """Configuration for the Tinker API server."""
+
+    host: str = Field(default="0.0.0.0", description="Host to bind to for API Server")
+    port: int = Field(default=8000, description="Port to bind to for API Server")
+
+
+class SkyRLTxConfig(BaseModel):
+    """Top-level configuration for the SkyRL Tinker orchestration."""
+
+    api: APIConfig = Field(default_factory=APIConfig, description="API server configuration")
+    engine: EngineConfig = Field(description="Engine configuration")
+    backend: JaxBackendConfig = Field(default_factory=JaxBackendConfig, description="JAX backend configuration")
