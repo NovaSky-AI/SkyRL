@@ -15,7 +15,10 @@ from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWo
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils.utils import validate_batch_sizes
+from skyrl.train.utils.utils import (
+    validate_batch_sizes,
+    validate_megatron_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -396,6 +399,39 @@ def test_validate_batch_sizes():
         AssertionError, match="critic_train_batch_size_per_gpu .* should be divisible by critic_mini_batch_size_per_gpu"
     ):
         validate_batch_sizes(cfg)
+
+    # Test Case 17: Valid Megatron VPP configuration - num microbatches divisible by PP
+    cfg = create_test_config(train_batch_size=96, policy_mini_batch_size=24, micro_train_batch_size_per_gpu=2)
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size = 2
+    validate_batch_sizes(cfg)
+
+    # Test Case 18: Error case - VPP requires num microbatches divisible by PP
+    cfg = create_test_config(train_batch_size=120, policy_mini_batch_size=20, micro_train_batch_size_per_gpu=2)
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size = 2
+    with pytest.raises(
+        AssertionError,
+        match="normalized policy num_microbatches .* should be divisible by pipeline_model_parallel_size",
+    ):
+        validate_batch_sizes(cfg)
+
+
+@pytest.mark.parametrize("vpp_size", [0, 1])
+def test_validate_megatron_cfg_rejects_vpp_size_lte_one(vpp_size):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size = vpp_size
+
+    with pytest.raises(
+        AssertionError,
+        match="policy\\.megatron_config\\.virtual_pipeline_model_parallel_size must be greater than 1",
+    ):
+        validate_megatron_cfg(cfg)
 
 
 def test_forward_backward_batch_calculations():

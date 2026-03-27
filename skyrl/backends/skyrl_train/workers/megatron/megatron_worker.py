@@ -304,6 +304,28 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def _validate_virtual_pipeline_parallelism(self, megatron_config):
+        vpp_size = megatron_config.virtual_pipeline_model_parallel_size
+        if vpp_size is None:
+            return
+        assert vpp_size > 1, f"virtual_pipeline_model_parallel_size must be greater than 1 when set (got {vpp_size})"
+        pp_size = megatron_config.pipeline_model_parallel_size
+        assert pp_size > 1, (
+            f"virtual_pipeline_model_parallel_size={vpp_size} requires "
+            f"pipeline_model_parallel_size > 1 (got {pp_size})"
+        )
+        transformer_config_kwargs = megatron_config.transformer_config_kwargs
+        if not isinstance(transformer_config_kwargs, dict):
+            transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        num_layers = transformer_config_kwargs.get(
+            "num_layers", getattr(self.strategy.hf_config, "num_hidden_layers", None)
+        )
+        total_chunks = pp_size * vpp_size
+        assert num_layers is not None and num_layers % total_chunks == 0, (
+            f"num_hidden_layers ({num_layers}) must be divisible by "
+            f"PP x VPP = {pp_size} x {vpp_size} = {total_chunks}"
+        )
+
     def init_configs(
         self,
         model_path,
@@ -342,6 +364,8 @@ class MegatronWorker:
         provider = bridge.to_megatron_provider()
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
+        if megatron_config.virtual_pipeline_model_parallel_size is not None:
+            provider.virtual_pipeline_model_parallel_size = megatron_config.virtual_pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
         provider.context_parallel_size = megatron_config.context_parallel_size
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
@@ -586,6 +610,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
+        self._validate_virtual_pipeline_parallelism(self.cfg.policy.megatron_config)
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import (
@@ -892,6 +917,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
+        self._validate_virtual_pipeline_parallelism(self.cfg.ref.megatron_config)
 
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=False,

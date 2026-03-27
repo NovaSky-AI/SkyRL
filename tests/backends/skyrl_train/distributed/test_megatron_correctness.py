@@ -5,6 +5,7 @@ installed.
 """
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -108,6 +109,89 @@ class TestSeedVariation:
             with patch("random.seed", side_effect=lambda s: captured.append(s)):
                 strategy.set_seed(42)
             assert captured[0] == expected_seed
+
+
+# ---------------------------------------------------------------------------
+# C6: VPP checkpoint layout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+class TestVPPCheckpointLayout:
+    """Verify VPP checkpoint helpers preserve legacy single-chunk layout."""
+
+    def test_single_chunk_keeps_legacy_model_key(self):
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
+            MegatronStrategy,
+        )
+        from skyrl.train.config.config import MegatronConfig
+
+        class _Chunk:
+            def sharded_state_dict(self):
+                return {"chunk0": "chunk0_state"}
+
+        strategy = MegatronStrategy(megatron_config=MegatronConfig(), seed=42)
+        _, model_sharded_state_dicts, sharded_state_dict = strategy._get_sharded_model_state_dicts([_Chunk()])
+
+        assert model_sharded_state_dicts == [{"chunk0": "chunk0_state"}]
+        assert sharded_state_dict == {"model": {"chunk0": "chunk0_state"}}
+
+    def test_multi_chunk_uses_per_chunk_keys(self):
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
+            MegatronStrategy,
+        )
+        from skyrl.train.config.config import MegatronConfig
+
+        class _Chunk:
+            def __init__(self, name):
+                self.name = name
+
+            def sharded_state_dict(self):
+                return {self.name: f"{self.name}_state"}
+
+        chunk0 = _Chunk("chunk0")
+        chunk1 = _Chunk("chunk1")
+        wrapper1 = type("_Wrapper", (), {"module": chunk1})()
+
+        strategy = MegatronStrategy(megatron_config=MegatronConfig(), seed=42)
+        unwrapped, model_sharded_state_dicts, sharded_state_dict = strategy._get_sharded_model_state_dicts(
+            [chunk0, wrapper1]
+        )
+
+        assert unwrapped == [chunk0, chunk1]
+        assert model_sharded_state_dicts == [{"chunk0": "chunk0_state"}, {"chunk1": "chunk1_state"}]
+        assert sharded_state_dict == {"model0": {"chunk0": "chunk0_state"}, "model1": {"chunk1": "chunk1_state"}}
+
+    def test_vpp_lora_checkpointing_not_supported(self):
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
+            MegatronStrategy,
+        )
+        from skyrl.train.config.config import MegatronConfig
+
+        strategy = MegatronStrategy(megatron_config=MegatronConfig(), seed=42, is_lora=True)
+
+        with pytest.raises(NotImplementedError, match="VPP \\+ LoRA"):
+            strategy._get_sharded_model_state_dicts([object(), object()])
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+class TestVPPValidation:
+    def test_rejects_vpp_sizes_lte_one(self):
+        from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+            MegatronWorker,
+        )
+        from skyrl.train.config.config import MegatronConfig
+
+        worker = MegatronWorker.__new__(MegatronWorker)
+        worker.strategy = SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=32))
+
+        for vpp_size in (0, 1):
+            megatron_config = MegatronConfig(
+                pipeline_model_parallel_size=4,
+                virtual_pipeline_model_parallel_size=vpp_size,
+            )
+            with pytest.raises(AssertionError, match="virtual_pipeline_model_parallel_size must be greater than 1"):
+                worker._validate_virtual_pipeline_parallelism(megatron_config)
 
 
 # ---------------------------------------------------------------------------
