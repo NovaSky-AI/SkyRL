@@ -10,7 +10,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
-    reduce_metrics_across_microbatches as reduce_metrics,
+    reduce_metrics,
 )
 
 
@@ -33,11 +33,17 @@ class TestReduceMetrics:
         result = reduce_metrics(metrics)
         assert result["entropy"] == 2.0
 
-    def test_reduce_metrics_loss_sum(self):
-        """Keys ending in _loss should use sum reduction."""
+    def test_reduce_metrics_loss_default_mean(self):
+        """_loss keys default to mean when sum_loss_metrics=False."""
         metrics = {"policy_loss": [1.0, 2.0, 3.0]}
         result = reduce_metrics(metrics)
-        assert result["policy_loss"] == 6.0  # sum of [1, 2, 3]
+        assert result["policy_loss"] == 2.0
+
+    def test_reduce_metrics_sum_loss_metrics(self):
+        """_loss keys are summed when sum_loss_metrics=True."""
+        metrics = {"policy_loss": [1.0, 2.0, 3.0]}
+        result = reduce_metrics(metrics, sum_loss_metrics=True)
+        assert result["policy_loss"] == 6.0
 
     def test_reduce_metrics_mixed(self):
         """Test mixed metric types are reduced correctly."""
@@ -47,7 +53,7 @@ class TestReduceMetrics:
             "policy_loss": [1.0, 3.0],
             "entropy": [1.0, 3.0],
         }
-        result = reduce_metrics(metrics)
+        result = reduce_metrics(metrics, sum_loss_metrics=True)
         assert result["is_ratio_max"] == 10.0
         assert result["is_ratio_min"] == 0.5
         assert result["policy_loss"] == 4.0  # sum
@@ -90,7 +96,7 @@ class TestAllReduceMetrics:
             "entropy": 0.5,
         }
 
-        _ = all_reduce_metrics(metrics, strategy)
+        _ = all_reduce_metrics(metrics, strategy, sum_loss_metrics=True)
 
         # Verify all_reduce was called 4 times
         assert strategy.all_reduce.call_count == 4
@@ -110,7 +116,7 @@ class TestAllReduceMetrics:
         mean_call = [c for c in ops_and_keys if c[0] == "mean"][0]
         assert mean_call[1] == {"entropy"}
 
-        # Verify sum metrics (_loss suffix)
+        # Verify sum metrics (explicit sum_keys)
         sum_call = [c for c in ops_and_keys if c[0] == "sum"][0]
         assert sum_call[1] == {"policy_loss"}
 
@@ -121,6 +127,22 @@ class TestAllReduceMetrics:
         # Verify max metrics
         max_call = [c for c in ops_and_keys if c[0] == "max"][0]
         assert max_call[1] == {"is_ratio_max"}
+
+    def test_all_reduce_metrics_average_loss_metrics(self):
+        """Verify _loss keys are averaged when sum_loss_metrics=False."""
+        strategy = MagicMock()
+
+        # Mock all_reduce to return the input dict unchanged but track calls
+        def mock_all_reduce(d, op, group=None):
+            return {k: v for k, v in d.items()}
+
+        strategy.all_reduce.side_effect = mock_all_reduce
+
+        metrics = {"policy_loss": 1.5}
+        result = all_reduce_metrics(metrics, strategy, sum_loss_metrics=False)
+        assert result["policy_loss"] == 1.5
+        assert strategy.all_reduce.call_count == 1
+        assert strategy.all_reduce.call_args[0][1] == "mean"
 
     def test_all_reduce_metrics_returns_merged_results(self):
         """Verify results from all reductions are merged correctly."""
@@ -147,7 +169,7 @@ class TestAllReduceMetrics:
             "entropy": 0.5,
         }
 
-        result = all_reduce_metrics(metrics, strategy)
+        result = all_reduce_metrics(metrics, strategy, sum_loss_metrics=True)
 
         # Check all keys are present
         assert "is_ratio_max" in result
@@ -160,47 +182,3 @@ class TestAllReduceMetrics:
         assert result["is_ratio_min"] == 0.05  # 0.1 / 2 (min op)
         assert result["policy_loss"] == 6.0  # sum op
         assert result["entropy"] == 1.0  # 0.5 * 2 (mean op)
-
-    def test_all_reduce_metrics_only_max(self):
-        """Test with only _max metrics."""
-        strategy = MagicMock()
-        strategy.all_reduce.side_effect = lambda d, op, group=None: d
-
-        metrics = {"loss_max": 5.0, "ratio_max": 10.0}
-
-        result = all_reduce_metrics(metrics, strategy)
-
-        assert result == {"loss_max": 5.0, "ratio_max": 10.0}
-
-    def test_all_reduce_metrics_only_min(self):
-        """Test with only _min metrics."""
-        strategy = MagicMock()
-        strategy.all_reduce.side_effect = lambda d, op, group=None: d
-
-        metrics = {"loss_min": 0.1, "ratio_min": 0.01}
-
-        result = all_reduce_metrics(metrics, strategy)
-
-        assert result == {"loss_min": 0.1, "ratio_min": 0.01}
-
-    def test_all_reduce_metrics_only_mean(self):
-        """Test with only mean metrics (no _max/_min/_loss suffix)."""
-        strategy = MagicMock()
-        strategy.all_reduce.side_effect = lambda d, op, group=None: d
-
-        metrics = {"entropy": 0.5, "kl_div": 1.5}
-
-        result = all_reduce_metrics(metrics, strategy)
-
-        assert result == {"entropy": 0.5, "kl_div": 1.5}
-
-    def test_all_reduce_metrics_only_sum(self):
-        """Test with only _loss metrics (sum reduction)."""
-        strategy = MagicMock()
-        strategy.all_reduce.side_effect = lambda d, op, group=None: d
-
-        metrics = {"policy_loss": 1.5, "value_loss": 0.5}
-
-        result = all_reduce_metrics(metrics, strategy)
-
-        assert result == {"policy_loss": 1.5, "value_loss": 0.5}

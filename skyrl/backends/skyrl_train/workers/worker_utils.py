@@ -6,17 +6,19 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.dataset.replay_buffer import Experience
 
 
-def reduce_metrics_across_microbatches(metrics: Dict[str, List[float]]) -> Dict[str, float]:
-    """Reduce metrics across micro-batches within a single mini-batch.
+def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
+    """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
 
-    NOTE: Metrics ending in `_loss` are summed, not averaged, because the scaling
-    is already done at the advantage level.
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+
+    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged.
+    This should be used if the scaling is already done at the advantage level.
     See `apply_loss_reduction_to_advantages_minibatch` for more details.
-
 
     Args:
         metrics: Dictionary of metrics with keys as metric names and values as lists of metric values.
             The list of values corresponds to micro-batches within a single mini-batch.
+        sum_loss_metrics: If True, metrics ending in `_loss` are summed (for pre-scaled policy losses).
     """
     reduced_metrics = dict()
     for k, v in metrics.items():
@@ -28,18 +30,33 @@ def reduce_metrics_across_microbatches(metrics: Dict[str, List[float]]) -> Dict[
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
-        elif k.endswith("_loss"):
+        elif sum_loss_metrics and k.endswith("_loss"):
             reduced_metrics[k] = sum(v)
         else:
             reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
 
 
-def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy, group=None) -> Dict[str, float]:
-    """All reduce metrics across all processes."""
+def all_reduce_metrics(
+    metrics: Dict[str, float],
+    strategy: DistributedStrategy,
+    group=None,
+    sum_loss_metrics: bool = False,
+) -> Dict[str, float]:
+    """All reduce metrics across all processes.
+
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged.
+
+    Args:
+        metrics: Dictionary of metric name to scalar value.
+        strategy: Distributed strategy for all-reduce.
+        group: Process group for all-reduce.
+        sum_loss_metrics: If True, metrics ending in `_loss` are summed (for pre-scaled policy losses).
+    """
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
-    sum_metrics = {k: v for k, v in metrics.items() if k.endswith("_loss")}
+    sum_metrics = {k: v for k, v in metrics.items() if sum_loss_metrics and k.endswith("_loss")}
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
     }

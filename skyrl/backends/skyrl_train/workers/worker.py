@@ -52,7 +52,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BatchIterator,
     all_reduce_metrics,
-    reduce_metrics_across_microbatches,
+    reduce_metrics,
 )
 from skyrl.env_vars import (
     _SKYRL_USE_NEW_INFERENCE,
@@ -714,12 +714,12 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # reduce metrics across micro batches (sum, mean, min, max)
-        result = reduce_metrics_across_microbatches(dict(all_metrics))
+        # reduce metrics across micro batches
+        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
 
         # all reduce metrics across DP workers
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
@@ -1070,7 +1070,13 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics_across_microbatches(dict(all_metrics))
+        # reduce metrics across micro batches
+        result = reduce_metrics(all_metrics)
+
+        # all reduce metrics across DP workers
+        result = all_reduce_metrics(result, self.strategy)
+
+        return result
 
     def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
         """
@@ -1140,9 +1146,6 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
