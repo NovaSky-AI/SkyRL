@@ -59,13 +59,14 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "lora", "fully_reshardable"),
+    ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload"),
     [
-        ("fsdp", False, False),
-        ("fsdp2", False, False),
-        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
-        pytest.param("megatron", False, True, marks=pytest.mark.megatron),
+        ("fsdp", False, False, False),
+        ("fsdp2", False, False, False),
+        pytest.param("megatron", False, False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", False, True, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, True, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp",
@@ -73,9 +74,10 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
         "megatron",
         "megatron_lora",
         "megatron_fully_reshardable",
+        "megatron_optimizer_cpu_offload",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable, optimizer_cpu_offload):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -91,6 +93,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
     if fully_reshardable:
         cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
+    if optimizer_cpu_offload:
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_cpu_offload"] = True
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1.0
 
     checkpoint_dir = None
     try:

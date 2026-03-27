@@ -166,6 +166,29 @@ class MegatronStrategy(DistributedStrategy):
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
 
+    @staticmethod
+    def _disable_inner_optimizer_post_load_hooks(optimizer):
+        """Temporarily disable post-load hooks on inner optimizers.
+
+        When CPU offloading is enabled, the HybridDeviceOptimizer registers a
+        post_load_state_dict_hook that can fail during DistributedOptimizer's
+        internal state normalization roundtrip in sharded_state_dict(is_loading=True).
+        """
+        saved = {}
+        for opt in getattr(optimizer, "chained_optimizers", [optimizer]):
+            inner = getattr(opt, "optimizer", None)
+            if inner is not None and hasattr(inner, "_optimizer_load_state_dict_post_hooks"):
+                hooks = inner._optimizer_load_state_dict_post_hooks
+                saved[id(inner)] = (inner, dict(hooks))
+                hooks.clear()
+        return saved
+
+    @staticmethod
+    def _restore_inner_optimizer_post_load_hooks(optimizer, saved_hooks):
+        """Restore previously disabled post-load hooks."""
+        for inner, hooks in saved_hooks.values():
+            inner._optimizer_load_state_dict_post_hooks.update(hooks)
+
     def save_checkpoint(
         self,
         model: MegatronModelWrapper,
@@ -292,11 +315,18 @@ class MegatronStrategy(DistributedStrategy):
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
+            # When CPU offloading is enabled, the inner HybridDeviceOptimizer has a
+            # post_load_state_dict_hook that fails during sharded_state_dict's internal
+            # state normalization roundtrip (self.load_state_dict(self.state_dict())).
+            # Temporarily disable these hooks since the roundtrip is just for normalization;
+            # the actual optimizer state loading happens later via optimizer.load_state_dict().
+            saved_hooks = self._disable_inner_optimizer_post_load_hooks(optimizer)
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                 model_sharded_state_dict,
                 is_loading=True,
                 metadata=self._dist_ckpt_optim_metadata,
             )
+            self._restore_inner_optimizer_post_load_hooks(optimizer, saved_hooks)
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -323,7 +353,9 @@ class MegatronStrategy(DistributedStrategy):
             assert (
                 "optimizer" in state_dict
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            saved_hooks = self._disable_inner_optimizer_post_load_hooks(optimizer)
             optimizer.load_state_dict(state_dict["optimizer"])
+            self._restore_inner_optimizer_post_load_hooks(optimizer, saved_hooks)
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:
