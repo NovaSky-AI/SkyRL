@@ -917,7 +917,14 @@ def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
 
     def _release(proto: aiohttp.client_proto.ResponseHandler) -> None:
         if proto.transport is not None:
-            proto.transport.close()
+            tsock = proto.transport.get_extra_info("socket")
+            if tsock is not None:
+                fd = tsock.fileno()
+                if fd != -1:
+                    try:
+                        tsock.close()
+                    except OSError:
+                        pass
 
     for proto_list in connector._conns.values():
         for proto, _ in proto_list:

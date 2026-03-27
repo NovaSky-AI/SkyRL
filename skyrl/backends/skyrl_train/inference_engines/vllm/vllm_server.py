@@ -2,9 +2,8 @@ import os
 import signal
 
 import uvloop
-from fastapi import Request
-
 import vllm.envs as envs
+from fastapi import Request
 from vllm import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launcher import serve_http
