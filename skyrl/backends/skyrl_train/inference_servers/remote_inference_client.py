@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -922,7 +923,7 @@ def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
                 fd = tsock.fileno()
                 if fd != -1:
                     try:
-                        tsock.close()
+                        os.close(fd)
                     except OSError:
                         pass
 
