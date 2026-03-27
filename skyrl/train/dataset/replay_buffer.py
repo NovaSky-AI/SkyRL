@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Integer
 
+from skyrl.backends.skyrl_train.training_batch import TensorList
+
 BasicType = Union[int, float, str, bool]
 
 
@@ -70,6 +72,8 @@ class Experience:
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
+    pixel_values: Optional[TensorList] = None
+    image_grid_thw: Optional[TensorList] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -94,6 +98,10 @@ class Experience:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = to(self.rollout_expert_indices, device)
+        if self.pixel_values is not None:
+            self.pixel_values = self.pixel_values.to(device)
+        if self.image_grid_thw is not None:
+            self.image_grid_thw = self.image_grid_thw.to(device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)

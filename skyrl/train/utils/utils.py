@@ -206,12 +206,6 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
-        assert (
-            cfg.trainer.policy.megatron_config.pipeline_model_parallel_size == 1
-        ), "pipeline parallel is not yet supported for router replay (r3) with megatron"
-        assert (
-            cfg.trainer.policy.megatron_config.context_parallel_size == 1
-        ), "context parallel is not yet supported for router replay (r3) with megatron"
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -514,11 +508,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
-        )
-
-    if cfg.generator.inference_engine.distributed_executor_backend == "mp":
-        raise ValueError(
-            "the mp backend for vLLM is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/1309. Use the ray backend instead."
         )
 
     if cfg.generator.inference_engine.enable_return_routed_experts:

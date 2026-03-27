@@ -727,6 +727,24 @@ class SkyRLTrainConfig(BaseConfig):
                 self.generator.max_input_length + self.generator.sampling_params.max_generate_length
             )
 
+        # TODO(devpatel): Bandaid solution, replace this once we have a better
+        # solution for LoRA performance degradation on the vLLM side
+        ie_cfg = self.generator.inference_engine
+        if (
+            self.trainer.policy.model.lora.rank > 0
+            and self.trainer.strategy != "megatron"
+            and ie_cfg.enforce_eager
+            and ie_cfg.backend == "vllm"
+        ):
+            import warnings
+
+            warnings.warn(
+                "LoRA is enabled but inference_engine.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            ie_cfg.enforce_eager = False
+
     @classmethod
     def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":
         """Construct a SkyRLTrainConfig from CLI arguments or a dict of overrides.

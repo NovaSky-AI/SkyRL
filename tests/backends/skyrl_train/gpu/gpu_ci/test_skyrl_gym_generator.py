@@ -488,7 +488,7 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
         max_prompt_length=2048,
         max_input_length=max_input_length,
         max_generate_length=1000,
-        data_path=os.path.expanduser("/mnt/cluster_storage/data/gsm8k/validation.parquet"),
+        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
         env_class="gsm8k_multi_turn",
         num_prompts=num_prompts,
         max_turns=2,

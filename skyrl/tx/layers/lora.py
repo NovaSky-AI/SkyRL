@@ -222,6 +222,85 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         return self.apply_lora(x, base_out, adapter_indices)
 
 
+class FusedLoRALinear(LoRALinear):
+    """A LoRALinear that fuses multiple component projections into one.
+
+    The fused output is split back into components on ``__call__``.
+    Components are interleaved in groups: for each of *num_groups* repetitions
+    the output contains ``[comp_0_chunk, comp_1_chunk, ...]``.
+
+    Attributes:
+        components: Names of the original (unfused) projections, e.g.
+            ``("q_proj", "k_proj", "v_proj")``.  Used by weight loading/saving
+            to map between fused parameters and per-component checkpoints.
+        group_sizes: Size of each component's chunk within one interleaving
+            group, e.g. ``(q_per_kv * head_dim, head_dim, head_dim)``.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        components: tuple[str, ...],
+        group_sizes: tuple[int, ...],
+        sharding: tuple[str | None, ...],
+        max_lora_adapters: int = 0,
+        max_lora_rank: int = 8,
+        dtype: jnp.dtype = jnp.float32,
+        param_dtype: jnp.dtype | None = None,
+        use_bias: bool = False,
+        kernel_init: nnx.Initializer = nnx.initializers.lecun_normal(),
+        rngs: nnx.Rngs,
+    ) -> None:
+        super().__init__(
+            in_features,
+            out_features,
+            sharding=sharding,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            use_bias=use_bias,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        )
+        self.components = components
+        self.group_sizes = group_sizes
+
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, ...]:
+        fused = super().__call__(x, adapter_indices)
+        return self.split(fused, self.group_sizes)
+
+    @staticmethod
+    def fuse(*arrays: jax.Array, group_sizes: tuple[int, ...]) -> jax.Array:
+        """Interleave per-component arrays into a single fused tensor (inverse of ``split``)."""
+        assert len(arrays) == len(group_sizes), f"got {len(arrays)} arrays but {len(group_sizes)} group_sizes"
+        *batch, _ = arrays[0].shape
+        num_groups = arrays[0].shape[-1] // group_sizes[0]
+        for arr, g in zip(arrays, group_sizes):
+            assert (
+                arr.shape[-1] == num_groups * g
+            ), f"array last dim {arr.shape[-1]} != num_groups({num_groups}) * group_size({g})"
+        concat = jnp.concatenate([arr.reshape(*batch, num_groups, g) for arr, g in zip(arrays, group_sizes)], axis=-1)
+        return concat.reshape(*batch, -1)
+
+    @staticmethod
+    def split(fused: jax.Array, group_sizes: tuple[int, ...]) -> tuple[jax.Array, ...]:
+        """Split a fused tensor into per-component tensors by undoing group interleaving."""
+        *batch, total = fused.shape
+        gs = sum(group_sizes)
+        assert total % gs == 0, f"last dim {total} not divisible by sum(group_sizes)={gs}"
+        num_groups = total // gs
+        fused = fused.reshape(*batch, num_groups, gs)
+        results: list[jax.Array] = []
+        offset = 0
+        for g in group_sizes:
+            results.append(fused[..., offset : offset + g].reshape(*batch, num_groups * g))
+            offset += g
+        return tuple(results)
+
+
 class LoRAExpert(LoRAMixin, nnx.Module):
     """Expert layer with multi-adapter LoRA support."""
 

@@ -14,7 +14,7 @@ set -x
 #      If not yet available via uv sync, install manually:
 #        uv pip install "transformers>=5.0.0"
 #   3. Prepare data:
-#        uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+#        uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #   4. Run:
 #        export WANDB_API_KEY=<your_key_here>  # or set LOGGER=console below
 #        bash examples/train/megatron/run_megatron_grpo_glm4_7_30b.sh

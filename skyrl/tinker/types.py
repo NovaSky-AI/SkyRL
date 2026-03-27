@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import Base64Bytes, BaseModel, Discriminator
 
 
 class RequestType(str, Enum):
@@ -92,12 +92,46 @@ class UnloadModelOutput(BaseModel):
     type: str = "unload_model"
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
+    type: Literal["encoded_text"] = "encoded_text"
     tokens: list[int]
+
+
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: Base64Bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+
+ModelInputChunk = Annotated[
+    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    Discriminator("type"),
+]
 
 
 class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
+
+
+class MultiModalPlaceholder(BaseModel):
+    """Denotes where placeholder tokens are within a prompt_ids list."""
+
+    offset: int  # Start index of the placeholder tokens
+    length: int  # Length of the placeholder tokens
+
+
+class RenderedModelInput(BaseModel):
+    prompt_ids: list[int]
+    multi_modal_kwargs: dict[str, bytes] | None = None
+    multi_modal_placeholders: list[MultiModalPlaceholder] | None = None
 
 
 class TensorData(BaseModel):
@@ -224,8 +258,8 @@ class PreparedModelPassBatch(BaseModel):
     Engine extracts this from requests, backend converts to JAX arrays and computes.
     """
 
-    # Per-example data (list of lists)
-    all_input_ids: list[list[int]]
+    # Per-example data
+    all_model_inputs: list[ModelInput]
     all_targets: list[list[int]]
     all_token_weights: list[list[float]]
     all_sampling_logprobs: list[list[float]]
@@ -247,7 +281,7 @@ class PreparedSampleBatch(BaseModel):
     """
 
     # Per-sample data
-    all_prompts: list[list[int]]
+    all_model_inputs: list[ModelInput]
     all_sampling_params: list[SamplingParams]
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]

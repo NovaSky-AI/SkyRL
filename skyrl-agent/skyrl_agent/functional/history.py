@@ -154,6 +154,7 @@ class MessageEncoder:
         kwargs = {
             "add_generation_prompt": add_generation,
             "tokenize": True,
+            "return_dict": False,
         }
         if self.chat_template:
             kwargs["chat_template"] = self.chat_template.read_text()

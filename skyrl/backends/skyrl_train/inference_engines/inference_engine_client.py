@@ -71,6 +71,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = inference_engine_cfg.enable_http_endpoint
         self.http_endpoint_host = inference_engine_cfg.http_endpoint_host
         self.http_endpoint_port = inference_engine_cfg.http_endpoint_port
+
+        # we assume that dp_size is same for all engines
+        dp_sizes = [engine.dp_size() for engine in self.engines]
+        assert len(set(dp_sizes)) <= 1, f"Expected all engines to have the same DP size, got {dp_sizes}"
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
@@ -98,9 +102,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_token_ids = self.tokenizer.apply_chat_template(
                 prompts,
                 add_generation_prompt=True,
-                return_dict=True,
+                return_dict=False,
                 tokenize=True,
-            )["input_ids"]
+            )
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)
@@ -329,7 +333,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         tasks = []
         for i, engine in enumerate(self.engines):
-            engine_init_info = init_info.for_engine(i, engine.tp_size(), engine.pp_size())
+            # With vLLM, DP ranks are managed as separate engine instances
+            # We want the index of truly separate vllm deployments i.e different dist worlds
+            engine_idx = i // engine.dp_size()
+            engine_init_info = init_info.for_engine(engine_idx, engine.tp_size(), engine.pp_size(), engine.dp_size())
             tasks.append(engine.init_weight_update_communicator(engine_init_info))
         await asyncio.gather(*tasks)
 

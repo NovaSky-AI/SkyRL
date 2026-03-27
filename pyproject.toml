@@ -86,43 +86,55 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn; sys_platform == 'linux'",
+    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
+    # flash-attn wheels), drop the custom wheel URL
+    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "polars",
     "s3fs",
     "fastapi",
     "uvicorn",
+    "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
 ]
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.16.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.18.0; sys_platform == 'linux'",
+    "vllm-router; sys_platform == 'linux'",
+    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
+    # flash-attn wheels), drop the custom wheel URL
+    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.16.0; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
+    # flash-attn wheels), drop the custom wheel URL
+    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
+    "vllm==0.18.0; sys_platform == 'linux'",
+    "vllm-router; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
 flashrl = [
     "skyrl[skyrl-train]",
     # NOTE: Custom vLLM wheel must be installed separately.
-    # See examples/flash_rl/README.md for installation instructions.
+    # See examples/train/flash_rl/README.md for installation instructions.
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.7.0; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux'",
@@ -161,9 +173,6 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = {attr = "skyrl.__version__"}
 
-[project.entry-points."vllm.general_plugins"]
-skyrl_ipc_engine = "skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine:register_ipc_engine"
-
 [project.scripts]
 # The following is for supporting the skyrl-train dependency
 
@@ -175,7 +184,7 @@ required-environments = [
 ]
 
 constraint-dependencies = [
-    "flashinfer-jit-cache==0.6.3",
+    "flashinfer-jit-cache==0.6.6",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras

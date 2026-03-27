@@ -2,7 +2,7 @@
 """
 Load test for concurrency limits across the inference stack.
 
-NOTE: This is not a full fledged serving benchmark script. This is primarily 
+NOTE: This is not a full fledged serving benchmark script. This is primarily
 aimed to testing bottlenecks in client/ API server code in handling
 concurrent requests before they are handed off to the inference engine.
 
@@ -12,8 +12,9 @@ pipeline handles high concurrency without dropping connections.
 
 Three modes:
   direct  - Direct to vLLM server (bypasses router)
-  router  - Through the InferenceRouter (tests httpx pool + uvicorn backlog)
-  e2e     - Via RemoteInferenceClient.generate() (tests aiohttp connector)
+  router  - Through the VLLMRouter (tests vllm-router subprocess)
+  e2e     - Via RemoteInferenceClient.generate() (tests aiohttp connector +
+            shared semaphore throttling)
 
 Usage:
   # Requires at least 1 GPU
@@ -40,11 +41,11 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.utils.utils import ResolvedPlacementGroup, initialize_ray
 
 logger = logging.getLogger(__name__)
 
@@ -69,15 +70,16 @@ def get_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, InferenceRouter, ServerGroup]:
+def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, VLLMRouter, ServerGroup]:
     """Start vLLM server group, router, and build a `RemoteInferenceClient`."""
     cli_args = build_vllm_cli_args(cfg)
     ie_cfg = cfg.generator.inference_engine
 
     # Placement group
     num_gpus = ie_cfg.tensor_parallel_size * ie_cfg.num_engines
-    pg = placement_group([{"GPU": 1, "CPU": 1}] * num_gpus, strategy="PACK")
-    ray.get(pg.ready())
+    raw_pg = placement_group([{"GPU": 1, "CPU": 1}] * num_gpus, strategy="PACK")
+    ray.get(raw_pg.ready())
+    pg = ResolvedPlacementGroup(raw_pg)
 
     # Server group
     server_group = ServerGroup(
@@ -89,14 +91,13 @@ def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, Inferen
     server_urls = [info.url for info in server_infos]
 
     # Router
-    router = InferenceRouter(server_urls=server_urls)
+    router = VLLMRouter(server_urls=server_urls)
     proxy_url = router.start()
 
     # Client
+    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
     client = RemoteInferenceClient(
-        proxy_url=proxy_url,
-        server_urls=server_urls,
-        model_name=SERVED_MODEL_NAME,
+        proxy_url=proxy_url, server_urls=server_urls, model_name=SERVED_MODEL_NAME, tokenizer=tokenizer
     )
 
     return client, router, server_group
@@ -157,10 +158,12 @@ async def fire_chat_completions(base_url: str, n: int, model_name: str, max_toke
 async def fire_client_generate(
     client: RemoteInferenceClient, tokenizer, n: int, max_tokens: int, qps: float = math.inf
 ) -> dict:
-    """Send *n* concurrent prompts through RemoteInferenceClient.generate().
+    """Send *n* concurrent single-prompt generate() calls through RemoteInferenceClient.
 
-    Bypasses client.generate() to use return_exceptions=True so we get
-    per-request error counts instead of one failure killing the whole batch.
+    Each of the n calls is a separate client.generate() with batch_size=1, simulating
+    num_parallel_generation_workers concurrent async RL workers all sharing one client.
+    Concurrency is throttled by the shared semaphore inside RemoteInferenceClient
+    (SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines), not by this function.
     """
     token_ids = tokenizer.apply_chat_template(
         [[{"role": "user", "content": "Say hi"}]],
@@ -168,25 +171,23 @@ async def fire_client_generate(
         tokenize=True,
     )
     sampling_params = {"max_tokens": max_tokens}
+    input_batch = {
+        "prompt_token_ids": [token_ids[0]],
+        "sampling_params": sampling_params,
+    }
 
-    async def _single(idx: int) -> dict:
-        """Wrap _generate_single to tag errors with the phase that failed."""
+    async def _call(idx: int):
         try:
-            return await client._generate_single(
-                prompt_token_ids=token_ids[0],
-                sampling_params=sampling_params,
-                session_id=None,
-            )
+            return await client.generate(input_batch)
         except Exception as e:
-            # Re-raise with context about which request and what type
             raise RuntimeError(f"request {idx}: {type(e).__name__}: {e}") from e
 
     t0 = time.monotonic()
     if math.isinf(qps):
-        tasks = [_single(i) for i in range(n)]
+        tasks = [_call(i) for i in range(n)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        coro_fns = [lambda i=i: _single(i) for i in range(n)]
+        coro_fns = [lambda i=i: _call(i) for i in range(n)]
         results = await _rate_limited_gather(coro_fns, qps)
     elapsed = time.monotonic() - t0
 
@@ -276,12 +277,17 @@ def parse_args():
         default=1,
         help="Number of worker processes for direct/router modes (default: 1)",
     )
-
     parser.add_argument(
         "--qps",
         type=float,
         default=math.inf,
-        help="Submit requests at a steady rate (requests/sec). " "Default: inf (all requests fired at time 0).",
+        help="Submit requests at a steady rate (requests/sec). Default: inf (all requests fired at time 0).",
+    )
+    parser.add_argument(
+        "--num-engines",
+        type=int,
+        default=1,
+        help="Number of vLLM server engines (default: 1). Each uses 1 GPU.",
     )
 
     args = parser.parse_args()
@@ -294,12 +300,12 @@ def parse_args():
     if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
         parser.error("--max-workers is not supported for e2e mode")
 
-    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.num_engines
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    num_prompts, modes, max_tokens, qps, max_workers = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers, num_engines = parse_args()
 
     print("Load test config:")
     print(f"  model={MODEL}")
@@ -308,10 +314,12 @@ def main():
     print(f"  modes={modes}")
     print(f"  qps={qps}")
     print(f"  max_workers={max_workers}")
+    print(f"  num_engines={num_engines}")
     print()
     print("Starting servers...")
 
     cfg = get_config()
+    cfg.generator.inference_engine.num_engines = num_engines
     if not ray.is_initialized():
         initialize_ray(cfg)
 
@@ -335,7 +343,7 @@ def main():
 
         if "router" in modes:
             print("=" * 60)
-            print("Mode: router - through `InferenceRouter`")
+            print(f"Mode: router - through `{type(router).__name__}`")
             print("=" * 60)
             result = run_chat_completions(proxy_url, num_prompts, SERVED_MODEL_NAME, max_tokens, qps, max_workers)
             print_result(result)

@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/train/generators/test_utils.py
+uv run --extra dev --extra skyrl-train --isolated pytest tests/train/generators/test_utils.py
 """
 
 import os
@@ -169,10 +169,15 @@ def tokenizer_w_dummy_template():
 )
 def test_encode_messages(messages, tokenizer_w_dummy_template):
     # For a simple chat template, the fixed base approach is expected to behave the same
-    # as `apply_chat_template`
-    expected_token_ids = tokenizer_w_dummy_template.apply_chat_template(messages)
+    # as `apply_chat_template`.  We compare decoded strings rather than raw token IDs
+    # because SentencePiece tokenizers assign a different token to the very first character
+    # of a sequence (e.g. `▁<` vs `<`), and `encode_messages_subset` always tokenizes
+    # mid-conversation so the first token will differ from a standalone `apply_chat_template`.
+    expected_token_ids = tokenizer_w_dummy_template.apply_chat_template(messages, return_dict=False)
     actual_token_ids = encode_messages_subset(messages, tokenizer_w_dummy_template)
-    assert expected_token_ids == actual_token_ids
+    expected_str = tokenizer_w_dummy_template.decode(expected_token_ids)
+    actual_str = tokenizer_w_dummy_template.decode(actual_token_ids)
+    assert expected_str == actual_str
 
 
 @pytest.fixture
