@@ -730,8 +730,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # Reduce and all-reduce metrics across DP ranks only
+        # Reduce across microbatches and all-reduce metrics across DP ranks
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
         group = mpu.get_data_parallel_group(with_context_parallel=True)

@@ -714,10 +714,9 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # reduce metrics across micro batches
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         result = reduce_metrics(all_metrics, sum_loss_metrics=True)
-
-        # all reduce metrics across DP workers
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
