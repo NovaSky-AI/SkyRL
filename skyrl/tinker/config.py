@@ -3,6 +3,8 @@
 import argparse
 import json
 import os
+import types
+import typing
 from pathlib import Path
 
 from cloudpathlib import AnyPath
@@ -113,7 +115,13 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             if argparse_type is not None:
                 kwargs["type"] = argparse_type
             elif field.annotation is not None:
-                kwargs["type"] = field.annotation
+                # Extract base type for argparse (unwrap from Optional / Union)
+                origin = typing.get_origin(field.annotation)
+                if origin is typing.Union or (hasattr(types, "UnionType") and origin is types.UnionType):
+                    base_type = next((arg for arg in typing.get_args(field.annotation) if arg is not type(None)), str)
+                    kwargs["type"] = base_type
+                else:
+                    kwargs["type"] = field.annotation
 
             if field.is_required():
                 # Mark as required in argparse if no default is provided
