@@ -53,19 +53,20 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "tp_size",
         "distributed_executor_backend",
         "model",
+        "dp_size",
     ),
     [
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", MODEL),
-        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", MODEL),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", MODEL),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
+        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", MODEL, 1, marks=_skip_new_inference),
+        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", MODEL, 1, marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", MODEL, 1),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", MODEL, 1),
         # moe model, dp > 1
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MOE_MODEL),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MOE_MODEL),
+        pytest.param(True, "nccl", "fsdp2", 2, 1, "ray", MOE_MODEL, 2),
+        pytest.param(False, "nccl", "fsdp2", 1, 1, "ray", MOE_MODEL, 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -89,6 +90,7 @@ def test_policy_local_engines_e2e(
     tp_size,
     distributed_executor_backend,
     model,
+    dp_size,
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
@@ -100,6 +102,7 @@ def test_policy_local_engines_e2e(
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
     cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
     cfg.generator.inference_engine.num_engines = num_engines
+    cfg.generator.inference_engine.data_parallel_size = dp_size
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
@@ -113,7 +116,7 @@ def test_policy_local_engines_e2e(
         sleep_level=2,  # since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
-        asyncio.run(client.sleep())
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -123,7 +126,6 @@ def test_policy_local_engines_e2e(
             * cfg.generator.inference_engine.data_parallel_size,
             cfg=cfg,
         )
-        asyncio.run(client.wake_up(tags=["weights"]))
 
         ray.get(
             policy.async_run_ray_method(
@@ -136,6 +138,9 @@ def test_policy_local_engines_e2e(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
+        if colocate_all:
+            policy.offload_to_cpu()
+            asyncio.run(client.wake_up())
 
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
