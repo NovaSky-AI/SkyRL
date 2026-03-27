@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -65,6 +64,16 @@ from skyrl.env_vars import (
 )
 
 _DATA_PLANE_RETRIES = 30
+
+_TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
+    "temperature": "temperature",
+    "max_tokens": "max_tokens",
+    "seed": "seed",
+    "top_k": "top_k",
+    "top_p": "top_p",
+    "stop_strings": "stop",
+    "stop_tokens": "stop_token_ids",
+}
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -391,16 +400,8 @@ class RemoteInferenceClient:
             "logprobs": 0,
             "output_kind": 2,
         }
-        _PARAM_MAP = {
-            "temperature": "temperature",
-            "max_tokens": "max_tokens",
-            "seed": "seed",
-            "top_k": "top_k",
-            "top_p": "top_p",
-            "stop": "stop_strings",
-            "stop_token_ids": "stop_tokens",
-        }
-        for tinker_key, vllm_key in _PARAM_MAP.items():
+
+        for tinker_key, vllm_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
             val = tinker_params.get(tinker_key)
             if val is not None:
                 sampling_params[vllm_key] = val

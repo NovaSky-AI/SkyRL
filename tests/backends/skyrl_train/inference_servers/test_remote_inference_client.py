@@ -53,7 +53,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         if "logprobs" in sp:
             num_choices = n
         else:
-            num_choices = max(len(body.get("token_ids", [])), 1)
+            num_choices = 1
 
         return {
             "choices": [
