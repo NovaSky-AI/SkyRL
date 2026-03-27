@@ -329,7 +329,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         tasks = []
         for i, engine in enumerate(self.engines):
-            engine_init_info = init_info.for_engine(i, engine.tp_size(), engine.pp_size())
+            # With vLLM, DP ranks are managed as separate engine instances
+            # We want the index of truly separate vllm engines i.e different dist worlds
+            engine_idx = i // engine.dp_size()
+            engine_init_info = init_info.for_engine(engine_idx, engine.tp_size(), engine.pp_size(), engine.dp_size())
             tasks.append(engine.init_weight_update_communicator(engine_init_info))
         await asyncio.gather(*tasks)
 
