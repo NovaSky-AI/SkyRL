@@ -114,7 +114,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]
@@ -380,7 +383,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]

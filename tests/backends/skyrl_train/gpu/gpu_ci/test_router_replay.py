@@ -28,8 +28,8 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 
 MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
-NUM_PROMPTS = 5
-N_SAMPLES_PER_PROMPT = 2
+NUM_PROMPTS = 10
+N_SAMPLES_PER_PROMPT = 4
 MAX_GENERATE_LENGTH = 128
 
 
@@ -43,10 +43,13 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
     # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
+    # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
+    # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
+
         cfg.trainer.flash_attn = False
     validate_cfg(cfg)
     return cfg
@@ -104,8 +107,14 @@ def build_training_input_from_text_samples(
 
 @pytest.mark.asyncio
 @pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay test for now due to size constraints")
-async def test_logprobs(ray_init_fixture):
+@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.parametrize(
+    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    [
+        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+    ],
+)
+async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
     """
@@ -119,8 +128,7 @@ async def test_logprobs(ray_init_fixture):
             logprobs=1,
             temperature=1.0,
         )
-        cfg.generator.batched = True
-        cfg.generator.async_engine = False
+        cfg.generator.batched = False
         cfg.generator.max_turns = 1
 
         tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
@@ -216,11 +224,13 @@ async def test_logprobs(ray_init_fixture):
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        if extra_tf_kwargs is not None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
         cfg.trainer.micro_forward_batch_size_per_gpu = 2
         cfg.trainer.micro_train_batch_size_per_gpu = 2
 
@@ -244,11 +254,12 @@ async def test_logprobs(ray_init_fixture):
 
         r3_logprobs = run_megatron_forward(enable_replay=True)
         no_r3_logprobs = run_megatron_forward(enable_replay=False)
-
         mask = response_mask.bool()
+
         vllm_valid = logprobs_t[mask]
         r3_valid = r3_logprobs[mask]
         no_r3_valid = no_r3_logprobs[mask]
+
         r3_diff = (vllm_valid - r3_valid).abs()
         no_r3_diff = (vllm_valid - no_r3_valid).abs()
         print(f"vLLM logprobs     - mean: {vllm_valid.mean().item():.6f}, std: {vllm_valid.std().item():.6f}")
@@ -266,8 +277,14 @@ async def test_logprobs(ray_init_fixture):
 
 
 @pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay test for now due to size constraints")
-def test_forward_backward(ray_init_fixture):
+@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.parametrize(
+    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    [
+        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+    ],
+)
+def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that forward_backward with router replay completes without error.
     Uses dummy expert routing indices (no vLLM engine needed).
@@ -338,11 +355,13 @@ def test_forward_backward(ray_init_fixture):
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        if extra_tf_kwargs is not None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
         cfg.trainer.micro_forward_batch_size_per_gpu = 2
         cfg.trainer.micro_train_batch_size_per_gpu = 2
         cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
@@ -353,7 +372,6 @@ def test_forward_backward(ray_init_fixture):
             cfg=cfg,
         )
 
-        ray.get(actor_group.async_run_ray_method("pass_through", "setup_per_microbatch_replay_backward"))
         ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))

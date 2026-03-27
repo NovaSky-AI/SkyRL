@@ -7,7 +7,7 @@ set -x
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
+# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train/gsm8k/run_gsm8k.sh`.
 
 DATA_DIR="/root/data/gsm8k"
 CHECK_POINT_DIR="/root/data/ckpts/gsm8k_1.5B_ckpt"

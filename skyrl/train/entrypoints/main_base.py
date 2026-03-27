@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -319,7 +320,6 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
         from skyrl.backends.skyrl_train.inference_servers.server_group import (
             ServerGroup,
         )
@@ -351,7 +351,7 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created internal router over external "
@@ -372,7 +372,7 @@ class BasePPOExp:
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -381,13 +381,53 @@ class BasePPOExp:
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        return RemoteInferenceClient(
+        client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
             tokenizer=self.tokenizer,
         )
+
+        if is_colocated:
+            # This method is called from both sync (BasePPOExp.run) and async
+            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
+            # event loop avoids the "cannot call asyncio.run() from a running
+            # event loop" error that occurs in the async case.
+            exc_holder = [None]
+
+            def _sleep_engines():
+                try:
+                    asyncio.run(client.sleep())
+                except Exception as e:
+                    exc_holder[0] = e
+
+            thread = threading.Thread(target=_sleep_engines)
+            thread.start()
+            thread.join()
+
+            if exc_holder[0] is not None:
+                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
+
+            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+
+        return client
+
+    @staticmethod
+    def _create_router(server_urls, router_type: str = "default"):
+        """Create a data-plane router based on ``router_type``."""
+        if router_type == "vllm-router":
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
+
+            return VLLMRouter(server_urls=server_urls)
+        else:
+            from skyrl.backends.skyrl_train.inference_servers.router import (
+                InferenceRouter,
+            )
+
+            return InferenceRouter(server_urls=server_urls)
 
     def _setup_trainer(self):
         """Setup and return the trainer.

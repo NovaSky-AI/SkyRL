@@ -400,6 +400,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             from skyrl.utils.tok import get_tokenizer
 
             tokenizer = get_tokenizer(client.model_name)
+            _ensure_chat_template(tokenizer)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
@@ -554,7 +555,11 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            router = InferenceRouter(server_urls=server_urls)
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
+
+            router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
