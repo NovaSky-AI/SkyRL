@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.utils.tok import get_tokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -70,7 +71,7 @@ def wait_for_url(url: str, timeout: float = 180.0) -> bool:
 
 
 @pytest.fixture(scope="class")
-def server_group_and_router(ray_init_fixture):
+def server_group_and_router(class_scoped_ray_init_fixture):
     """Create 2 vLLM servers (TP=2 each) + router."""
     cli_args = make_vllm_cli_args(MODEL, tp_size=2)
     start_port = get_open_port()
@@ -99,6 +100,7 @@ def server_group_and_router(ray_init_fixture):
         proxy_url=router_url,
         server_urls=server_urls,
         model_name=MODEL,
+        tokenizer=get_tokenizer(MODEL),
     )
 
     yield {

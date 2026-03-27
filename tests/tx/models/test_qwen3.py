@@ -12,7 +12,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock,
 )
 
-from skyrl.tx.layers.lora import LoRAMixin
+from skyrl.tx.layers.lora import FusedLoRALinear, LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
 from tests.tx.models.conftest import load_model
@@ -104,6 +104,13 @@ def load_lora_weights(
     jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(lora_B_weights))
     jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[adapter_idx].set(scaling)
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
+
+
+def share_hf_lora_A(hf_modules: list) -> None:
+    """Set all lora_A matrices in a group to be identical (copy from first)."""
+    first_A = hf_modules[0].lora_A["default"].weight.data
+    for m in hf_modules[1:]:
+        m.lora_A["default"].weight.data.copy_(first_A)
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
@@ -200,6 +207,12 @@ def test_qwen3_lora():
         hf_model.load_adapter(adapter_name, adapter_name="default")
         hf_lora_models.append(hf_model)
 
+    # Share lora_A matrices so fused projections can use a single lora_A
+    for hf_model in hf_lora_models:
+        for layer in hf_model.base_model.model.model.layers:
+            share_hf_lora_A([layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            share_hf_lora_A([layer.mlp.gate_proj, layer.mlp.up_proj])
+
     config, model = load_model(
         base_model_name,
         Qwen3Config,
@@ -209,7 +222,7 @@ def test_qwen3_lora():
         max_lora_rank=max(cfg.r for cfg in lora_configs),
     )
 
-    # Get outputs from all HF models
+    # Get outputs from all HF models (after normalization)
     hf_outputs_list = []
     with torch.no_grad():
         for idx in range(len(lora_adapters)):
@@ -235,24 +248,28 @@ def test_qwen3_lora():
         )
 
         # Load layer LoRA weights
+        qkv_group_sizes = model.model.layers[0].self_attn.qkv_proj.group_sizes
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
-            for module_name, projections in [
-                ("mlp", ["gate_proj", "up_proj", "down_proj"]),
-                ("self_attn", ["q_proj", "k_proj", "v_proj", "o_proj"]),
+            hf_attn, hf_mlp = hf_layer.self_attn, hf_layer.mlp
+            for jax_proj, hf_projs, group_sizes in [
+                (jax_layer.self_attn.qkv_proj, [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj], qkv_group_sizes),
+                (jax_layer.self_attn.o_proj, [hf_attn.o_proj], (1,)),
+                (jax_layer.mlp.gate_up_proj, [hf_mlp.gate_proj, hf_mlp.up_proj], (1, 1)),
+                (jax_layer.mlp.down_proj, [hf_mlp.down_proj], (1,)),
             ]:
-                for proj_name in projections:
-                    hf_proj = getattr(getattr(hf_layer, module_name), proj_name)
-                    jax_proj = getattr(getattr(jax_layer, module_name), proj_name)
-                    load_lora_weights(
-                        jax_proj,
-                        adapter_idx=adapter_idx,
-                        lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
-                        lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,
-                        scaling=lora_config.lora_alpha / lora_config.r,
-                        rank=lora_config.r,
-                    )
+                load_lora_weights(
+                    jax_proj,
+                    adapter_idx=adapter_idx,
+                    lora_A_weights=hf_projs[0].lora_A["default"].weight.detach().numpy().T,
+                    lora_B_weights=FusedLoRALinear.fuse(
+                        *(p.lora_B["default"].weight.detach().numpy().T for p in hf_projs),
+                        group_sizes=group_sizes,
+                    ),
+                    scaling=lora_config.lora_alpha / lora_config.r,
+                    rank=lora_config.r,
+                )
 
     # Use different adapter indices for each input
     adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)

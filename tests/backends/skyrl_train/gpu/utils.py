@@ -160,7 +160,7 @@ def init_worker_with_type(
         cfg = get_test_actor_config()
 
     if shared_pg is not None:
-        pg = shared_pg
+        pg = ResolvedPlacementGroup(shared_pg)
         num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
@@ -396,11 +396,15 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
-        assert tokenizer is not None
+        if tokenizer is None:
+            from skyrl.utils.tok import get_tokenizer
+
+            tokenizer = get_tokenizer(client.model_name)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
@@ -416,11 +420,22 @@ class InferenceEngineState:
     server_group: Optional[ServerGroup]
 
     def close(self):
-        """Shutdown router and server_group if they exist."""
+        """Shutdown all engine resources: router, server_group, and Ray actors.
+
+        For local engines (InferenceEngineClient wrapping RayWrappedInferenceEngines),
+        kills the underlying Ray actors so their torch.distributed TCPStore sockets
+        are released promptly, preventing port conflicts between tests.
+        """
         if self.router is not None:
             self.router.shutdown()
         if self.server_group is not None:
             self.server_group.shutdown()
+
+        if isinstance(self.client, InferenceEngineClient):
+            for engine in self.client.engines:
+                if hasattr(engine, "inference_engine_actor"):
+                    ray.kill(engine.inference_engine_actor)
+            self.client.engines.clear()
 
     def __enter__(self):
         return self
@@ -444,6 +459,7 @@ class InferenceEngineState:
         num_inference_engines: Optional[int] = None,
         sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
         enable_lora: bool = False,
+        active_lora_name: Optional[str] = None,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
@@ -508,13 +524,15 @@ class InferenceEngineState:
         router = None
         server_group = None
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
-            # init with internal router and servers
-            if enable_lora:
-                raise ValueError("LoRA is not supported with new inference backend")
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
+            cli_args = build_vllm_cli_args(cfg)
+            if enable_lora:
+                cli_args.enable_lora = True
+                if active_lora_name is None:
+                    active_lora_name = "skyrl-lora"
             server_group = ServerGroup(
-                cli_args=build_vllm_cli_args(cfg),
+                cli_args=cli_args,
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
                 placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -523,7 +541,11 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            router = InferenceRouter(server_urls=server_urls)
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
+
+            router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -534,6 +556,8 @@ class InferenceEngineState:
                 server_urls=server_urls,
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+                active_lora_name=active_lora_name,
+                tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:
             eps = create_ray_wrapped_inference_engines(
@@ -566,7 +590,7 @@ class InferenceEngineState:
             )
             if sleep:
                 asyncio.run(client.wake_up())
-        return cls(client=client, pg=shared_pg, router=router, server_group=server_group)
+        return cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(

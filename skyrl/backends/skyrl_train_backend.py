@@ -16,6 +16,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
+from skyrl.backends.renderer import render_model_input
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
@@ -262,14 +263,17 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
+
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
         full_sequences = [
             list(input_ids) + ([targets[-1]] if targets else [])
-            for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets)
+            for input_ids, targets in zip(all_input_ids, prepared_batch.all_targets)
         ]
 
         max_seq_len = max(len(seq) for seq in full_sequences)
@@ -387,7 +391,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -450,7 +454,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -531,10 +535,12 @@ class SkyRLTrainBackend(AbstractBackend):
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
         # 3. Sample all prompts in parallel
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
+
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_prompts)):
-                prompt = prepared_batch.all_prompts[i]
+            for i in range(len(all_input_ids)):
+                prompt_token_ids = all_input_ids[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation
@@ -554,7 +560,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 tasks.append(
                     self._inference_engine_client.sample(
-                        prompt_token_ids=prompt,
+                        prompt_token_ids=prompt_token_ids,
                         num_samples=1,  # Tinker batches multiple samples separately
                         sampling_params=params_dict,
                     )

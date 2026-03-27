@@ -1011,12 +1011,13 @@ class RayPPOTrainer:
         action_log_probs: torch.Tensor = data["action_log_probs"]
 
         # single batched computation
-        kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
-            action_log_probs,
-            base_action_log_probs,
-            loss_mask=loss_masks_all,
-            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-        )
+        with torch.no_grad():
+            kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_masks_all,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
         kl_max: Float[torch.Tensor, "batch_size"] = torch.max(kl.abs(), dim=-1)[0]  # noqa: F821
         kl_mean: Float[torch.Tensor, "batch_size"] = masked_mean(kl, loss_masks_all, dim=-1)  # noqa: F821
 
@@ -1058,13 +1059,13 @@ class RayPPOTrainer:
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
-        Execute training step for FSDP strategy using forward_backward + optim_step.
+        Execute training step using forward_backward + optim_step.
 
         The trainer loops over epochs and mini-batches. Workers handle micro-batching
         internally for gradient accumulation (memory efficiency).
 
-        Uses staged data approach: the full batch is put in Ray object store once,
-        and workers fetch + slice locally to avoid repeated serialization.
+        All per-DP mini-batch chunks are pre-staged in the Ray object store before
+        the training loop so serialization stays off the GPU critical path.
 
         Args:
             model: Model name ("policy" or "critic")
@@ -1082,18 +1083,14 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
-        # Stage full batch in object store ONCE to avoid repeated serialization
-        data_ref = self.dispatch.stage_data(data)
+        # Pre-stage all per-DP mini-batch chunks in the object store so that
+        # serialization is fully off the critical path during training.
+        all_chunk_refs = self.dispatch.stage_data(model, data, mini_batch_size)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            num_mini_batches = len(data) // mini_batch_size
-            for local_step in range(num_mini_batches):
-                start_idx = local_step * mini_batch_size
-                end_idx = (local_step + 1) * mini_batch_size
-
-                # Workers fetch from object store and slice locally
-                status = self.dispatch.forward_backward_from_staged(model, data_ref, start_idx, end_idx)
+            for chunk_refs in all_chunk_refs:
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.items():
                     all_metrics[k].append(v)
 

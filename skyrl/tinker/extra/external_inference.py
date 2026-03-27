@@ -6,6 +6,7 @@ import httpx
 from cloudpathlib import AnyPath
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from skyrl.backends.renderer import render_model_input
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
@@ -91,7 +92,8 @@ class ExternalInferenceClient:
 
         For base model sampling (no LoRA), the request is sent directly using the base model name.
         """
-        prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
+        model_input = request.prompt.to_types()
+        prompt_tokens = render_model_input([model_input])[0].prompt_ids
 
         if base_model:
             # Base model sampling: use the model name directly, no LoRA checkpoint needed

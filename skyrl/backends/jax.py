@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from skyrl.backends.backend import AbstractBackend
+from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
 from skyrl.tinker import types
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
@@ -612,13 +613,13 @@ class JaxBackendImpl(AbstractBackend):
         Returns:
             Dict mapping request_id to result_data or error info
         """
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         results = {}
 
-        # Extract data from prepared batch
-        all_input_ids = prepared_batch.all_input_ids
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
         all_targets = prepared_batch.all_targets
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
@@ -819,13 +820,13 @@ class JaxBackendImpl(AbstractBackend):
         Returns:
             Dict mapping request_id to result or error
         """
-        if not prepared_batch.all_prompts:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         results = {}
 
-        # Extract data from prepared batch
-        all_prompts = prepared_batch.all_prompts
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
         all_sampling_params = prepared_batch.all_sampling_params
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
@@ -833,7 +834,7 @@ class JaxBackendImpl(AbstractBackend):
         # Load sampler weights and get adapter indices
         all_adapter_indices = self.load_sampler_weights(prepared_batch)
 
-        total_batch_size = len(all_prompts)
+        total_batch_size = len(all_input_ids)
         max_batch_size = (
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
@@ -849,7 +850,7 @@ class JaxBackendImpl(AbstractBackend):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
+                batch_input_ids = pad(all_input_ids[batch_start:batch_end], max_batch_size, fill=[])
                 batch_adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
                 sampling_params = pad(
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
@@ -857,9 +858,9 @@ class JaxBackendImpl(AbstractBackend):
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
-                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = pad_batch(batch_prompts, max_len, np.int32)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                max_len = round_up_seq_len(max((len(seq) for seq in batch_input_ids), default=0))
+                input_ids = pad_batch(batch_input_ids, max_len, np.int32)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_input_ids], max_len, np.int32)
 
                 # Shard inputs along FSDP axis (already padded to max_batch_size)
                 input_ids, attention_mask, adapter_indices = jax.device_put(
