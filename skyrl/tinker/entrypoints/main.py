@@ -27,12 +27,23 @@ def main():
     logger.info(f"Initializing Ray with address: {config.engine.ray_address or 'local'}")
     ray.init(address=config.engine.ray_address)
 
+    logger.info("Creating STRICT_PACK placement group to colocate API and Engine actors...")
+    from ray.util.placement_group import placement_group
+    pg = placement_group([{"CPU": 1}, {"CPU": 1}], strategy="STRICT_PACK")
+    ray.get(pg.ready())
+
     logger.info(f"Starting Tinker API Actor on {config.api.host}:{config.api.port}")
-    api_actor = TinkerAPIActor.remote(config.engine)
+    api_actor = TinkerAPIActor.options(
+        placement_group=pg,
+        placement_group_bundle_index=0
+    ).remote(config.engine)
     api_task = api_actor.run.remote(config.api.host, config.api.port)
 
     logger.info("Starting Tinker Engine Actor")
-    engine_actor = TinkerEngineActor.remote(config.engine)
+    engine_actor = TinkerEngineActor.options(
+        placement_group=pg,
+        placement_group_bundle_index=1
+    ).remote(config.engine)
     engine_task = engine_actor.run.remote()
 
     logger.info("Ray Orchestrator running. Waiting for actors to complete.")
