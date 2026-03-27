@@ -1,8 +1,6 @@
 import ray
 import uvicorn
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.engine import TinkerEngine
-from skyrl.tinker.api import app
 
 @ray.remote
 class TinkerAPIActor:
@@ -11,6 +9,7 @@ class TinkerAPIActor:
         self.config = config
 
     def run(self, host: str, port: int):
+        from skyrl.tinker.api import app
         app.state.engine_config = self.config
         # Logging config can be customized if needed
         from skyrl.utils.log import get_uvicorn_log_config
@@ -24,5 +23,6 @@ class TinkerEngineActor:
         self.config = config
     
     def run(self):
+        from skyrl.tinker.engine import TinkerEngine
         engine = TinkerEngine(self.config)
         engine.run()
