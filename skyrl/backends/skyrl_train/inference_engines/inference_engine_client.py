@@ -74,8 +74,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # we assume that dp_size is same for all engines
         dp_sizes = [engine.dp_size() for engine in self.engines]
-        for dp_size in dp_sizes:
-            assert dp_size == dp_sizes[0], f"Expected all engines to have the same DP size, got {dp_sizes}"
+        assert len(set(dp_sizes)) <= 1, f"Expected all engines to have the same DP size, got {dp_sizes}"
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
