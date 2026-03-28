@@ -36,3 +36,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="fleet_task",
+    entry_point="skyrl_gym.envs.fleet_task.env:FleetTaskEnv",
+)
