@@ -45,16 +45,17 @@ def _get_model_chunk_stage_flags(model: nn.Module) -> tuple[bool, bool]:
     pre_process = _get_model_chunk_attr(model, "pre_process")
     post_process = _get_model_chunk_attr(model, "post_process")
     vp_stage = _get_model_chunk_attr(model, "vp_stage")
-
     if pre_process is None:
         if vp_stage is not None:
-            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage)
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False) and vp_stage == 0
         else:
             pre_process = mpu.is_pipeline_first_stage(ignore_virtual=True)
-
     if post_process is None:
         if vp_stage is not None:
-            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
+            vpp_world_size = mpu.get_virtual_pipeline_model_parallel_world_size()
+            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False) and vp_stage == (
+                vpp_world_size - 1 if vpp_world_size else 0
+            )
         else:
             post_process = mpu.is_pipeline_last_stage(ignore_virtual=True)
 
