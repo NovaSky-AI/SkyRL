@@ -44,6 +44,79 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 _PP_SEED_OFFSET = 100
 
 
+def _patched_update_fp32_params_by_new_state(self):
+    """Monkeypatch for megatron-core HybridDeviceOptimizer._update_fp32_params_by_new_state.
+
+    Upstream bug: params that are already fp32 are not present in
+    ``self.param_to_fp32_param`` but the original code does an unconditional
+    dict lookup, causing a ``KeyError`` during checkpoint loading with CPU
+    offloading enabled.
+    """
+    if not self.param_update_in_fp32:
+        return
+    for param, v in self.state.items():
+        if param not in self.param_to_fp32_param:
+            continue
+        fp32_param = self.param_to_fp32_param[param]
+        fp32_param.data.copy_(v["master_param"])
+
+
+_orig_load_parameter_state_from_dp_reshardable = DistributedOptimizer.load_parameter_state_from_dp_reshardable
+
+
+def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
+    """Wrapper around the original method that preserves the Adam step counter.
+
+    Upstream bug: each bucket element carries a ``step`` tensor wrapped as a
+    ``LocalNonpersistentObject``.  During the load-time round-trip this object
+    picks up the *current* (stale) step count instead of the checkpoint value.
+    The correct step is already set from ``param_groups`` by
+    ``load_state_dict`` before this method runs, but the original
+    ``_set_main_param_and_optimizer_states`` overwrites it with the stale one.
+    ``load_parameter_state_from_fs_model_space`` already filters ``step``;
+    here we save/restore it around the original method instead.
+    """
+    correct_step = None
+    for v in self.optimizer.state.values():
+        if "step" in v and isinstance(v["step"], torch.Tensor):
+            correct_step = v["step"].clone()
+            break
+
+    _orig_load_parameter_state_from_dp_reshardable(self, state_dict)
+
+    if correct_step is not None:
+        for v in self.optimizer.state.values():
+            if "step" in v and isinstance(v["step"], torch.Tensor):
+                v["step"].copy_(correct_step)
+
+    if isinstance(self.optimizer, HybridDeviceOptimizer):
+        self.optimizer._sync_hdo_state_to_sub_optimizers()
+
+
+# HybridDeviceOptimizer stores optimizer class references (cpu_optimizer_cls,
+# gpu_optimizer_cls) in its ``defaults`` dict, which bleed into param_groups
+# and get pickled into the "common" checkpoint file.  PyTorch 2.6+ defaults
+# torch.load to weights_only=True, which rejects these class globals.
+_safe_globals = [torch.optim.Adam, torch.optim.AdamW]
+try:
+    from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import (
+        HybridDeviceOptimizer,
+    )
+
+    HybridDeviceOptimizer._update_fp32_params_by_new_state = _patched_update_fp32_params_by_new_state
+    DistributedOptimizer.load_parameter_state_from_dp_reshardable = _patched_load_parameter_state_from_dp_reshardable
+
+    try:
+        from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
+
+        _safe_globals.append(FusedAdam)
+    except ImportError:
+        pass
+except ImportError:
+    pass
+torch.serialization.add_safe_globals(_safe_globals)
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.

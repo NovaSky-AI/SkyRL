@@ -12,7 +12,7 @@ pipeline handles high concurrency without dropping connections.
 
 Three modes:
   direct  - Direct to vLLM server (bypasses router)
-  router  - Through the InferenceRouter (tests httpx pool + uvicorn backlog)
+  router  - Through the VLLMRouter (tests vllm-router subprocess)
   e2e     - Via RemoteInferenceClient.generate() (tests aiohttp connector +
             shared semaphore throttling)
 
@@ -41,7 +41,6 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
@@ -71,9 +70,7 @@ def get_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def start_servers(
-    cfg: SkyRLTrainConfig, router_type: str = "default"
-) -> Tuple[RemoteInferenceClient, object, ServerGroup]:
+def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, VLLMRouter, ServerGroup]:
     """Start vLLM server group, router, and build a `RemoteInferenceClient`."""
     cli_args = build_vllm_cli_args(cfg)
     ie_cfg = cfg.generator.inference_engine
@@ -94,10 +91,7 @@ def start_servers(
     server_urls = [info.url for info in server_infos]
 
     # Router
-    if router_type == "vllm-router":
-        router = VLLMRouter(server_urls=server_urls)
-    else:
-        router = InferenceRouter(server_urls=server_urls)
+    router = VLLMRouter(server_urls=server_urls)
     proxy_url = router.start()
 
     # Client
@@ -290,13 +284,6 @@ def parse_args():
         help="Submit requests at a steady rate (requests/sec). Default: inf (all requests fired at time 0).",
     )
     parser.add_argument(
-        "--router",
-        type=str,
-        default="default",
-        choices=["default", "vllm-router"],
-        help="Router type: 'default' (Python InferenceRouter) or 'vllm-router' (Rust subprocess). Default: default.",
-    )
-    parser.add_argument(
         "--num-engines",
         type=int,
         default=1,
@@ -313,12 +300,12 @@ def parse_args():
     if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
         parser.error("--max-workers is not supported for e2e mode")
 
-    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.router, args.num_engines
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.num_engines
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    num_prompts, modes, max_tokens, qps, max_workers, router_type, num_engines = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers, num_engines = parse_args()
 
     print("Load test config:")
     print(f"  model={MODEL}")
@@ -327,7 +314,6 @@ def main():
     print(f"  modes={modes}")
     print(f"  qps={qps}")
     print(f"  max_workers={max_workers}")
-    print(f"  router={router_type}")
     print(f"  num_engines={num_engines}")
     print()
     print("Starting servers...")
@@ -337,7 +323,7 @@ def main():
     if not ray.is_initialized():
         initialize_ray(cfg)
 
-    client, router, server_group = start_servers(cfg, router_type=router_type)
+    client, router, server_group = start_servers(cfg)
 
     try:
         proxy_url = client.proxy_url

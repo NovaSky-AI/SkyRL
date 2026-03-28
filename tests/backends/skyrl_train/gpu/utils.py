@@ -31,9 +31,9 @@ from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
     TrainingInputBatch,
@@ -402,6 +402,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             from skyrl.utils.tok import get_tokenizer
 
             tokenizer = get_tokenizer(client.model_name)
+            _ensure_chat_template(tokenizer)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
@@ -418,7 +419,7 @@ class InferenceEngineState:
 
     client: Union[InferenceEngineClient, RemoteInferenceClient]
     pg: Optional[Any]  # placement group
-    router: Optional[InferenceRouter]
+    router: Optional[VLLMRouter]
     server_group: Optional[ServerGroup]
 
     def close(self):
@@ -545,10 +546,6 @@ class InferenceEngineState:
             )
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
-
-            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-                VLLMRouter,
-            )
 
             router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()

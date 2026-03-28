@@ -2,7 +2,7 @@
 VLLMRouter - Subprocess wrapper for vllm-router (data plane only).
 
 Spawns the vllm-router binary as a subprocess with consistent_hash policy,
-providing the same interface as InferenceRouter. Requires ``pip install vllm-router``.
+providing session-aware routing via consistent hashing.
 """
 
 import logging
