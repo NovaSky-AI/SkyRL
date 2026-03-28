@@ -459,12 +459,12 @@ if modal is not None:
         policy_dp_size = num_gpus // pp_size
         effective_policy_mini_batch_size = policy_mini_batch_size * n_samples_per_prompt
         policy_mini_batch_size_per_gpu = effective_policy_mini_batch_size // policy_dp_size
-        assert policy_mini_batch_size_per_gpu % micro_batch_size == 0, (
-            "policy_mini_batch_size_per_gpu must be divisible by micro_batch_size"
-        )
-        assert (policy_mini_batch_size_per_gpu // micro_batch_size) % pp_size == 0, (
-            "num_microbatches must be divisible by pp_size for interleaved VPP"
-        )
+        assert (
+            policy_mini_batch_size_per_gpu % micro_batch_size == 0
+        ), "policy_mini_batch_size_per_gpu must be divisible by micro_batch_size"
+        assert (
+            policy_mini_batch_size_per_gpu // micro_batch_size
+        ) % pp_size == 0, "num_microbatches must be divisible by pp_size for interleaved VPP"
 
         repo_root = Path(os.environ.get("SKYRL_REPO_ROOT", "/root/SkyRL"))
         gym_root = repo_root / "skyrl-gym"
@@ -546,9 +546,7 @@ if modal is not None:
         pp_run = results["pp"]
         vpp_run = results["vpp"]
         results["speedups"] = {
-            "wall_clock_pp_over_vpp": (
-                pp_run["elapsed_s"] / vpp_run["elapsed_s"] if vpp_run["elapsed_s"] else None
-            ),
+            "wall_clock_pp_over_vpp": (pp_run["elapsed_s"] / vpp_run["elapsed_s"] if vpp_run["elapsed_s"] else None),
             "avg_step_pp_over_vpp": (
                 pp_run["avg_step_s"] / vpp_run["avg_step_s"]
                 if pp_run["avg_step_s"] is not None and vpp_run["avg_step_s"] not in (None, 0)
