@@ -1,8 +1,7 @@
 """
 Tests for expert parallel (EP).
 
-uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/test_expert_parallel_inference.py
-
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_expert_parallel_inference.py
 """
 
 import asyncio
@@ -17,6 +16,7 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
+    _ensure_chat_template,
     are_responses_similar,
     get_available_gpus,
     get_test_actor_config,
@@ -25,7 +25,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 
-MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
+MODEL = "allenai/OLMoE-1B-7B-0924"
 NUM_GPUS = 4  # Should be divisible by 2
 
 
@@ -96,6 +96,8 @@ def test_ep_generation():
 
         with InferenceEngineState.create(cfg, sleep_level=1) as state:
             tokenizer = get_tokenizer(MODEL)
+            _ensure_chat_template(tokenizer)
+            state.client.tokenizer = tokenizer
             prompts = get_test_prompts(MODEL, num_samples=4)
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
@@ -124,6 +126,8 @@ def test_ep_weight_sync(ray_init_fixture):
     with InferenceEngineState.create(cfg, colocate_all=True) as state:
         # Generate before weight sync
         tokenizer = get_tokenizer(MODEL)
+        _ensure_chat_template(tokenizer)
+        state.client.tokenizer = tokenizer
         prompts = get_test_prompts(MODEL, num_samples=4)
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params

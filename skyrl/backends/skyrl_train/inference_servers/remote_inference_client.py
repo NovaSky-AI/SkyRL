@@ -186,7 +186,8 @@ class RemoteInferenceClient:
         if self._session is not None and not self._session.closed and self._session.loop != current_loop:
             # Event loop changed - the old session is unusable (bound to a dead loop).
             # Force-close the connector to release socket FDs immediately.
-            _force_close_connector(self._session.connector)
+            # TODO (aaron): fix cleanup
+            # _force_close_connector(self._session.connector)
             self._session = None
         if self._session is None or self._session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive
