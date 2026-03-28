@@ -117,10 +117,23 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "megatron":
         vpp_size = cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size
         if vpp_size is not None and vpp_size > 1:
-            policy_num_microbatches = policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu
-            assert policy_num_microbatches % pp == 0, (
-                f"normalized policy num_microbatches {policy_num_microbatches} should be divisible by "
+            policy_train_num_microbatches = policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu
+            assert policy_train_num_microbatches % pp == 0, (
+                f"normalized policy training num_microbatches {policy_train_num_microbatches} should be divisible by "
                 f"pipeline_model_parallel_size {pp} when "
+                f"virtual_pipeline_model_parallel_size={vpp_size}"
+            )
+            assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_forward_batch_size_per_gpu == 0, (
+                f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+                f"by micro_forward_batch_size_per_gpu {cfg.trainer.micro_forward_batch_size_per_gpu} when "
+                f"virtual_pipeline_model_parallel_size={vpp_size}"
+            )
+            policy_forward_num_microbatches = (
+                policy_mini_batch_size_per_gpu // cfg.trainer.micro_forward_batch_size_per_gpu
+            )
+            assert policy_forward_num_microbatches % pp == 0, (
+                f"normalized policy forward num_microbatches {policy_forward_num_microbatches} should be divisible "
+                f"by pipeline_model_parallel_size {pp} when "
                 f"virtual_pipeline_model_parallel_size={vpp_size}"
             )
     policy_train_batch_size_per_gpu = (

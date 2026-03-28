@@ -401,7 +401,12 @@ def test_validate_batch_sizes():
         validate_batch_sizes(cfg)
 
     # Test Case 17: Valid Megatron VPP configuration - num microbatches divisible by PP
-    cfg = create_test_config(train_batch_size=96, policy_mini_batch_size=24, micro_train_batch_size_per_gpu=2)
+    cfg = create_test_config(
+        train_batch_size=96,
+        policy_mini_batch_size=24,
+        micro_train_batch_size_per_gpu=2,
+        micro_forward_batch_size_per_gpu=6,
+    )
     cfg.trainer.strategy = "megatron"
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
@@ -409,14 +414,36 @@ def test_validate_batch_sizes():
     validate_batch_sizes(cfg)
 
     # Test Case 18: Error case - VPP requires num microbatches divisible by PP
-    cfg = create_test_config(train_batch_size=120, policy_mini_batch_size=20, micro_train_batch_size_per_gpu=2)
+    cfg = create_test_config(
+        train_batch_size=120,
+        policy_mini_batch_size=20,
+        micro_train_batch_size_per_gpu=2,
+        micro_forward_batch_size_per_gpu=5,
+    )
     cfg.trainer.strategy = "megatron"
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
     cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size = 2
     with pytest.raises(
         AssertionError,
-        match="normalized policy num_microbatches .* should be divisible by pipeline_model_parallel_size",
+        match="normalized policy training num_microbatches .* should be divisible by pipeline_model_parallel_size",
+    ):
+        validate_batch_sizes(cfg)
+
+    # Test Case 19: Error case - VPP forward path requires num microbatches divisible by PP
+    cfg = create_test_config(
+        train_batch_size=96,
+        policy_mini_batch_size=24,
+        micro_train_batch_size_per_gpu=2,
+        micro_forward_batch_size_per_gpu=8,
+    )
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size = 2
+    with pytest.raises(
+        AssertionError,
+        match="normalized policy forward num_microbatches .* should be divisible by pipeline_model_parallel_size",
     ):
         validate_batch_sizes(cfg)
 
