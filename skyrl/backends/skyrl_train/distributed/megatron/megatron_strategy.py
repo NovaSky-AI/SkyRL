@@ -99,15 +99,19 @@ def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
 # torch.load to weights_only=True, which rejects these class globals.
 _safe_globals = [torch.optim.Adam, torch.optim.AdamW]
 try:
-    from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import (
-        HybridDeviceOptimizer,
-    )
-    from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
+    from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
 
     HybridDeviceOptimizer._update_fp32_params_by_new_state = _patched_update_fp32_params_by_new_state
-    DistributedOptimizer.load_parameter_state_from_dp_reshardable = _patched_load_parameter_state_from_dp_reshardable
-    _safe_globals.append(FusedAdam)
+    DistributedOptimizer.load_parameter_state_from_dp_reshardable = (
+        _patched_load_parameter_state_from_dp_reshardable
+    )
 
+    try:
+        from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
+
+        _safe_globals.append(FusedAdam)
+    except ImportError:
+        pass
 except ImportError:
     pass
 torch.serialization.add_safe_globals(_safe_globals)
