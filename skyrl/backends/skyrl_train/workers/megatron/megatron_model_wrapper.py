@@ -140,7 +140,7 @@ class MegatronModelWrapper:
             batch = next(batch_iter)
             pre_process, post_process = _get_model_chunk_stage_flags(model)
 
-            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            rollout_expert_indices = batch.get("rollout_expert_indices")
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
@@ -410,7 +410,7 @@ class MegatronModelWrapper:
             batch = next(batch_iter)
             pre_process, post_process = _get_model_chunk_stage_flags(model)
 
-            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            rollout_expert_indices = batch.get("rollout_expert_indices")
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
