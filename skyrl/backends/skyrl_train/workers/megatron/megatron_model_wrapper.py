@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.utils import get_attr_wrapped_model
 from omegaconf import OmegaConf
 
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
@@ -31,6 +32,33 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
+
+
+def _get_model_chunk_attr(model: nn.Module, attr_name: str) -> Any:
+    try:
+        return get_attr_wrapped_model(model, attr_name, allow_none=True)
+    except RuntimeError:
+        return None
+
+
+def _get_model_chunk_stage_flags(model: nn.Module) -> tuple[bool, bool]:
+    pre_process = _get_model_chunk_attr(model, "pre_process")
+    post_process = _get_model_chunk_attr(model, "post_process")
+    vp_stage = _get_model_chunk_attr(model, "vp_stage")
+
+    if pre_process is None:
+        if vp_stage is not None:
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage)
+        else:
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=True)
+
+    if post_process is None:
+        if vp_stage is not None:
+            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
+        else:
+            post_process = mpu.is_pipeline_last_stage(ignore_virtual=True)
+
+    return bool(pre_process), bool(post_process)
 
 
 class MegatronModelWrapper:
@@ -110,6 +138,7 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+            pre_process, post_process = _get_model_chunk_stage_flags(model)
 
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
@@ -128,7 +157,7 @@ class MegatronModelWrapper:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=pre_process,
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -137,7 +166,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=pre_process,
                 )
                 packed_seq_params = None
 
@@ -155,7 +184,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     micro_batch_size,
                     seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    post_process=post_process,
                 )
             else:
                 outputs = recover_left_padding(
@@ -163,7 +192,7 @@ class MegatronModelWrapper:
                     new_attention_mask,
                     attention_mask,
                     seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    post_process=post_process,
                 )
 
             return outputs, partial(collection_func, data=batch)
@@ -379,6 +408,7 @@ class MegatronModelWrapper:
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
+            pre_process, post_process = _get_model_chunk_stage_flags(model)
 
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
@@ -397,7 +427,7 @@ class MegatronModelWrapper:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=pre_process,
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -406,7 +436,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=pre_process,
                 )
                 packed_seq_params = None
 
@@ -424,7 +454,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     micro_batch_size,
                     seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    post_process=post_process,
                 )
             else:
                 outputs = recover_left_padding(
@@ -432,7 +462,7 @@ class MegatronModelWrapper:
                     new_attention_mask,
                     attention_mask,
                     seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    post_process=post_process,
                 )
 
             if rollout_expert_indices is not None:
