@@ -14,3 +14,13 @@ search:
   search_url: "http://127.0.0.1:8000/retrieve"
   topk: 3
   timeout: 30
+
+fleet_task:
+  tasks_file: null
+  api_key: null
+  ttl_seconds: 900
+  partial_reward: false
+  enable_hints: false
+  hint_reward_threshold: 0.0
+  n_hint_samples: 2
+  enable_context_tools: false

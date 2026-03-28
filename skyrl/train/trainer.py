@@ -659,6 +659,9 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        # Track which samples are hint-augmented for first-turn baseline
+        if generator_output.get("is_hinted") is not None:
+            training_input.metadata["is_hinted"] = generator_output["is_hinted"]
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
@@ -798,10 +801,15 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
+        # Convert is_hinted metadata to numpy array for advantage computation
+        is_hinted_list = data.metadata.get("is_hinted")
+        is_hinted = np.array(is_hinted_list) if is_hinted_list is not None else None
+
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             index = np.array(data.metadata["uids"])
             values = data["values"]
+            last_step_is_hinted = is_hinted[is_last_step.cpu().numpy()] if is_hinted is not None else None
             # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
             # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
@@ -814,6 +822,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                is_hinted=last_step_is_hinted,
             )
             # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
@@ -836,6 +845,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                is_hinted=is_hinted,
             )
         data["returns"] = returns
         data["advantages"] = advantages
@@ -920,8 +930,10 @@ class RayPPOTrainer:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
+        if "is_hinted" in training_input.metadata:
+            new_training_input.metadata["is_hinted"] = training_input.metadata["is_hinted"] + [False] * pad_size
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
+            if key not in ["uids", "trajectory_ids", "is_hinted"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
