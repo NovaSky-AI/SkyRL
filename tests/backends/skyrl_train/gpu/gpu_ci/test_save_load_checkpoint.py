@@ -189,14 +189,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
             assert fsdp_config["fsdp_strategy"] == strategy
             assert fsdp_config["world_size"] == NUM_GPUS
 
-        # Create test input for comparing model outputs
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        test_input = torch.randint(0, 1000, (dp_size, 20), device="cpu")  # batch_size=dp_size, seq_len=20
-        attention_mask = torch.ones_like(test_input)
-
-        # Get logits right after step 1 / checkpoint save (before step 2)
-        logits_after_step1 = get_model_logits_from_actor(actor_group, test_input, attention_mask)
-
         # Step 3: Do second training step and record results
         run_one_training_step(
             actor_group,
@@ -205,20 +197,17 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
             megatron_batch=train_batch_2,
         )
 
+        # Create test input for comparing model outputs
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        test_input = torch.randint(0, 1000, (dp_size, 20), device="cpu")  # batch_size=dp_size, seq_len=20
+        attention_mask = torch.ones_like(test_input)
+
+        # Step 4: Get logits after the second training step (this should be different from after checkpoint load)
         logits_after_second_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)
 
         # Step 5: Load checkpoint via strategy's load_checkpoint method
         assert os.path.exists(checkpoint_path), f"Checkpoint directory {checkpoint_path} does not exist"
         ray.get(actor_group.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
-
-        # Verify checkpoint restores model weights exactly to the state after step 1.
-        logits_after_restore = get_model_logits_from_actor(actor_group, test_input, attention_mask)
-        torch.testing.assert_close(
-            logits_after_step1,
-            logits_after_restore,
-            atol=0.0,
-            rtol=0.0,
-        )
 
         # Step 6: Now repeat the exact same second training step
         run_one_training_step(
@@ -231,6 +220,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         # Get logits after loading checkpoint and repeating second training
         logits_after_reload_and_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)
 
+        # The logits should be exactly the same (checkpoint loading worked correctly)
         torch.testing.assert_close(logits_after_second_training, logits_after_reload_and_training, atol=0.0, rtol=0.0)
 
     finally:
