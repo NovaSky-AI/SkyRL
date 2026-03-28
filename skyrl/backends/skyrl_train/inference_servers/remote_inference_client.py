@@ -423,7 +423,6 @@ class RemoteInferenceClient:
 
         # Transform response choices → sequences
         sequences = []
-        logger.info("num choices: %d", len(response.get("choices", [])))
         for choice in response.get("choices", []):
             seq_logprobs: Optional[List[float]] = None
             logprobs_data = choice.get("logprobs")
