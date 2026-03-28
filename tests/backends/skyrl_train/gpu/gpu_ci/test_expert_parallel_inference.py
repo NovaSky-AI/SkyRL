@@ -25,7 +25,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 
-MODEL = "allenai/OLMoE-1B-7B-0924"
+MODEL = "huihui-ai/Huihui-MoE-0.8B-2E"
 NUM_GPUS = 4  # Should be divisible by 2
 
 
