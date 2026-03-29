@@ -475,7 +475,7 @@ def _task_to_record(task: Dict[str, Any], env_key: str, env_class: str = "fleet_
     if not task_key or not prompt:
         return None
 
-    return {
+    record = {
         # Required fields for SkyRL
         "prompt": [{"role": "user", "content": prompt}],
         "env_class": env_class,
@@ -483,7 +483,13 @@ def _task_to_record(task: Dict[str, Any], env_key: str, env_class: str = "fleet_
         "task_key": task_key,
         # Data source for per-environment metrics in WandB
         "data_source": env_key,
+        # Environment/data fields needed by TaskGenEnv for orchestrator provisioning
+        "data_key": task.get("data_key") or "",
+        "data_version": task.get("data_version") or "",
+        "env_version": task.get("env_version") or "",
+        "env_variables": json.dumps(task.get("env_variables") or {}),
     }
+    return record
 
 
 def main():
