@@ -255,6 +255,9 @@ trainer:
   # YaRN:
   rope_scaling: null
   rope_theta: null
+  loss_chunk_size: null
+  use_hybrid_env_sampling: false
+  min_samples_per_env: 1
   # rope_scaling:
   #   rope_type: yarn
   #   factor: 1.0
@@ -381,6 +384,9 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  inject_context_status: false
+  context_warning_threshold: 0.90
+  trajectory_timeout_seconds: null
 
 environment:
   env_class: "gsm8k"

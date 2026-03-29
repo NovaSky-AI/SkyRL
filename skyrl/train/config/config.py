@@ -517,6 +517,12 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    inject_context_status: bool = False
+    """Inject context length status into the conversation."""
+    context_warning_threshold: float = 0.90
+    """Threshold for context length warning (fraction of max_input_length)."""
+    trajectory_timeout_seconds: Optional[int] = None
+    """Timeout in seconds for each trajectory rollout."""
 
     def __post_init__(self):
 
@@ -609,6 +615,12 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    loss_chunk_size: Optional[int] = None
+    """Chunk size for loss computation to reduce memory usage."""
+    use_hybrid_env_sampling: bool = False
+    """Enable hybrid environment sampling for multi-env training."""
+    min_samples_per_env: int = 1
+    """Minimum number of samples per environment in each batch."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
