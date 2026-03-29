@@ -32,10 +32,14 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
+    apply_chat_template_with_images,
     apply_overlong_filtering,
+    extract_images_from_conversation,
     get_custom_chat_template,
     get_generation_prompt_ids,
     get_rollout_metrics,
+    is_multimodal_conversation,
+    try_load_processor,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
@@ -52,6 +56,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    multi_modal_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -70,6 +75,7 @@ class AgentLoopState:
     response_end_idx: Optional[int]
     done: bool
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    accumulated_images: Optional[List[Any]] = None
 
 
 @dataclass
@@ -140,17 +146,22 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        model_name: str = "",
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            model_name: HuggingFace model name (used for VL processor detection)
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.model_name = model_name
+        self.processor = try_load_processor(model_name) if model_name else None
+        self.is_vl_model = self.processor is not None
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
@@ -211,6 +222,28 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
+
+    def _apply_chat_template(
+        self,
+        conversation: ConversationType,
+        add_generation_prompt: bool = True,
+        **kwargs,
+    ) -> List[int]:
+        """Apply chat template, routing to VL processor for multimodal conversations."""
+        if self.is_vl_model and is_multimodal_conversation(conversation):
+            return apply_chat_template_with_images(
+                self.processor,
+                conversation,
+                add_generation_prompt=add_generation_prompt,
+                **kwargs,
+            )
+        return self.tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=False,
+            **self.generator_cfg.chat_template_kwargs,
+        )
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
@@ -275,16 +308,31 @@ class SkyRLGymGenerator(GeneratorInterface):
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
-        initial_input_ids = self.tokenizer.apply_chat_template(
-            chat_history,
-            # If retokenize_chat_history==True, avoid including the generation prompt in both the
-            # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
-            add_generation_prompt=not retokenize_chat_history,
-            chat_template=self.custom_chat_template if retokenize_chat_history else None,
-            tokenize=True,
-            return_dict=False,
-            **self.generator_cfg.chat_template_kwargs,
+
+        # VL: extract images from initial prompt for multimodal models
+        initial_images = (
+            extract_images_from_conversation(chat_history)
+            if self.is_vl_model and is_multimodal_conversation(chat_history)
+            else []
         )
+        if self.is_vl_model and initial_images:
+            logger.info(f"Session {session_id}: VL model, extracted {len(initial_images)} initial images")
+
+        # Tokenize initial prompt (VL-aware for multimodal content)
+        if self.is_vl_model and is_multimodal_conversation(chat_history):
+            initial_input_ids = self._apply_chat_template(
+                chat_history,
+                add_generation_prompt=not retokenize_chat_history,
+            )
+        else:
+            initial_input_ids = self.tokenizer.apply_chat_template(
+                chat_history,
+                add_generation_prompt=not retokenize_chat_history,
+                chat_template=self.custom_chat_template if retokenize_chat_history else None,
+                tokenize=True,
+                return_dict=False,
+                **self.generator_cfg.chat_template_kwargs,
+            )
 
         initial_prompt_length = len(initial_input_ids)
         loss_mask = []  # this excludes the prompt
@@ -311,6 +359,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs=[] if get_logprobs else None,
             response_end_idx=None,
             done=False,
+            accumulated_images=initial_images if initial_images else None,
         )
 
         while not agent_loop_state.done:
@@ -333,8 +382,16 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
+            # VL: build multimodal data for engine input
+            mm_data = None
+            if agent_loop_state.accumulated_images:
+                mm_data = [{"image": agent_loop_state.accumulated_images}]
+
             engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                prompt_token_ids=[agent_loop_state.input_ids],
+                session_ids=[session_id],
+                sampling_params=sampling_params,
+                multi_modal_data=mm_data,
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -384,6 +441,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 output_ids = self.tokenizer.encode(output, add_special_tokens=False)
 
             obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
+
+            # VL: accumulate images from observations
+            if new_obs and is_multimodal_conversation(new_obs):
+                new_images = extract_images_from_conversation(new_obs)
+                if new_images:
+                    if agent_loop_state.accumulated_images is None:
+                        agent_loop_state.accumulated_images = []
+                    agent_loop_state.accumulated_images.extend(new_images)
 
             # final turn output containing generated response and environment observations
             turn_output = TurnOutput(

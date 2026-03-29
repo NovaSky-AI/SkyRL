@@ -224,6 +224,84 @@ class FleetTaskEnv(BaseTextEnv):
                     "ContextManager not available, disabling context tools"
                 )
 
+    def _adapt_computer_tool_for_qwen(self):
+        """Adapt computer tool description for Qwen VL's [0, 1000] coordinate space.
+
+        Qwen3-VL/3.5 output coordinates in a normalized [0, 1000] grid regardless
+        of screen resolution. This rewrites tool descriptions to match, and
+        _convert_qwen_coordinates() converts back to pixels before MCP execution.
+        """
+        for tool in self.tools:
+            func = tool.get("function", {})
+            if func.get("name") != "computer":
+                continue
+
+            desc = func.get("description", "")
+
+            # Parse actual screen dimensions
+            res_match = re.search(r"Screen resolution:\s*(\d+)x(\d+)", desc)
+            if res_match:
+                self.screen_width = int(res_match.group(1))
+                self.screen_height = int(res_match.group(2))
+            else:
+                self.screen_width = 1366
+                self.screen_height = 768
+
+            w, h = self.screen_width, self.screen_height
+
+            # Rewrite description for Qwen's [0, 1000] coordinate space
+            desc = re.sub(
+                r"Screen resolution:\s*\d+x\d+\s*pixels\s*(\([^)]*\))?",
+                "Screen resolution: 1000x1000",
+                desc,
+            )
+            desc = re.sub(
+                r"\(0, 0\) is top-left,\s*\(\d+, \d+\) is bottom-right",
+                "(0, 0) is top-left, (999, 999) is bottom-right",
+                desc,
+            )
+            desc = re.sub(
+                r"valid range: x=0-\d+, y=0-\d+",
+                "valid range: x=0-999, y=0-999",
+                desc,
+            )
+            desc = re.sub(
+                r"JPEG format at \d+x\d+",
+                "JPEG format at 1000x1000",
+                desc,
+            )
+            func["description"] = desc
+
+            logger.info(
+                f"Adapted computer tool for Qwen VL: actual_screen={w}x{h}, "
+                f"model coordinate space=[0, 1000]"
+            )
+            break
+
+    def _convert_qwen_coordinates(self, tool_call: Dict[str, Any]):
+        """Convert Qwen's [0, 1000] normalized coordinates to pixel coordinates.
+
+        Modifies tool_call arguments in-place.
+        """
+        if not getattr(self, "screen_width", None) or not getattr(
+            self, "screen_height", None
+        ):
+            return
+        args = tool_call.get("arguments", {})
+        if not args or tool_call.get("name") != "computer":
+            return
+        for field in ("coordinate", "start_coordinate"):
+            coords = args.get(field)
+            if (
+                coords
+                and isinstance(coords, (list, tuple))
+                and len(coords) == 2
+            ):
+                args[field] = [
+                    int(coords[0] / 1000 * self.screen_width),
+                    int(coords[1] / 1000 * self.screen_height),
+                ]
+
     def _normalize_task_config(self) -> Dict[str, Any]:
         """Normalize task config to OpenEnv's expected format."""
         config = self.task_config.copy()
@@ -291,6 +369,11 @@ class FleetTaskEnv(BaseTextEnv):
                 f"Task {self.task_key}: no tools found. Fleet env requires tools."
             )
 
+        # VL: adapt computer tool for Qwen's normalized coordinate space
+        modality = self.task_config.get("task_modality", "tool_use")
+        if modality == "computer_use":
+            self._adapt_computer_tool_for_qwen()
+
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
 
@@ -348,13 +431,29 @@ class FleetTaskEnv(BaseTextEnv):
                 "information_schema.columns WHERE table_name = 'your_table'\n"
             )
 
+        # Computer-use hints for VL models
+        computer_use_hints = ""
+        if modality == "computer_use":
+            computer_use_hints = (
+                "\n## Browser Interaction Strategy\n"
+                "You are controlling a web browser via screenshots. Follow this loop:\n"
+                "1. **Act**: Perform ONE action (click, type, scroll, etc.)\n"
+                "2. **Observe**: Take a screenshot to see the result\n"
+                "3. **Think**: Analyze what happened and decide the next action\n\n"
+                "Tips:\n"
+                "- Always take a screenshot after each action to verify the result\n"
+                "- Click on elements by their visual position in the screenshot\n"
+                "- If an element is not visible, scroll to find it\n"
+                "- Use keyboard shortcuts when appropriate (Ctrl+A, Ctrl+C, etc.)\n"
+            )
+
         system_content = (
             f"You are a helpful agent. Complete the task by calling tools.\n\n"
             f"## Current Date\n"
             f"Today's date is {current_date}. When dates are mentioned without "
             f"a year, assume the current year ({datetime.now().year}) or a "
             f"future date.\n"
-            f"{env_context}{env_hints}\n"
+            f"{env_context}{env_hints}{computer_use_hints}\n"
             f"## Available Tools\n{tools_json}\n\n"
             f"## Tool Call Format\n"
             f'<tool_call>{{"name": "tool_name", "arguments": '
@@ -379,7 +478,18 @@ class FleetTaskEnv(BaseTextEnv):
         )
 
         system_message = {"role": "system", "content": system_content}
-        user_message = {"role": "user", "content": task_prompt}
+
+        # VL: include initial screenshot in multimodal user message
+        initial_screenshot = obs.get("initial_screenshot")
+        if initial_screenshot and isinstance(initial_screenshot, list):
+            user_content = [{"type": "text", "text": task_prompt}]
+            for item in initial_screenshot:
+                if isinstance(item, dict) and item.get("type") == "image_url":
+                    user_content.append(item)
+            user_message = {"role": "user", "content": user_content}
+        else:
+            user_message = {"role": "user", "content": task_prompt}
+
         self.chat_history = [system_message, user_message]
 
         metadata = {
@@ -431,6 +541,19 @@ class FleetTaskEnv(BaseTextEnv):
         error = None
         reward = 0.0
         mcp_time = 0.0
+
+        # VL: catch done signal wrapped in a computer tool call
+        if (
+            not agent_done
+            and tool_call
+            and tool_call.get("arguments", {}).get("action") == "done"
+        ):
+            agent_done = True
+            tool_call = None
+
+        # VL: convert Qwen [0,1000] coordinates to pixel coordinates
+        if tool_call and getattr(self, "screen_width", None):
+            self._convert_qwen_coordinates(tool_call)
 
         # Handle context management tools locally (no MCP call)
         if (
