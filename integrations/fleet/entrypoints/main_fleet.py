@@ -22,44 +22,34 @@ Environment Variables for S3 Checkpoint Management:
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
-import hydra
 import ray
-from omegaconf import OmegaConf, open_dict
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.config.legacy import GENERATOR_TO_INFERENCE_ENGINE_FIELDS
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
+from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
 logger = logging.getLogger(__name__)
 
 
-def _sync_legacy_generator_to_inference_engine(cfg):
-    """Sync flat legacy generator.* CLI overrides into generator.inference_engine.*.
+def _strip_hydra_prefixes(args: list[str]) -> list[str]:
+    """Strip Hydra ++ and + prefixes from CLI args.
 
-    The YAML has both flat legacy keys (generator.backend, etc.) and the structured
-    generator.inference_engine section. CLI args override the flat keys, but
-    validate_cfg reads from the structured section. This function copies the flat
-    values into inference_engine so both stay in sync.
+    from_cli_overrides rejects +/++ prefixed args, but our run scripts use
+    them for environment-specific config (e.g. ++environment.skyrl_gym.task_gen.*).
+    Since these fields now exist in the dataclass, we can strip the prefix.
     """
-    gen = cfg.generator
-    with open_dict(gen):
-        if not OmegaConf.is_missing(gen, "inference_engine"):
-            ie = gen.inference_engine
-            for old_field, new_field in GENERATOR_TO_INFERENCE_ENGINE_FIELDS.items():
-                if OmegaConf.is_missing(gen, old_field):
-                    continue
-                try:
-                    value = getattr(gen, old_field)
-                except Exception:
-                    continue
-                target_field = new_field if new_field else old_field
-                try:
-                    setattr(ie, target_field, value)
-                except Exception:
-                    pass
+    cleaned = []
+    for arg in args:
+        if arg.startswith("++"):
+            cleaned.append(arg[2:])
+        elif arg.startswith("+"):
+            cleaned.append(arg[1:])
+        else:
+            cleaned.append(arg)
+    return cleaned
 
 
 class FleetPPOExp(BasePPOExp):
@@ -106,14 +96,13 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: SkyRLTrainConfig) -> None:
+def main() -> None:
     """Main entry point for Fleet task training."""
-    # Hydra loads the legacy YAML with flat generator.* keys (e.g. generator.backend)
-    # that are also overridden by CLI args. The YAML also has a structured
-    # generator.inference_engine section with defaults. Sync flat CLI overrides
-    # into the structured section so validate_cfg sees the right values.
-    _sync_legacy_generator_to_inference_engine(cfg)
+    # Strip ++/+ prefixes from CLI args (used for env-specific config keys
+    # that now have proper dataclass fields)
+    args = _strip_hydra_prefixes(sys.argv[1:])
+    # Build typed dataclass config (handles legacy flat→nested translation)
+    cfg = SkyRLTrainConfig.from_cli_overrides(args)
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))

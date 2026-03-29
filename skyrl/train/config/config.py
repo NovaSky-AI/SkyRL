@@ -550,6 +550,8 @@ class SkyRLGymConfig(BaseConfig):
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    fleet_task: Optional[Dict[str, Any]] = None
+    task_gen: Optional[Dict[str, Any]] = None
 
 
 @dataclass

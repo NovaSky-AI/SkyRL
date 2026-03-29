@@ -14,12 +14,12 @@ Usage:
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
-import hydra
 import ray
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
+from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
@@ -63,17 +63,17 @@ class FleetPPOExp(BasePPOExp):
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     """Ray remote function that registers TaskGenEnv and runs training."""
-    # task_gen env is registered in skyrl_gym.envs.__init__ (after PR 3)
+    # task_gen env is registered in skyrl_gym.envs.__init__
     exp = FleetPPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: SkyRLTrainConfig) -> None:
+def main() -> None:
     """Main entry point for task generation training."""
-    # Import and call the shared sync function from main_fleet
-    from integrations.fleet.entrypoints.main_fleet import _sync_legacy_generator_to_inference_engine
-    _sync_legacy_generator_to_inference_engine(cfg)
+    from integrations.fleet.entrypoints.main_fleet import _strip_hydra_prefixes
+
+    args = _strip_hydra_prefixes(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(args)
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
