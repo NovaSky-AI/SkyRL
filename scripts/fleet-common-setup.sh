@@ -87,7 +87,7 @@ fi
 source .venv/bin/activate
 # vLLM 0.17.0 has native Qwen3.5 support (GDN via torch.ops.vllm.gdn_attention_core),
 # FlashAttention 4, and PyTorch 2.10.0
-uv sync --extra vllm
+uv sync --extra fsdp
 uv pip install wandb boto3 awscli
 # Pin fleet-python<=0.2.119: 0.2.120+ has async BaseWrapper bug (missing jwt/team_id params)
 uv pip install "litellm>=1.75.5" "fleet-python<=0.2.119" logfire "mcp>=1.0.0"
