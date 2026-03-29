@@ -168,6 +168,7 @@ class BasePPOExp:
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=8,
+            env_filter=getattr(self.cfg.data, "env_filter", None),
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -187,6 +188,7 @@ class BasePPOExp:
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
                 num_workers=8,
+                env_filter=getattr(self.cfg.data, "env_filter", None),
             )
             return prompts_dataset
         return None

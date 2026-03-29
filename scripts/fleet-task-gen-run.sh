@@ -14,6 +14,14 @@ set -euo pipefail
 # Always use random hex suffix for unique run names
 export RUN_NAME="task_gen_$(python3 -c 'import os; print(os.urandom(4).hex())')"
 
+# Optional: per-env dataset filtering via TASK_GEN_ENV_CLASSES env var
+# e.g. TASK_GEN_ENV_CLASSES="outlook" or TASK_GEN_ENV_CLASSES="outlook,booking"
+ENV_FILTER_ARGS=()
+if [ -n "${TASK_GEN_ENV_CLASSES:-}" ]; then
+  echo "=== env_filter: $TASK_GEN_ENV_CLASSES ==="
+  ENV_FILTER_ARGS+=("data.env_filter=$TASK_GEN_ENV_CLASSES")
+fi
+
 # Task-gen GRPO training via shared run script
 # --entrypoint: task-gen entrypoint (not main_fleet)
 # --env-class: task_gen environment (not fleet_task)
@@ -78,4 +86,5 @@ bash scripts/fleet-common-run.sh \
   ++environment.skyrl_gym.task_gen.max_eval_steps=$MAX_EVAL_STEPS \
   ++environment.skyrl_gym.task_gen.evaluator_model="${EVALUATOR_MODEL:-anthropic/claude-sonnet-4.5}" \
   ++environment.skyrl_gym.task_gen.eval_k_rollouts=8 \
+  "${ENV_FILTER_ARGS[@]}" \
   "$@"

@@ -41,6 +41,8 @@ class BaseConfig(ABC):
 class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
     val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
+    env_filter: Optional[str] = None
+    """Comma-separated list of data_source values to include (e.g. 'outlook,github'). None = no filtering."""
 
 
 # ---------------------------------------------------------------------------
