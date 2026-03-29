@@ -436,16 +436,24 @@ class FleetTaskEnv(BaseTextEnv):
         if modality == "computer_use":
             computer_use_hints = (
                 "\n## Browser Interaction Strategy\n"
-                "You are controlling a web browser via screenshots. Follow this loop:\n"
+                "You are controlling a web browser via screenshots. Follow this loop:\n\n"
                 "1. **Act**: Perform ONE action (click, type, scroll, etc.)\n"
                 "2. **Observe**: Take a screenshot to see the result\n"
-                "3. **Think**: Analyze what happened and decide the next action\n\n"
-                "Tips:\n"
-                "- Always take a screenshot after each action to verify the result\n"
-                "- Click on elements by their visual position in the screenshot\n"
-                "- If an element is not visible, scroll to find it\n"
-                "- Use keyboard shortcuts when appropriate (Ctrl+A, Ctrl+C, etc.)\n"
+                "3. **Adapt**: If the screen hasn't changed, try a DIFFERENT action\n\n"
+                "Key rules:\n"
+                "- After clicking or typing, ALWAYS take a screenshot next to see what happened\n"
+                "- NEVER repeat the same action more than twice. If it didn't work, try something different:\n"
+                "  - Can't find an element by scrolling? Use the search bar or navigation menu instead\n"
+                "  - Page not loading after a click? Try refreshing with key(\"F5\") or clicking a different element\n"
+                "  - Form not submitting? Check if required fields are missing\n"
+                "- Use wait() only ONCE after a page navigation, then screenshot to check. Do not wait repeatedly\n"
+                "- When the task is fully complete, say <done>. Do not keep clicking after finishing\n"
             )
+
+        tool_names = [
+            t["function"]["name"] for t in self.tools if "function" in t
+        ]
+        tool_names_str = ", ".join(tool_names)
 
         system_content = (
             f"You are a helpful agent. Complete the task by calling tools.\n\n"
@@ -456,8 +464,10 @@ class FleetTaskEnv(BaseTextEnv):
             f"{env_context}{env_hints}{computer_use_hints}\n"
             f"## Available Tools\n{tools_json}\n\n"
             f"## Tool Call Format\n"
-            f'<tool_call>{{"name": "tool_name", "arguments": '
-            f'{{"param": "value"}}}}</tool_call>\n\n'
+            f"Use the tools listed above by name ({tool_names_str}). "
+            f"Format each call as:\n"
+            f'<tool_call>{{"name": "<tool_name_from_above>", "arguments": '
+            f"{{...}}}}</tool_call>\n\n"
             f"## Error Handling\n"
             f"If a tool call returns an error:\n"
             f"- Read the error message carefully\n"
