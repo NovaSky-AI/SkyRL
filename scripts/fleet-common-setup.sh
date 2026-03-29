@@ -18,6 +18,7 @@ DATA_ROOT=""
 SKIP_UV_ISOLATED=false
 EXTRA_PIP=""
 SKIP_PREPARE=false
+ENV_CLASS="fleet_task"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -28,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --skip-uv-isolated) SKIP_UV_ISOLATED=true; shift ;;
     --extra-pip) EXTRA_PIP="$2"; shift 2 ;;
     --skip-prepare) SKIP_PREPARE=true; shift ;;
+    --env-class) ENV_CLASS="$2"; shift 2 ;;
     *) echo "ERROR: Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -121,7 +123,7 @@ if [ "$SKIP_PREPARE" = true ]; then
   echo "Skipping prepare_dataset (--skip-prepare). Caller handles preparation."
 else
   DATA_DIR="${DATA_ROOT}/data/fleet/${MODALITY}"
-  PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY --env-class $ENV_CLASS"
   [ -n "${ENV_KEYS:-}" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
   [ -n "${DIFFICULTY:-}" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
   eval "$PREPARE_CMD"

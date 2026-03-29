@@ -191,6 +191,7 @@ def prepare_fleet_dataset(
     max_tasks: Optional[int] = None,
     max_env_ratio: float = MAX_ENV_TRAIN_RATIO,  # v0.3.1: cap dominant environments
     max_eval_prompts: Optional[int] = MAX_EVAL_PROMPTS,  # v0.3.2: cap total eval prompts
+    env_class: str = "fleet_task",  # SkyRL env_class per record (fleet_task or task_gen)
 ):
     """
     Convert Fleet tasks JSON to SkyRL parquet dataset.
@@ -203,6 +204,7 @@ def prepare_fleet_dataset(
         env_filter: Optional env_key filter (e.g., "github", "booking")
         max_tasks: Optional maximum number of tasks to include
         max_env_ratio: Maximum fraction any single env can contribute to training (default: 0.20)
+        env_class: SkyRL env_class per record (default: "fleet_task", use "task_gen" for task generation)
     """
     # Log applied filters at the start
     print("\n=== Dataset Filters ===")
@@ -315,7 +317,7 @@ def prepare_fleet_dataset(
         if env_key in held_out_envs:
             env_eval_count = 0
             for task in env_tasks:
-                record = _task_to_record(task, env_key)
+                record = _task_to_record(task, env_key, env_class=env_class)
                 if record:
                     eval_records.append(record)
                     env_eval_count += 1
@@ -330,7 +332,7 @@ def prepare_fleet_dataset(
         if target_eval_size < MIN_EVAL_SAMPLES:
             env_train_count = 0
             for task in env_tasks:
-                record = _task_to_record(task, env_key)
+                record = _task_to_record(task, env_key, env_class=env_class)
                 if record:
                     train_records.append(record)
                     env_train_count += 1
@@ -346,7 +348,7 @@ def prepare_fleet_dataset(
         env_eval = 0
         for task in env_tasks:
             task_key = task.get("key") or task.get("task_key")
-            record = _task_to_record(task, env_key)
+            record = _task_to_record(task, env_key, env_class=env_class)
             if not record:
                 continue
 
@@ -465,7 +467,7 @@ def prepare_fleet_dataset(
     )
 
 
-def _task_to_record(task: Dict[str, Any], env_key: str) -> Optional[Dict[str, Any]]:
+def _task_to_record(task: Dict[str, Any], env_key: str, env_class: str = "fleet_task") -> Optional[Dict[str, Any]]:
     """Convert a task dict to a dataset record."""
     task_key = task.get("key") or task.get("task_key")
     prompt = task.get("prompt", "")
@@ -476,7 +478,7 @@ def _task_to_record(task: Dict[str, Any], env_key: str) -> Optional[Dict[str, An
     return {
         # Required fields for SkyRL
         "prompt": [{"role": "user", "content": prompt}],
-        "env_class": "fleet_task",  # This tells SkyRL to use FleetTaskEnv
+        "env_class": env_class,
         # Task identification (passed as env_extras)
         "task_key": task_key,
         # Data source for per-environment metrics in WandB
@@ -541,6 +543,13 @@ def main():
         default=MAX_EVAL_PROMPTS,
         help=f"Maximum total eval prompts across all environments (default: {MAX_EVAL_PROMPTS})",
     )
+    parser.add_argument(
+        "--env-class",
+        type=str,
+        default="fleet_task",
+        choices=["fleet_task", "task_gen"],
+        help="SkyRL env_class per record (default: fleet_task, use task_gen for task generation)",
+    )
 
     args = parser.parse_args()
 
@@ -557,6 +566,7 @@ def main():
         max_tasks=args.max_tasks,
         max_env_ratio=args.max_env_ratio,
         max_eval_prompts=args.max_eval_prompts,
+        env_class=args.env_class,
     )
 
 

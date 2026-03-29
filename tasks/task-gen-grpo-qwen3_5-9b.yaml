@@ -52,7 +52,8 @@ envs:
 setup: |
   bash scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
-    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh \
+    --env-class task_gen
 
 run: |
   bash scripts/fleet-task-gen-run.sh

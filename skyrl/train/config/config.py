@@ -800,25 +800,31 @@ class SkyRLTrainConfig(BaseConfig):
                 )
         overrides = OmegaConf.from_cli(args)
 
-        # Try new format first
+        # Always load base config and merge overrides.
+        # Our run scripts use legacy flat keys (e.g. generator.backend) that
+        # need translation to the new nested format (generator.inference_engine.backend).
+        # The direct from_dict_config path only works for fully-qualified new-format keys.
         try:
-            return cls.from_dict_config(overrides)
-        except ValueError:
-            # Fall back to legacy format: load base YAML, merge overrides, translate
-            try:
-                base_cfg = get_legacy_config()
-                merged = OmegaConf.merge(base_cfg, overrides)
-                merged_dict = OmegaConf.to_container(merged, resolve=True)
+            base_cfg = get_legacy_config()
+        except Exception:
+            # Hydra compose can fail (e.g., GlobalHydra already initialized).
+            # Fall back to loading YAML directly without Hydra defaults resolution.
+            import yaml
+            config_yaml = Path(__file__).parent / "ppo_base_config.yaml"
+            with open(config_yaml) as f:
+                raw_yaml = yaml.safe_load(f)
+            # Remove Hydra defaults key (not needed for direct loading)
+            raw_yaml.pop("defaults", None)
+            base_cfg = OmegaConf.create(raw_yaml)
 
-                if is_legacy_config(merged_dict):
-                    warn_legacy_config()
-                    translated = translate_legacy_config(merged_dict)
-                    return build_nested_dataclass(cls, translated)
-            except Exception:
-                pass  # Legacy translation failed, re-raise original error
+        merged = OmegaConf.merge(base_cfg, overrides)
+        merged_dict = OmegaConf.to_container(merged, resolve=True)
 
-            # Re-raise original error if not a legacy config issue
-            raise
+        if is_legacy_config(merged_dict):
+            warn_legacy_config()
+            merged_dict = translate_legacy_config(merged_dict)
+
+        return build_nested_dataclass(cls, merged_dict)
 
 
 def make_config(
