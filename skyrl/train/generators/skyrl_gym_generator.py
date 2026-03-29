@@ -316,9 +316,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 **self.generator_cfg.chat_template_kwargs,
             )
             eos_id = self.tokenizer.eos_token_id
+            # Match reward format: custom_chat_template uses float, otherwise per-token List[float]
+            reward_val = 0.0 if self.custom_chat_template else [0.0]
             return TrajectoryOutput(
                 response_ids=[eos_id] if eos_id is not None else [0],
-                reward=0.0,
+                reward=reward_val,
                 stop_reason="env_init_error",
                 loss_mask=[0],
                 prompt_ids=dummy_ids,
