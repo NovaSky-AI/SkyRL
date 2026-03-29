@@ -81,7 +81,7 @@ bash scripts/fleet-common-run.sh \
   generator.inject_context_status=true \
   generator.context_warning_threshold=0.90 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="fleet-task-grpo" \
+  trainer.project_name="fleet-tool-use-grpo" \
   trainer.run_name="fleet_qwen35_35b_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_35b_${MODALITY}" \
