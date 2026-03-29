@@ -817,6 +817,11 @@ class SkyRLTrainConfig(BaseConfig):
             raw_yaml.pop("defaults", None)
             base_cfg = OmegaConf.create(raw_yaml)
 
+        # Disable struct flag so overrides can add new keys to dict-typed fields
+        # (e.g., chat_template_kwargs={enable_thinking:true}).
+        # OmegaConf loads empty dicts from YAML as closed structs by default.
+        OmegaConf.set_struct(base_cfg, False)
+
         merged = OmegaConf.merge(base_cfg, overrides)
         merged_dict = OmegaConf.to_container(merged, resolve=True)
 
@@ -895,7 +900,11 @@ def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
 
 def get_config_as_yaml_str(cfg) -> str:
     if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
-        return yaml.dump(asdict(cfg))
+        try:
+            return yaml.dump(asdict(cfg))
+        except TypeError:
+            # asdict can fail in some Ray serialization edge cases; fall back to str
+            return str(cfg)
     # Handle OmegaConf DictConfig (from Hydra entrypoints)
     try:
         from omegaconf import OmegaConf
