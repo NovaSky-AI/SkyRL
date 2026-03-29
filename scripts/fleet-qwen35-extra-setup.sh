@@ -55,7 +55,9 @@ echo "export PATH=$CUDA_HOME/bin:\$PATH" >> "$HOME/.cuda_env"
 # Without it, fla-core falls back to a naive PyTorch implementation that crashes
 # with cudaErrorIllegalAddress on multi-node FSDP2 (Xid 31 MMU fault).
 # Must be built from source (needs nvcc + g++) — install AFTER CUDA toolkit setup.
-uv pip install "causal-conv1d>=1.6.0"
+# Build from source with --no-build-isolation so it finds torch from the venv.
+# uv pip install can silently fail on CUDA extensions; use pip directly.
+pip install --no-cache-dir --no-build-isolation "causal-conv1d>=1.6.0"
 python -c "import causal_conv1d; print(f'causal-conv1d OK: {causal_conv1d.__version__}')"
 
 # Verify pinned packages survived dependency resolution
