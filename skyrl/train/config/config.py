@@ -615,6 +615,7 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     dump_data_batch: bool = False
     dump_eval_results: bool = True
+    dump_training_trajectories: bool = False
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     loss_chunk_size: Optional[int] = None
