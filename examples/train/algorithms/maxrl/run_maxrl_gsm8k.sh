@@ -16,6 +16,8 @@ set -x
 
 # MAXRL parameters
 : "${ADV_ESTIMATOR:=maxrl}"
+
+# Other algorithm parameters
 : "${USE_KL_LOSS:=true}"
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
