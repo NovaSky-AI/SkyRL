@@ -26,14 +26,40 @@ from pathlib import Path
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.config.legacy import is_legacy_config, translate_legacy_config
+from skyrl.train.config.legacy import GENERATOR_TO_INFERENCE_ENGINE_FIELDS
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_legacy_generator_to_inference_engine(cfg):
+    """Sync flat legacy generator.* CLI overrides into generator.inference_engine.*.
+
+    The YAML has both flat legacy keys (generator.backend, etc.) and the structured
+    generator.inference_engine section. CLI args override the flat keys, but
+    validate_cfg reads from the structured section. This function copies the flat
+    values into inference_engine so both stay in sync.
+    """
+    gen = cfg.generator
+    with open_dict(gen):
+        if not OmegaConf.is_missing(gen, "inference_engine"):
+            ie = gen.inference_engine
+            for old_field, new_field in GENERATOR_TO_INFERENCE_ENGINE_FIELDS.items():
+                if OmegaConf.is_missing(gen, old_field):
+                    continue
+                try:
+                    value = getattr(gen, old_field)
+                except Exception:
+                    continue
+                target_field = new_field if new_field else old_field
+                try:
+                    setattr(ie, target_field, value)
+                except Exception:
+                    pass
 
 
 class FleetPPOExp(BasePPOExp):
@@ -83,14 +109,11 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: SkyRLTrainConfig) -> None:
     """Main entry point for Fleet task training."""
-    # Hydra loads the legacy YAML with flat generator.* keys (e.g. generator.backend).
-    # validate_cfg expects the new generator.inference_engine.* structure.
-    # Convert to dict, apply legacy translation, then build the full typed config
-    # so all dataclass defaults (like distributed_executor_backend) are populated.
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    if is_legacy_config(cfg_dict):
-        cfg_dict = translate_legacy_config(cfg_dict)
-        cfg = OmegaConf.create(cfg_dict)
+    # Hydra loads the legacy YAML with flat generator.* keys (e.g. generator.backend)
+    # that are also overridden by CLI args. The YAML also has a structured
+    # generator.inference_engine section with defaults. Sync flat CLI overrides
+    # into the structured section so validate_cfg sees the right values.
+    _sync_legacy_generator_to_inference_engine(cfg)
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
