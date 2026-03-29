@@ -9,10 +9,11 @@
 # - 5.1.0 doesn't register qwen3_5_moe in AUTO_CONFIG_MAPPING.
 # - 5.3.0 is the first stable release with full qwen3_5_moe support.
 # - Do NOT install from git main (renamed layer_type_validation, breaks vLLM 0.17).
-# Upgrade accelerate first — 1.12.0 (from uv.lock) passes param.__dict__ kwargs
+# Upgrade accelerate — 1.12.0 (from uv.lock) passes param.__dict__ kwargs
 # (including _is_hf_initialized from transformers 5.x) to Parameter.__new__() which
 # torch 2.10 rejects. Newer accelerate filters these kwargs properly.
-uv pip install -U accelerate
+# Use --no-deps to avoid re-resolving torch (uv would pull CUDA 13.0 torch, breaking torchvision).
+pip install --no-deps "accelerate>=1.14"
 uv pip install -U "transformers==5.3.0"
 
 # flash-attn 2.8.3 prebuilt wheel for torch 2.10 + CUDA 12 (training forward/backward)
