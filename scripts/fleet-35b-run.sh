@@ -5,7 +5,7 @@
 # Required env vars: FLEET_API_KEY, WANDB_API_KEY
 # Optional: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (for S3 checkpoints)
 set -euo pipefail
-cd "$(dirname "$0")/../.."  # cd to SkyRL root
+cd "$(dirname "$0")/.."  # cd to SkyRL root (scripts/ is directly under repo root)
 
 # Defaults for vars normally set by SkyPilot YAML envs block
 export LOGGER="${LOGGER:-wandb}"
