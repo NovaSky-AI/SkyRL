@@ -437,3 +437,107 @@ def upload_eval_results_to_s3(
     except Exception as e:
         logger.error(f"S3 upload failed for eval results {local_dir}: {e}")
         return False
+
+
+def upload_training_trajectories_to_s3(
+    local_path: str,
+    run_name: str,
+    global_step: int,
+    bucket: Optional[str] = None,
+    region: Optional[str] = None,
+) -> bool:
+    """Upload a single training trajectory JSONL file to S3.
+
+    Args:
+        local_path: Path to the JSONL file
+        run_name: Run name for S3 prefix
+        global_step: Global step number
+        bucket: S3 bucket (default: from S3_TRAJECTORY_BUCKET env var)
+        region: AWS region (default: from AWS_REGION env var)
+
+    Returns:
+        True if upload succeeded
+    """
+    bucket = bucket or os.environ.get("S3_TRAJECTORY_BUCKET", "skyrl-trajectories")
+    region = region or os.environ.get("AWS_REGION", "us-east-1")
+
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not (aws_key and aws_secret):
+        logger.warning("AWS credentials not found. Skipping training trajectory upload.")
+        return False
+
+    if not os.path.exists(local_path):
+        logger.warning(f"Trajectory file does not exist: {local_path}")
+        return False
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        config = Config(retries={"max_attempts": 3, "mode": "adaptive"})
+        s3 = boto3.client("s3", region_name=region, config=config)
+
+        s3_key = f"rollouts/{run_name}/global_step_{global_step}.jsonl"
+        s3.upload_file(local_path, bucket, s3_key)
+        logger.info(f"Uploaded training trajectories to s3://{bucket}/{s3_key}")
+        return True
+
+    except Exception as e:
+        logger.error(f"S3 upload failed for training trajectories: {e}")
+        return False
+
+
+def upload_reward_rollouts_to_s3(
+    rollout_dir: str,
+    run_name: str,
+    bucket: Optional[str] = None,
+    region: Optional[str] = None,
+) -> bool:
+    """Upload reward rollout files to S3.
+
+    Args:
+        rollout_dir: Local directory containing reward rollout JSONL files
+        run_name: Run name for S3 prefix
+        bucket: S3 bucket (default: from S3_TRAJECTORY_BUCKET env var)
+        region: AWS region (default: from AWS_REGION env var)
+
+    Returns:
+        True if upload succeeded
+    """
+    bucket = bucket or os.environ.get("S3_TRAJECTORY_BUCKET", "skyrl-trajectories")
+    region = region or os.environ.get("AWS_REGION", "us-east-1")
+
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not (aws_key and aws_secret):
+        logger.warning("AWS credentials not found. Skipping reward rollout upload.")
+        return False
+
+    rollout_path = Path(rollout_dir)
+    if not rollout_path.exists():
+        logger.info(f"No reward rollout directory at {rollout_dir}, skipping upload.")
+        return False
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        config = Config(retries={"max_attempts": 3, "mode": "adaptive"})
+        s3 = boto3.client("s3", region_name=region, config=config)
+
+        uploaded = 0
+        for file_path in rollout_path.rglob("*"):
+            if file_path.is_file():
+                relative = file_path.relative_to(rollout_path)
+                s3_key = f"reward_rollouts/{run_name}/{relative}"
+                s3.upload_file(str(file_path), bucket, s3_key)
+                uploaded += 1
+
+        if uploaded:
+            logger.info(f"Uploaded {uploaded} reward rollout files to s3://{bucket}/reward_rollouts/{run_name}/")
+        return True
+
+    except Exception as e:
+        logger.error(f"S3 upload failed for reward rollouts: {e}")
+        return False

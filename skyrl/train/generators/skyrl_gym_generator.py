@@ -985,6 +985,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
             "rollout_expert_indices": truncated_indices,
+            "env_metrics": env_metrics,
         }
 
         return generator_output
@@ -1200,6 +1201,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
+            "env_metrics": env_metrics,
             "is_last_step": is_last_step,
             "is_hinted": is_hinted,
         }

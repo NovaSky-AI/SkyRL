@@ -70,6 +70,7 @@ from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
     cleanup_old_checkpoints,
+    dump_training_trajectories,
     extract_step_from_path,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
@@ -248,6 +249,26 @@ class RayPPOTrainer:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
 
+                    # 1.1.5 dump training trajectories
+                    if self.cfg.trainer.dump_training_trajectories:
+                        with Timer("dump_training_trajectories", self.all_timings):
+                            traj_file = dump_training_trajectories(
+                                dump_dir=self.cfg.trainer.export_path,
+                                tokenizer=self.tokenizer,
+                                generator_output=generator_output,
+                                env_extras=generator_input.get("env_extras", []),
+                                global_step=self.global_step,
+                            )
+                            try:
+                                from integrations.fleet.s3_checkpoints import upload_training_trajectories_to_s3
+                                upload_training_trajectories_to_s3(
+                                    local_path=traj_file,
+                                    run_name=self.cfg.trainer.run_name,
+                                    global_step=self.global_step,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to upload training trajectories to S3: {e}")
+
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
@@ -299,6 +320,16 @@ class RayPPOTrainer:
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
                             self.save_checkpoints()
+                        if self.cfg.trainer.dump_training_trajectories:
+                            try:
+                                from integrations.fleet.s3_checkpoints import upload_reward_rollouts_to_s3
+                                reward_rollout_dir = os.environ.get("REWARD_ROLLOUT_DIR", "/workspace/reward_rollouts")
+                                upload_reward_rollouts_to_s3(
+                                    rollout_dir=reward_rollout_dir,
+                                    run_name=self.cfg.trainer.run_name,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to upload reward rollouts to S3: {e}")
                     if (
                         self.cfg.trainer.hf_save_interval > 0
                         and self.global_step % self.cfg.trainer.hf_save_interval == 0

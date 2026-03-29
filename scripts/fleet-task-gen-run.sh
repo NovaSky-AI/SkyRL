@@ -66,7 +66,7 @@ bash scripts/fleet-common-run.sh \
   generator.eval_n_samples_per_prompt=3 \
   generator.gpu_memory_utilization=0.75 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="task-gen-grpo" \
+  trainer.project_name="fleet-task-gen" \
   trainer.run_name="$RUN_NAME" \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/task_gen" \

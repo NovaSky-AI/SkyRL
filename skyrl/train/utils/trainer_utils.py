@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
@@ -291,6 +292,61 @@ def dump_per_dataset_eval_results(
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
+def dump_training_trajectories(
+    dump_dir: str,
+    tokenizer: AutoTokenizer,
+    generator_output: GeneratorOutput,
+    env_extras: List[Dict[str, Any]],
+    global_step: int,
+) -> str:
+    """Dump training trajectories to a JSONL file for analysis.
+
+    Each line contains: step, env_key, data_source, stop_reason, reward, turns, tokens, prompt, text, timestamp.
+    """
+    traj_dir = Path(dump_dir) / "dumped_trajectories"
+    traj_dir.mkdir(parents=True, exist_ok=True)
+    filename = traj_dir / f"global_step_{global_step}.jsonl"
+
+    env_metrics_list = generator_output.get("env_metrics") or []
+    rewards_list = generator_output["rewards"]
+    stop_reasons = generator_output.get("stop_reasons") or []
+    ts = time.time()
+
+    with open(filename, "w") as f:
+        for i in range(len(generator_output["response_ids"])):
+            env_m = env_metrics_list[i] if i < len(env_metrics_list) and env_metrics_list[i] else {}
+            env_key = env_m.get("env_key", "unknown")
+            turns = env_m.get("turns", env_m.get("num_turns", 0))
+            extras = env_extras[i] if i < len(env_extras) else {}
+            data_source = extras.get("data_source", "unknown") if isinstance(extras, dict) else "unknown"
+
+            reward = rewards_list[i]
+            if isinstance(reward, list):
+                reward = float(sum(reward))
+            else:
+                reward = float(reward)
+
+            stop_reason = stop_reasons[i] if i < len(stop_reasons) else "unknown"
+            tokens = len(generator_output["response_ids"][i])
+
+            entry = {
+                "step": global_step,
+                "env_key": env_key,
+                "data_source": data_source,
+                "stop_reason": stop_reason,
+                "reward": reward,
+                "turns": turns,
+                "tokens": tokens,
+                "prompt": tokenizer.decode(generator_output["prompt_token_ids"][i]),
+                "text": tokenizer.decode(generator_output["response_ids"][i]),
+                "timestamp": ts,
+            }
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    logger.info(f"Dumped {len(generator_output['response_ids'])} training trajectories to {filename}")
+    return str(filename)
+
+
 class DynamicSamplingState(TypedDict, total=False):
     """Schema for dynamic sampling state dictionary.
 
@@ -564,6 +620,10 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
 
     if output.get("stop_reasons"):
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
+
+    filtered["env_metrics"] = (
+        [output["env_metrics"][i] for i in kept_indices] if output.get("env_metrics") else None
+    )
 
     return filtered
 

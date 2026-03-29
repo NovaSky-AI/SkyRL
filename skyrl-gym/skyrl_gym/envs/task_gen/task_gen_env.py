@@ -180,8 +180,8 @@ class TaskGenEnv(BaseTextEnv):
         self._fleet_client = None
 
         # Rollout dump directory (full prompt/verifier/scores per eval)
-        default_rollout_dir = os.path.join(os.path.expanduser("~"), "rollouts")
-        self._rollout_dir = os.environ.get("ROLLOUT_DIR", default_rollout_dir)
+        default_rollout_dir = os.path.join(os.path.expanduser("~"), "reward_rollouts")
+        self._rollout_dir = os.environ.get("REWARD_ROLLOUT_DIR", default_rollout_dir)
         os.makedirs(self._rollout_dir, exist_ok=True)
 
         # Base quality reward for tasks passing sandbox + judge gate.

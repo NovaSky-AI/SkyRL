@@ -250,6 +250,7 @@ trainer:
   run_name: "test_run"
   logger: "wandb"
   dump_data_batch: false
+  dump_training_trajectories: false
   dump_eval_results: true
 
   # YaRN:

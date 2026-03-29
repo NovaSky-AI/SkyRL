@@ -268,6 +268,7 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     "generator.num_inference_engines=$NUM_INFERENCE_ENGINES"
     "trainer.ckpt_path=${CKPT_ROOT}/ckpts"
     "trainer.export_path=${CKPT_ROOT}/exports"
+    trainer.dump_training_trajectories=true
   )
 
   # Append model-specific hydra overrides (passed after --)
