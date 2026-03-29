@@ -10,7 +10,6 @@ from skyrl.tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from skyrl.tx.models.llama3 import Llama3ForCausalLM
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM
-
 from tests.tx.models.conftest import create_model, load_model
 
 MODEL_PARAMS = [
@@ -77,14 +76,10 @@ class TestGradientCheckpointing:
 
         hidden_states_no_ckpt = results[False]["hidden_states"]
         hidden_states_ckpt = results[True]["hidden_states"]
-        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == (results[False]["num_hidden_layers"] + 1)
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == results[False]["num_hidden_layers"] + 1
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(
-                hs_no_ckpt,
-                hs_ckpt,
-                rtol=1e-4,
-                atol=1e-6,
-                err_msg=f"Mismatch at hidden state {i}",
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
             )
 
     def test_kv_cache_with_checkpointing(
@@ -163,14 +158,7 @@ def test_chunked_logprobs(
     del model, outputs
 
     # Load chunked model, compute logprobs
-    _, model = load_model(
-        model_name,
-        config_cls,
-        model_cls,
-        mesh_axes,
-        loss_chunk_size=chunk_size,
-        **common_kwargs,
-    )
+    _, model = load_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs)
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 

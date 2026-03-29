@@ -192,7 +192,10 @@ def test_compute_maxrl_advantage():
         index=index,
     )
 
-    expected = torch.tensor([1.5 / 4.5, -1.5 / 4.5, -1.5 / 10.5, 1.5 / 10.5]).unsqueeze(-1) * response_mask
+    expected = (
+        torch.tensor([1.5 / (4.5 + 1e-6), -1.5 / (4.5 + 1e-6), -1.5 / (10.5 + 1e-6), 1.5 / (10.5 + 1e-6)]).unsqueeze(-1)
+        * response_mask
+    )
 
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with MAXRL"
