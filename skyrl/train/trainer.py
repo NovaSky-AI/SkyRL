@@ -231,6 +231,10 @@ class RayPPOTrainer:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
                         # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
                         uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+                    elif "trajectory_ids" in generator_input and generator_input["trajectory_ids"] is not None:
+                        # Hint augmentation may extend trajectory_ids in-place during generate().
+                        # Re-derive uids to stay aligned with rewards/responses.
+                        uids = [tid.instance_id for tid in generator_input["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
