@@ -27,7 +27,6 @@ from pathlib import Path
 import hydra
 import ray
 from omegaconf import OmegaConf
-from skyrl_gym.envs import register
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.legacy import is_legacy_config, translate_legacy_config
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
@@ -75,11 +74,8 @@ class FleetPPOExp(BasePPOExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):
-    """Ray remote function that registers Fleet environment and runs training."""
-    register(
-        id="fleet_task",
-        entry_point="skyrl_gym.envs.fleet_task.env:FleetTaskEnv",
-    )
+    """Ray remote function that runs Fleet training."""
+    # fleet_task env is auto-registered by skyrl_gym.envs.__init__
     exp = FleetPPOExp(cfg)
     exp.run()
 

@@ -24,8 +24,7 @@ bash scripts/fleet-common-run.sh \
   --use-python-direct --cuda-env "$HOME/.cuda_env" \
   --set-ulimit --no-pytorch-alloc-conf \
   --entrypoint integrations.fleet.entrypoints.main_task_gen \
-  --env-class task_gen \
-  --data-dir-name task_gen -- \
+  --env-class task_gen -- \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3.5-9B" \
   trainer.flash_attn=true \
