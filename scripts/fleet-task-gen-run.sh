@@ -27,7 +27,7 @@ bash scripts/fleet-common-run.sh \
   --env-class task_gen -- \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3.5-9B" \
-  trainer.flash_attn=true \
+  trainer.flash_attn=false \
   trainer.use_sample_packing=false \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=${NUM_EPOCHS} \
@@ -77,4 +77,5 @@ bash scripts/fleet-common-run.sh \
   ++environment.skyrl_gym.task_gen.alpha=$ALPHA \
   ++environment.skyrl_gym.task_gen.max_eval_steps=$MAX_EVAL_STEPS \
   ++environment.skyrl_gym.task_gen.evaluator_model="${EVALUATOR_MODEL:-anthropic/claude-sonnet-4.5}" \
-  ++environment.skyrl_gym.task_gen.eval_k_rollouts=8
+  ++environment.skyrl_gym.task_gen.eval_k_rollouts=8 \
+  "$@"

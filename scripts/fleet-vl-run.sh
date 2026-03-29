@@ -44,7 +44,7 @@ bash scripts/fleet-common-run.sh \
   environment.skyrl_gym.fleet_task.enable_hints=false \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="Qwen/Qwen3.5-9B" \
-  trainer.flash_attn=true \
+  trainer.flash_attn=false \
   trainer.loss_chunk_size=4096 \
   trainer.use_sample_packing=false \
   trainer.algorithm.loss_reduction="sequence_mean" \
