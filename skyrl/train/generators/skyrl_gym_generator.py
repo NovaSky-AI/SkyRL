@@ -306,7 +306,25 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        try:
+            chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        except Exception as e:
+            logger.warning(f"Session {session_id}: env.init failed ({type(e).__name__}: {e}), returning zero-reward trajectory")
+            # Return a minimal failed trajectory so training can continue
+            dummy_ids = self.tokenizer.apply_chat_template(
+                chat_history, add_generation_prompt=False, tokenize=True, return_dict=False,
+                **self.generator_cfg.chat_template_kwargs,
+            )
+            eos_id = self.tokenizer.eos_token_id
+            return TrajectoryOutput(
+                response_ids=[eos_id] if eos_id is not None else [0],
+                reward=0.0,
+                stop_reason="env_init_error",
+                loss_mask=[0],
+                prompt_ids=dummy_ids,
+                rollout_logprobs=None,
+                env_metrics={"env_init_error": str(e), "final_reward": 0.0},
+            )
         initial_chat_history_length = len(chat_history)
 
         # VL: extract images from initial prompt for multimodal models
