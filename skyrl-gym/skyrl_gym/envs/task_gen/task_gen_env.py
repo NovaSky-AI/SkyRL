@@ -789,9 +789,13 @@ Generate exactly ONE task. Output it in this format:
             env_variables=self.env_variables or {},
         )
 
-        import_response = fleet.import_single_task(task)
+        try:
+            import_response = fleet.import_single_task(task)
+        except Exception as e:
+            logger.error(f"[{task_key}] Failed to import task to Fleet: {e}")
+            return (None, [(0.0, None, None)] * k)
         if import_response is None:
-            logger.error(f"[{task_key}] Failed to import task to Fleet")
+            logger.error(f"[{task_key}] Failed to import task to Fleet (returned None, api_key set: {bool(self.fleet_api_key)})")
             return (None, [(0.0, None, None)] * k)
 
         job_response = fleet.create_job(

@@ -638,6 +638,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # Fleet env vars needed by fleet_task and task_gen environments
+    for var_name in ["FLEET_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"]:
+        if value := os.environ.get(var_name):
+            env_vars[var_name] = value
+
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
     for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
         if value := os.environ.get(var_name):
