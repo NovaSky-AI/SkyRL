@@ -40,7 +40,7 @@ bash scripts/fleet-common-run.sh \
   environment.skyrl_gym.fleet_task.n_hint_samples=2 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
-  trainer.flash_attn=false \
+  trainer.flash_attn=true \
   trainer.loss_chunk_size=4096 \
   trainer.use_sample_packing=false \
   +generator.chat_template_kwargs='{enable_thinking:true}' \
