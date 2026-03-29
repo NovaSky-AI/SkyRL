@@ -43,6 +43,8 @@ class GeneratorOutput(TypedDict):
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # Hint augmentation: True for samples generated with hint feedback
+    is_hinted: Optional[List[bool]]
 
 
 class MetricsOutput(TypedDict):

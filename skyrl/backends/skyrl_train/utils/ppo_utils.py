@@ -1192,10 +1192,16 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     grpo_norm_by_std: bool = True,
+    is_hinted: Optional[np.ndarray] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
+
+    When ``is_hinted`` is provided, uses a **first-turn baseline**: the group mean and std
+    are computed from raw (unhinted) samples only. All samples (raw + hinted) are then
+    centered using this raw-only baseline. This prevents hinted samples from contaminating
+    the baseline for raw samples (RLTF-SD paper, Section 3.2).
 
     Expects:
         - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
@@ -1203,6 +1209,7 @@ def compute_grpo_outcome_advantage(
         - index: np.ndarray (batch_size)
         - epsilon: float
         - grpo_norm_by_std: bool
+        - is_hinted: Optional[np.ndarray] bool array (batch_size), True for hinted samples
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
@@ -1211,23 +1218,50 @@ def compute_grpo_outcome_advantage(
     # this assumes response-level rewards
     scores = token_level_rewards.sum(dim=-1)
 
-    id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
+    use_first_turn_baseline = is_hinted is not None and np.any(is_hinted)
+
     with torch.no_grad():
         bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
+
+        if use_first_turn_baseline:
+            # First-turn baseline: compute mean/std from raw (unhinted) samples only
+            id2raw_scores = defaultdict(list)
+            for i in range(bsz):
+                if not is_hinted[i]:
+                    id2raw_scores[index[i]].append(scores[i])
+
+            for idx in id2raw_scores:
+                raw = id2raw_scores[idx]
+                if len(raw) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                else:
+                    id2mean[idx] = torch.mean(torch.tensor(raw))
+                    id2std[idx] = torch.std(torch.tensor([raw]))
+
+            # For groups with only hinted samples (no raw), use 0 mean / 1 std
+            for i in range(bsz):
+                if index[i] not in id2mean:
+                    id2mean[index[i]] = torch.tensor(0.0)
+                    id2std[index[i]] = torch.tensor(1.0)
+        else:
+            # Standard GRPO: compute mean/std from all samples
+            id2score = defaultdict(list)
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                    id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
+
         for i in range(bsz):
             if grpo_norm_by_std:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)

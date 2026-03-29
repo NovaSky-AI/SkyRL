@@ -18,9 +18,11 @@ search:
 fleet_task:
   tasks_file: null
   api_key: null
-  ttl_seconds: null
+  ttl_seconds: 900
   partial_reward: false
   enable_hints: false
+  hint_reward_threshold: 0.0
+  n_hint_samples: 2
   enable_context_tools: false
 
 task_gen:
