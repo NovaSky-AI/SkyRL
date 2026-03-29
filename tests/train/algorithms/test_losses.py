@@ -616,3 +616,79 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert loss_metrics["clip_ratio"] == 0.0
+
+
+def test_importance_sampling_loss():
+    """Tests importance sampling loss computation and IW diagnostic metrics."""
+
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, 2.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)  # on-policy: same as old
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = AlgorithmConfig(
+        policy_loss_type="importance_sampling",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("importance_sampling")
+
+    loss, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
+    )
+
+    # Loss should be a scalar tensor
+    assert loss.dim() == 0, "Loss should be a scalar"
+
+    # Metrics should contain IW diagnostic keys
+    for key in ["iw_ratio_mean", "iw_ratio_std", "iw_ratio_max", "iw_ratio_min"]:
+        assert key in metrics, f"Missing metric key: {key}"
+
+    # On-policy case: log_probs == old_log_probs => ratio == 1.0 everywhere
+    assert metrics["iw_ratio_mean"] == pytest.approx(1.0, abs=1e-5)
+    assert metrics["iw_ratio_max"] == pytest.approx(1.0, abs=1e-5)
+    assert metrics["iw_ratio_min"] == pytest.approx(1.0, abs=1e-5)
+
+    # Hand-computed expected loss: -(1.0 * 1.0 + 1.0 * (-1.0) + 1.0 * 2.0) / 3 = -2/3
+    expected_loss = torch.tensor(-2.0 / 3.0)
+    torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-8)
+
+
+def test_importance_sampling_loss_extreme_ratio():
+    """Tests that safe_exp_delta prevents overflow for extreme log-prob deltas."""
+
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, 1.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0]], device=device)
+    # Extreme delta: log_probs - old_log_probs = 100.0 (would overflow without clamping)
+    log_probs = torch.tensor([[99.0, 99.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0]], device=device)
+
+    config = AlgorithmConfig(
+        policy_loss_type="importance_sampling",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("importance_sampling")
+
+    loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
+    )
+
+    # Loss must be finite (not inf or nan) thanks to safe_exp_delta clamping
+    assert torch.isfinite(loss), f"Loss should be finite, got {loss.item()}"
