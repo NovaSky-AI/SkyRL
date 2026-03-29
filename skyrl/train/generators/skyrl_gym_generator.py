@@ -628,6 +628,37 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward_out = token_level_rewards
         return reward_out
 
+    @staticmethod
+    def _sanitize_messages_for_template(messages: ConversationType) -> ConversationType:
+        """Ensure message content is compatible with the model's chat template.
+
+        Converts list-format content (multimodal observations from fleet env) to
+        plain text. This handles two cases from OpenEnv:
+        1. List of strings (multiple text results): joined into one string
+        2. List of dicts (image_url / text blocks): text extracted, images replaced
+        """
+        sanitized = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        text_parts.append(item)
+                    elif isinstance(item, dict):
+                        if "text" in item:
+                            text_parts.append(item["text"])
+                        elif "image_url" in item or "image" in item:
+                            text_parts.append("[image]")
+                        else:
+                            text_parts.append(str(item))
+                    else:
+                        text_parts.append(str(item))
+                sanitized.append({**msg, "content": "\n".join(text_parts)})
+            else:
+                sanitized.append(msg)
+        return sanitized
+
     def get_obs_ids_from_obs(self, new_obs: ConversationType, is_done: bool) -> List[int]:
         """
         Returns observation token ids from observation messages for a turn.
@@ -644,10 +675,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. apply chat template for observations, also generate generation prompt for next turn
             obs_ids_to_add = []
             if len(new_obs) > 0:
+                # Sanitize list-format content (multimodal) to plain text for
+                # compatibility with text-only chat templates (e.g. Qwen3.5-35B-A3B)
+                safe_obs = self._sanitize_messages_for_template(new_obs)
                 # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
                 # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
                 obs_ids_to_add = self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
+                    [*self.base_conversation, *safe_obs],
                     add_generation_prompt=not is_done,
                     tokenize=True,
                     return_dict=False,
@@ -660,7 +694,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             # no generation prompt is added in this case
             obs_ids_to_add = []
             if len(new_obs) > 0:
-                for obs in new_obs:
+                safe_obs = self._sanitize_messages_for_template(new_obs)
+                for obs in safe_obs:
                     obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
                     obs_ids_to_add.extend(obs_tokens)
         return obs_ids_to_add
