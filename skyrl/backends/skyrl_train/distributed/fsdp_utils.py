@@ -23,6 +23,20 @@ from typing import Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+
+# Patch torch.nn.Parameter.__new__ to accept and ignore _is_hf_initialized.
+# accelerate's init_empty_weights passes param.__dict__ (which includes
+# _is_hf_initialized set by transformers 5.x) to Parameter(), but torch 2.10
+# rejects unknown kwargs. This patch filters them out.
+_orig_param_new = torch.nn.Parameter.__new__
+
+
+def _patched_param_new(cls, *args, **kwargs):
+    kwargs.pop("_is_hf_initialized", None)
+    return _orig_param_new(cls, *args, **kwargs)
+
+
+torch.nn.Parameter.__new__ = _patched_param_new
 from omegaconf import DictConfig
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
