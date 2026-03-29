@@ -322,7 +322,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 stop_reason="env_init_error",
                 loss_mask=[0],
                 prompt_ids=dummy_ids,
-                rollout_logprobs=None,
+                rollout_logprobs=[0.0],
                 env_metrics={"env_init_error": str(e), "final_reward": 0.0},
             )
         initial_chat_history_length = len(chat_history)
