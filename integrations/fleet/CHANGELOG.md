@@ -33,15 +33,15 @@ Ported from fleet-ai/SkyRL PR #328 and PR #333, plus a new fix for hint augmenta
 
 **Why upstream SkyRL doesn't need this:** Targets smaller models (8B) with enough GPU headroom that fragmentation doesn't matter.
 
-#### 3. Enable expandable_segments for 35B (`fleet-35b-run.sh`)
+#### 3. Keep `--no-pytorch-alloc-conf` for vLLM 0.18.0 compatibility (`fleet-35b-run.sh`)
 
-**Where:** Removed `--no-pytorch-alloc-conf` flag from `fleet-35b-run.sh`
+**Where:** `fleet-35b-run.sh` retains `--no-pytorch-alloc-conf` flag.
 
-**Problem:** Without `expandable_segments:True`, PyTorch allocates fixed-size CUDA segments. Triton autotuning (FlashAttention, MoE kernels) allocates many trial buffers then frees them, leaving a fragmented segment map. Subsequent large allocations fail even though total free memory is sufficient.
+**Problem:** SkyRL-v2 uses vLLM 0.18.0 which introduced `CuMemAllocator` — a custom CUDA memory allocator that uses `cuMemCreate`/`cuMemMap` (virtual memory management APIs) for its memory pool. PyTorch's `expandable_segments:True` (set by `fleet-common-run.sh` when `--no-pytorch-alloc-conf` is absent) also uses `cuMemCreate`/`cuMemMap`. Two independent cuMem-based allocators in the same process maintain conflicting bookkeeping of the virtual address space, causing `AssertionError: Expandable segments are not compatible with memory pool` at vLLM engine init.
 
-**Fix:** Remove `--no-pytorch-alloc-conf` so `fleet-common-run.sh` sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. GCP has writable `ptrace_scope=0` so vLLM's CuMemAllocator and expandable_segments coexist fine.
+**Why this wasn't an issue in the old SkyRL fork:** Old SkyRL uses vLLM 0.17.0 which uses standard `cudaMalloc`/`cudaFree` — no cuMem APIs, no conflict with `expandable_segments`.
 
-**Note:** 9B task-gen runs on RunPod still use `--no-pytorch-alloc-conf` because RunPod containers lack `CAP_SYS_PTRACE` and expandable_segments uses cuMem APIs that need `pidfd_getfd`.
+**Fix:** Keep `--no-pytorch-alloc-conf` so `expandable_segments` is never set. CUDA memory fragmentation (the problem `expandable_segments` would solve) is instead mitigated by the `empty_cache()` calls added in fix #2 above, which defragment the PyTorch allocator cache before each backward pass.
 
 #### 4. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
@@ -61,5 +61,5 @@ The old fork's manual loop (`num_mini_batches = len(data) // mini_batch_size`) s
 |------|--------|
 | `skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py` | Synchronous ref offload + barrier |
 | `skyrl/backends/skyrl_train/workers/worker.py` | empty_cache before backward (3 sites) |
-| `scripts/fleet-35b-run.sh` | Remove `--no-pytorch-alloc-conf` |
+| `scripts/fleet-35b-run.sh` | Keep `--no-pytorch-alloc-conf` (vLLM 0.18.0 CuMemAllocator compat) |
 | `skyrl/backends/skyrl_train/distributed/dispatch.py` | Dynamic mini_batch_size adjustment |

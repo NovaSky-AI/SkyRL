@@ -17,7 +17,7 @@ Always consult the changelog before modifying Fleet training paths (`fsdp_worker
 
 3. **`stage_chunks` pre-staging**: `dispatch.py` has a `stage_chunks` optimization (not in upstream) that pre-stages mini-batch chunks in Ray object store. Includes dynamic `mini_batch_size` adjustment for hint augmentation's variable batch sizes.
 
-4. **`expandable_segments` for 35B**: `fleet-35b-run.sh` does NOT pass `--no-pytorch-alloc-conf`, so `fleet-common-run.sh` enables `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. 9B runs on RunPod still use `--no-pytorch-alloc-conf` (no `CAP_SYS_PTRACE`).
+4. **No `expandable_segments` with vLLM 0.18.0**: `fleet-35b-run.sh` passes `--no-pytorch-alloc-conf` because vLLM 0.18.0's `CuMemAllocator` uses `cuMemCreate`/`cuMemMap` and conflicts with PyTorch's `expandable_segments:True` (also cuMem-based). Anti-fragmentation is handled by `empty_cache()` before backward (fix #2). Old SkyRL (vLLM 0.17.0, `cudaMalloc`) doesn't have this conflict.
 
 ## Training Scripts
 
