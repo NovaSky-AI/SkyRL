@@ -252,6 +252,29 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    def _make_zero_reward_output(
+        self,
+        prompt: ConversationType,
+        zero_reward: Union[float, list],
+        is_step_wise: bool,
+        stop_reason: str = "trajectory_error",
+        env_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Union[TrajectoryOutput, StepWiseOutput]:
+        """Create a zero-reward output for failed/cancelled trajectories."""
+        prompt_ids = self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+        output = TrajectoryOutput(
+            response_ids=[self.tokenizer.eos_token_id],
+            reward=zero_reward,
+            stop_reason=stop_reason,
+            loss_mask=[0],
+            prompt_ids=prompt_ids,
+            rollout_logprobs=[0.0],
+            env_metrics=env_metrics or {stop_reason: 1.0},
+        )
+        if is_step_wise:
+            return StepWiseOutput(step_outputs=[output])
+        return output
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -991,27 +1014,47 @@ class SkyRLGymGenerator(GeneratorInterface):
             return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
 
         # Async agent loop to generate trajectories in parallel.
-        tasks = []
-        for i in range(len(prompts)):
-            tasks.append(
-                self.agent_loop(
-                    prompts[i],
-                    env_classes[i],
-                    env_extras[i],
-                    max_tokens,
-                    max_input_length,
-                    sampling_params=sampling_params,
-                    trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
-                )
-            )
+        # Use asyncio.wait() instead of gather() so individual trajectory failures
+        # don't crash the entire batch — failed trajectories get zero-reward outputs.
+        is_step_wise = self.generator_cfg.step_wise_trajectories
+        zero_reward = 0.0 if self.custom_chat_template else [0.0]
 
-        all_outputs = await tqdm.gather(
-            *tasks,
+        async_tasks = []
+        for i in range(len(prompts)):
+            coro = self.agent_loop(
+                prompts[i],
+                env_classes[i],
+                env_extras[i],
+                max_tokens,
+                max_input_length,
+                sampling_params=sampling_params,
+                trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+            )
+            async_tasks.append(asyncio.ensure_future(coro))
+
+        task_to_idx = {id(t): i for i, t in enumerate(async_tasks)}
+
+        pbar = tqdm(
+            total=len(async_tasks),
             desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
+            miniters=max(1, len(async_tasks) // 10),
             mininterval=5,
             disable=disable_tqdm,
         )
+        for t in async_tasks:
+            t.add_done_callback(lambda _: pbar.update(1))
+
+        done, pending = await asyncio.wait(async_tasks)
+        pbar.close()
+
+        all_outputs: list = [None] * len(async_tasks)
+        for t in done:
+            idx = task_to_idx[id(t)]
+            if t.exception() is not None:
+                logger.error(f"Trajectory {idx} raised exception: {t.exception()}")
+                all_outputs[idx] = self._make_zero_reward_output(prompts[idx], zero_reward, is_step_wise)
+            else:
+                all_outputs[idx] = t.result()
 
         # --- Hint augmentation: rescue GRPO signal on dead prompts ---
         # Only during training; eval should not run hints.

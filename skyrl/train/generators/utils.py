@@ -609,7 +609,7 @@ def extract_images_from_conversation(conversation: ConversationType) -> List[Any
             if not isinstance(item, dict) or item.get("type") != "image_url":
                 continue
             image_url_data = item.get("image_url", {})
-            url = image_url_data.get("url", "")
+            url = image_url_data.get("url") or ""
             if url.startswith("data:image"):
                 images.append(decode_base64_image(url))
             elif url.startswith(("http://", "https://")):
