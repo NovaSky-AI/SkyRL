@@ -3,8 +3,6 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
-import asyncio
-
 import pytest
 import ray
 from transformers import AutoTokenizer
@@ -141,7 +139,7 @@ async def test_policy_local_engines_e2e(
         )
         if colocate_all:
             policy.offload_to_cpu()
-            asyncio.run(client.wake_up())
+            await client.wake_up()
 
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
