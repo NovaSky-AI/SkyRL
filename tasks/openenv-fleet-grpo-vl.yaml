@@ -16,6 +16,10 @@ resources:
   ports: 6479
   any_of:
     - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
       cloud: runpod
     - accelerators: H200:8
       cloud: lambda
