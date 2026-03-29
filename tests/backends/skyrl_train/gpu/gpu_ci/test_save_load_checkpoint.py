@@ -6,20 +6,21 @@ For Megatron, run:
 uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
-import ray
-import pytest
-import torch
+import json
 import os
 import shutil
-import json
+
+import pytest
+import ray
+import torch
 from transformers import AutoTokenizer
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
+    get_model_logits_from_actor,
     init_worker_with_type,
     make_dummy_training_batch,
-    get_model_logits_from_actor,
 )
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -58,23 +59,40 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "lora", "fully_reshardable"),
+    ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload"),
     [
-        ("fsdp", False, False),
-        ("fsdp2", False, False),
-        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
-        pytest.param("megatron", False, True, marks=pytest.mark.megatron),
+        ("fsdp", False, False, False),
+        ("fsdp2", False, False, False),
+        pytest.param("megatron", False, False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, True, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", False, True, False, marks=pytest.mark.megatron),
+        pytest.param(
+            "megatron",
+            False,
+            True,
+            True,
+            marks=[
+                pytest.mark.megatron,
+                pytest.mark.skip(
+                    reason="fully_reshardable + cpu_offload has multiple upstream megatron-core bugs "
+                    "(_set_main_param_and_optimizer_states KeyError on 'step', master_param key "
+                    "mismatch with HybridDeviceOptimizer). dp_reshardable + cpu_offload works."
+                ),
+            ],
+        ),
     ],
     ids=[
         "fsdp",
         "fsdp2",
         "megatron",
+        "megatron_optimizer_cpu_offload",
         "megatron_lora",
         "megatron_fully_reshardable",
+        "megatron_fully_reshardable_optimizer_cpu_offload",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable, optimizer_cpu_offload):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -90,7 +108,11 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
     if fully_reshardable:
         cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
+    if optimizer_cpu_offload:
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_cpu_offload"] = True
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1
 
+    checkpoint_dir = None
     try:
         actor_group = init_worker_with_type(
             "policy",
@@ -100,8 +122,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
             cfg=cfg,
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-        checkpoint_dir = None
         # Create dummy training batches for training steps
         dp_size = actor_group.actor_infos[0].rank.dp_size
         dummy_batch_1 = make_dummy_training_batch(batch_size=dp_size)  # First training step
@@ -112,7 +132,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
+            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+                get_test_training_batch,
+            )
 
             dp_size = actor_group.actor_infos[0].rank.dp_size
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)

@@ -3,8 +3,8 @@ set -x
 # Colocated GRPO training+generation for Qwen3-235B-A22B on DAPO with Megatron.
 # Runs on 4 nodes of 8xH100s
 
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/megatron/run_megatron_dapo_qwen3_235b_a22b_lora.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/megatron/run_megatron_dapo_qwen3_235b_a22b_lora.sh
 
 LOGGER="wandb"  # change to "console" to print to stdout
 
@@ -94,6 +94,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \

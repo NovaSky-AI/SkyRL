@@ -1,7 +1,8 @@
-import datasets
-from loguru import logger
 import os
 from typing import List
+
+import datasets
+from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
 
@@ -58,7 +59,11 @@ class PromptDataset:
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
         self.dataframe = self.dataframe.filter(
-            lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+            lambda doc: len(
+                tokenizer.apply_chat_template(
+                    doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
+                )
+            )
             <= self.max_prompt_length,
             num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",

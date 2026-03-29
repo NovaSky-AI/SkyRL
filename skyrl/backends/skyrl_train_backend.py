@@ -9,27 +9,32 @@ import os
 import tarfile
 import tempfile
 
+import ray
 import torch
 from pydantic import BaseModel
+from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from skyrl.tinker import types
 from skyrl.backends.backend import AbstractBackend
-from skyrl.utils.log import logger
-from skyrl.train.config import SkyRLTrainConfig
-
-import ray
-from ray.util.placement_group import placement_group, PlacementGroup
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.train.config import get_config_as_yaml_str
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.backends.renderer import render_model_input
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.tinker import types
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    initialize_ray,
+)
+from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
 
@@ -222,7 +227,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
         elif self._cfg.trainer.strategy == "megatron":
-            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                PolicyWorker,
+            )
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
@@ -234,13 +241,11 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Created model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
-        """Create placement group for colocated training + inference (following main_base.py pattern)."""
-        total_gpu_slots = (
-            self._cfg.generator.inference_engine.num_engines
-            * self._cfg.generator.inference_engine.tensor_parallel_size
-            * self._cfg.generator.inference_engine.pipeline_parallel_size
-            * self._cfg.generator.inference_engine.data_parallel_size
-        )
+        """Create a placement group for colocated training + inference."""
+        ie_cfg = self._cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+
         logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
@@ -248,7 +253,7 @@ class SkyRLTrainBackend(AbstractBackend):
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         logger.info("Placement group ready!")
 
-        return pg
+        return ResolvedPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
@@ -258,14 +263,17 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
+
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
         full_sequences = [
             list(input_ids) + ([targets[-1]] if targets else [])
-            for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets)
+            for input_ids, targets in zip(all_input_ids, prepared_batch.all_targets)
         ]
 
         max_seq_len = max(len(seq) for seq in full_sequences)
@@ -383,7 +391,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -446,7 +454,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -527,10 +535,12 @@ class SkyRLTrainBackend(AbstractBackend):
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
         # 3. Sample all prompts in parallel
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
+
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_prompts)):
-                prompt = prepared_batch.all_prompts[i]
+            for i in range(len(all_input_ids)):
+                prompt_token_ids = all_input_ids[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation
@@ -550,7 +560,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 tasks.append(
                     self._inference_engine_client.sample(
-                        prompt_token_ids=prompt,
+                        prompt_token_ids=prompt_token_ids,
                         num_samples=1,  # Tinker batches multiple samples separately
                         sampling_params=params_dict,
                     )
@@ -713,7 +723,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pg: ResolvedPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.inference_engine.num_engines,
@@ -737,6 +747,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": cfg.generator.inference_engine.backend,
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
+        "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

@@ -5,8 +5,8 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
-from skyrl.tx.models.configs import ModelConfig
 
+from skyrl.tx.models.configs import ModelConfig
 
 # lm_head: (hidden_states, adapter_indices) -> logits
 LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]

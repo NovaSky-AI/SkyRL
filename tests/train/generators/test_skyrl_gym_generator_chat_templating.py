@@ -2,21 +2,27 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator_chat_templating.py
 """
 
-import pytest
-from typing import Dict, Any
-from unittest.mock import AsyncMock, MagicMock
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from transformers import AutoTokenizer
-from skyrl_gym.envs import register
-from skyrl.train.generators.utils import get_custom_chat_template
-from skyrl.train.config import GeneratorConfig, SamplingParams, ChatTemplateConfig, SkyRLGymConfig
-from skyrl.train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
+from typing import Any, Dict
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from transformers import AutoTokenizer
+
+from skyrl.train.config import (
+    ChatTemplateConfig,
+    GeneratorConfig,
+    SamplingParams,
+    SkyRLGymConfig,
+)
+from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.utils import CUSTOM_CHAT_TEMPLATES, get_custom_chat_template
+from skyrl_gym.envs import register
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.train.generators.chat_templating_test_constants import (
-    QWEN2_5_EXPECTED_STR,
     LLAMA3_2_EXPECTED_STR,
+    QWEN2_5_EXPECTED_STR,
     QWEN3_TITO_EXPECTED_STR,
     QWEN3_WITHOUT_THINKING_EXPECTED_STR,
     get_expected_chat_history,
@@ -208,11 +214,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
 
     # 4. Check loss mask exact matches
     system_prompt = tokenizer.apply_chat_template(
-        [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
+        [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], return_dict=False, tokenize=True
     )
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], return_dict=False, tokenize=True)
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, return_dict=False, tokenize=True
     )
     # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`

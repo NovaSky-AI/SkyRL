@@ -3,28 +3,32 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 """
 
-import pytest
-
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import asyncio
+
+import pytest
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
     are_responses_similar,
     get_test_prompts,
-    InferenceEngineState,
     init_remote_inference_servers,
 )
-from transformers import AutoTokenizer
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
-def get_test_actor_config() -> SkyRLTrainConfig:
+def get_test_actor_config(model: str = MODEL) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
-    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.policy.model.path = model
 
     cfg.generator.sampling_params.temperature = 0.0
     cfg.generator.sampling_params.top_p = 1
@@ -86,25 +90,25 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
 
 @pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support text based generation")
 @pytest.mark.parametrize(
-    "tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size,model",
     [
-        pytest.param(2, 1, 1),
-        pytest.param(2, 1, 2),
-        pytest.param(2, 2, 1),  # TP=2, PP=2
+        pytest.param(2, 1, 1, MODEL),
+        pytest.param(2, 1, 2, MOE_MODEL),
+        pytest.param(2, 2, 1, MODEL),  # TP=2, PP=2
     ],
-    ids=["tp2_pp1_dp1", "tp2_pp1_dp2", "tp2_pp2_dp1"],
+    ids=["tp2_pp1_dp1", "tp2_pp1_dp2_moe", "tp2_pp2_dp1"],
 )
-def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int):
+def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str):
     """
     Tests generation with both remote and ray-wrapped engines.
     """
-    cfg = get_test_actor_config()
+    cfg = get_test_actor_config(model)
 
-    prompts = get_test_prompts(MODEL)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompts = get_test_prompts(model)
+    tokenizer = AutoTokenizer.from_pretrained(model)
 
     try:
-        llm_client, remote_server_process = init_remote_inference_servers(tp_size, "vllm", tokenizer, cfg, MODEL)
+        llm_client, remote_server_process = init_remote_inference_servers(tp_size, "vllm", tokenizer, cfg, model)
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
@@ -192,21 +196,24 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
 
 
 @pytest.mark.parametrize(
-    "tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size,model,distributed_executor_backend",
     [
-        pytest.param(2, 1, 1),
-        pytest.param(2, 2, 1),
-        pytest.param(2, 1, 2),
+        pytest.param(2, 1, 1, MODEL, "ray"),
+        pytest.param(2, 2, 1, MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "mp"),
     ],
-    ids=["tp2_pp1_dp1", "tp2_pp2_dp1", "tp2_pp1_dp2"],
+    ids=["tp2_pp1_dp1_ray", "tp2_pp2_dp1_ray", "tp2_pp1_dp2_moe_ray", "tp2_pp1_dp2_moe_mp"],
 )
-def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int):
+def test_token_based_generation(
+    ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str, distributed_executor_backend: str
+):
     """Test generation using prompt_token_ids."""
 
-    cfg = get_test_actor_config()
+    cfg = get_test_actor_config(model)
 
-    prompts = get_test_prompts(MODEL, 3)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompts = get_test_prompts(model, 3)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     prompt_token_ids = tokenizer.apply_chat_template(
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
@@ -214,6 +221,7 @@ def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
     cfg.generator.inference_engine.pipeline_parallel_size = pp_size
     cfg.generator.inference_engine.data_parallel_size = dp_size
+    cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
 
     with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client

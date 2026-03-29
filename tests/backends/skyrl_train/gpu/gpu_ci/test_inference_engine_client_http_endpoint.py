@@ -8,40 +8,51 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
 """
 
-import json
-import pytest
 import asyncio
-from http import HTTPStatus
-from typing import Any, Dict, List, Union, Tuple
-from pathlib import Path
-from unittest.mock import patch
-import ray
+import json
+import logging
 import threading
-import requests
+from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+from unittest.mock import patch
+
 import aiohttp
-from pydantic import BaseModel
 import litellm
-from litellm import completion as litellm_completion
+import pytest
+import ray
+import requests
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
-import logging
+from litellm import completion as litellm_completion
+from pydantic import BaseModel
+from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
+import skyrl.train.utils
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
-    wait_for_server_ready,
     shutdown_server,
+    wait_for_server_ready,
 )
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from concurrent.futures import ThreadPoolExecutor
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-import skyrl.train.utils
-from transformers import AutoTokenizer
+from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
+    init_remote_inference_servers,
+)
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
+)
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
@@ -137,7 +148,9 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import (
+                    ChatCompletionResponse,
+                )
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
@@ -189,7 +202,9 @@ def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import (
+                    CompletionResponse,
+                )
 
                 CompletionResponse.model_validate(response_data)
             else:
@@ -225,6 +240,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
@@ -276,6 +292,8 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
@@ -294,6 +312,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     endpoints = ["chat_completions", "completions"]
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -341,7 +360,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
@@ -450,6 +469,8 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 @pytest.mark.parametrize(
@@ -483,7 +504,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
@@ -547,6 +568,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
 def test_structured_generation(ray_init_fixture):
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
@@ -600,6 +622,8 @@ def test_structured_generation(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
@@ -611,6 +635,7 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
@@ -766,6 +791,8 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 @pytest.mark.parametrize("use_custom_template", [False, True])
@@ -776,6 +803,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
@@ -853,6 +881,8 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_served_model_name(ray_init_fixture):
@@ -872,6 +902,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -945,6 +976,8 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_context_length_error_returns_400(ray_init_fixture):
@@ -964,6 +997,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
@@ -1061,3 +1095,5 @@ def test_context_length_error_returns_400(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()

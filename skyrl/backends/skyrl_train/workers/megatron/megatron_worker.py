@@ -1,51 +1,63 @@
-import torch
-import torch.nn as nn
-import torch.distributed
-import ray
-from transformers import AutoConfig
-from huggingface_hub import snapshot_download
-
 import os
-from datetime import timedelta
-from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING
 from collections import defaultdict
-from omegaconf import OmegaConf
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from megatron.bridge import AutoBridge
-from megatron.bridge.peft.lora import LoRA
-from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
+import ray
+import torch
+import torch.distributed
+import torch.nn as nn
+from huggingface_hub import snapshot_download
+from megatron.bridge import AutoBridge
+from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+from megatron.bridge.peft.lora import LoRA
+from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from omegaconf import OmegaConf
+from transformers import AutoConfig
 
-from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
+from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
+    MegatronStrategy,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    broadcast_object_across_pp_ranks,
+    print_model_size,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
-    init_megatron_optim_config,
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    print_model_size,
-    broadcast_object_across_pp_ranks,
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
 )
-from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.weight_sync import WeightChunk, WeightExtractor
+from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronModelWrapper,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
+    CriticWorkerBase,
     PolicyWorkerBase,
     RefWorkerBase,
-    CriticWorkerBase,
 )
-from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
-from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BatchIterator,
+    all_reduce_metrics,
+    reduce_metrics,
+)
+from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
+from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+    from skyrl.backends.skyrl_train.inference_engines.base import (
+        InferenceEngineInterface,
+    )
     from skyrl.train.config.config import InferenceEngineConfig
 
 # ---------------------------------------------------------------------------
@@ -56,7 +68,9 @@ if TYPE_CHECKING:
 try:
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
     from megatron.bridge.models.deepseek.common import get_common_configs
-    from megatron.bridge.models.deepseek.deepseek_provider import DeepSeekV3ModelProvider
+    from megatron.bridge.models.deepseek.deepseek_provider import (
+        DeepSeekV3ModelProvider,
+    )
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.core.models.gpt.gpt_model import GPTModel
@@ -137,56 +151,53 @@ class MegatronWeightExtractor(WeightExtractor):
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
 
-        # Initialize bucketing if enabled
-        if enable_bucketing:
-            self._init_param_buckets()
-        else:
-            self.param_buckets = None
+        # Defer bucket init to first extract_weights call.
+        # At __init__ time the model may be CPU-offloaded (colocate_all),
+        # so param.numel()==0 and bucketing collapses to a single bucket.
+        # By the time extract_weights runs, the dispatch has already
+        # called prepare_for_weight_sync → _ensure_on_gpu.
+        self.bucket_index_groups = None
+        self._buckets_initialized = False
 
     def _init_param_buckets(self):
-        """Initialize parameter buckets for packing."""
-        # Get conversion tasks from bridge
-        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        """Compute bucket boundaries (index groups) from parameter sizes.
 
-        # Calculate size for each parameter
-        param_info = []
+        Only the bucket *structure* (which task indices go in which bucket) is
+        persisted.  The actual ``WeightConversionTask`` objects are rebuilt on
+        every ``extract_weights`` call so that mapping objects start with clean
+        PP-collective caches, avoiding stale cached state across offload/reload
+        and training cycles.
+        """
+        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
 
         def calculate_size_in_bytes(param, tp_size, ep_size):
             if param is None:
-                # need to broadcast for other pp ranks
                 size_in_bytes = None
             else:
-                # Calculate size for this parameter
                 prec_to_bytes = {
                     torch.bfloat16: 2,
                     torch.float32: 4,
                 }
                 scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
                 size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-
-            # Broadcast size_in_bytes across pipeline parallel ranks
             return broadcast_object_across_pp_ranks(size_in_bytes)
 
-        for task in weight_conversion_tasks:
-            param_info.append(
-                (
-                    task,
-                    calculate_size_in_bytes(
-                        task.param_weight,
-                        task.mapping.tp_size,
-                        task.mapping.ep_size if task.mapping.is_expert else 1,
-                    ),
-                )
+        sizes = [
+            calculate_size_in_bytes(
+                task.param_weight,
+                task.mapping.tp_size,
+                task.mapping.ep_size if task.mapping.is_expert else 1,
             )
+            for task in weight_conversion_tasks
+        ]
 
-        # Group parameters into buckets based on size threshold
-        self.param_buckets = [[]]
+        self.bucket_index_groups: list[list[int]] = [[]]
         curr_size = 0
-        for task, size in param_info:
+        for idx, size in enumerate(sizes):
             if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
-                self.param_buckets.append([])
+                self.bucket_index_groups.append([])
                 curr_size = 0
-            self.param_buckets[-1].append(task)
+            self.bucket_index_groups[-1].append(idx)
             curr_size += size
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
@@ -217,6 +228,14 @@ class MegatronWeightExtractor(WeightExtractor):
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         return self._weight_metadata_cache
 
+    def _ensure_buckets_initialized(self):
+        """Lazily initialize param buckets on first use (model must be on GPU)."""
+        if self._buckets_initialized:
+            return
+        if self.enable_bucketing:
+            self._init_param_buckets()
+        self._buckets_initialized = True
+
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
 
@@ -226,6 +245,7 @@ class MegatronWeightExtractor(WeightExtractor):
         Yields:
             WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
         """
+        self._ensure_buckets_initialized()
         device = torch.cuda.current_device()
 
         if not self.enable_bucketing:
@@ -237,7 +257,6 @@ class MegatronWeightExtractor(WeightExtractor):
             )
 
             for name, tensor in hf_params_generator:
-                # Move to device and convert dtype
                 tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
 
                 yield WeightChunk(
@@ -247,12 +266,16 @@ class MegatronWeightExtractor(WeightExtractor):
                     tensors=[tensor],
                 )
         else:
-            # Bucketing mode: iterate over buckets, yield one chunk per bucket
-            for bucket in self.param_buckets:
+            # Build fresh tasks each sync so mapping objects have clean
+            # PP-collective caches; reuse the pre-computed bucket structure.
+            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+
+            for index_group in self.bucket_index_groups:
+                bucket_tasks = [fresh_tasks[i] for i in index_group]
                 hf_params_generator = self.bridge.export_hf_weights(
                     self.actor_module,
                     show_progress=False,
-                    conversion_tasks=bucket,
+                    conversion_tasks=bucket_tasks,
                 )
 
                 # Collect all parameters in this bucket into one chunk
@@ -305,13 +328,11 @@ class MegatronWorker:
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
-        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = (
             transformer_config_kwargs
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
-        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
@@ -339,6 +360,7 @@ class MegatronWorker:
             provider.moe_router_score_function = megatron_config.moe_router_score_function
         if megatron_config.moe_router_enable_expert_bias is not None:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
+        provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
@@ -350,6 +372,7 @@ class MegatronWorker:
 
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
+        self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         if lora_type == "lora":
@@ -401,7 +424,9 @@ class MegatronWorker:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
-        from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
+        from megatron.core.distributed.distributed_data_parallel_config import (
+            DistributedDataParallelConfig,
+        )
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
@@ -429,6 +454,8 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
@@ -443,12 +470,16 @@ class MegatronWorker:
             num_actions = micro.metadata["response_length"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
             micro_dicts.append(
                 {
                     "sequences": sequences,
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                     "num_actions": num_actions,
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                 }
             )
 
@@ -466,6 +497,7 @@ class MegatronWorker:
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
+        clear_router_replay()
         return output
 
     def save_hf_model(self, export_dir: str, tokenizer):
@@ -555,6 +587,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.flash_attn,
         )
 
+        if self.enable_router_replay:
+            from skyrl.backends.skyrl_train.utils.replay_utils import (
+                patch_topk_router_layer_number,
+            )
+
+            patch_topk_router_layer_number()
+
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
@@ -621,6 +660,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             Aggregated metrics dict across all micro batches
         """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
         self.model.train()
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
@@ -639,6 +680,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             micro_buffer.append(
                 {
@@ -652,6 +696,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                 }
             )
 
@@ -693,6 +738,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:
             status["loss_fn_outputs"] = all_loss_fn_outputs
+
+        clear_router_replay()
 
         return status
 
@@ -750,19 +797,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
-        # Initialize weight extractor
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
-
-        enable_bucketing = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        # Initialize weight extractor with bucketing enabled for all strategies
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
-            enable_bucketing=enable_bucketing,
-            bucket_size_threshold_GB=(
-                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
-            ),
+            enable_bucketing=True,
+            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
 

@@ -4,25 +4,40 @@ This module implements the CUDA IPC transfer strategy for synchronizing model we
 from training workers to inference engines using CUDA IPC handles.
 """
 
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+import base64
+import copy
+import pickle
+from dataclasses import asdict, dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
-
 from torch.multiprocessing.reductions import reduce_tensor
 
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferStrategy,
-    WeightTransferSender,
     WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor
 IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
@@ -38,6 +53,14 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
     def strategy_type() -> type:
         """Return the strategy class for this init info type."""
         return CudaIpcTransferStrategy
+
+    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["CudaIpcInitInfo"]:
+        """IPC init is a no-op, so return identical copies for each server."""
+        return [copy.deepcopy(self) for _ in range(num_servers)]
+
+    def to_api_payload(self) -> Dict[str, Any]:
+        """IPC needs no initialization parameters."""
+        return {}
 
 
 _IPC_REQUEST_END_MARKER = b"__END_OF_REQUEST__"
@@ -56,8 +79,8 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
 
     def serialize(self) -> bytes:
         """Serialize the request to bytes."""
-        import pickle
         import base64
+        import pickle
 
         request_data = pickle.dumps(self)
         request_data_encoded = base64.b64encode(request_data)
@@ -73,8 +96,8 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
     @classmethod
     def deserialize(cls, data: bytes) -> "CudaIpcWeightUpdateRequest":
         """Deserialize the request from bytes."""
-        import pickle
         import base64
+        import pickle
 
         end_index = data.find(_IPC_REQUEST_END_MARKER)
         if end_index == -1:
@@ -111,7 +134,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
     """Sends weights via CUDA IPC handles.
 
     Creates IPC handles for tensors, gathers them across ranks, and sends
-    the handle metadata to inference engines.
+    the handle metadata to inference engines. When using the new inference
+    path, sends handles via vLLM's native /update_weights endpoint.
     """
 
     def __init__(
@@ -133,31 +157,98 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
     ) -> None:
-        """Send chunks via CUDA IPC with packed tensors.
-
-        Each chunk can contain multiple parameters. All tensors in a chunk are
-        packed into a single contiguous buffer, and one IPC handle is created
-        for the packed buffer. This reduces the number of IPC handles and file
-        descriptors.
+        """Send chunks via CUDA IPC.
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
-            weight_metadata: Pre-computed metadata (unused by CUDA IPC path,
-                accepted for interface compatibility).
+            weight_metadata: Unused for IPC (metadata is derived from chunks
+                directly to avoid ordering mismatches). Kept for interface
+                compatibility with the base class.
         """
+        if _SKYRL_USE_NEW_INFERENCE:
+            await self._send_chunks_vllm_native(chunks, weight_metadata)
+        else:
+            await self._send_chunks_legacy(chunks)
+
+    async def _send_chunks_vllm_native(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
+        """Send all weights via vLLM native IPC (new inference path).
+
+        All ranks iterate chunks (weight extraction may use collective ops),
+        create per-tensor IPC handles, and all-gather them so rank 0 has
+        handles for every GPU. Rank 0 then sends the merged handles to
+        vLLM via /update_weights with pickled IPC handles.
+
+        Names, dtypes, and shapes are derived from the chunks themselves
+        (not from weight_metadata) to guarantee they stay aligned with the
+        IPC handles. FSDP state_dict() can return parameters in different
+        orders across separate calls.
+        """
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+
+        names: List[str] = []
+        dtype_names: List[str] = []
+        shapes: List[List[int]] = []
+        tensor_refs: List[torch.Tensor] = []
+        per_param_handles: List[Dict[str, IpcHandle]] = []
+        for chunk in chunks:
+            for name, tensor in zip(chunk.names, chunk.tensors):
+                weight = tensor.detach().contiguous()
+                tensor_refs.append(weight)
+                handle = reduce_tensor(weight)
+                per_param_handles.append({gpu_uuid: handle})
+                names.append(name)
+                dtype_names.append(str(weight.dtype).split(".")[-1])
+                shapes.append(list(weight.shape))
+
+        # All-gather handles from every training rank
+        gathered: List[Optional[List[Dict[str, IpcHandle]]]] = [None] * world_size
+        torch.distributed.all_gather_object(gathered, per_param_handles)
+
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+
+        if rank == 0:
+            # Merge per-parameter handle dicts across ranks so each
+            # parameter's dict maps every GPU UUID to its handle.
+            merged_handles: List[Dict[str, IpcHandle]] = []
+            for param_idx in range(len(per_param_handles)):
+                merged: Dict[str, IpcHandle] = {}
+                for rank_handles in gathered:
+                    merged.update(rank_handles[param_idx])  # type: ignore[union-attr]
+                merged_handles.append(merged)
+
+            pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
+            update_info: Dict[str, Any] = {
+                "names": names,
+                "dtype_names": dtype_names,
+                "shapes": shapes,
+                "ipc_handles_pickled": pickled,
+            }
+            await self._inference_client.update_named_weights(update_info)
+
+        torch.distributed.barrier()
+        torch.cuda.ipc_collect()
+        torch.cuda.synchronize()
+
+    async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:
+        """Per-chunk CUDA IPC with packed tensors (legacy path)."""
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         device = torch.cuda.current_device()
         dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
 
         for chunk in chunks:
-            # Collect metadata
             names = []
             dtypes = []
             shapes = []
             sizes = []
 
-            # Pack all tensors in this chunk into a single contiguous buffer
             total_numel = sum(t.numel() for t in chunk.tensors)
             packed_tensor = torch.empty(
                 total_numel,
@@ -176,10 +267,9 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 shapes.append(shape)
                 sizes.append(size)
 
-            # Create single IPC handle for the packed buffer
             ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
             ipc_handle_dict: Dict[str, IpcHandle] = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list: List[Dict[str, IpcHandle] | None] = [None] * world_size
+            ipc_handle_list: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
             torch.distributed.all_gather_object(ipc_handle_list, ipc_handle_dict)
 
             ipc_handles: Dict[str, IpcHandle] = {}
@@ -191,7 +281,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
-            # Send the packed chunk
             if rank == 0:
                 request = CudaIpcWeightUpdateRequest(
                     names=names,

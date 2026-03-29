@@ -3,16 +3,14 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 import optax
+import pytest
 
 from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+from skyrl.tinker import api, types
 from skyrl.tinker.engine import prepare_model_pass_batch, prepare_sample_batch
 from skyrl.tinker.types import LoraConfig, OptimStepInput
-from skyrl.tinker import api
-from skyrl.tinker import types
 from skyrl.tx.layers.lora import LoRALinear
-
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 MAX_LORA_ADAPTERS = 4
@@ -108,7 +106,7 @@ def test_clear_lora_adapter():
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
-    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.qkv_proj
     connector = model.model.layers[0].attn_connector
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
@@ -156,7 +154,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
         weights = [1] * len(tokens)
         samples.append(
             types.Datum(
-                model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=tokens)]),
                 loss_fn_inputs=types.LossFnInputs(
                     target_tokens=types.TensorData(data=targets),
                     weights=types.TensorData(data=weights),
@@ -438,7 +436,7 @@ def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_toke
     """Build a SampleInput for testing."""
     return types.SampleInput(
         base_model=BASE_MODEL,  # Sample from base model (no LoRA)
-        prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=tokens)]),
         sampling_params=api.SamplingParams(temperature=0.0, max_tokens=max_tokens, seed=42).to_types(),
         num_samples=1,
         checkpoint_id="",  # Empty for base model sampling
@@ -453,7 +451,7 @@ def test_ppo_loss_fn_config_is_applied():
     backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
 
     datum = types.Datum(
-        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3, 4])]),
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3, 4])]),
         loss_fn_inputs=types.LossFnInputs(
             target_tokens=types.TensorData(data=[2, 3, 4, 0]),
             weights=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),
@@ -635,7 +633,7 @@ def test_adapter_reuse_initializes_lora_adapter():
     # (slot 0 is reserved for base model)
     backend = create_backend(max_lora_adapters=2)
     model = backend.model
-    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.qkv_proj
 
     # Create first model
     model_id_1 = "model_1"

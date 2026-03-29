@@ -1,10 +1,12 @@
 import os
+from functools import lru_cache
+
 import pytest
 import ray
 from loguru import logger
-from functools import lru_cache
-from skyrl.train.utils.utils import peer_access_supported
+
 from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl.train.utils.utils import peer_access_supported
 
 
 @lru_cache(5)
@@ -13,12 +15,7 @@ def log_once(msg):
     return None
 
 
-@pytest.fixture(scope="class")
-def ray_init_fixture():
-    if ray.is_initialized():
-        ray.shutdown()
-
-    # TODO (team): maybe we should use the default config and use prepare_runtime_environment in some way
+def _build_ray_env_vars():
     env_vars = {
         "VLLM_USE_V1": "1",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
@@ -45,9 +42,29 @@ def ray_init_fixture():
             raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
         env_vars["PYTHONPATH"] = pythonpath
 
+    return env_vars
+
+
+def _ray_init():
+    if ray.is_initialized():
+        ray.shutdown()
+
+    # TODO (team): maybe we should use the default config and use prepare_runtime_environment in some way
+    env_vars = _build_ray_env_vars()
+
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})
 
+
+@pytest.fixture
+def ray_init_fixture():
+    _ray_init()
     yield
-    # call ray shutdown after a test regardless
+    ray.shutdown()
+
+
+@pytest.fixture(scope="class")
+def class_scoped_ray_init_fixture():
+    _ray_init()
+    yield
     ray.shutdown()

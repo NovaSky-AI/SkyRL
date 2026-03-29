@@ -1,13 +1,18 @@
 """Defines dispatch and collect logic for distributed training"""
 
-from dataclasses import dataclass
-from ray.actor import ActorHandle
-from typing import List, Tuple, Optional, Dict, Type, Any
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Type
+
 import ray
 from ray import ObjectRef
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from ray.actor import ActorHandle
+
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
 
 
 @dataclass
@@ -161,21 +166,63 @@ class MeshDispatch(Dispatch):
         return
 
     @classmethod
+    def stage_chunks(
+        cls,
+        dp_size: int,
+        data: TrainingInputBatch,
+        mini_batch_size: int,
+    ) -> List[List[ObjectRef]]:
+        """
+        Pre-stage all mini-batch chunks into the object store.
+
+        Slices the full batch into mini-batches, chunks each by DP rank, and
+        ``ray.put``s each chunk.
+
+        Args:
+            dp_size: Number of data-parallel ranks
+            data: Full TrainingInputBatch to slice from
+            mini_batch_size: Size of each mini-batch (before DP chunking)
+
+        Returns:
+            List of per-mini-batch chunk ref lists.  ``result[i][dp_rank]`` is
+            the ObjectRef for mini-batch *i*, DP rank *dp_rank*.
+        """
+        assert (
+            len(data) % mini_batch_size == 0
+        ), f"data batch size must be divisible by mini_batch_size, got {len(data)} and {mini_batch_size}"
+        assert (
+            mini_batch_size % dp_size == 0
+        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
+        num_mini_batches = len(data) // mini_batch_size
+        chunk_size = mini_batch_size // dp_size
+
+        all_chunk_refs: List[List[ObjectRef]] = []
+        for step in range(num_mini_batches):
+            start = step * mini_batch_size
+            end = start + mini_batch_size
+            mini_batch = data[start:end]
+            chunks = mini_batch.chunk(chunk_size)
+            all_chunk_refs.append([ray.put(chunk) for chunk in chunks])
+        return all_chunk_refs
+
+    @classmethod
     def dispatch_from_staged(
-        cls, actor_infos: List[ActorInfo], method: str, data_ref: ObjectRef, start_idx: int, end_idx: int, **kwargs
+        cls,
+        actor_infos: List[ActorInfo],
+        method: str,
+        chunk_refs: List[ObjectRef],
+        **kwargs,
     ) -> List[ObjectRef]:
         """
-        Dispatch to workers using pre-staged data from object store.
+        Dispatch pre-staged per-DP chunks to workers.
 
-        Workers receive the full batch ObjectRef and slice indices, then fetch
-        and slice locally. This avoids serialization on each mini-batch iteration.
+        Each worker receives only its own chunk (already in the object
+        store), avoiding unnecessary deserialization overhead.
 
         Args:
             actor_infos: List of actor info objects
-            method: Name of method to call on workers
-            data_ref: ObjectRef to full TrainingInputBatch in object store
-            start_idx: Start index for mini-batch slice (before DP chunking)
-            end_idx: End index for mini-batch slice (before DP chunking)
+            method: Name of method to call on workers (receives a single data chunk)
+            chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_chunks``)
             **kwargs: Additional keyword arguments to pass to the method
 
         Returns:
@@ -183,25 +230,9 @@ class MeshDispatch(Dispatch):
         """
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
-        dp_size = actor_infos[0].rank.dp_size
-
-        # Compute per-DP-rank slice indices
-        mini_batch_size = end_idx - start_idx
-        assert (
-            mini_batch_size % dp_size == 0
-        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
-        chunk_size = mini_batch_size // dp_size
-
         for actor_info in actor_infos:
-            dp_rank = actor_info.rank.dp
-            # Compute this worker's slice of the mini-batch
-            worker_start = start_idx + dp_rank * chunk_size
-            worker_end = worker_start + chunk_size
-            object_refs.append(
-                getattr(actor_info.handle, method).remote(
-                    data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
-                )
-            )
+            chunk_ref = chunk_refs[actor_info.rank.dp]
+            object_refs.append(getattr(actor_info.handle, method).remote(chunk_ref, **kwargs))
         return object_refs
 
     @classmethod

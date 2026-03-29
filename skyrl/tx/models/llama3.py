@@ -1,17 +1,17 @@
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
+from skyrl.tx.layers.attention import dot_product_attention
+from skyrl.tx.layers.layernorm import RMSNorm
 from skyrl.tx.layers.lora import LoRAEmbed, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
-from skyrl.tx.layers.layernorm import RMSNorm
-from skyrl.tx.layers.attention import dot_product_attention
 from skyrl.tx.layers.stacked import StackedDecoderLayers
-from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
+from skyrl.tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 
 class Llama3Attention(nnx.Module):
@@ -229,6 +229,7 @@ class Llama3Model(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -245,6 +246,7 @@ class Llama3Model(nnx.Module):
             output_hidden_states=output_hidden_states,
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         hidden_states = self.norm(hidden_states)
@@ -284,6 +286,9 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         """Return the lm_head callable for logits computation."""
         return self.lm_head or self.model.embed_tokens.T
 
+    def get_decode_layers(self):
+        return self.model.layers.preextract_decode()
+
     def __call__(
         self,
         input_ids: jax.Array,
@@ -294,6 +299,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -306,6 +312,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         return CausalLMOutput(

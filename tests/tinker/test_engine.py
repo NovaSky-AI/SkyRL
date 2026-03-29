@@ -1,14 +1,13 @@
-from cloudpathlib import AnyPath
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from cloudpathlib import AnyPath
 from sqlmodel import Session, SQLModel
 
-from skyrl.tinker.engine import TinkerEngine, prepare_model_pass_batch
-from skyrl.tinker.config import EngineConfig
 from skyrl.tinker import types
-from skyrl.tinker.db_models import SessionDB, ModelDB
-
+from skyrl.tinker.config import EngineConfig
+from skyrl.tinker.db_models import ModelDB, SessionDB
+from skyrl.tinker.engine import TinkerEngine, prepare_model_pass_batch
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -111,7 +110,7 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
 ):
     """Test that prepare_model_pass_batch preserves loss_fn and loss_fn_config values."""
     datum = types.Datum(
-        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
         loss_fn_inputs=types.LossFnInputs(
             target_tokens=types.TensorData(data=[2, 3, 4]),
             weights=types.TensorData(data=[1.0, 1.0, 1.0]),
@@ -134,3 +133,4 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     batch = prepare_model_pass_batch(requests)
     assert batch.all_loss_fns == [loss_fn]
     assert batch.all_loss_fn_configs == [loss_fn_config]
+    assert batch.all_model_inputs == [datum.model_input]

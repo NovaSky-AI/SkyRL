@@ -4,18 +4,18 @@ Main entrypoint for evaluation-only.
 
 import asyncio
 import sys
+from typing import Any
 
 import ray
 from loguru import logger
-from typing import Any
 
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
 )
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl.train.evaluate import evaluate
 from skyrl.train.utils.trainer_utils import build_dataloader
+from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 
 
 class EvalOnlyEntrypoint(BasePPOExp):

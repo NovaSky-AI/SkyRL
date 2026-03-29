@@ -1,31 +1,32 @@
+import functools
 import ipaddress
-import os
-import time
-import sys
 import logging
 import math
+import os
 import socket
+import sys
+import time
 from datetime import datetime
+from pathlib import Path
 
 import ray
 import torch
 from loguru import logger
 from ray.util.placement_group import (
-    placement_group,
-    PlacementGroupSchedulingStrategy,
     PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
     placement_group_table,
 )
 
-from skyrl.train.config.config import SkyRLTrainConfig
 from skyrl.env_vars import (
-    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
-    _SKYRL_USE_NEW_INFERENCE,
 )
-from pathlib import Path
+from skyrl.train.config.config import SkyRLTrainConfig
 
 
 class Timer:
@@ -200,6 +201,11 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         version = flash_attn.__version__
         if version > "2.8.1":
             logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
+
+    if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
+        assert (
+            cfg.generator.inference_engine.enable_return_routed_experts
+        ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -438,6 +444,31 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
+
+    if ie_cfg.enable_return_routed_experts:
+        assert (
+            ie_cfg.distributed_executor_backend == "mp"
+        ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
+        assert (
+            cfg.trainer.strategy == "megatron"
+        ), "rollout router replay (r3) is only supported with Megatron training backend"
+        assert (
+            cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+        ), "moe_enable_routing_replay must be True to consume rollout expert indices"
+
+    pp_size = ie_cfg.pipeline_parallel_size
+    tp_pp_size = tp_size * pp_size
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    if (
+        cfg.trainer.placement.colocate_all
+        and tp_pp_size > num_gpus_per_node
+        and ie_cfg.distributed_executor_backend == "mp"
+    ):
+        raise ValueError(
+            "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
+        )
+
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
 
@@ -476,6 +507,11 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
+    if cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "rollout router replay (r3) is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/815."
         )
 
 
@@ -608,6 +644,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
+    if _SKYRL_USE_NEW_INFERENCE:
+        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
@@ -729,16 +768,20 @@ class InfoActor:
         return ray.get_gpu_ids()[0]
 
 
-def get_reordered_bundle_indices(pg: PlacementGroup):
+def _probe_bundle_placement(pg):
+    """Probe every bundle in a placement group to get (bundle_idx, node_id, gpu_id) tuples.
+
+    Spawns a lightweight InfoActor per bundle to discover physical GPU assignments,
+    then returns the tuples sorted by (node_id, gpu_id) for deterministic ordering.
+    """
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-    # use info actor to get the GPU id
+
     info_actors = []
     for i in range(num_bundles):
         info_actors.append(
             InfoActor.options(
-                # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
                 num_cpus=0.01,
                 num_gpus=0.01,
                 resources=None,
@@ -753,12 +796,58 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     for actor in info_actors:
         ray.kill(actor)
 
-    # original index, node_id, gpu_id
     bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
-    pg_reordered_bundle_indices = [
-        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
-    ]  # sort by node_id, then gpu_id
-    return pg_reordered_bundle_indices
+    return sorted(bundle_infos, key=lambda x: (x[1], x[2]))
+
+
+class ResolvedPlacementGroup:
+    """Wrapper around Ray PlacementGroup that resolves physical ordering of bundles and stores reordered bundle indices.
+
+    Ray placement groups don't guarantee bundle ordering (bundles on the same node
+    may not have consecutive indices). This wrapper probes the PG once on first access
+    and caches the full (bundle_idx, node_id, gpu_id) mapping sorted by (node_id, gpu_id).
+
+    All attributes are lazy and computed on first access.
+    Use ``.pg`` to access the underlying Ray PlacementGroup for Ray APIs.
+
+    Attributes:
+        reordered_bundle_indices: Raw bundle indices sorted by (node_id, gpu_id).
+        bundle_node_ids: Node ID for each reordered bundle index.
+        bundle_gpu_ids: Physical GPU ID for each reordered bundle index.
+        num_nodes: Number of distinct nodes in the placement group.
+        num_gpus_per_node: Number of GPUs per node (assumes uniform distribution).
+    """
+
+    def __init__(self, pg: PlacementGroup):
+        self.pg = pg
+        self._bundle_placement = None
+
+    def _get_bundle_placement(self):
+        if self._bundle_placement is None:
+            self._bundle_placement = _probe_bundle_placement(self.pg)
+        return self._bundle_placement
+
+    @functools.cached_property
+    def reordered_bundle_indices(self):
+        return [info[0] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_node_ids(self):
+        """Node ID for each reordered bundle index."""
+        return [info[1] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_gpu_ids(self):
+        """Physical GPU ID for each reordered bundle index."""
+        return [info[2] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def num_nodes(self):
+        return len(set(self.bundle_node_ids))
+
+    @functools.cached_property
+    def num_gpus_per_node(self):
+        return len(self._get_bundle_placement()) // self.num_nodes
 
 
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
