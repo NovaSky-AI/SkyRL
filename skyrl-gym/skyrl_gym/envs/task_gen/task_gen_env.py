@@ -98,7 +98,7 @@ class TaskGenEnv(BaseTextEnv):
         self.called_query_db = False
 
         # Environment context from dataset (extras)
-        self.env_key = extras.get("env_key", "unknown")
+        self.env_key = extras.get("env_key") or extras.get("data_source", "unknown")
         self.env_version = extras.get("env_version", "")
         self.data_key = extras.get("data_key", "")
         self.data_version = extras.get("data_version", "")
