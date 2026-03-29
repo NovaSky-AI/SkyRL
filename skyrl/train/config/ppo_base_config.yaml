@@ -265,6 +265,42 @@ trainer:
 
 
 generator:
+  # New structured inference_engine config (provides defaults for validate_cfg).
+  # Legacy flat fields below are translated into this section at runtime.
+  inference_engine:
+    model_dtype: "bfloat16"
+    run_engines_locally: true
+    num_engines: 1
+    backend: "vllm"
+    weight_sync_backend: "nccl"
+    weight_transfer_threshold_cuda_ipc_GB: 1.0
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    expert_parallel_size: 1
+    data_parallel_size: 1
+    async_engine: true
+    vllm_v1_disable_multiproc: true
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    enable_return_routed_experts: false
+    max_num_batched_tokens: 8192
+    enforce_eager: true
+    fully_sharded_loras: false
+    enable_ray_prometheus_stats: false
+    gpu_memory_utilization: 0.8
+    max_num_seqs: 1024
+    remote_urls: ["127.0.0.1:8001"]
+    enable_http_endpoint: false
+    http_endpoint_host: "127.0.0.1"
+    http_endpoint_port: 8000
+    served_model_name: null
+    distributed_executor_backend: "ray"
+    engine_init_kwargs: {}
+    override_existing_update_group: "auto"
+    external_proxy_url: null
+    external_server_urls: null
+
+  # ---- Legacy flat fields (kept for backward compat; translated at runtime) ----
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16" # should match dtype for inference engine
   run_engines_locally: true

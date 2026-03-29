@@ -87,9 +87,10 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: SkyRLTrainConfig) -> None:
     """Main entry point for Fleet task training."""
-    # Hydra loads the legacy YAML with flat generator.* keys.
-    # Translate to the new generator.inference_engine.* structure
-    # before validate_cfg accesses those fields.
+    # Hydra loads the legacy YAML with flat generator.* keys (e.g. generator.backend).
+    # validate_cfg expects the new generator.inference_engine.* structure.
+    # Convert to dict, apply legacy translation, then build the full typed config
+    # so all dataclass defaults (like distributed_executor_backend) are populated.
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     if is_legacy_config(cfg_dict):
         cfg_dict = translate_legacy_config(cfg_dict)
