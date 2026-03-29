@@ -885,5 +885,14 @@ def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
     return asdict(cfg)
 
 
-def get_config_as_yaml_str(cfg: BaseConfig) -> str:
-    return yaml.dump(asdict(cfg))
+def get_config_as_yaml_str(cfg) -> str:
+    if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
+        return yaml.dump(asdict(cfg))
+    # Handle OmegaConf DictConfig (from Hydra entrypoints)
+    try:
+        from omegaconf import OmegaConf
+        if OmegaConf.is_config(cfg):
+            return OmegaConf.to_yaml(cfg, resolve=True)
+    except ImportError:
+        pass
+    return str(cfg)
