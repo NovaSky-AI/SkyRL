@@ -805,6 +805,7 @@ class PolicyWorkerBase(Worker):
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
             loss = policy_loss
+            torch.cuda.empty_cache()  # defrag before backward to prevent OOM on 35B
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -870,6 +871,7 @@ class PolicyWorkerBase(Worker):
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
+            torch.cuda.empty_cache()  # defrag before backward to prevent OOM on 35B
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -1100,6 +1102,7 @@ class CriticWorkerBase(Worker):
                 loss_mask=loss_mask,
             )
         # NO loss scaling here - gradient scaling happens at optim_step
+        torch.cuda.empty_cache()  # defrag before backward to prevent OOM on 35B
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {

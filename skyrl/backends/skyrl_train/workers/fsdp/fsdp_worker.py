@@ -395,10 +395,17 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 class FSDPRefWorkerBase(RefWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
+        # Force synchronous transfers + barrier to prevent cudaErrorIllegalAddress
+        # when policy workers access GPU memory that ref workers are still offloading
+        # across nodes (no shared CUDA context in multi-node).
+        self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking=False)
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):
-        self.strategy.backload_to_gpu(self.model, None, non_blocking)
+        self.strategy.backload_to_gpu(self.model, None, non_blocking=False)
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     def init_model(self, model_path):
         assert self.cfg.strategy in ("fsdp", "fsdp2")
