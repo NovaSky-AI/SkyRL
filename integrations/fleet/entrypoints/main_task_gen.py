@@ -18,7 +18,9 @@ from pathlib import Path
 
 import hydra
 import ray
+from omegaconf import OmegaConf
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config.legacy import is_legacy_config, translate_legacy_config
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
@@ -71,6 +73,13 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: SkyRLTrainConfig) -> None:
     """Main entry point for task generation training."""
+    # Hydra loads the legacy YAML with flat generator.* keys.
+    # Translate to the new generator.inference_engine.* structure
+    # before validate_cfg accesses those fields.
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    if is_legacy_config(cfg_dict):
+        cfg_dict = translate_legacy_config(cfg_dict)
+        cfg = OmegaConf.create(cfg_dict)
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
