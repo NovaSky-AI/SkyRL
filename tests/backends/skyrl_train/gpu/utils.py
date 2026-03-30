@@ -558,6 +558,8 @@ class InferenceEngineState:
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 active_lora_name=active_lora_name,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
+                inference_tensor_parallel_size=ie_cfg.tensor_parallel_size,
+                inference_pipeline_parallel_size=ie_cfg.pipeline_parallel_size,
             )
         else:
             eps = create_ray_wrapped_inference_engines(

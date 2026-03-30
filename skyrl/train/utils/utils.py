@@ -509,12 +509,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
         )
 
-    if cfg.generator.inference_engine.enable_return_routed_experts:
-        raise ValueError(
-            "rollout router replay (r3) is not yet fully supported for the new inference backend. "
-            "mp backend support is required — see https://github.com/NovaSky-AI/SkyRL/issues/1309."
-        )
-
 
 @ray.remote
 def get_all_env_variables():

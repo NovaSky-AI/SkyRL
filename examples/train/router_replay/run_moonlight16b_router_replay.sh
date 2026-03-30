@@ -7,6 +7,8 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/router_replay/run_moonlight16b_router_replay.sh
 
+export _SKYRL_USE_NEW_INFERENCE=1
+
 DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
 MODEL_NAME="moonshotai/Moonlight-16B-A3B-Instruct"
@@ -30,7 +32,7 @@ INFERENCE_ENGINE_TP=8
 FLASH_ATTN=false
 
 # router replay (r3)
-ROUTER_REPLAY=true
+ROUTER_REPLAY=false
 DISTRIBUTED_EXECUTION_BACKEND="mp"
 
 SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile -m skyrl.train.entrypoints.main_base \
@@ -52,6 +54,7 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile
   trainer.policy.megatron_config.moe_enable_routing_replay=$ROUTER_REPLAY \
   generator.inference_engine.distributed_executor_backend=$DISTRIBUTED_EXECUTION_BACKEND \
   generator.inference_engine.enable_return_routed_experts=$ROUTER_REPLAY \
+  generator.inference_engine.router_type=vllm-router \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \

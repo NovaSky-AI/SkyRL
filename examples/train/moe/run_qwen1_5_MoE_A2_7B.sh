@@ -11,6 +11,9 @@ TP_SIZE=$NUM_GPUS
 EP_SIZE=$NUM_GPUS
 DP_SIZE=1
 
+# Default 0; use `_SKYRL_USE_NEW_INFERENCE=1 bash ...` to enable and tag the W&B run name.
+export _SKYRL_USE_NEW_INFERENCE="${_SKYRL_USE_NEW_INFERENCE:-0}"
+
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -48,7 +51,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="moe" \
-  trainer.run_name="moe_test" \
+  trainer.run_name="moe_test_tp${TP_SIZE}_ep${EP_SIZE}_new_inf${_SKYRL_USE_NEW_INFERENCE}" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/moe_qwen_a2_7b_ckpt" \
   $@

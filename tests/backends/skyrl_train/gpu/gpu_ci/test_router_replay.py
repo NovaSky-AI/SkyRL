@@ -107,8 +107,8 @@ def build_training_input_from_text_samples(
     return training_input
 
 
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+# @pytest.mark.megatron
+# @pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
@@ -277,8 +277,8 @@ def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         ray.shutdown()
 
 
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+# @pytest.mark.megatron
+# @pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
