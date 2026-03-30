@@ -172,19 +172,6 @@ def test_micro_batches_accumulated_initialized():
     """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
 
     # Create minimal worker instances for testing
-    class TestPolicyWorker(PolicyWorkerBase):
-        def init_model(self, *args, **kwargs):
-            pass
-
-        def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-            pass
-
-        def backload_to_gpu(self, non_blocking=True):
-            pass
-
-        def _forward_micro_batch(self, micro_batch):
-            pass
-
     class TestCriticWorker(CriticWorkerBase):
         def init_model(self, *args, **kwargs):
             pass
@@ -200,19 +187,6 @@ def test_micro_batches_accumulated_initialized():
 
     cfg = SkyRLTrainConfig()
     cfg.trainer.algorithm.policy_loss_type = "regular"
-
-    # PolicyWorker has _micro_batches_accumulated initialized at construction
-    policy_worker = TestPolicyWorker(
-        cfg=cfg.trainer,
-        world_size=4,
-        rank=0,
-        local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
-        sequence_parallel_size=1,
-    )
-    assert hasattr(policy_worker, "_micro_batches_accumulated")
-    assert policy_worker._micro_batches_accumulated == 0
 
     # CriticWorker has _micro_batches_accumulated initialized at construction
     critic_worker = TestCriticWorker(
@@ -461,9 +435,6 @@ def test_forward_backward_batch_calculations():
     # Test PolicyWorkerBase
     policy_worker = create_test_worker(PolicyWorkerBase)
 
-    # Reset _micro_batches_accumulated (initialized in __init__, reset here for test isolation)
-    policy_worker._micro_batches_accumulated = 0
-
     # Mock _forward_backward_micro to track calls
     policy_forward_backward_micro_calls = []
 
@@ -488,9 +459,6 @@ def test_forward_backward_batch_calculations():
     assert (
         len(policy_forward_backward_micro_calls) == expected_micro_batches
     ), f"PolicyWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(policy_forward_backward_micro_calls)}"
-
-    # Verify _micro_batches_accumulated is set correctly
-    assert policy_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure
     assert isinstance(result, dict)

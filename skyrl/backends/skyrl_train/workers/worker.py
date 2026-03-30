@@ -703,7 +703,7 @@ class PolicyWorkerBase(Worker):
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            microbatch_weight = len(micro_batch) / len(data)
+            microbatch_weight = micro_batch_size / len(data)
             metrics = self._forward_backward_micro(
                 micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
             )
