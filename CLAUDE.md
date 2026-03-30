@@ -17,7 +17,7 @@ Always consult the changelog before modifying Fleet training paths (`fsdp_worker
 
 3. **CUDA memory management for 35B**: `torch.cuda.empty_cache()` before backward pass in `worker.py` (policy + critic). Prevents OOM from fragmentation. Especially important because `expandable_segments` can't be used (see #5).
 
-4. **`flash_attn=false` for GatedDeltaNet**: `fleet-35b-run.sh` uses SDPA, not flash_attention_2. Qwen3.5-35B's GatedDeltaNet linear attention layers crash with flash_attn in multi-node FSDP2. Memory savings come from chunked lm_head (#2), not flash attention.
+4. **`flash_attn=true` required for memory headroom**: `fleet-35b-run.sh` uses flash_attention_2. SDPA uses too much memory at 97K sequence lengths — even with chunked lm_head, backward pass OOMs. Flash attention + chunked lm_head together provide sufficient headroom. (Earlier Xid 31 crashes were misattributed to GatedDeltaNet; actually caused by missing chunked lm_head.)
 
 5. **No `expandable_segments` with vLLM 0.18.0**: `fleet-35b-run.sh` passes `--no-pytorch-alloc-conf` because vLLM 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`) conflicts with PyTorch's `expandable_segments:True`. Old SkyRL uses vLLM 0.17.0 (`cudaMalloc`) which has no conflict.
 

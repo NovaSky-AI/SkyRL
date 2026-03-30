@@ -58,13 +58,15 @@ Fixes for 2-node (16 GPU) Qwen3.5-35B GRPO training on GCP H200. Ported from fle
 
 **Why the old fork doesn't have this:** Old SkyRL uses vLLM 0.17.0 (`cudaMalloc`/`cudaFree`, no cuMem APIs, no conflict).
 
-#### 5. `flash_attn=false` for Qwen3.5-35B GatedDeltaNet (`fleet-35b-run.sh`)
+#### 5. `flash_attn=true` required for memory headroom (`fleet-35b-run.sh`)
 
-**Where:** `fleet-35b-run.sh` sets `trainer.flash_attn=false`.
+**Where:** `fleet-35b-run.sh` sets `trainer.flash_attn=true`.
 
-**Problem:** Qwen3.5-35B uses GatedDeltaNet architecture which alternates softmax attention layers with linear attention layers (`torch_chunk_gated_delta_rule`). Setting `flash_attn=true` → `attn_implementation="flash_attention_2"` causes Xid 31 FAULT_PDE during the GDN linear attention layers' tensor allocation in multi-node FSDP2 training.
+**Problem:** SDPA (`flash_attn=false`) uses significantly more memory for attention activations than flash_attention_2, especially at 97K sequence lengths. Even with chunked lm_head (fix #2), SDPA doesn't leave enough headroom for backward pass gradients → OOM requesting 5.95 GiB during `strategy.backward()`.
 
-**Fix:** Use `flash_attn=false` (SDPA). The old fork has `flash_attn=true` but the real memory savings there come from chunked lm_head (fix #2), not flash attention itself. With chunked lm_head ported, SDPA provides sufficient memory headroom.
+Earlier Xid 31 crashes with `flash_attn=true` were misattributed to GatedDeltaNet incompatibility. The Xid 31 occurred in `torch_chunk_gated_delta_rule` (a linear attention kernel that doesn't use flash attention at all) — it was caused by memory exhaustion from the missing chunked lm_head (fix #2), not by flash_attn itself.
+
+**Fix:** Use `flash_attn=true` (matches old fork). Flash attention + chunked lm_head together provide sufficient memory headroom for training forward+backward on 97K sequences.
 
 #### 6. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
@@ -85,5 +87,5 @@ The old fork's manual loop (`num_mini_batches = len(data) // mini_batch_size`) s
 | `skyrl/backends/skyrl_train/workers/model_wrapper.py` | Port chunked lm_head forward (loss_chunk_size) |
 | `skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py` | Pass loss_chunk_size to HFModelWrapper; synchronous ref offload + barrier |
 | `skyrl/backends/skyrl_train/workers/worker.py` | empty_cache before backward (3 sites) |
-| `scripts/fleet-35b-run.sh` | flash_attn=false, --no-pytorch-alloc-conf, wandb project rename |
+| `scripts/fleet-35b-run.sh` | flash_attn=true, --no-pytorch-alloc-conf, wandb project rename |
 | `skyrl/backends/skyrl_train/distributed/dispatch.py` | Dynamic mini_batch_size adjustment |
