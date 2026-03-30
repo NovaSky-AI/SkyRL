@@ -1,4 +1,3 @@
-import functools
 import os
 from typing import List
 
@@ -6,16 +5,8 @@ import datasets
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
-from skyrl.utils.tok import get_tokenizer
 
-
-@functools.lru_cache(maxsize=4)
-def _get_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
-    return get_tokenizer(tokenizer_name)
-
-
-def _prompt_not_too_long(doc, tokenizer_name, prompt_key, max_length):
-    tokenizer = _get_tokenizer(tokenizer_name)
+def _prompt_not_too_long(doc, tokenizer, prompt_key, max_length):
     tokens = tokenizer.apply_chat_template(
         doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
     )
@@ -82,7 +73,7 @@ class PromptDataset:
         self.dataframe = self.dataframe.filter(
             _prompt_not_too_long,
             fn_kwargs={
-                "tokenizer_name": self.tokenizer.name_or_path,
+                "tokenizer": self.tokenizer,
                 "prompt_key": self.prompt_key,
                 "max_length": self.max_prompt_length,
             },
