@@ -59,7 +59,7 @@ Fixes for 2-node (16 GPU) Qwen3.5-35B GRPO training on GCP H200. Ported from fle
 
 **Fix:** Reduce `MAX_INPUT_LENGTH` from 96000 to 72000 (total seq ~76K) and use `flash_attn=false` (SDPA). At 72K, SDPA's O(n²) memory is ~55% of what it was at 97K — enough to fit with chunked lm_head + `empty_cache`. The `--no-pytorch-alloc-conf` flag passed to `fleet-common-run.sh` skips the default `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, avoiding the vLLM 0.18.0 CuMemAllocator conflict. The 9B VL script (`fleet-vl-run.sh`) also passes this flag for the same reason.
 
-**Verified working:** Step 1 completed — ref forward 8.4 min, policy backward 45.6 min, total step ~80 min. SDPA is slower than flash_attn but stable.
+**Verified working:** 10 steps completed on GCP spot 2×H200:8 (asia-south1-b) with zero GPU errors over 12 hours. Step timing: generation ~7 min, ref forward ~8 min, policy backward ~44 min, total step ~70 min avg. Checkpoint saved to S3 at step 10. SDPA is slower than flash_attn but stable. WandB: `fleet_qwen35_35b_tool_use_2c0e13b7` (run ID `f6kw15p2`).
 
 #### 5. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
