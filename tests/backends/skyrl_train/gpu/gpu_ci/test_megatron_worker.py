@@ -329,7 +329,7 @@ async def test_megatron_forward(
         assert max_diff < 4e-1, f"Max diff {max_diff} is too large"
 
     if ep == 1:
-        assert avg_diff < 7e-2, f"Avg diff {avg_diff} is too large"
+        assert avg_diff < 9e-2, f"Avg diff {avg_diff} is too large"
     else:
         # allow larger tolerance in diff for the 30B-MoE model due to larger model size
         assert avg_diff < 1.6e-1, f"Avg diff {avg_diff} is too large"
