@@ -32,7 +32,7 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 
 # Run tests for new inference layer
 # TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp --extra vllm-router pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp --extra vllm-router pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp --extra vllm-router pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_gym_generator.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp --extra vllm-router pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_gym_generator.py
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py

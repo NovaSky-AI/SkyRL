@@ -323,6 +323,9 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.server_group import (
             ServerGroup,
         )
+        from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+            VLLMRouter,
+        )
 
         ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
@@ -351,10 +354,10 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
+            self._inference_router = VLLMRouter(server_urls=server_urls)
             proxy_url = self._inference_router.start()
             logger.info(
-                f"HTTP Inference: Created internal router over external "
+                f"HTTP Inference: Created router over external "
                 f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
             )
 
@@ -372,7 +375,7 @@ class BasePPOExp:
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = self._create_router(server_urls, ie_cfg.router_type)
+            self._inference_router = VLLMRouter(server_urls=server_urls)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -412,22 +415,6 @@ class BasePPOExp:
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
-
-    @staticmethod
-    def _create_router(server_urls, router_type: str = "default"):
-        """Create a data-plane router based on ``router_type``."""
-        if router_type == "vllm-router":
-            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-                VLLMRouter,
-            )
-
-            return VLLMRouter(server_urls=server_urls)
-        else:
-            from skyrl.backends.skyrl_train.inference_servers.router import (
-                InferenceRouter,
-            )
-
-            return InferenceRouter(server_urls=server_urls)
 
     def _setup_trainer(self):
         """Setup and return the trainer.

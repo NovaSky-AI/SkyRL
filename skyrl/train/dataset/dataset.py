@@ -59,9 +59,10 @@ class PromptDataset:
         # filter out too long prompts
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
-        # Disable multiprocessing when Ray is initialized to avoid fork + Ray hangs.
-        # Forked children inherit Ray's gRPC connections in a broken state.
-        num_proc = self.num_workers if not ray.is_initialized() else 1
+        # Disable multiprocessing when Ray is active to avoid fork + Ray hangs.
+        # Forked children inherit Ray's gRPC connections in a broken state,
+        # and spawn doesn't work here because the lambda closure isn't pickleable.
+        num_proc = 1 if ray.is_initialized() else self.num_workers
         self.dataframe = self.dataframe.filter(
             lambda doc: len(
                 tokenizer.apply_chat_template(
