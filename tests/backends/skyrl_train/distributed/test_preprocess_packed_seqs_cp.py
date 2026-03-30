@@ -5,15 +5,19 @@ Regression test for the CP=2 tensor shape crash:
   size (2) at non-singleton dimension 0.
 
 Run with:
-  uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/distributed/test_preprocess_packed_seqs_cp.py
+  uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_cp.py
 """
 
+import importlib.util
 from unittest.mock import patch
 
 import pytest
 import torch
 
+_has_megatron = importlib.util.find_spec("megatron") is not None
 
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
 class TestPreprocessPackedSeqsShortSequencesCP:
     """preprocess_packed_seqs must not crash when sequences are shorter than align_size."""
 
@@ -42,17 +46,15 @@ class TestPreprocessPackedSeqsShortSequencesCP:
         attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
 
         # Short sequence: only `real_tokens` valid tokens at the front
-        for j in range(real_tokens):
-            input_ids[0, j] = j + 1
-            attention_mask[0, j] = True
+        input_ids[0, :real_tokens] = torch.arange(1, real_tokens + 1)
+        attention_mask[0, :real_tokens] = True
 
         # Normal sequence: all tokens valid
-        for j in range(seq_len):
-            input_ids[1, j] = j + 1
-            attention_mask[1, j] = True
+        input_ids[1, :] = torch.arange(1, seq_len + 1)
+        attention_mask[1, :] = True
 
         for cp_rank in range(cp_size):
-            with (patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu,):
+            with patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu:
                 mock_mpu.get_tensor_model_parallel_world_size.return_value = tp_size
                 mock_mpu.get_context_parallel_world_size.return_value = cp_size
                 mock_mpu.get_context_parallel_rank.return_value = cp_rank
