@@ -748,6 +748,15 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.batched:
             return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
 
+        for i in range(len(prompts)):
+            if env_classes[i] == "rlm":
+                rlm_config = getattr(self.skyrl_gym_cfg, "rlm", None)
+                if rlm_config is not None:
+                    cfg = vars(rlm_config) if hasattr(rlm_config, "__dict__") else rlm_config
+                    custom_prompt = cfg.get("custom_system_prompt")
+                    if custom_prompt:
+                        env_extras[i]["custom_system_prompt"] = custom_prompt
+
         # Async agent loop to generate trajectories in parallel.
         tasks = []
         for i in range(len(prompts)):

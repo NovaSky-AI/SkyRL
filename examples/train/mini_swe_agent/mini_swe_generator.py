@@ -176,7 +176,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             ), "Expected the first two messages to be system and user messages"
 
         initial_input_ids = self.tokenizer.apply_chat_template(
-            messages[:2], add_generation_prompt=False, return_dict=False, tokenize=True, return_dict=False
+            messages[:2], add_generation_prompt=False, return_dict=False, tokenize=True
         )
         initial_prompt_length = len(initial_input_ids)
 

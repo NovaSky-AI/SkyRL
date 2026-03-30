@@ -1,3 +1,4 @@
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
@@ -58,6 +59,8 @@ async def evaluate(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    total_generate_time = 0.0
+    total_rollouts = 0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -69,7 +72,10 @@ async def evaluate(
             "eval",
             global_step,
         )
+        t0 = time.perf_counter()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        total_generate_time += time.perf_counter() - t0
+        total_rollouts += len(generator_input["prompts"])
         validate_generator_output(len(generator_input["prompts"]), generator_output)
         generator_outputs.append(generator_output)
         concat_all_envs.extend(generator_input["env_classes"])
@@ -99,6 +105,7 @@ async def evaluate(
             "eval/all/avg_score": overall_metrics["avg_score"],
             f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
+            "eval/all/rollout_latency_s": total_generate_time / total_rollouts if total_rollouts > 0 else 0.0,
         }
     )
 
@@ -158,6 +165,8 @@ async def evaluate_step_wise(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    total_generate_time = 0.0
+    total_rollouts = 0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -169,7 +178,10 @@ async def evaluate_step_wise(
             "eval",
             global_step,
         )
+        t0 = time.perf_counter()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        total_generate_time += time.perf_counter() - t0
+        total_rollouts += len(generator_input["prompts"])
         traj_id_to_input = {
             traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
             for traj_id, env_class, env_extra in zip(
@@ -217,6 +229,7 @@ async def evaluate_step_wise(
             "eval/all/avg_score": overall_metrics["avg_score"],
             f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
+            "eval/all/rollout_latency_s": total_generate_time / total_rollouts if total_rollouts > 0 else 0.0,
         }
     )
 

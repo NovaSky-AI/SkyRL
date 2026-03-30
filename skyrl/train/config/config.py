@@ -539,11 +539,22 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 
 
 @dataclass
+class RLMEnvConfig(BaseConfig):
+    """Configuration for the Recursive Language Model environment."""
+
+    repl_timeout: float = 15.0
+    """Timeout in seconds for each REPL code execution."""
+    custom_system_prompt: Optional[str] = None
+    """Custom system prompt that fully replaces the default RLM system prompt."""
+
+
+@dataclass
 class SkyRLGymConfig(BaseConfig):
     max_env_workers: int = 32
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    rlm: RLMEnvConfig = field(default_factory=RLMEnvConfig)
 
 
 @dataclass
