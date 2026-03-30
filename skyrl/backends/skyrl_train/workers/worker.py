@@ -806,15 +806,9 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-        # DP all-reduce averages gradients, but policy losses are pre-scaled sums
-        # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
-        # dp_size to recover the correct sum reduction across workers.
-        grad_sum_correction_factor = self.mesh_rank.dp_size
-
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            unscaled_loss = policy_loss
-            loss = unscaled_loss * grad_sum_correction_factor
+            loss = policy_loss
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -822,7 +816,6 @@ class PolicyWorkerBase(Worker):
                 elementwise_loss = -action_log_probs
                 if loss_mask is not None:
                     elementwise_loss = elementwise_loss * loss_mask
-                elementwise_loss = elementwise_loss * grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs (matches Tinker's ForwardBackwardOutput structure)
             # Trim to actual response length per sample (Tinker expects variable-length arrays
@@ -848,12 +841,17 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": unscaled_loss.item(),
+                "loss": loss.item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
         else:
+            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+            # dp_size to recover the correct sum reduction across workers.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+
             # RL path: add optional KL/entropy terms
             # entropy loss
             with torch.set_grad_enabled(self.cfg.algorithm.use_entropy_loss):
