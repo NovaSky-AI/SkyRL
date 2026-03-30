@@ -80,7 +80,7 @@ bash scripts/fleet-common-run.sh \
   generator.batched=false \
   generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=4 \
-  generator.eval_n_samples_per_prompt=3 \
+  generator.eval_n_samples_per_prompt=1 \
   generator.gpu_memory_utilization=0.80 \
   trainer.logger="$LOGGER" \
   trainer.project_name="fleet-browser-use-grpo" \
