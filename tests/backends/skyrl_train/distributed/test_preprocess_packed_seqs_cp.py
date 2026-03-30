@@ -24,10 +24,10 @@ class TestPreprocessPackedSeqsShortSequencesCP:
     @pytest.mark.parametrize(
         "tp_size,cp_size,real_tokens",
         [
-            (4, 2, 2),   # Production crash: align=16, 2-token masked seq
-            (4, 2, 1),   # Even shorter
-            (2, 2, 2),   # Smaller TP, still needs padding
-            (1, 2, 2),   # TP=1, CP=2: align=4, 2-token seq (borderline)
+            (4, 2, 2),  # Production crash: align=16, 2-token masked seq
+            (4, 2, 1),  # Even shorter
+            (2, 2, 2),  # Smaller TP, still needs padding
+            (1, 2, 2),  # TP=1, CP=2: align=4, 2-token seq (borderline)
         ],
     )
     def test_short_seq_no_crash(self, tp_size, cp_size, real_tokens):
@@ -56,17 +56,13 @@ class TestPreprocessPackedSeqsShortSequencesCP:
             attention_mask[1, j] = True
 
         for cp_rank in range(cp_size):
-            with (
-                patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu,
-            ):
+            with (patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu,):
                 mock_mpu.get_tensor_model_parallel_world_size.return_value = tp_size
                 mock_mpu.get_context_parallel_world_size.return_value = cp_size
                 mock_mpu.get_context_parallel_rank.return_value = cp_rank
 
                 # This used to raise RuntimeError for short sequences
-                result_ids, packed_params = preprocess_packed_seqs(
-                    input_ids, attention_mask, pre_process=True
-                )
+                result_ids, packed_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
 
                 assert result_ids.shape[0] == 1  # unsqueezed
                 assert packed_params.qkv_format == "thd"
