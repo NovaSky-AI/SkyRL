@@ -349,8 +349,19 @@ def prepare_training_data(
             logprobs = logprobs[:response_len] if logprobs else []
             loss_mask_data = loss_mask_data[:response_len]
 
+        # Ensure logprobs and response_ids are in sync before building training data
+        if len(logprobs) != len(response_ids):
+            logger.warning(
+                f"Datum {idx}: logprobs ({len(logprobs)}) != response_ids ({len(response_ids)}), fixing"
+            )
+            if len(logprobs) > len(response_ids):
+                logprobs = logprobs[: len(response_ids)]
+            else:
+                logprobs = logprobs + [0.0] * (len(response_ids) - len(logprobs))
+
         # Target tokens (shifted by 1)
         target_tokens = full_sequence[1:]
+        seq_len = len(target_tokens)
 
         # Logprobs (0 for prompt, actual for response)
         full_logprobs = [0.0] * prompt_len + logprobs
@@ -359,6 +370,10 @@ def prepare_training_data(
         # Loss mask (0 for prompt, actual for response)
         full_mask = [0] * prompt_len + loss_mask_data
         full_mask = full_mask[1:]
+
+        # Safety: ensure all arrays match target_tokens length
+        full_logprobs = full_logprobs[:seq_len] + [0.0] * max(0, seq_len - len(full_logprobs))
+        full_mask = full_mask[:seq_len] + [0] * max(0, seq_len - len(full_mask))
 
         # Advantages (apply only where loss mask is 1)
         advantage_value = advantages[idx]
@@ -493,6 +508,16 @@ async def collect_fleet_rollout(
             sequence = result.sequences[0]
             output_ids = sequence.tokens
             output_logprobs = sequence.logprobs if sequence.logprobs else []
+
+            # Guard: logprobs must match token count (Tinker may return different lengths)
+            if output_logprobs and len(output_logprobs) != len(output_ids):
+                logger.warning(
+                    f"[{task_key}] Turn {turn_num}: logprobs length ({len(output_logprobs)}) != tokens length ({len(output_ids)}), truncating/padding"
+                )
+                if len(output_logprobs) > len(output_ids):
+                    output_logprobs = output_logprobs[: len(output_ids)]
+                else:
+                    output_logprobs = output_logprobs + [0.0] * (len(output_ids) - len(output_logprobs))
 
             # Decode output
             output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
