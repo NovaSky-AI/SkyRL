@@ -1,4 +1,8 @@
-# Nemotron 3 Training with Megatron
+# Nemotron Training with Megatron
+
+## Nemotron-Mini-4B-Instruct
+
+[Nemotron-Mini-4B-Instruct](https://huggingface.co/nvidia/Nemotron-Mini-4B-Instruct) is a standard transformer model that works out of the box with the Megatron backend — no dependency changes are needed. Use the existing megatron example scripts with `trainer.policy.model.path=nvidia/Nemotron-Mini-4B-Instruct`. See [`examples/train/megatron/`](../megatron/) for reference scripts.
 
 ## Nemotron-3-Nano-4B-BF16
 
@@ -8,10 +12,10 @@ Nemotron-3-Nano is a hybrid Mamba+Attention+MoE architecture (52 layers, 128 exp
 
 ### Required dependency changes
 
-A patch is provided that makes the necessary `pyproject.toml` changes. It was tested against SkyRL commit [`c69f2488`](https://github.com/NovaSky-AI/SkyRL/commit/c69f24881509f78dfc16d88e2f77392c4795c3ce).
+A patch is provided that makes the necessary `pyproject.toml` changes. It was tested against SkyRL commit [`c69f2488`](https://github.com/sky-org/SkyRL/commit/c69f2488).
 
 ```bash
-git apply examples/train/nemotron_3/nemotron_support.patch
+git apply examples/train/nemotron/nemotron_support.patch
 uv lock
 ```
 
@@ -32,7 +36,7 @@ uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 2. Run training (requires 8 GPUs):
 
 ```bash
-bash examples/train/nemotron_3/run_nemotron_3_nano_4b_gsm8k.sh
+bash examples/train/nemotron/run_nemotron_3_nano_4b_gsm8k.sh
 ```
 
 ### Expected results
@@ -41,5 +45,5 @@ On GSM8K with 8xH100/A100 GPUs, the model reaches ~96% pass@1 within 20 epochs. 
 
 ### Notes
 
-- Numerical differences between HF and Megatron forward passes are higher for this hybrid architecture (~0.9 max, ~0.17 avg) compared to pure transformer models (~0.3 max, ~0.05 avg), likely due to implementation differences. The vLLM-vs-Megatron logprob difference is ~0.01 on average, similar to other models like Qwen 2.5.
+- Numerical differences between HF and Megatron forward passes are higher for this hybrid architecture (~0.9 max, ~0.17 avg) compared to pure transformer models (~0.3 max, ~0.05 avg), likely due to implementation differences in HF's custom modeling code. The vLLM-vs-Megatron logprob difference is ~0.01 on average, similar to other models like Qwen 2.5, confirming that Megatron and vLLM agree closely. This does not affect training quality.
 - The `nano-v3` branch of Megatron-Bridge also supports other Nemotron-H variants (Nemotron-H, Nemotron-Nano-V2-VL).

@@ -3,14 +3,14 @@ set -x
 # Colocated GRPO training+generation for NVIDIA-Nemotron-3-Nano-4B-BF16 on GSM8K with Megatron.
 #
 # Prerequisites:
-#   See examples/train/nemotron_3/README.md for required dependency changes.
+#   See examples/train/nemotron/README.md for required dependency changes.
 #
 # Setup:
 # 1. Prepare GSM8K data:
 #    uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #
 # 2. Run training:
-#    bash examples/train/nemotron_3/run_nemotron_3_nano_4b_gsm8k.sh
+#    bash examples/train/nemotron/run_nemotron_3_nano_4b_gsm8k.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=8
