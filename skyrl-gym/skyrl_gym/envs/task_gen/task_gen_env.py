@@ -1186,22 +1186,27 @@ Generate exactly ONE task. Output it in this format:
         if self.orch is None:
             return "Error: Fleet environment not provisioned. Generate a <task> directly."
 
-        try:
-            if name == "describe_db":
-                result = await self.orch.describe_db_async(db_name=args.get("db_name", "seed"))
-            elif name == "query_db":
-                sql = args.get("sql", "")
-                if not sql:
-                    return "Error: query_db requires a 'sql' argument."
-                result = await self.orch.query_db_async(sql=sql, db_name=args.get("db_name", "seed"))
-            else:
-                return f"Error: Unknown meta-tool '{name}'."
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if name == "describe_db":
+                    result = await self.orch.describe_db_async(db_name=args.get("db_name", "seed"))
+                elif name == "query_db":
+                    sql = args.get("sql", "")
+                    if not sql:
+                        return "Error: query_db requires a 'sql' argument."
+                    result = await self.orch.query_db_async(sql=sql, db_name=args.get("db_name", "seed"))
+                else:
+                    return f"Error: Unknown meta-tool '{name}'."
 
-            if isinstance(result, dict):
-                return f"Tool result:\n{json.dumps(result, indent=2, default=str)}"
-            return f"Tool result:\n{result}"
-        except Exception as e:
-            return f"Error: {e}"
+                if isinstance(result, dict):
+                    return f"Tool result:\n{json.dumps(result, indent=2, default=str)}"
+                return f"Tool result:\n{result}"
+            except Exception as e:
+                if attempt < max_retries - 1 and ("closed" in str(e).lower() or "transport" in str(e).lower() or "connection" in str(e).lower()):
+                    await asyncio.sleep(1)
+                    continue
+                return f"Error: {e}"
 
     async def _execute_mcp_tool(self, tool_call: Dict[str, Any]) -> str:
         """Execute an MCP tool call via FleetMCPTools."""
