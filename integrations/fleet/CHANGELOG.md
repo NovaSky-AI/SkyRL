@@ -57,7 +57,7 @@ Fixes for 2-node (16 GPU) Qwen3.5-35B GRPO training on GCP H200. Ported from fle
 - `flash_attn=true`: Xid 31 FAULT_PDE in GatedDeltaNet layers during ref model forward.
 - `expandable_segments:True` would help with fragmentation but conflicts with vLLM 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`).
 
-**Fix:** Reduce `MAX_INPUT_LENGTH` from 96000 to 72000 (total seq ~76K). This lowers peak memory enough that `flash_attn=true` + chunked lm_head + `empty_cache` fits without needing `expandable_segments`. The `--no-pytorch-alloc-conf` flag disables `expandable_segments` to avoid the vLLM 0.18.0 CuMemAllocator conflict.
+**Fix:** Reduce `MAX_INPUT_LENGTH` from 96000 to 72000 (total seq ~76K). This lowers peak memory enough that `flash_attn=true` + chunked lm_head + `empty_cache` fits without needing `expandable_segments`. The `--no-pytorch-alloc-conf` flag passed to `fleet-common-run.sh` skips the default `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, avoiding the vLLM 0.18.0 CuMemAllocator conflict. The 9B VL script (`fleet-vl-run.sh`) also passes this flag for the same reason.
 
 #### 5. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
