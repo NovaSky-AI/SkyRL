@@ -52,6 +52,5 @@ On GSM8K with 8xH100/A100 GPUs, the model reaches ~96% pass@1 within 20 epochs. 
 
 ## Notes
 
-- The model ships with safetensors weights natively — no checkpoint conversion is needed.
-- Numerical differences between HF and Megatron forward passes are higher for this hybrid architecture (~0.9 max, ~0.17 avg) compared to pure transformer models (~0.3 max, ~0.05 avg), due to recurrent state accumulation in Mamba layers. This does not affect training quality.
+- Numerical differences between HF and Megatron forward passes are higher for this hybrid architecture (~0.9 max, ~0.17 avg) compared to pure transformer models (~0.3 max, ~0.05 avg), due to recurrent state accumulation in Mamba layers. This does not seem to affect training quality - training has been verified against GSM8K task, with stable rewards for 1k+ steps.
 - The `nano-v3` branch of Megatron-Bridge also supports other Nemotron-H variants (Nemotron-H, Nemotron-Nano-V2-VL).
