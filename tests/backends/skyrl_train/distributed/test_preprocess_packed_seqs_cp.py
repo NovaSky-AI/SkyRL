@@ -5,19 +5,62 @@ Regression test for the CP=2 tensor shape crash:
   size (2) at non-singleton dimension 0.
 
 Run with:
-  uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_cp.py
+  uv run --isolated --extra dev -- pytest -s tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_cp.py
 """
 
-import importlib.util
-from unittest.mock import patch
+import sys
+from dataclasses import dataclass
+from types import ModuleType
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-_has_megatron = importlib.util.find_spec("megatron") is not None
+# ---------------------------------------------------------------------------
+# Inject lightweight megatron stubs into sys.modules so that megatron_utils
+# can be imported without megatron-core installed (CPU CI).
+# The only real class the function under test constructs is PackedSeqParams;
+# everything else (mpu, DDP, Float16Module, …) is mocked per-test or unused.
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@dataclass
+class _PackedSeqParams:
+    qkv_format: str = ""
+    cu_seqlens_q: Any = None
+    max_seqlen_q: Any = None
+    cu_seqlens_kv: Any = None
+    max_seqlen_kv: Any = None
+    cu_seqlens_q_padded: Any = None
+    cu_seqlens_kv_padded: Any = None
+
+
+_MEGATRON_MODULES = [
+    "megatron",
+    "megatron.core",
+    "megatron.core.parallel_state",
+    "megatron.core.distributed",
+    "megatron.core.optimizer",
+    "megatron.core.packed_seq_params",
+    "megatron.core.transformer",
+    "megatron.core.transformer.module",
+    "megatron.core.utils",
+]
+
+_mock_modules: dict[str, ModuleType] = {}
+for _name in _MEGATRON_MODULES:
+    _mock_modules[_name] = ModuleType(_name)
+
+_mock_modules["megatron.core"].parallel_state = _mock_modules["megatron.core.parallel_state"]
+_mock_modules["megatron.core.packed_seq_params"].PackedSeqParams = _PackedSeqParams
+_mock_modules["megatron.core.distributed"].DistributedDataParallel = MagicMock
+_mock_modules["megatron.core.optimizer"].ChainedOptimizer = MagicMock
+_mock_modules["megatron.core.transformer.module"].Float16Module = MagicMock
+_mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
+sys.modules.update(_mock_modules)
+
+
 class TestPreprocessPackedSeqsShortSequencesCP:
     """preprocess_packed_seqs must not crash when sequences are shorter than align_size."""
 
