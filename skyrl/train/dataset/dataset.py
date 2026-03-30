@@ -1,9 +1,23 @@
+import functools
 import os
 from typing import List
 
 import datasets
 from loguru import logger
-from transformers import PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+
+@functools.lru_cache(maxsize=4)
+def _get_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
+    return AutoTokenizer.from_pretrained(tokenizer_name)
+
+
+def _prompt_not_too_long(doc, tokenizer_name, prompt_key, max_length):
+    tokenizer = _get_tokenizer(tokenizer_name)
+    tokens = tokenizer.apply_chat_template(
+        doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
+    )
+    return len(tokens) <= max_length
 
 
 class PromptDataset:
@@ -56,15 +70,20 @@ class PromptDataset:
         logger.info(f"Total dataset size: {len(self.dataframe)}")
 
         # filter out too long prompts
-        tokenizer = self.tokenizer
-        prompt_key = self.prompt_key
+        # Use spawn start method to avoid fork + gRPC deadlocks when Ray is active.
+        # The filter function is a top-level function (not a closure) so it's picklable for spawn.
+        if self.num_workers > 1:
+            import multiprocess
+
+            multiprocess.set_start_method("spawn", force=True)
+
         self.dataframe = self.dataframe.filter(
-            lambda doc: len(
-                tokenizer.apply_chat_template(
-                    doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
-                )
-            )
-            <= self.max_prompt_length,
+            _prompt_not_too_long,
+            fn_kwargs={
+                "tokenizer_name": self.tokenizer.name_or_path,
+                "prompt_key": self.prompt_key,
+                "max_length": self.max_prompt_length,
+            },
             num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )

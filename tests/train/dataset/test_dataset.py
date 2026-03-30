@@ -7,8 +7,17 @@ from skyrl.train.dataset import PromptDataset
 
 
 class SimpleTokenizer:
+    name_or_path = "simple-tokenizer"
+
     def apply_chat_template(self, x, add_generation_prompt=False, **kwargs):
         return x
+
+
+@pytest.fixture(autouse=True)
+def _patch_get_tokenizer():
+    """Patch _get_tokenizer so filter workers use SimpleTokenizer instead of AutoTokenizer."""
+    with patch("skyrl.train.dataset.dataset._get_tokenizer", return_value=SimpleTokenizer()):
+        yield
 
 
 @pytest.fixture
