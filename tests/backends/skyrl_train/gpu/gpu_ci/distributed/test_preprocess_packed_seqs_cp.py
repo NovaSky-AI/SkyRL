@@ -5,19 +5,15 @@ Regression test for the CP=2 tensor shape crash:
   size (2) at non-singleton dimension 0.
 
 Run with:
-  uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_cp.py
+  uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/distributed/test_preprocess_packed_seqs_cp.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
 import torch
 
-_has_megatron = "megatron" in sys.modules or __import__("importlib").util.find_spec("megatron") is not None
 
-
-@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
 class TestPreprocessPackedSeqsShortSequencesCP:
     """preprocess_packed_seqs must not crash when sequences are shorter than align_size."""
 
