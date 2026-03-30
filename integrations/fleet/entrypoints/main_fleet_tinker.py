@@ -247,6 +247,7 @@ def compute_rollout_metrics(
     # Core reward metrics using shared module
     core_metrics = compute_reward_metrics(rewards, uids, n_samples_per_prompt)
     metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = core_metrics[f"pass_at_{n_samples_per_prompt}"]
+    metrics["reward/avg_raw_reward"] = np.mean(rewards)
     metrics["reward/variance_per_prompt"] = core_metrics["variance_per_prompt"]
     metrics["reward/mean_positive_reward"] = core_metrics["mean_positive_reward"]
 
@@ -409,6 +410,8 @@ async def collect_fleet_rollout(
     max_generate_length: int = 2048,
     max_input_length: int = 30720,
     temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Collect a single trajectory using Fleet environment and Tinker inference.
@@ -465,11 +468,14 @@ async def collect_fleet_rollout(
 
             # Generate with Tinker
             gen_start = time.time()
-            sampling_params = types.SamplingParams(
-                max_tokens=max_generate_length,
-                temperature=temperature,
-                top_p=1.0,
-            )
+            sampling_params_kwargs = {
+                "max_tokens": max_generate_length,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+            if stop_sequences:
+                sampling_params_kwargs["stop"] = stop_sequences
+            sampling_params = types.SamplingParams(**sampling_params_kwargs)
 
             # Use async sampling to avoid blocking the event loop
             result = await sampling_client.sample_async(
@@ -550,6 +556,9 @@ async def collect_batch_rollouts(
     max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
     max_concurrent: int = 8,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """Collect rollouts for a batch of tasks with limited concurrency.
 
@@ -573,6 +582,9 @@ async def collect_batch_rollouts(
                     max_turns=max_turns,
                     max_generate_length=max_generate_length,
                     max_input_length=max_input_length,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop_sequences=stop_sequences,
                 )
                 return index, rollout
             except Exception as e:
@@ -646,6 +658,10 @@ async def main(
     seed: int = 42,
     wandb_project: str = "fleet-tinker-grpo",
     wandb_name: str = None,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
+    loss_fn: str = "ppo",
 ):
     """
     Main training loop using Tinker for training/inference and Fleet for environments.
@@ -657,6 +673,9 @@ async def main(
         wandb_name = f"{model_name.split('/')[-1]}_{datetime.now().strftime('%m%d_%H%M')}"
 
     # Initialize WandB
+    if stop_sequences is None:
+        stop_sequences = []
+
     wandb.init(
         project=wandb_project,
         name=wandb_name,
@@ -670,6 +689,10 @@ async def main(
             "max_input_length": max_input_length,
             "max_sequence_length": max_sequence_length,
             "n_samples_per_prompt": n_samples_per_prompt,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop_sequences": stop_sequences,
+            "loss_fn": loss_fn,
         },
     )
 
@@ -744,6 +767,9 @@ async def main(
             max_generate_length=max_generate_length,
             max_input_length=max_input_length,
             n_samples_per_prompt=n_samples_per_prompt,
+            temperature=temperature,
+            top_p=top_p,
+            stop_sequences=stop_sequences,
         )
 
         metrics["time/rollout"] = time.time() - rollout_start
@@ -820,7 +846,7 @@ async def main(
         logger.info(f"Step {step}: Training on {len(training_datums)} sequences...")
         train_start = time.time()
 
-        fwd_bwd_future = training_client.forward_backward(training_datums, loss_fn="ppo")
+        fwd_bwd_future = training_client.forward_backward(training_datums, loss_fn=loss_fn)
         optim_step_future = training_client.optim_step(adam_params)
 
         fwd_bwd_future.result()
@@ -855,6 +881,9 @@ async def main(
                     max_generate_length=max_generate_length,
                     max_input_length=max_input_length,
                     n_samples_per_prompt=1,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop_sequences=stop_sequences,
                 )
                 all_eval_rollouts.extend([r for r in eval_rollouts if not r.error])
 
@@ -912,8 +941,26 @@ if __name__ == "__main__":
         default=False,
         help="Track additional gradient metrics (for parity with SkyRL config)",
     )
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling")
+    parser.add_argument(
+        "--stop-sequences",
+        type=str,
+        default="[]",
+        help="JSON list of stop sequences (e.g. '[\"</tool_call>\"]')",
+    )
+    parser.add_argument(
+        "--loss-fn",
+        type=str,
+        default="ppo",
+        help="Loss function for Tinker forward_backward (e.g. ppo, grpo)",
+    )
 
     args = parser.parse_args()
+
+    import json as _json
+
+    stop_sequences = _json.loads(args.stop_sequences)
 
     asyncio.run(
         main(
@@ -935,5 +982,9 @@ if __name__ == "__main__":
             seed=args.seed,
             wandb_project=args.wandb_project,
             wandb_name=args.wandb_name,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            stop_sequences=stop_sequences,
+            loss_fn=args.loss_fn,
         )
     )
