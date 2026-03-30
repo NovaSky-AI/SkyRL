@@ -32,26 +32,25 @@ def main():
     pg = placement_group([{"CPU": 1}, {"CPU": 1}], strategy="STRICT_PACK")
     ray.get(pg.ready())
 
-    logger.info(f"Starting Tinker API Actor on {config.api.host}:{config.api.port}")
+    logger.info(f"Starting Tinker API Actor on {config.api.host}:{config.api.port} (Detached)...")
     api_actor = TinkerAPIActor.options(
         placement_group=pg,
-        placement_group_bundle_index=0
+        placement_group_bundle_index=0,
+        name="tinker_api",
+        lifetime="detached"
     ).remote(config.engine)
-    api_task = api_actor.run.remote(config.api.host, config.api.port)
+    api_actor.run.remote(config.api.host, config.api.port)
 
-    logger.info("Starting Tinker Engine Actor")
+    logger.info("Starting Tinker Engine Actor (Detached)...")
     engine_actor = TinkerEngineActor.options(
         placement_group=pg,
-        placement_group_bundle_index=1
+        placement_group_bundle_index=1,
+        name="tinker_engine",
+        lifetime="detached"
     ).remote(config.engine)
-    engine_task = engine_actor.run.remote()
+    engine_actor.run.remote()
 
-    logger.info("Ray Orchestrator running. Waiting for actors to complete.")
-    try:
-        ray.get([api_task, engine_task])
-    except KeyboardInterrupt:
-        logger.info("Interrupted. Shutting down Ray...")
-        ray.shutdown()
+    logger.info("Ray actors started in detached mode. They will keep running. You can now run your training script.")
 
 
 if __name__ == "__main__":
