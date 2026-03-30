@@ -880,8 +880,8 @@ class PolicyWorkerBase(Worker):
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
-            unscaled_loss = policy_loss + kl_loss_term - entropy_loss_term
-            loss = unscaled_loss * grad_sum_correction_factor
+            loss = policy_loss * grad_sum_correction_factor + kl_loss_term - entropy_loss_term
+            unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Build per-sequence loss_fn_outputs with logprobs.
