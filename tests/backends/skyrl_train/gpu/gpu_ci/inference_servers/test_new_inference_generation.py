@@ -617,13 +617,14 @@ def _get_test_token_ids(model: str) -> List[int]:
 
 
 @pytest.mark.vllm
-def test_client_sample(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_sample(vllm_server: InferenceEngineState):
     """Test sample with n=1 returns correct Tinker response structure."""
     client = vllm_server.client
     token_ids = _get_test_token_ids(MODEL_QWEN2_5)
     payload = _build_sample_payload(token_ids, num_samples=1, sampling_params={"temperature": 0.7, "max_tokens": 64})
 
-    result = asyncio.run(client.sample(payload))
+    result = await client.sample(payload)
 
     assert result["type"] == "sample"
     assert len(result["sequences"]) == 1
@@ -637,13 +638,14 @@ def test_client_sample(vllm_server: InferenceEngineState):
 
 
 @pytest.mark.vllm
-def test_client_sample_multiple(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_sample_multiple(vllm_server: InferenceEngineState):
     """Test sample with n=3 returns three independent sequences."""
     client = vllm_server.client
     token_ids = _get_test_token_ids(MODEL_QWEN2_5)
     payload = _build_sample_payload(token_ids, num_samples=3, sampling_params={"temperature": 1.0, "max_tokens": 64})
 
-    result = asyncio.run(client.sample(payload))
+    result = await client.sample(payload)
 
     assert result["type"] == "sample"
     assert len(result["sequences"]) == 3
@@ -659,13 +661,14 @@ def test_client_sample_multiple(vllm_server: InferenceEngineState):
 
 
 @pytest.mark.vllm
-def test_client_sample_deterministic(vllm_server: InferenceEngineState):
+@pytest.mark.asyncio
+async def test_client_sample_deterministic(vllm_server: InferenceEngineState):
     """Test that sample with seed + temperature=0 is deterministic across calls."""
     client = vllm_server.client
     token_ids = _get_test_token_ids(MODEL_QWEN2_5)
     params = {"temperature": 0.0, "max_tokens": 32, "seed": 42}
 
-    result1 = asyncio.run(client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params)))
-    result2 = asyncio.run(client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params)))
+    result1 = await client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params))
+    result2 = await client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params))
 
     assert result1["sequences"][0]["tokens"] == result2["sequences"][0]["tokens"]
