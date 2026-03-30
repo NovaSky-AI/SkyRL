@@ -302,6 +302,31 @@ def prepare_fleet_dataset(
         env_key = task.get("env_key") or task.get("env_id") or "unknown"
         tasks_by_env[env_key].append(task)
 
+    # Collect per-env metadata: representative env_variables and env_variable_keys
+    # (mirrors original SkyRL fork's _collect_env_metadata)
+    env_metadata: Dict[str, Dict[str, Any]] = {}
+    for env_key, env_tasks_list in tasks_by_env.items():
+        all_var_keys: set = set()
+        representative_env_vars: Dict[str, Any] = {}
+        for t in env_tasks_list:
+            env_vars = t.get("env_variables") or {}
+            if isinstance(env_vars, str):
+                try:
+                    env_vars = json.loads(env_vars)
+                except json.JSONDecodeError:
+                    env_vars = {}
+            all_var_keys.update(env_vars.keys())
+            if not representative_env_vars and env_vars:
+                representative_env_vars = dict(env_vars)
+        env_metadata[env_key] = {
+            "env_variable_keys": sorted(all_var_keys),
+            "env_variables": representative_env_vars,
+        }
+    print("\nEnvironment metadata:")
+    for ek in sorted(env_metadata):
+        meta = env_metadata[ek]
+        print(f"  {ek}: env_vars={meta['env_variable_keys']}")
+
     # Prepare records with stratified split
     train_records = []
     eval_records = []
@@ -317,7 +342,7 @@ def prepare_fleet_dataset(
         if env_key in held_out_envs:
             env_eval_count = 0
             for task in env_tasks:
-                record = _task_to_record(task, env_key, env_class=env_class)
+                record = _task_to_record(task, env_key, env_class=env_class, env_meta=env_metadata.get(env_key))
                 if record:
                     eval_records.append(record)
                     env_eval_count += 1
@@ -332,7 +357,7 @@ def prepare_fleet_dataset(
         if target_eval_size < MIN_EVAL_SAMPLES:
             env_train_count = 0
             for task in env_tasks:
-                record = _task_to_record(task, env_key, env_class=env_class)
+                record = _task_to_record(task, env_key, env_class=env_class, env_meta=env_metadata.get(env_key))
                 if record:
                     train_records.append(record)
                     env_train_count += 1
@@ -348,7 +373,7 @@ def prepare_fleet_dataset(
         env_eval = 0
         for task in env_tasks:
             task_key = task.get("key") or task.get("task_key")
-            record = _task_to_record(task, env_key, env_class=env_class)
+            record = _task_to_record(task, env_key, env_class=env_class, env_meta=env_metadata.get(env_key))
             if not record:
                 continue
 
@@ -467,13 +492,38 @@ def prepare_fleet_dataset(
     )
 
 
-def _task_to_record(task: Dict[str, Any], env_key: str, env_class: str = "fleet_task") -> Optional[Dict[str, Any]]:
-    """Convert a task dict to a dataset record."""
+def _task_to_record(
+    task: Dict[str, Any],
+    env_key: str,
+    env_class: str = "fleet_task",
+    env_meta: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Convert a task dict to a dataset record.
+
+    Args:
+        task: Task dict from Fleet JSON
+        env_key: Environment identifier
+        env_class: SkyRL env class (fleet_task or task_gen)
+        env_meta: Per-env metadata with representative env_variables and env_variable_keys
+    """
     task_key = task.get("key") or task.get("task_key")
     prompt = task.get("prompt", "")
 
     if not task_key or not prompt:
         return None
+
+    # Use per-task env_variables if available, otherwise fall back to
+    # representative per-env values (some tasks lack env_variables)
+    task_env_vars = task.get("env_variables") or {}
+    if isinstance(task_env_vars, str):
+        try:
+            task_env_vars = json.loads(task_env_vars)
+        except json.JSONDecodeError:
+            task_env_vars = {}
+    if not task_env_vars and env_meta:
+        task_env_vars = env_meta.get("env_variables", {})
+
+    env_var_keys = (env_meta or {}).get("env_variable_keys", [])
 
     record = {
         # Required fields for SkyRL
@@ -487,7 +537,8 @@ def _task_to_record(task: Dict[str, Any], env_key: str, env_class: str = "fleet_
         "data_key": task.get("data_key") or "",
         "data_version": task.get("data_version") or "",
         "env_version": task.get("env_version") or "",
-        "env_variables": json.dumps(task.get("env_variables") or {}),
+        "env_variables": json.dumps(task_env_vars),
+        "env_variable_keys": json.dumps(env_var_keys),
     }
     return record
 
