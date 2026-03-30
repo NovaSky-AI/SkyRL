@@ -4,12 +4,14 @@ from typing import List
 
 import datasets
 from loguru import logger
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
+
+from skyrl.utils.tok import get_tokenizer
 
 
 @functools.lru_cache(maxsize=4)
 def _get_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
-    return AutoTokenizer.from_pretrained(tokenizer_name)
+    return get_tokenizer(tokenizer_name)
 
 
 def _prompt_not_too_long(doc, tokenizer_name, prompt_key, max_length):
