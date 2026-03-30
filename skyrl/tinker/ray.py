@@ -9,28 +9,30 @@ from skyrl.utils.log import logger
 def run_ray_detached_actors(config: SkyRLTxConfig):
     logger.info("Creating STRICT_PACK placement group to colocate API and Engine actors...")
 
-    pg = placement_group([{"CPU": 1}, {"CPU": 1}], strategy="STRICT_PACK")
+    pg = placement_group([{"CPU": 4, "TPU": 8}], strategy="STRICT_PACK")
     ray.get(pg.ready())
 
     logger.info(f"Starting Tinker API Actor on {config.api.host}:{config.api.port} (Detached)...")
     api_actor = TinkerAPIActor.options(
+        num_cpus=1,
         placement_group=pg,
-        placement_group_bundle_index=0,
         name="tinker_api",
         lifetime="detached"
     ).remote(config.engine)
+    address = ray.get(api_actor.get_ip_address.remote())
     api_actor.run.remote(config.api.host, config.api.port)
 
     logger.info("Starting Tinker Engine Actor (Detached)...")
     engine_actor = TinkerEngineActor.options(
+        num_cpus=1,
         placement_group=pg,
-        placement_group_bundle_index=1,
         name="tinker_engine",
         lifetime="detached"
     ).remote(config.engine)
     engine_actor.run.remote()
 
     logger.info("Ray actors started in detached mode. They will keep running. You can now run your training script.")
+    return address
 
 
 @ray.remote
@@ -45,6 +47,9 @@ class TinkerAPIActor:
         # Logging config can be customized if needed
         from skyrl.utils.log import get_uvicorn_log_config
         uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
+
+    def get_ip_address(self):
+        return ray.util.get_node_ip_address()
 
 
 

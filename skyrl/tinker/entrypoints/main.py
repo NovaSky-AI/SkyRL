@@ -37,6 +37,7 @@ def main():
     jax_backend_config = JaxBackendConfig.model_validate({k: v for k, v in vars(args).items() if k in JaxBackendConfig.model_fields})
 
     engine_config.backend_config = jax_backend_config.model_dump()
+    engine_config.database_url = "sqlite:////tmp/tinker.db"
     config = SkyRLTxConfig(api=api_config, engine=engine_config, jax_backend=jax_backend_config)
     
     # Force Ray orchestrated mode and ray_jax backend
@@ -45,11 +46,10 @@ def main():
     
     logger.info(f"Initializing Ray with address: {config.engine.ray_address or 'local'}")
     ray.init(address=config.engine.ray_address)
-    run_ray_detached_actors(config)
-
-    time.sleep(100)
-
-    service_client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy")
+    tinker_address = run_ray_detached_actors(config)
+    logger.info(f"Tinker address: {tinker_address}")
+    time.sleep(120)
+    service_client = tinker.ServiceClient(base_url=f"http://{tinker_address}:8000", api_key="tml-dummy")
     training_client = service_client.create_lora_training_client(base_model="Qwen/Qwen3-0.6B")
     tokenizer = training_client.get_tokenizer()
 
