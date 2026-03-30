@@ -109,7 +109,16 @@ class RayJaxBackend(AbstractBackend):
         logger.info(f"Initializing RayJaxBackend with num_processes={num_processes}")
 
         # Instantiate the coordinator but do not run setup yet (to avoid blocking)
-        self.actor = RayJaxCoordinatorActor.remote(self.base_model, self.config)
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        current_node_id = ray.get_runtime_context().get_node_id()
+        logger.info(f"Scheduling RayJaxCoordinatorActor on node {current_node_id} to co-locate with TinkerEngine")
+        self.actor = RayJaxCoordinatorActor.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=current_node_id,
+                soft=False,
+            )
+        ).remote(self.base_model, self.config)
         
         # Retrieve dynamically allocated coordinator address from actor
         coordinator_address = ray.get(self.actor.get_coordinator_address.remote())
