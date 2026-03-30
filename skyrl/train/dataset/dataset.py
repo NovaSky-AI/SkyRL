@@ -2,7 +2,6 @@ import os
 from typing import List
 
 import datasets
-import ray
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
@@ -59,10 +58,6 @@ class PromptDataset:
         # filter out too long prompts
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
-        # Disable multiprocessing when Ray is active to avoid fork + Ray hangs.
-        # Forked children inherit Ray's gRPC connections in a broken state,
-        # and spawn doesn't work here because the lambda closure isn't pickleable.
-        num_proc = 1 if ray.is_initialized() else self.num_workers
         self.dataframe = self.dataframe.filter(
             lambda doc: len(
                 tokenizer.apply_chat_template(
@@ -70,7 +65,7 @@ class PromptDataset:
                 )
             )
             <= self.max_prompt_length,
-            num_proc=num_proc,
+            num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
 
