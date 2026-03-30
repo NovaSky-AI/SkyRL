@@ -323,10 +323,10 @@ def prepare_training_data(
     Returns:
         Tuple of (training_datums, truncated_count)
     """
-    # Apply DAPO overlong filtering (zero out loss mask if response doesn't end with EOS)
-    all_response_ids = [r.response_ids for r in rollouts]
+    # Apply DAPO overlong filtering (zero out loss mask for truncated responses)
     all_loss_masks = [r.loss_mask for r in rollouts]
-    filtered_loss_masks = apply_overlong_filtering(all_loss_masks, all_response_ids, tokenizer.eos_token_id)
+    stop_reasons = [r.stop_reason for r in rollouts]
+    filtered_loss_masks = apply_overlong_filtering(all_loss_masks, stop_reasons)
 
     training_datums = []
     truncated_count = 0
