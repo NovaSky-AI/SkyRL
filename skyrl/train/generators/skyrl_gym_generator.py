@@ -252,6 +252,24 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    async def _env_init(self, env, *args, **kwargs):
+        """Call env.init, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "init_async"):
+            return await env.init_async(*args, **kwargs)
+        return await self._run_in_executor_if_available(env.init, *args, **kwargs)
+
+    async def _env_step(self, env, action):
+        """Call env.step, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "step_async"):
+            return await env.step_async(action)
+        return await self._run_in_executor_if_available(env.step, action)
+
+    async def _env_close(self, env):
+        """Call env.close, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "close_async"):
+            return await env.close_async()
+        return await self._run_in_executor_if_available(env.close)
+
     def _make_zero_reward_output(
         self,
         prompt: ConversationType,
@@ -330,7 +348,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         try:
-            chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+            chat_history, _ = await self._env_init(env, chat_history)
         except Exception as e:
             logger.warning(f"Session {session_id}: env.init failed ({type(e).__name__}: {e}), returning zero-reward trajectory")
             # Return a minimal failed trajectory so training can continue
@@ -468,7 +486,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos = True
 
             # 2. Environment step
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            env_step_output: BaseTextEnvStepOutput = await self._env_step(env, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
@@ -550,7 +568,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
         # Close the environment
-        await self._run_in_executor_if_available(env.close)
+        await self._env_close(env)
 
         prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
         rollout_logprobs = None
@@ -921,7 +939,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_extra["max_turns"] = self.max_turns
             env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
             env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
-            init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
+            init_prompt, _ = await self._env_init(env, prompt)
             init_prompts.append(init_prompt)
             envs.append(env)
 
@@ -949,7 +967,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            env_step_output: BaseTextEnvStepOutput = await self._env_step(env, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
@@ -968,7 +986,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())
             # Close the environment
-            await self._run_in_executor_if_available(env.close)
+            await self._env_close(env)
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
