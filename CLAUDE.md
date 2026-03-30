@@ -15,13 +15,11 @@ Always consult the changelog before modifying Fleet training paths (`fsdp_worker
 
 2. **Chunked lm_head forward**: `model_wrapper.py` has `loss_chunk_size` support ported from the old fork. Avoids materializing full `(B, S, vocab_size)` logits — critical for 35B with 131K vocab at 97K sequence length. Without it, OOM/Xid 31 during training forward.
 
-3. **CUDA memory management for 35B**: `torch.cuda.empty_cache()` before backward pass in `worker.py` (policy + critic). Prevents OOM from fragmentation. Especially important because `expandable_segments` can't be used (see #5).
+3. **CUDA memory management for 35B**: `torch.cuda.empty_cache()` before backward pass in `worker.py` (policy + critic). Prevents OOM from fragmentation.
 
-4. **`flash_attn=true` required for memory headroom**: `fleet-35b-run.sh` uses flash_attention_2. SDPA uses too much memory at 97K sequence lengths — even with chunked lm_head, backward pass OOMs. Flash attention + chunked lm_head together provide sufficient headroom. (Earlier Xid 31 crashes were misattributed to GatedDeltaNet; actually caused by missing chunked lm_head.)
+4. **Pin vLLM 0.17.0 for expandable_segments**: `fleet-35b-run.sh` pins `vllm==0.17.0` because 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`) conflicts with PyTorch's `expandable_segments:True`. Without expandable_segments, memory fragmentation causes OOM during backward. vLLM 0.17.0 uses `cudaMalloc` (no conflict), enabling the full proven config: expandable_segments + flash_attn=true + chunked lm_head.
 
-5. **No `expandable_segments` with vLLM 0.18.0**: `fleet-35b-run.sh` passes `--no-pytorch-alloc-conf` because vLLM 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`) conflicts with PyTorch's `expandable_segments:True`. Old SkyRL uses vLLM 0.17.0 (`cudaMalloc`) which has no conflict.
-
-6. **`stage_chunks` pre-staging**: `dispatch.py` has a `stage_chunks` optimization (not in upstream) that pre-stages mini-batch chunks in Ray object store. Includes dynamic `mini_batch_size` adjustment for hint augmentation's variable batch sizes.
+5. **`stage_chunks` pre-staging**: `dispatch.py` has a `stage_chunks` optimization (not in upstream) that pre-stages mini-batch chunks in Ray object store. Includes dynamic `mini_batch_size` adjustment for hint augmentation's variable batch sizes.
 
 ## Training Scripts
 

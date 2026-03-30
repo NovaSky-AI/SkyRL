@@ -48,27 +48,19 @@ Fixes for 2-node (16 GPU) Qwen3.5-35B GRPO training on GCP H200. Ported from fle
 
 **Why the old fork doesn't need this:** Targets smaller models (8B) with enough GPU headroom that fragmentation doesn't matter.
 
-#### 4. Keep `--no-pytorch-alloc-conf` for vLLM 0.18.0 (`fleet-35b-run.sh`)
+#### 4. Pin vLLM 0.17.0 to enable `expandable_segments` (`fleet-35b-run.sh`)
 
-**Where:** `fleet-35b-run.sh` retains `--no-pytorch-alloc-conf` flag.
+**Where:** `fleet-35b-run.sh` pins `vllm==0.17.0` before training starts.
 
-**Problem:** SkyRL-v2 uses vLLM 0.18.0 which introduced `CuMemAllocator` — a custom CUDA memory allocator using `cuMemCreate`/`cuMemMap` for its memory pool. PyTorch's `expandable_segments:True` (set by `fleet-common-run.sh` when `--no-pytorch-alloc-conf` is absent) also uses `cuMemCreate`/`cuMemMap`. Two independent cuMem-based allocators in the same process conflict → `AssertionError: Expandable segments are not compatible with memory pool` at vLLM engine init.
+**Problem:** SkyRL-v2's `pyproject.toml` pins `vllm==0.18.0`, which introduced `CuMemAllocator` using `cuMemCreate`/`cuMemMap`. This conflicts with PyTorch's `expandable_segments:True` (also uses `cuMemCreate`/`cuMemMap`). Without `expandable_segments`, memory fragmentation causes OOM during backward on the 35B model — PyTorch can't satisfy large contiguous allocations from scattered free blocks.
 
-**Fix:** Keep `--no-pytorch-alloc-conf` so `expandable_segments` is never set. Anti-fragmentation is handled by `empty_cache()` (fix #3) and chunked lm_head (fix #2).
+Additionally, `flash_attn=false` (SDPA) uses too much attention memory at 97K sequences (OOM requesting 5.95 GiB during backward). `flash_attn=true` with vLLM 0.18.0 triggers Xid 31 FAULT_PDE in GatedDeltaNet layers during ref model forward — not a memory issue but an incompatibility between vLLM 0.18.0's CUDA allocator and FSDP2 DTensor operations.
 
-**Why the old fork doesn't have this:** Old SkyRL uses vLLM 0.17.0 (`cudaMalloc`/`cudaFree`, no cuMem APIs, no conflict).
+**Fix:** Pin `vllm==0.17.0` at the start of `fleet-35b-run.sh` (`pip install --force-reinstall --no-deps`). vLLM 0.17.0 uses `cudaMalloc` (no `CuMemAllocator`), so `expandable_segments:True` works. Removed `--no-pytorch-alloc-conf` flag so `fleet-common-run.sh` enables `expandable_segments`. This restores the proven config: vLLM 0.17.0 + `expandable_segments` + `flash_attn=true` + chunked lm_head.
 
-#### 5. `flash_attn=true` required for memory headroom (`fleet-35b-run.sh`)
+**Why the rest of SkyRL-v2 keeps 0.18.0:** The pin is only in `fleet-35b-run.sh`. Other models (9B) may work fine with 0.18.0. The 35B model's extreme memory requirements make expandable_segments essential.
 
-**Where:** `fleet-35b-run.sh` sets `trainer.flash_attn=true`.
-
-**Problem:** SDPA (`flash_attn=false`) uses significantly more memory for attention activations than flash_attention_2, especially at 97K sequence lengths. Even with chunked lm_head (fix #2), SDPA doesn't leave enough headroom for backward pass gradients → OOM requesting 5.95 GiB during `strategy.backward()`.
-
-Earlier Xid 31 crashes with `flash_attn=true` were misattributed to GatedDeltaNet incompatibility. The Xid 31 occurred in `torch_chunk_gated_delta_rule` (a linear attention kernel that doesn't use flash attention at all) — it was caused by memory exhaustion from the missing chunked lm_head (fix #2), not by flash_attn itself.
-
-**Fix:** Use `flash_attn=true` (matches old fork). Flash attention + chunked lm_head together provide sufficient memory headroom for training forward+backward on 97K sequences.
-
-#### 6. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
+#### 5. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
 **Where:** `MeshDispatch.stage_chunks()`
 
@@ -87,5 +79,5 @@ The old fork's manual loop (`num_mini_batches = len(data) // mini_batch_size`) s
 | `skyrl/backends/skyrl_train/workers/model_wrapper.py` | Port chunked lm_head forward (loss_chunk_size) |
 | `skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py` | Pass loss_chunk_size to HFModelWrapper; synchronous ref offload + barrier |
 | `skyrl/backends/skyrl_train/workers/worker.py` | empty_cache before backward (3 sites) |
-| `scripts/fleet-35b-run.sh` | flash_attn=true, --no-pytorch-alloc-conf, wandb project rename |
+| `scripts/fleet-35b-run.sh` | Pin vLLM 0.17.0, flash_attn=true, expandable_segments, wandb project rename |
 | `skyrl/backends/skyrl_train/distributed/dispatch.py` | Dynamic mini_batch_size adjustment |
