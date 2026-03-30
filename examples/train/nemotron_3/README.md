@@ -9,7 +9,7 @@ Nemotron-3-Nano is a hybrid Mamba+Attention+MoE architecture (52 layers, 128 exp
 A patch is provided that makes the necessary `pyproject.toml` changes. It was tested against SkyRL commit [`48cf6035`](https://github.com/sky-org/SkyRL/commit/48cf6035f36d076426e100ea3c6164662028ab0d) (HEAD of `main` at time of writing).
 
 ```bash
-git apply examples/train/nemotron/nemotron_support.patch
+git apply examples/train/nemotron_3/nemotron_support.patch
 uv lock
 ```
 
@@ -32,7 +32,7 @@ uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 2. Run training (requires 8 GPUs):
 
 ```bash
-bash examples/train/nemotron/run_nemotron_3_nano_4b_gsm8k.sh
+bash examples/train/nemotron_3/run_nemotron_3_nano_4b_gsm8k.sh
 ```
 
 
