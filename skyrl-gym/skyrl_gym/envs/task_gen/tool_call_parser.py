@@ -7,7 +7,7 @@ Copied from skyrl-train/integrations/fleet/env.py to avoid cross-package imports
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _try_parse_json(raw: str) -> Optional[Dict[str, Any]]:
@@ -33,9 +33,26 @@ def _try_parse_json(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _parse_one(match_text: str) -> Optional[Dict[str, Any]]:
+    """Parse a single tool call from matched text."""
+    parsed = _try_parse_json(match_text)
+    if parsed is None:
+        return None
+    name = parsed.get("name") or parsed.get("tool")
+    args = parsed.get("arguments") or parsed.get("params", {})
+    if name:
+        return {"name": name, "arguments": args}
+    return None
+
+
 def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse tool call from LLM response.
+    """Parse the first tool call from LLM response. Returns None if not found."""
+    calls = parse_tool_calls(action)
+    return calls[0] if calls else None
+
+
+def parse_tool_calls(action: str) -> List[Dict[str, Any]]:
+    """Parse all tool calls from LLM response.
 
     Supports tag-based formats:
     - <tool_call>{"name": "...", "arguments": {...}}</tool_call>
@@ -44,24 +61,23 @@ def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
     Also handles cases where the closing tag is missing (e.g., when </tool_call>
     is used as the stop string and not included in the output).
 
-    Returns dict with "name" and "arguments" keys, or None if not found.
+    Returns list of dicts with "name" and "arguments" keys.
     """
-    # Try common tag formats
-    for tag in ["tool_call", "function_call"]:
-        # First try with closing tag
-        match = re.search(rf"<{tag}>(.*?)</{tag}>", action, re.DOTALL)
-        if not match:
-            # Try without closing tag (for when </tool_call> is the stop string)
-            # Match from opening tag to end of string or next special token
-            match = re.search(rf"<{tag}>(.*?)(?:<\||\Z)", action, re.DOTALL)
-        if match:
-            parsed = _try_parse_json(match.group(1))
-            if parsed is None:
-                continue
-            # Normalize keys
-            name = parsed.get("name") or parsed.get("tool")
-            args = parsed.get("arguments") or parsed.get("params", {})
-            if name:
-                return {"name": name, "arguments": args}
+    results: List[Dict[str, Any]] = []
 
-    return None
+    for tag in ["tool_call", "function_call"]:
+        # Find all with closing tag
+        for match in re.finditer(rf"<{tag}>(.*?)</{tag}>", action, re.DOTALL):
+            parsed = _parse_one(match.group(1))
+            if parsed:
+                results.append(parsed)
+
+        # If none found with closing tags, try without (stop string case)
+        if not results:
+            match = re.search(rf"<{tag}>(.*?)(?:<\||\Z)", action, re.DOTALL)
+            if match:
+                parsed = _parse_one(match.group(1))
+                if parsed:
+                    results.append(parsed)
+
+    return results
