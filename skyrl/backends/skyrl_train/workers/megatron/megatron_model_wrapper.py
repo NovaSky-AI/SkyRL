@@ -318,15 +318,6 @@ class MegatronModelWrapper:
                 }
                 return loss, metrics
 
-            # Policy losses are pre-scaled to achieve the correct loss_reduction when summing across the entire minibatch
-            # (see `apply_loss_reduction_to_advantages_minibatch`).
-            # Megatron divides loss by num_microbatches
-            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
-            # and the data parallel all-reduce averages gradients across dp_size
-            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
-            # so we multiply by both factors to recover the correct sum reduction.
-            grad_sum_correction_factor = num_microbatches * dp_size
-
             # RL path: add optional KL/entropy terms
             # entropy loss
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
@@ -351,6 +342,17 @@ class MegatronModelWrapper:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
+            # Policy losses are pre-scaled to achieve the correct loss_reduction
+            # when summing across the entire minibatch (see `apply_loss_reduction_to_advantages_minibatch`).
+            # Megatron divides loss by num_microbatches
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
+            # and the data parallel all-reduce averages gradients across dp_size
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
+            # so we multiply by both factors to recover the correct sum reduction.
+            grad_sum_correction_factor = num_microbatches * dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
             loss = policy_loss * grad_sum_correction_factor + kl_loss_term - entropy_loss_term
             unscaled_loss = loss / grad_sum_correction_factor
 

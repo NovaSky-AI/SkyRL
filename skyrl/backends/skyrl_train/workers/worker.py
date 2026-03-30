@@ -854,11 +854,6 @@ class PolicyWorkerBase(Worker):
                 "loss_fn_outputs": loss_fn_outputs,
             }
         else:
-            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
-            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
-            # dp_size to recover the correct sum reduction across workers.
-            grad_sum_correction_factor = self.mesh_rank.dp_size
-
             # RL path: add optional KL/entropy terms
             # entropy loss
             with torch.set_grad_enabled(self.cfg.algorithm.use_entropy_loss):
@@ -885,7 +880,13 @@ class PolicyWorkerBase(Worker):
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
-            # TODO: The KL and entropy loss terms still need to be averaged across microbatches and workers.
+            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+            # dp_size to recover the correct sum reduction across workers.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
             loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * microbatch_weight
             unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
