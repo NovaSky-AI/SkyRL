@@ -17,7 +17,7 @@ Always consult the changelog before modifying Fleet training paths (`fsdp_worker
 
 3. **CUDA memory management for 35B**: `torch.cuda.empty_cache()` before backward pass in `worker.py` (policy + critic). Prevents OOM from fragmentation.
 
-4. **Pin vLLM 0.17.0 for expandable_segments**: `fleet-35b-run.sh` pins `vllm==0.17.0` because 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`) conflicts with PyTorch's `expandable_segments:True`. Without expandable_segments, memory fragmentation causes OOM during backward. vLLM 0.17.0 uses `cudaMalloc` (no conflict), enabling the full proven config: expandable_segments + flash_attn=true + chunked lm_head.
+4. **Reduced sequence length (72K) for 35B**: `fleet-35b-run.sh` uses `MAX_INPUT_LENGTH=72000` (down from 96000) with `--no-pytorch-alloc-conf` (disables `expandable_segments` which conflicts with vLLM 0.18.0's `CuMemAllocator`). At 97K, SDPA OOM'd and flash_attn hit Xid 31 in GatedDeltaNet. At 72K, flash_attn=true + chunked lm_head + empty_cache fits without expandable_segments.
 
 5. **`stage_chunks` pre-staging**: `dispatch.py` has a `stage_chunks` optimization (not in upstream) that pre-stages mini-batch chunks in Ray object store. Includes dynamic `mini_batch_size` adjustment for hint augmentation's variable batch sizes.
 

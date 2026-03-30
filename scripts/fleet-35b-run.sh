@@ -14,7 +14,7 @@ export DATA_VERSION="${DATA_VERSION:-v55}"
 export MODALITY="${MODALITY:-tool_use}"
 export NUM_EPOCHS="${NUM_EPOCHS:-20}"
 export MAX_TURNS="${MAX_TURNS:-50}"
-export MAX_INPUT_LENGTH="${MAX_INPUT_LENGTH:-96000}"
+export MAX_INPUT_LENGTH="${MAX_INPUT_LENGTH:-72000}"
 export MAX_GENERATE_LENGTH="${MAX_GENERATE_LENGTH:-4096}"
 export NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-8}"
 export ENV_KEYS="${ENV_KEYS:-}"
@@ -30,16 +30,9 @@ export S3_TRAJECTORY_BUCKET="${S3_TRAJECTORY_BUCKET:-skyrl-trajectories}"
 : "${FLEET_API_KEY:?Set FLEET_API_KEY before running}"
 : "${WANDB_API_KEY:?Set WANDB_API_KEY before running}"
 
-# Pin vLLM to 0.17.0 for 35B training. vLLM 0.18.0's CuMemAllocator
-# (cuMemCreate/cuMemMap) conflicts with PyTorch's expandable_segments:True.
-# Without expandable_segments, memory fragmentation causes OOM during backward.
-# vLLM 0.17.0 uses cudaMalloc (no conflict), enabling expandable_segments.
-source .venv/bin/activate
-pip install --force-reinstall --no-deps "vllm==0.17.0"
-
 bash scripts/fleet-common-run.sh \
   --use-python-direct --cuda-env "$HOME/.cuda_env" \
-  --set-ulimit \
+  --set-ulimit --no-pytorch-alloc-conf \
   --nccl-heartbeat 1800 -- \
   environment.skyrl_gym.fleet_task.ttl_seconds=900 \
   environment.skyrl_gym.fleet_task.partial_reward=true \
