@@ -172,9 +172,12 @@ class TaskGenEnv(BaseTextEnv):
         self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
         self.fleet_api_key = os.environ.get("FLEET_API_KEY", "")
 
-        # Eval mode: k=8 raw only (no hints); Train mode: k with hints
+        # Eval mode: k=8 raw only (no hints)
         self.is_eval = extras.get("training_phase") == "eval"
         self.eval_k_rollouts = int(env_config.get("eval_k_rollouts", 8)) if env_config else 8
+        # Whether to run hinted evaluation jobs (2nd harness job with verifier feedback).
+        # Default off — hints were net negative in iter#11 (verifier code dump confused evaluator).
+        self.enable_hints = bool(env_config.get("enable_hints", False)) if env_config else False
 
         # Lazy-init Fleet SDK client for harness evaluation
         self._fleet_client = None
@@ -838,21 +841,15 @@ Generate exactly ONE task. Output it in this format:
         start = time.time()
 
         try:
-            # Eval mode: k=8 raw only (no hints) for pass rate measurement
-            # Train mode: k raw + k hinted for hint_gap signal
+            # Eval: k=eval_k_rollouts for pass rate; Train: k=k_rollouts
             eval_k = self.eval_k_rollouts if self.is_eval else self.k_rollouts
 
             # 1. Raw job: k rollouts without hints
             raw_job_id, raw_results = await self._run_harness_job(prompt, verifier, k=eval_k)
             raw_scores = [r[0] for r in raw_results]
 
-            if self.is_eval:
-                # Eval: no hints, reward = alpha * var_raw (hint_gap=0)
-                hinted_scores = []
-                hinted_job_id = None
-                hint_text = ""
-                result = compute_task_reward(raw_scores, raw_scores, validity=1.0)
-            else:
+            if self.enable_hints and not self.is_eval:
+                # Hinted training: k raw + k hinted for hint_gap signal
                 # 2. Build hint from first failing session's stdout/error
                 hint_stdout = None
                 hint_error = None
@@ -885,6 +882,12 @@ Generate exactly ONE task. Output it in this format:
 
                 # 4. Compute reward
                 result = compute_task_reward(raw_scores, hinted_scores, validity=1.0)
+            else:
+                # No hints — reward based on raw variance only
+                hinted_scores = []
+                hinted_job_id = None
+                hint_text = ""
+                result = compute_task_reward(raw_scores, raw_scores, validity=1.0)
 
             duration = time.time() - start
 
