@@ -1,18 +1,30 @@
 set -x
 
-# Colocated GRPO training+generation for NVIDIA-Nemotron-3-Nano-4B-BF16 on GSM8K with Megatron.
+# Colocated GRPO training+generation for Nemotron-Mini-4B-Instruct on GSM8K with Megatron.
 #
 # Setup:
 # 1. Prepare GSM8K data:
 #    uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #
-# 2. Run training:
+# 2. The Nemotron-Mini-4B-Instruct model on HuggingFace only ships pytorch_model.bin.
+#    Megatron-Bridge requires safetensors format, so convert first:
+#    uv run --isolated --extra megatron python -c "
+#      from huggingface_hub import snapshot_download
+#      from safetensors.torch import save_file
+#      import torch, os
+#      path = snapshot_download('nvidia/Nemotron-Mini-4B-Instruct')
+#      sd = torch.load(os.path.join(path, 'pytorch_model.bin'), map_location='cpu', weights_only=True)
+#      save_file(sd, os.path.join(path, 'model.safetensors'))
+#      print(f'Saved safetensors to {path}/model.safetensors')
+#    "
+#
+# 3. Run training:
 #    bash examples/train/megatron/run_megatron_nemotron_mini_4b.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
-MODEL_NAME="nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+MODEL_NAME="nvidia/Nemotron-Mini-4B-Instruct"
 
 INFERENCE_BACKEND="vllm"
 
