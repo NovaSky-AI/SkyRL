@@ -15,6 +15,7 @@ from uuid import uuid4
 import ray
 import vllm
 from loguru import logger
+from packaging import version
 from vllm import SamplingParams
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -27,12 +28,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.openai.models.serving import (
-    BaseModelPath,
-    OpenAIModelRegistry,
-    OpenAIServingModels,
-)
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 
@@ -102,7 +98,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
-        if vllm_v1_disable_multiproc:
+        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
+            # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
         # Store common attributes
@@ -135,7 +132,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
-        multi_modal_data = input_batch.get("multi_modal_data")
 
         assert (
             prompts is None and prompt_token_ids is not None
@@ -145,7 +141,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             SamplingParams(**request_sampling_params) if request_sampling_params is not None else SamplingParams()
         )
 
-        return prompt_token_ids, sampling_params, multi_modal_data
+        return prompt_token_ids, sampling_params
 
     def _postprocess_outputs(self, outputs):
         """Common output processing logic."""
@@ -248,7 +244,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        prompt_token_ids, sampling_params, multi_modal_data = self._preprocess_prompts(input_batch)
+        prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
         # Check if LoRA is enabled and create LoRA requests
         lora_requests = None
@@ -262,18 +258,9 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                     LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path")
                 ] * batch_size
 
-        # Build prompts with multimodal data for VL models
-        prompts = []
-        for i, token_ids in enumerate(prompt_token_ids):
-            mm_data = multi_modal_data[i] if multi_modal_data and i < len(multi_modal_data) else None
-            if mm_data:
-                prompts.append({"prompt_token_ids": token_ids, "multi_modal_data": mm_data})
-            else:
-                prompts.append(TokensPrompt(prompt_token_ids=token_ids))
-
         outputs = await asyncio.to_thread(
             self.llm.generate,
-            prompts=prompts,
+            prompts=[TokensPrompt(prompt_token_ids=r) for r in prompt_token_ids],
             sampling_params=sampling_params,
             lora_request=lora_requests,
         )
@@ -364,7 +351,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         enable_log_requests = kwargs.pop("enable_log_requests", False)
         max_log_len = kwargs.pop("max_log_len", None)
 
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
+        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
+        else:
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=not enable_log_requests, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
         stat_loggers = None
@@ -373,6 +363,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
+        # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
+        model_config = engine.model_config
         model_path = kwargs.get("model")
         # Use served_model_name if provided (from generator.served_model_name config),
         # otherwise fall back to model_path. This allows using a different model name
@@ -382,7 +374,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         model_name = served_model_name if served_model_name is not None else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, base_model_paths)
+
+        # vllm >= 0.11.2 removed model_config from OpenAI serving APIs
+        is_new_api = version.parse(vllm.__version__) >= version.parse("0.11.2")
+        legacy_kwargs = {}
+        if is_new_api:
+            models = OpenAIServingModels(engine, base_model_paths)
+        else:
+            models = OpenAIServingModels(engine, model_config, base_model_paths)
+            legacy_kwargs["model_config"] = model_config
 
         # Build request logger for debugging (off by default).
         # Enable via: generator.engine_init_kwargs.enable_log_requests=true
@@ -393,39 +393,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
             request_logger = RequestLogger(max_log_len=max_log_len)
 
-        chat_template = openai_kwargs.pop("chat_template", None)
-
-        from vllm.plugins.io_processors import get_io_processor
-        from vllm.renderers import renderer_from_config
-
-        model_registry = OpenAIModelRegistry(
-            model_config=engine.model_config,
-            base_model_paths=base_model_paths,
-        )
-        renderer = renderer_from_config(engine.vllm_config)
-        io_processor = get_io_processor(
-            engine.vllm_config,
-            renderer,
-            engine.model_config.io_processor_plugin,
-        )
-        openai_serving_render = OpenAIServingRender(
-            model_config=engine.model_config,
-            renderer=renderer,
-            io_processor=io_processor,
-            model_registry=model_registry,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format="auto",
-        )
-
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
-            openai_serving_render=openai_serving_render,
             request_logger=request_logger,
-            chat_template=chat_template,
+            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
+            **legacy_kwargs,
             **openai_kwargs,
         )
 
@@ -434,8 +409,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
             models=models,
-            openai_serving_render=openai_serving_render,
             request_logger=request_logger,
+            **legacy_kwargs,
         )
         return engine
 
@@ -470,13 +445,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = await self.llm.add_lora(lora_request)
         return result
 
-    async def _collect_outputs(
-        self,
-        prompt_token_ids,
-        request_id: str,
-        sampling_params: SamplingParams,
-        multi_modal_data: Optional[Dict[str, Any]] = None,
-    ):
+    async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
         # Check if LoRA is enabled and create LoRA request
         final_output = None
@@ -491,16 +460,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )
 
-        # Build prompt with multimodal data for VL models
-        if multi_modal_data:
-            num_images = len(multi_modal_data.get("image", []))
-            logger.info(f"VL generate: {num_images} images, {len(prompt_token_ids)} input tokens")
-            prompt = {"prompt_token_ids": prompt_token_ids, "multi_modal_data": multi_modal_data}
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
         async for request_output in self.llm.generate(
-            prompt=prompt,
+            prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params=sampling_params,
             request_id=request_id,
             lora_request=lora_request,
@@ -511,15 +472,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine."""
-        prompt_token_ids, sampling_params, multi_modal_data = self._preprocess_prompts(input_batch)
+        prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
         tasks = []
-        for i, prompt in enumerate(prompt_token_ids):
+        for prompt in prompt_token_ids:
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
-            mm_data = multi_modal_data[i] if multi_modal_data and i < len(multi_modal_data) else None
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params, mm_data))
+            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
             tasks.append(task)
         outputs = await asyncio.gather(*tasks)
 
@@ -602,13 +562,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.BAD_REQUEST.phrase,
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -640,13 +607,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             else:
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=http_status.phrase,
+                        code=http_status.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=http_status.phrase,
                     code=http_status.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.
