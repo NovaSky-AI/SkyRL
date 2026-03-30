@@ -54,10 +54,12 @@ Fixes for 2-node (16 GPU) Qwen3.5-35B GRPO training on GCP H200. Ported from fle
 
 **Problem:** At 97K sequences (96000 input + 4096 generate), memory was too tight even with chunked lm_head and `empty_cache`:
 - `flash_attn=false` (SDPA): OOM requesting 5.95 GiB during backward — SDPA's O(n²) attention memory is too large at 97K.
-- `flash_attn=true`: Xid 31 FAULT_PDE in GatedDeltaNet layers during ref model forward.
+- `flash_attn=true`: Xid 31 FAULT_PDE in GatedDeltaNet layers during ref model forward — reproduced at both 97K and 72K. Not a memory issue; vLLM 0.18.0's CuMemAllocator corrupts CUDA memory mappings that FSDP2 DTensor operations later touch.
 - `expandable_segments:True` would help with fragmentation but conflicts with vLLM 0.18.0's `CuMemAllocator` (`cuMemCreate`/`cuMemMap`).
 
-**Fix:** Reduce `MAX_INPUT_LENGTH` from 96000 to 72000 (total seq ~76K). This lowers peak memory enough that `flash_attn=true` + chunked lm_head + `empty_cache` fits without needing `expandable_segments`. The `--no-pytorch-alloc-conf` flag passed to `fleet-common-run.sh` skips the default `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, avoiding the vLLM 0.18.0 CuMemAllocator conflict. The 9B VL script (`fleet-vl-run.sh`) also passes this flag for the same reason.
+**Fix:** Reduce `MAX_INPUT_LENGTH` from 96000 to 72000 (total seq ~76K) and use `flash_attn=false` (SDPA). At 72K, SDPA's O(n²) memory is ~55% of what it was at 97K — enough to fit with chunked lm_head + `empty_cache`. The `--no-pytorch-alloc-conf` flag passed to `fleet-common-run.sh` skips the default `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, avoiding the vLLM 0.18.0 CuMemAllocator conflict. The 9B VL script (`fleet-vl-run.sh`) also passes this flag for the same reason.
+
+**Verified working:** Step 1 completed — ref forward 8.4 min, policy backward 45.6 min, total step ~80 min. SDPA is slower than flash_attn but stable.
 
 #### 5. Dynamic mini_batch_size for hint augmentation (`dispatch.py`)
 
@@ -78,5 +80,5 @@ The old fork's manual loop (`num_mini_batches = len(data) // mini_batch_size`) s
 | `skyrl/backends/skyrl_train/workers/model_wrapper.py` | Port chunked lm_head forward (loss_chunk_size) |
 | `skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py` | Pass loss_chunk_size to HFModelWrapper; synchronous ref offload + barrier |
 | `skyrl/backends/skyrl_train/workers/worker.py` | empty_cache before backward (3 sites) |
-| `scripts/fleet-35b-run.sh` | Reduce seq length to 72K, flash_attn=true, --no-pytorch-alloc-conf, wandb project rename |
+| `scripts/fleet-35b-run.sh` | Reduce seq length to 72K, flash_attn=false, --no-pytorch-alloc-conf, wandb project rename |
 | `skyrl/backends/skyrl_train/distributed/dispatch.py` | Dynamic mini_batch_size adjustment |
