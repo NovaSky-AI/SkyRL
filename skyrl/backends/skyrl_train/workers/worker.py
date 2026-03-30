@@ -675,7 +675,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
-        self._micro_batches_accumulated = 0
 
     def forward_backward(
         self,
@@ -704,8 +703,10 @@ class PolicyWorkerBase(Worker):
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            metrics = self._forward_backward_micro(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-            self._micro_batches_accumulated += 1
+            microbatch_weight = len(micro_batch) / len(data)
+            metrics = self._forward_backward_micro(
+                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+            )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
@@ -714,11 +715,16 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
-        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
+        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
@@ -729,21 +735,21 @@ class PolicyWorkerBase(Worker):
     def _forward_backward_micro(
         self,
         experience: Experience,
+        microbatch_weight: float,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
 
-        Loss is not scaled here - gradient scaling happens at optim_step time.
-
         Args:
             experience: Experience object for one micro batch
+            microbatch_weight: Weight of the micro batch in the overall batch
             loss_fn: Optional loss function name to use instead of config default
             loss_fn_config: Optional config overrides for the loss function
 
         Returns:
-            All-reduced metrics dict for this micro batch
+            Metrics dict for the worker's local micro batch
         """
         self.model.train()
 
@@ -808,7 +814,8 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            loss = policy_loss
+            unscaled_loss = policy_loss
+            loss = unscaled_loss * microbatch_weight
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -878,7 +885,8 @@ class PolicyWorkerBase(Worker):
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
-            loss = policy_loss * grad_sum_correction_factor + kl_loss_term - entropy_loss_term
+            # TODO: The KL and entropy loss terms still need to be averaged across microbatches and workers.
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * microbatch_weight
             unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
