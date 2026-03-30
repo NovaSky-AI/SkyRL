@@ -8,7 +8,9 @@ from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
+from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 from flash_attn.bert_padding import pad_input, unpad_input
 from loguru import logger
 from packaging.version import Version
@@ -31,6 +33,36 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+
+def _chunked_logprobs_only(hidden_chunk, labels_chunk, weight, bias, temperature):
+    """Compute logprobs for one chunk. Used inside gradient_checkpoint.
+    Uses F.linear with raw weight/bias to avoid DTensor issues with FSDP2.
+    """
+    logits = F.linear(hidden_chunk, weight, bias)
+    logits = logits / temperature
+    return logprobs_from_logits(logits, labels_chunk, inplace_backward=False)
+
+
+def _chunked_logprobs_and_entropy(hidden_chunk, labels_chunk, weight, bias, temperature):
+    """Compute logprobs and entropy for one chunk. Used inside gradient_checkpoint.
+    Uses F.linear with raw weight/bias to avoid DTensor issues with FSDP2.
+    """
+    logits = F.linear(hidden_chunk, weight, bias)
+    logits = logits / temperature
+    lp = logprobs_from_logits(logits, labels_chunk, inplace_backward=False)
+    log_softmax_vals = F.log_softmax(logits, dim=-1)
+    entropy = -(log_softmax_vals.exp() * log_softmax_vals).sum(dim=-1)
+    return lp, entropy
+
+
+class _IdentityLMHead(nn.Module):
+    """Dummy lm_head that passes hidden states through unchanged.
+    Used to prevent the HF model from materializing the full (B, S, vocab) logits tensor.
+    """
+
+    def forward(self, x):
+        return x
 
 
 class HFModelWrapper(nn.Module):
@@ -74,6 +106,7 @@ class HFModelWrapper(nn.Module):
         use_liger_kernel=False,
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
+        loss_chunk_size: int = 0,
         use_torch_compile: bool = False,
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
@@ -85,6 +118,7 @@ class HFModelWrapper(nn.Module):
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
+        self.loss_chunk_size = loss_chunk_size
         self.is_vlm = False
         # packing samples using Flash Attention 2
         if use_sample_packing:
@@ -351,31 +385,62 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
-        if self.is_vlm:
-            output = self.model(
-                sequences_fwd,
-                attention_mask=attention_mask_fwd,
-                position_ids=None,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
+        use_chunked = self.loss_chunk_size > 0
+
+        if use_chunked:
+            # Chunked lm_head: avoid materializing full (B, S, vocab_size) logits tensor.
+            # Replace lm_head with identity so the model returns hidden states instead.
+            lm_head = self.model.lm_head
+            self.model.lm_head = _IdentityLMHead()
+
+        try:
+            if self.is_vlm:
+                output = self.model(
+                    sequences_fwd,
+                    attention_mask=attention_mask_fwd,
+                    position_ids=None,
+                    pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
+                )
+            # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
+            elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+                # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
+                # Not using attention mask leads to higher perf since flash attention varlen func is enabled
+                output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            else:
+                output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+        finally:
+            if use_chunked:
+                self.model.lm_head = lm_head
+
+        if use_chunked:
+            # output["logits"] is actually hidden_states (B, S, hidden_dim) since lm_head was identity
+            hidden_states = output["logits"]
+            entropy_mask = None
+            if compute_entropy and not self.use_sample_packing:
+                entropy_mask = attention_mask_fwd
+            log_probs, entropy_BS = self._chunked_lm_head_forward(
+                hidden_states,
+                lm_head,
+                sequences_rolled,
+                temperature,
+                self.loss_chunk_size,
+                compute_entropy=compute_entropy,
+                entropy_requires_grad=entropy_requires_grad,
+                attention_mask=entropy_mask,
             )
-        # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
-            # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
-            # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            # Replace hidden_states in output with None to free memory
+            output["logits"] = None
         else:
-            output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+            logits_BSV = output["logits"]
+            logits_BSV.div_(temperature)
 
-        logits_BSV = output["logits"]
-        logits_BSV.div_(temperature)
-
-        # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
-        log_probs = logprobs_from_logits(
-            logits_BSV,
-            sequences_rolled,
-            inplace_backward=True,
-        )
+            # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+            log_probs = logprobs_from_logits(
+                logits_BSV,
+                sequences_rolled,
+                inplace_backward=True,
+            )
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
@@ -392,7 +457,20 @@ class HFModelWrapper(nn.Module):
                 log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
 
-        if compute_entropy:
+        if use_chunked:
+            # Entropy already computed in _chunked_lm_head_forward
+            if compute_entropy:
+                if self.sequence_parallel_size > 1:
+                    dim = entropy_BS.ndim - 1
+                    entropy_BS = gather_outputs_and_unpad(
+                        entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                    )
+                if self.use_sample_packing:
+                    entropy_BS = pad_input(
+                        entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                    ).squeeze(-1)
+                output["entropy"] = entropy_BS
+        elif compute_entropy:
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
             entropy_mask = None
@@ -430,6 +508,93 @@ class HFModelWrapper(nn.Module):
             return (action_log_probs, output)
         else:
             return action_log_probs
+
+    def _chunked_lm_head_forward(
+        self,
+        hidden_states,
+        lm_head,
+        labels,
+        temperature,
+        chunk_size,
+        compute_entropy=False,
+        entropy_requires_grad=True,
+        attention_mask=None,
+    ):
+        """Compute log_probs (and optionally entropy) via chunked lm_head projection.
+
+        Instead of materializing the full (B, S, vocab_size) logits tensor, this
+        computes lm_head in chunks of `chunk_size` tokens along the sequence dimension.
+        Each chunk uses gradient checkpointing so logits are recomputed during backward
+        rather than stored, keeping peak memory at (B, chunk_size, vocab_size).
+        """
+        B, S, H = hidden_states.shape
+        all_log_probs = []
+        all_entropy = [] if compute_entropy else None
+
+        # Extract weight/bias from lm_head module. With FSDP2, parameters are DTensors;
+        # calling the module inside gradient_checkpoint causes DTensor/Tensor mismatch.
+        # We all-gather DTensors to regular tensors via full_tensor() which is differentiable.
+        weight = lm_head.weight
+        bias = lm_head.bias
+        try:
+            from torch.distributed.tensor import DTensor
+
+            if isinstance(weight, DTensor):
+                weight = weight.full_tensor()
+            if bias is not None and isinstance(bias, DTensor):
+                bias = bias.full_tensor()
+        except ImportError:
+            pass
+
+        # When not computing gradients (ref model), skip gradient_checkpoint entirely —
+        # just compute each chunk directly with no_grad already active from caller.
+        use_checkpointing = torch.is_grad_enabled()
+
+        for start in range(0, S, chunk_size):
+            end = min(start + chunk_size, S)
+            chunk_hidden = hidden_states[:, start:end]
+            chunk_labels = labels[:, start:end]
+
+            if compute_entropy:
+                if use_checkpointing:
+                    chunk_lp, chunk_ent = gradient_checkpoint(
+                        _chunked_logprobs_and_entropy,
+                        chunk_hidden,
+                        chunk_labels,
+                        weight,
+                        bias,
+                        temperature,
+                        use_reentrant=False,
+                    )
+                else:
+                    chunk_lp, chunk_ent = _chunked_logprobs_and_entropy(
+                        chunk_hidden, chunk_labels, weight, bias, temperature
+                    )
+                if not entropy_requires_grad:
+                    chunk_ent = chunk_ent.detach()
+                if attention_mask is not None:
+                    chunk_mask = attention_mask[:, start:end]
+                    chunk_ent = chunk_ent * chunk_mask
+                all_entropy.append(chunk_ent)
+            else:
+                if use_checkpointing:
+                    chunk_lp = gradient_checkpoint(
+                        _chunked_logprobs_only,
+                        chunk_hidden,
+                        chunk_labels,
+                        weight,
+                        bias,
+                        temperature,
+                        use_reentrant=False,
+                    )
+                else:
+                    chunk_lp = _chunked_logprobs_only(chunk_hidden, chunk_labels, weight, bias, temperature)
+
+            all_log_probs.append(chunk_lp)
+
+        log_probs = torch.cat(all_log_probs, dim=1)
+        entropy = torch.cat(all_entropy, dim=1) if compute_entropy else None
+        return log_probs, entropy
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
