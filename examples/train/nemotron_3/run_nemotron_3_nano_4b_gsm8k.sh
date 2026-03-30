@@ -72,5 +72,5 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.project_name="gsm8k_megatron_nemotron" \
   trainer.run_name="gsm8k_megatron_nemotron_3_nano_4b_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_nemotron_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_nemotron_3_nano_ckpt" \
   $@
