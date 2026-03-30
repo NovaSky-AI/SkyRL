@@ -252,15 +252,6 @@ class MegatronModelWrapper:
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
-            # Policy losses are pre-scaled to achieve the correct loss_reduction when summing across the entire minibatch
-            # (see `apply_loss_reduction_to_advantages_minibatch`).
-            # Megatron divides loss by num_microbatches
-            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
-            # and the data parallel all-reduce averages gradients across dp_size
-            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
-            # so we multiply by both factors to recover the correct sum reduction.
-            grad_sum_correction_factor = num_microbatches * dp_size
-
             # temperature normalization
             if temperature != 1.0:
                 logits.div_(temperature)
@@ -290,15 +281,13 @@ class MegatronModelWrapper:
 
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
-                unscaled_loss = policy_loss
-                loss = unscaled_loss * grad_sum_correction_factor
+                loss = policy_loss
 
                 # Compute elementwise loss for Tinker API (per-token NLL)
                 with torch.no_grad():
                     elementwise_loss = -action_log_probs
                     if loss_mask is not None:
                         elementwise_loss = elementwise_loss * loss_mask
-                    elementwise_loss = elementwise_loss * grad_sum_correction_factor
 
                 # Build per-sequence loss_fn_outputs
                 batch_size = action_log_probs.shape[0]
@@ -323,11 +312,20 @@ class MegatronModelWrapper:
                     )
 
                 metrics = {
-                    "loss": unscaled_loss.detach().item(),
+                    "loss": loss.item(),
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
                 return loss, metrics
+
+            # Policy losses are pre-scaled to achieve the correct loss_reduction when summing across the entire minibatch
+            # (see `apply_loss_reduction_to_advantages_minibatch`).
+            # Megatron divides loss by num_microbatches
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
+            # and the data parallel all-reduce averages gradients across dp_size
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
+            # so we multiply by both factors to recover the correct sum reduction.
+            grad_sum_correction_factor = num_microbatches * dp_size
 
             # RL path: add optional KL/entropy terms
             # entropy loss
@@ -353,8 +351,8 @@ class MegatronModelWrapper:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
-            unscaled_loss = policy_loss + kl_loss_term - entropy_loss_term
-            loss = unscaled_loss * grad_sum_correction_factor
+            loss = policy_loss * grad_sum_correction_factor + kl_loss_term - entropy_loss_term
+            unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
