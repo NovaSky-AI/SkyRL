@@ -73,6 +73,7 @@ _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
     "top_p": "top_p",
     "stop_strings": "stop",
     "stop_tokens": "stop_token_ids",
+    "top_k_prompt_logprobs": "prompt_logprobs",
 }
 
 if TYPE_CHECKING:
@@ -404,7 +405,7 @@ class RemoteInferenceClient:
         tinker_params = body.get("sampling_params", {})
 
         # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
-        # SamplingClient.sample() uses "include_prompt_logprobs". Support both.
+        # SamplingClient.sample() uses "include_prompt_logprobs".
         include_prompt_logprobs = body.get("include_prompt_logprobs", body.get("prompt_logprobs", False))
         topk_prompt_logprobs_k = body.get("topk_prompt_logprobs", 0)
 
@@ -416,17 +417,13 @@ class RemoteInferenceClient:
             "n": num_samples,
             "logprobs": 0,
             "output_kind": 2,
+            "prompt_logprobs": 0 if include_prompt_logprobs else None,
         }
 
         for tinker_key, vllm_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
             val = tinker_params.get(tinker_key)
             if val is not None:
                 sampling_params[vllm_key] = val
-
-        if topk_prompt_logprobs_k > 0:
-            sampling_params["prompt_logprobs"] = topk_prompt_logprobs_k
-        elif include_prompt_logprobs:
-            sampling_params["prompt_logprobs"] = 0
 
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
@@ -443,7 +440,6 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/inference/v1/generate"
         response = await self._post(url, json=payload, headers=headers)
 
-        # Parse prompt logprobs from vLLM response (top-level, shared across choices).
         # vLLM returns: list[dict[str(token_id) → {"logprob": float, ...}] | None]
         result_prompt_logprobs: Optional[List[Optional[float]]] = None
         result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None

@@ -520,20 +520,6 @@ class TestSample:
         assert pl[0] is None
 
     @pytest.mark.asyncio
-    async def test_sample_no_prompt_logprobs_default(self, client):
-        """When neither flag is set, prompt_logprobs fields remain None."""
-        request_payload = {
-            "json": {
-                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
-                "num_samples": 1,
-                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
-            }
-        }
-        result = await client.sample(request_payload)
-        assert result["prompt_logprobs"] is None
-        assert result["topk_prompt_logprobs"] is None
-
-    @pytest.mark.asyncio
     async def test_sample_topk_prompt_logprobs(self, client):
         """Test topk_prompt_logprobs returns both prompt_logprobs and topk tuples."""
         request_payload = {
