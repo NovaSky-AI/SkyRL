@@ -537,6 +537,8 @@ class TestSample:
         assert pl is not None
         assert len(pl) == 3
         assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
 
         topk = result["topk_prompt_logprobs"]
         assert topk is not None
@@ -545,9 +547,11 @@ class TestSample:
         # Each non-None position has 1 actual token + 2 topk extras = 3 entries
         assert len(topk[1]) == 3
         assert len(topk[2]) == 3
-        for token_id, logprob in topk[1]:
-            assert isinstance(token_id, int)
-            assert isinstance(logprob, float)
+        # Position 1: actual token 20 at -0.5, extras 9010 at -1.0, 9011 at -1.1
+        topk1 = dict(topk[1])
+        assert topk1[20] == pytest.approx(-0.5)
+        assert topk1[9010] == pytest.approx(-1.0)
+        assert topk1[9011] == pytest.approx(-1.1)
 
 
 class TestRenderChatCompletion:

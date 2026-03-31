@@ -73,7 +73,6 @@ _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
     "top_p": "top_p",
     "stop_strings": "stop",
     "stop_tokens": "stop_token_ids",
-    "top_k_prompt_logprobs": "prompt_logprobs",
 }
 
 if TYPE_CHECKING:
@@ -409,6 +408,13 @@ class RemoteInferenceClient:
         include_prompt_logprobs = body.get("include_prompt_logprobs", body.get("prompt_logprobs", False))
         topk_prompt_logprobs_k = body.get("topk_prompt_logprobs", 0)
 
+        # vLLM prompt logprob mapping
+        prompt_logprobs_sp = None
+        if topk_prompt_logprobs_k > 0:
+            prompt_logprobs_sp = topk_prompt_logprobs_k
+        elif include_prompt_logprobs:
+            prompt_logprobs_sp = 0
+
         # Flatten prompt chunks → token IDs
         token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
 
@@ -417,7 +423,7 @@ class RemoteInferenceClient:
             "n": num_samples,
             "logprobs": 0,
             "output_kind": 2,
-            "prompt_logprobs": 0 if include_prompt_logprobs else None,
+            "prompt_logprobs": prompt_logprobs_sp,
         }
 
         for tinker_key, vllm_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
