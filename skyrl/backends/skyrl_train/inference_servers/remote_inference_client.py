@@ -391,16 +391,22 @@ class RemoteInferenceClient:
 
         Args:
             request_payload: Dict with {"json": <request-body>}.
-                Expected keys in json: prompt, num_samples, sampling_params, session_id.
+                Expected keys in json: prompt, num_samples, sampling_params, session_id,
+                include_prompt_logprobs (bool), topk_prompt_logprobs (int).
 
         Returns:
-            Dict with type="sample", sequences list, and stub prompt_logprobs fields.
+            Dict with type="sample", sequences list, prompt_logprobs, and topk_prompt_logprobs.
         """
         session_id, body = _extract_session_id_and_body(request_payload)
 
         prompt = body.get("prompt", {})
         num_samples = body.get("num_samples", 1)
         tinker_params = body.get("sampling_params", {})
+
+        # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
+        # SamplingClient.sample() uses "include_prompt_logprobs". Support both.
+        include_prompt_logprobs = body.get("include_prompt_logprobs", body.get("prompt_logprobs", False))
+        topk_prompt_logprobs_k = body.get("topk_prompt_logprobs", 0)
 
         # Flatten prompt chunks → token IDs
         token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
@@ -417,6 +423,11 @@ class RemoteInferenceClient:
             if val is not None:
                 sampling_params[vllm_key] = val
 
+        if topk_prompt_logprobs_k > 0:
+            sampling_params["prompt_logprobs"] = topk_prompt_logprobs_k
+        elif include_prompt_logprobs:
+            sampling_params["prompt_logprobs"] = 0
+
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
         payload = {
@@ -431,6 +442,23 @@ class RemoteInferenceClient:
 
         url = f"{self.proxy_url}/inference/v1/generate"
         response = await self._post(url, json=payload, headers=headers)
+
+        # Parse prompt logprobs from vLLM response (top-level, shared across choices).
+        # vLLM returns: list[dict[str(token_id) → {"logprob": float, ...}] | None]
+        result_prompt_logprobs: Optional[List[Optional[float]]] = None
+        result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
+
+        raw_prompt_logprobs = response.get("prompt_logprobs")
+        if raw_prompt_logprobs is not None and (include_prompt_logprobs or topk_prompt_logprobs_k > 0):
+            result_prompt_logprobs = [
+                pos_dict[str(token_ids[i])]["logprob"] if pos_dict is not None else None
+                for i, pos_dict in enumerate(raw_prompt_logprobs)
+            ]
+            if topk_prompt_logprobs_k > 0:
+                result_topk_prompt_logprobs = [
+                    [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()] if pos_dict is not None else None
+                    for pos_dict in raw_prompt_logprobs
+                ]
 
         # Transform response choices → sequences
         sequences = []
@@ -453,8 +481,8 @@ class RemoteInferenceClient:
         return {
             "type": "sample",
             "sequences": sequences,
-            "prompt_logprobs": None,
-            "topk_prompt_logprobs": None,
+            "prompt_logprobs": result_prompt_logprobs,
+            "topk_prompt_logprobs": result_topk_prompt_logprobs,
         }
 
     async def chat_completion(
