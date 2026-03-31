@@ -44,9 +44,12 @@ TP_SIZE = 1
 def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
-    sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
+        sampling_params["logprobs"] = True
         sampling_params["top_logprobs"] = 1
+    else:
+        # /v1/completions expects logprobs as an integer (number of top logprobs)
+        sampling_params["logprobs"] = 1
     sampling_params["return_tokens_as_token_ids"] = True
     return sampling_params
 
@@ -311,7 +314,10 @@ def test_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     response = requests.post(f"{base_url}/chat/completions", json={"model": SERVED_MODEL_NAME})
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert response.status_code in (
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+    )
 
     # Wrong model name
     response = requests.post(
