@@ -353,7 +353,11 @@ class MegatronModelWrapper:
 
             # NOTE: The KL and entropy loss terms are not pre-scaled,
             # so we just average them across microbatches and DP workers.
-            loss = policy_loss * grad_sum_correction_factor + kl_loss_term - entropy_loss_term
+            # Megatron's DDP averages gradients across the full DP+CP group,
+            # but KL/entropy should only be averaged across DP (not CP).
+            # Multiply by cp_size to counteract the unwanted CP averaging.
+            cp_size = mpu.get_context_parallel_world_size()
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * cp_size
             unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
