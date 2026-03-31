@@ -321,6 +321,24 @@ class OffPolicyCorrectionConfig(BaseConfig):
 
 
 @dataclass
+class LEASHConfig(BaseConfig):
+    """Configuration for LEASH adaptive length penalty (arxiv 2512.21540)."""
+
+    use_leash: bool = False
+    """Enable the LEASH adaptive length penalty."""
+    lambda_init: float = 0.2
+    """Initial value of the dual variable λ."""
+    lambda_lr: float = 0.05
+    """Learning rate α_λ for the dual variable update."""
+    lambda_min: float = 0.0
+    """Minimum value to clip λ to."""
+    lambda_max: float = 1.0
+    """Maximum value to clip λ to."""
+    target_length: Optional[int] = None
+    """Target length L_t in tokens. Falls back to ``generator.sampling_params.max_generate_length`` if ``None``."""
+
+
+@dataclass
 class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
     """``"grpo"``, ``"gae"``, ``"rloo"``, ``"reinforce++"``, or custom via ``AdvantageEstimatorRegistry``."""
@@ -374,6 +392,8 @@ class AlgorithmConfig(BaseConfig):
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
     If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""
+    leash: LEASHConfig = field(default_factory=LEASHConfig)
+    """LEASH adaptive length penalty config. Only used when ``leash.use_leash=True``."""
 
 
 # ---------------------------------------------------------------------------

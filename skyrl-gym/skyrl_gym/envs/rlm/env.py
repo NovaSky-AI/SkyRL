@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -235,6 +236,7 @@ class RLMEnv(BaseTextEnv):
         self.repl: Optional[PersistentREPL] = None
         self._final_answer: Optional[str] = None
         self._turn_index = 0  # iteration counter for build_user_prompt
+        self._last_repl_exec_s: float = 0.0
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
@@ -319,7 +321,9 @@ class RLMEnv(BaseTextEnv):
                 observations=obs, reward=self._get_reward(done, None), done=done, metadata={}
             )
 
+        _t_repl = time.perf_counter()
         result = self.repl.execute(code)
+        self._last_repl_exec_s = time.perf_counter() - _t_repl
 
         # Two-stage final answer detection
         final_answer = result.final_answer  # set by FINAL_VAR() callable during execution
@@ -379,7 +383,7 @@ class RLMEnv(BaseTextEnv):
         return 0.0
 
     def _build_metadata(self) -> Dict[str, Any]:
-        return {"turns": self.turns}
+        return {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
 
     def get_metrics(self) -> Dict[str, Any]:
         return {

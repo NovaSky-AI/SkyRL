@@ -56,7 +56,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
   generator.step_wise_trajectories=true \
-  generator.max_turns=15 \
+  generator.max_turns=10 \
   generator.batched=false \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=false \

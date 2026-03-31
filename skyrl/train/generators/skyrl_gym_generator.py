@@ -7,6 +7,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -312,13 +313,16 @@ class SkyRLGymGenerator(GeneratorInterface):
             done=False,
         )
 
+        _turn_num = 0
         while not agent_loop_state.done:
+            _turn_num += 1
 
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
 
             # 1. Generate output
+            _t_tokenize = time.perf_counter()
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
@@ -331,11 +335,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+            _tokenize_s = time.perf_counter() - _t_tokenize
+            _prompt_tokens = len(agent_loop_state.input_ids)
 
+            _t_infer = time.perf_counter()
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
+            _inference_s = time.perf_counter() - _t_infer
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -367,10 +375,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos = True
 
             # 2. Environment step
+            _t_env = time.perf_counter()
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            _env_step_s = time.perf_counter() - _t_env
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
+
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
@@ -408,6 +419,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 turn_loss_mask = turn_output.get_turn_loss_mask()
                 turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
 
+                _step_latency = {
+                    "prompt_tokens": _prompt_tokens,
+                    "output_tokens": len(output_ids),
+                    "tokenize_s": _tokenize_s,
+                    "inference_s": _inference_s,
+                    "env_step_s": _env_step_s,
+                    "repl_exec_s": env_step_output.get("metadata", {}).get("repl_exec_s"),
+                }
                 per_step_output = TrajectoryOutput(
                     response_ids=turn_response_ids,
                     reward=step_reward,
@@ -415,7 +434,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_ids=turn_prompt_ids,
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
-                    env_metrics=env.get_metrics() if agent_loop_state.done else {},
+                    env_metrics={**(env.get_metrics() if agent_loop_state.done else {}), "latency": _step_latency},
                     rollout_expert_indices=turn_output.get_turn_rollout_expert_indices(),
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
@@ -705,7 +724,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"
@@ -834,7 +853,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
@@ -855,6 +874,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
+            "env_metrics": env_metrics,
         }
 
         return generator_output

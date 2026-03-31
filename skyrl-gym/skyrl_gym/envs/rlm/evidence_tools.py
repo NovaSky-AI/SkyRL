@@ -81,7 +81,9 @@ def make_reward_fn(ctx: str, evidence: List[str]):
             substrings = ast.literal_eval(final_answer)
             if isinstance(substrings, str):
                 substrings = [substrings]
-            elif not isinstance(substrings, list):
+            elif isinstance(substrings, (list, tuple)):
+                substrings = [s if isinstance(s, str) else str(s) for s in substrings]
+            else:
                 substrings = [str(substrings)]
         except (ValueError, SyntaxError):
             substrings = [s.strip() for s in final_answer.split("\n\n") if s.strip()]

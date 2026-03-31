@@ -253,6 +253,7 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    env_metrics_list = concat_generator_outputs.get("env_metrics", None)
 
     # Group indices by data source
     data_source_indices = {}
@@ -274,14 +275,20 @@ def dump_per_dataset_eval_results(
                 serializable_extras = {
                     k: v for k, v in concat_env_extras[i].items() if not callable(v) and k not in _skip_keys
                 }
+                # context_text is the full paper text — too large to include in eval dumps
+                if "extra_info" in serializable_extras and isinstance(serializable_extras["extra_info"], dict):
+                    serializable_extras["extra_info"] = {
+                        k: v for k, v in serializable_extras["extra_info"].items() if k != "context_text"
+                    }
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    "score": concat_generator_outputs["rewards"][i],
+                    # "score": concat_generator_outputs["rewards"][i],  # usually all zeros for RLM, not useful
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": serializable_extras,
                     "data_source": data_source,
+                    "latency": env_metrics_list[i].get("latency") if env_metrics_list else None,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

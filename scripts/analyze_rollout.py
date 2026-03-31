@@ -598,6 +598,23 @@ def main():
                 turns_str = f"{n_sys}s {n_usr}u {n_ast}a"
                 print(f"  {i:>4}  {turns_str:>18}  {resp_tok:>6} tok  {sr_c:>19}  {score_str}")
             print()
+
+            for i in range(total):
+                r = records[i]
+                full = r["input_prompt"] + r["output_response"]
+                turns = parse_prompt_turns(full)
+                assistant_turns = [t for t in turns if t["role"] == "assistant"]
+                if not assistant_turns:
+                    continue
+                print(c(f"  Rollout {i}:", "bold"))
+                print(f"    {'Turn':>4}  {'Tokens':>10}  {'Cumulative':>12}")
+                print(f"    {'─' * 4}  {'─' * 10}  {'─' * 12}")
+                cumulative = 0
+                for ai, at in enumerate(assistant_turns):
+                    tok = count_tokens(at["content"])
+                    cumulative += tok
+                    print(f"    {ai + 1:>4}  {tok:>6} tok  {cumulative:>8} tok")
+                print()
         return
 
     if is_step_wise and not args.raw:
