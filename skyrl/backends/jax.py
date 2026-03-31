@@ -113,6 +113,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
+    # RayJaxBackend configuration
     ray_actor_options: dict = Field(
         default_factory=dict,
         description="Options to pass to Ray actors (e.g., resources, num_cpus)",
