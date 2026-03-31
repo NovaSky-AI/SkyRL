@@ -453,8 +453,8 @@ class RemoteInferenceClient:
         raw_prompt_logprobs = response.get("prompt_logprobs")
         if raw_prompt_logprobs is not None and (include_prompt_logprobs or topk_prompt_logprobs_k > 0):
             result_prompt_logprobs = [
-                pos_dict[str(token_ids[i])]["logprob"] if pos_dict is not None else None
-                for i, pos_dict in enumerate(raw_prompt_logprobs)
+                (pos_dict.get(str(tid)) or {}).get("logprob") if pos_dict is not None else None
+                for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
             ]
             if topk_prompt_logprobs_k > 0:
                 result_topk_prompt_logprobs = [
