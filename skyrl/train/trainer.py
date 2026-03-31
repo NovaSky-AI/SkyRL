@@ -15,7 +15,7 @@ from loguru import logger
 from ray import ObjectRef
 from ray.util.placement_group import placement_group
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_scheduler
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -42,7 +42,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import OptimizerConfig, SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -125,6 +125,11 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
+
+        # LR scheduling state (created in build_models via _create_lr_schedulers)
+        self._lr_schedulers: Dict[str, Any] = {}
+        self._num_training_steps: Dict[str, Optional[int]] = {"policy": None, "critic": None}
+
         configure_ray_worker_logging()
 
     @property
@@ -520,6 +525,9 @@ class RayPPOTrainer:
         critic_num_training_steps = (
             self.total_training_steps * critic_steps_per_train_batch if self.total_training_steps is not None else None
         )
+        self._num_training_steps["policy"] = policy_num_training_steps
+        self._num_training_steps["critic"] = critic_num_training_steps
+        self._create_lr_schedulers()
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -1057,6 +1065,46 @@ class RayPPOTrainer:
 
         return data
 
+    def _get_optimizer_config(self, model: str) -> OptimizerConfig:
+        """Get optimizer config for a model."""
+        if model == "policy":
+            return self.cfg.trainer.policy.optimizer_config
+        elif model == "critic":
+            return self.cfg.trainer.critic.optimizer_config
+        raise ValueError(f"Unknown model: {model}")
+
+    def _create_lr_schedulers(self):
+        """
+        Create LR schedulers for policy and critic using transformers.get_scheduler.
+
+        Uses a lightweight dummy optimizer per model to track the LR schedule.
+        Called once from build_models after _num_training_steps is set.
+        """
+        for model_name in ("policy", "critic"):
+            optim_config = self._get_optimizer_config(model_name)
+            if optim_config is None:
+                continue
+            dummy_optimizer = torch.optim.SGD([torch.zeros(1)], lr=optim_config.lr)
+            self._lr_schedulers[model_name] = get_scheduler(
+                optim_config.scheduler,
+                dummy_optimizer,
+                num_warmup_steps=optim_config.num_warmup_steps,
+                num_training_steps=self._num_training_steps.get(model_name),
+            )
+
+    def _compute_lr(self, model: str) -> float:
+        """
+        Get the current learning rate from the scheduler for a model, then advance it.
+
+        Subclasses (e.g. AsyncRayPPOTrainer) can reuse this method.
+        """
+        scheduler = self._lr_schedulers.get(model)
+        if scheduler is None:
+            return self._get_optimizer_config(model).lr
+        # Advance the schedule first, then read the LR
+        scheduler.step()
+        return scheduler.optimizer.param_groups[0]["lr"]
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step using forward_backward + optim_step.
@@ -1094,7 +1142,9 @@ class RayPPOTrainer:
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
-                # Optimizer step after each mini batch
+                # Set LR for this step, then optimizer step
+                lr = self._compute_lr(model)
+                self.dispatch.set_lr(model, lr)
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
@@ -1363,7 +1413,6 @@ class RayPPOTrainer:
             "policy",
             policy_ckpt_dir,
             load_optimizer_states=True,
-            load_lr_scheduler_states=True,
         )
         logger.info("Successfully loaded policy checkpoint")
 
@@ -1374,7 +1423,6 @@ class RayPPOTrainer:
                 "critic",
                 critic_ckpt_dir,
                 load_optimizer_states=True,
-                load_lr_scheduler_states=True,
             )
             logger.info("Successfully loaded critic checkpoint")
 

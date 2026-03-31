@@ -197,12 +197,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
                 )
 
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
+        self.model, self.optimizer, _ = strategy.prepare(
             (wrapped_model, None, None),
         )
-        assert (
-            self.optimizer is not None and self.scheduler is not None
-        ), "FSDP preparation should create optimizer and scheduler"
+        assert self.optimizer is not None, "FSDP preparation should create optimizer"
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
@@ -372,7 +370,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 )
 
         # prepare models/optimizers...
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
+        self.model, self.optimizer, _ = strategy.prepare(
             (critic, None, None),
         )
         assert self.optimizer is not None

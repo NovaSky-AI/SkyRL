@@ -13,7 +13,6 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.bridge.peft.lora import LoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
-from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
@@ -27,7 +26,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
-    get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
 from skyrl.backends.skyrl_train.training_batch import (
@@ -515,7 +513,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
-        self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._is_lora = self.cfg.policy.model.lora.rank > 0
@@ -575,7 +572,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """
-        Initialize the model, optimizer, and scheduler for the policy worker.
+        Initialize the model and optimizer for the policy worker.
+        Tinker controls the LR so no need to init that.
         """
         # initialize the bridge and provider objects
         self.init_configs(
@@ -621,13 +619,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
         )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
-
-        # create scheduler
-        self.scheduler = get_megatron_optimizer_param_scheduler(
-            optimizer=self.optimizer,
-            config=self.cfg.policy.optimizer_config,
-            num_training_steps=num_training_steps,
-        )
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -753,7 +744,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             The gradient norm (before scaling, after clipping), or None if unavailable.
         """
-        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, None, name="actor")
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0
@@ -780,9 +771,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         distributed optimizer). Updates all param_groups across all
         underlying optimizers.
 
-        Note: This bypasses the scheduler. The next scheduler.step() call
-        will override this value unless the scheduler is configured for
-        constant LR.
+        Tinker uses this function to set the LR
         """
         if isinstance(self.optimizer, ChainedOptimizer):
             # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
