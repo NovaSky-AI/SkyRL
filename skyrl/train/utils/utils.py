@@ -660,6 +660,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
+    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
+        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
     return env_vars
 
 
