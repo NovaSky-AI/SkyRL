@@ -3,8 +3,6 @@
 import argparse
 import json
 import os
-import types
-import typing
 from pathlib import Path
 
 from cloudpathlib import AnyPath
@@ -80,10 +78,6 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         model: The Pydantic model class
     """
     for name, field in model.model_fields.items():
-        if isinstance(field.annotation, type) and issubclass(field.annotation, BaseModel):
-            add_model(parser, field.annotation)
-            continue
-
         arg_name = name.replace("_", "-")
         kwargs = {
             "help": field.description,
@@ -105,13 +99,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             if argparse_type is not None:
                 kwargs["type"] = argparse_type
             elif field.annotation is not None:
-                # Extract base type for argparse (unwrap from Optional / Union)
-                origin = typing.get_origin(field.annotation)
-                if origin is typing.Union or (hasattr(types, "UnionType") and origin is types.UnionType):
-                    base_type = next((arg for arg in typing.get_args(field.annotation) if arg is not type(None)), str)
-                    kwargs["type"] = base_type
-                else:
-                    kwargs["type"] = field.annotation
+                kwargs["type"] = field.annotation
 
             if field.is_required():
                 # Mark as required in argparse if no default is provided
@@ -128,13 +116,6 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
     argv = []
     for field_name, value in cfg.model_dump().items():
         field = cfg.model_fields[field_name]
-
-        if isinstance(field.annotation, type) and issubclass(field.annotation, BaseModel):
-            nested_cfg = getattr(cfg, field_name)
-            if nested_cfg is not None:
-                argv.extend(config_to_argv(nested_cfg))
-            continue
-
         arg_name = field_name.replace("_", "-")
 
         if field.annotation is bool:
@@ -146,6 +127,7 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
                 argv.append(json.dumps(value))
         else:
             # Skip None values - let them use defaults or environment variables
+            if value is not None:
                 argv.append(f"--{arg_name}")
                 argv.append(str(value))
     return argv
