@@ -14,3 +14,22 @@ search:
   search_url: "http://127.0.0.1:8000/retrieve"
   topk: 3
   timeout: 30
+
+fleet_task:
+  tasks_file: null
+  api_key: null
+  ttl_seconds: 900
+  partial_reward: false
+  enable_hints: false
+  hint_reward_threshold: 0.0
+  n_hint_samples: 2
+  enable_context_tools: false
+
+task_gen:
+  max_turns: 10
+  judge_model: "anthropic/claude-sonnet-4.5"
+  evaluator_model: "anthropic/claude-sonnet-4.5"
+  k_rollouts: 4
+  eval_k_rollouts: 8
+  alpha: 1.0
+  max_eval_steps: 20

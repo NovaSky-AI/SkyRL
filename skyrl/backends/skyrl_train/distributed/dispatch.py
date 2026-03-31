@@ -1,9 +1,12 @@
 """Defines dispatch and collect logic for distributed training"""
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
+
+logger = logging.getLogger(__name__)
 
 import ray
 from ray import ObjectRef
@@ -187,9 +190,22 @@ class MeshDispatch(Dispatch):
             List of per-mini-batch chunk ref lists.  ``result[i][dp_rank]`` is
             the ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
-        assert (
-            len(data) % mini_batch_size == 0
-        ), f"data batch size must be divisible by mini_batch_size, got {len(data)} and {mini_batch_size}"
+        # Hint augmentation can produce variable batch sizes that don't evenly
+        # divide the configured mini_batch_size.  Rather than dropping samples
+        # (which wastes the expensive hint rollouts), reduce mini_batch_size to
+        # the largest value that divides both len(data) and dp_size.
+        if len(data) % mini_batch_size != 0:
+            original_mbs = mini_batch_size
+            # Step down by dp_size to stay dp-divisible
+            while mini_batch_size > 0 and (len(data) % mini_batch_size != 0 or mini_batch_size % dp_size != 0):
+                mini_batch_size -= dp_size
+            if mini_batch_size <= 0:
+                mini_batch_size = dp_size
+            logger.info(
+                f"Adjusted mini_batch_size from {original_mbs} to {mini_batch_size} "
+                f"to evenly divide batch of {len(data)} samples "
+                f"({len(data) // mini_batch_size} mini-batches)."
+            )
         assert (
             mini_batch_size % dp_size == 0
         ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"

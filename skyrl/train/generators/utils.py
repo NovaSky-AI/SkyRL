@@ -1,7 +1,7 @@
 import copy
 import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -574,3 +574,185 @@ def get_response_ids_and_loss_mask_from_messages(
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
 
     return response_ids, loss_mask, rollout_logprobs
+
+
+# --- Multimodal/VL Utilities ---
+
+
+def is_multimodal_message(message: Dict[str, Any]) -> bool:
+    """Check if a message contains multimodal content (images)."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return False
+    if isinstance(content, list):
+        return any(isinstance(item, dict) and item.get("type") == "image_url" for item in content)
+    return False
+
+
+def is_multimodal_conversation(conversation: ConversationType) -> bool:
+    """Check if any message in a conversation contains multimodal content."""
+    return any(is_multimodal_message(msg) for msg in conversation)
+
+
+def extract_images_from_conversation(conversation: ConversationType) -> List[Any]:
+    """Extract all images from a conversation in order.
+
+    Supports base64 data URLs, HTTP URLs, and local file paths.
+    Returns a list of PIL Images or image URL strings.
+    """
+    images = []
+    for message in conversation:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            image_url_data = item.get("image_url", {})
+            url = image_url_data.get("url") or ""
+            if url.startswith("data:image"):
+                images.append(decode_base64_image(url))
+            elif url.startswith(("http://", "https://")):
+                images.append(url)
+            elif url:
+                images.append(load_image_from_path(url))
+    return images
+
+
+def decode_base64_image(data_url: str) -> "Image.Image":
+    """Decode a base64 image from a data URL."""
+    import base64
+    import io
+
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("PIL/Pillow is required for multimodal support. Install with: pip install pillow")
+
+    if "," in data_url:
+        base64_data = data_url.split(",", 1)[1]
+    else:
+        base64_data = data_url
+
+    image_bytes = base64.b64decode(base64_data)
+    return Image.open(io.BytesIO(image_bytes))
+
+
+def load_image_from_path(path: str) -> "Image.Image":
+    """Load an image from a file path."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("PIL/Pillow is required for multimodal support. Install with: pip install pillow")
+
+    return Image.open(path)
+
+
+def get_text_from_multimodal_content(content: Any) -> str:
+    """Extract text from multimodal content, ignoring images."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                texts.append(item.get("text", ""))
+        return " ".join(texts)
+    return ""
+
+
+def convert_to_text_only_conversation(conversation: ConversationType) -> ConversationType:
+    """Convert multimodal conversation to processor format (image_url -> image type)."""
+    text_only = []
+    for message in conversation:
+        content = message.get("content")
+        if isinstance(content, str):
+            text_only.append(message)
+        elif isinstance(content, list):
+            new_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "image_url":
+                        new_content.append({"type": "image"})
+                    else:
+                        new_content.append(item)
+                else:
+                    new_content.append(item)
+            text_only.append({"role": message["role"], "content": new_content})
+        else:
+            text_only.append(message)
+    return text_only
+
+
+def try_load_processor(model_name: str) -> Optional[Any]:
+    """Try to load a HuggingFace processor for VL models. Returns None for text-only models."""
+    try:
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        if hasattr(processor, "image_processor") or "VL" in type(processor).__name__:
+            logger.info(f"Loaded VL processor for model: {model_name}")
+            return processor
+        return None
+    except Exception as e:
+        logger.debug(f"No processor available for {model_name}: {e}")
+        return None
+
+
+def apply_chat_template_with_images(
+    processor_or_tokenizer,
+    conversation: ConversationType,
+    add_generation_prompt: bool = True,
+    chat_template: Optional[str] = None,
+    **kwargs,
+) -> List[int]:
+    """Apply chat template handling both text-only and multimodal conversations.
+
+    For VL models (with processor), extracts images and uses the processor to get
+    correctly-sized token IDs (vision tokens expand based on image dimensions).
+    """
+    has_processor = hasattr(processor_or_tokenizer, "image_processor") or hasattr(
+        processor_or_tokenizer, "tokenizer"
+    )
+
+    if has_processor and is_multimodal_conversation(conversation):
+        processor = processor_or_tokenizer
+        converted = convert_to_text_only_conversation(conversation)
+        images = extract_images_from_conversation(conversation)
+
+        text = processor.apply_chat_template(
+            converted,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            **kwargs,
+        )
+
+        if images:
+            inputs = processor(text=text, images=images, return_tensors="pt")
+            token_ids = inputs.input_ids[0].tolist()
+        else:
+            tokenizer = getattr(processor, "tokenizer", processor)
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+        return token_ids
+    else:
+        tokenizer = getattr(processor_or_tokenizer, "tokenizer", processor_or_tokenizer)
+
+        if is_multimodal_conversation(conversation):
+            text_conversation = []
+            for msg in conversation:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    text = get_text_from_multimodal_content(content)
+                    text_conversation.append({"role": msg["role"], "content": text})
+                else:
+                    text_conversation.append(msg)
+            conversation = text_conversation
+
+        return tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            chat_template=chat_template,
+            return_dict=False,
+            **kwargs,
+        )

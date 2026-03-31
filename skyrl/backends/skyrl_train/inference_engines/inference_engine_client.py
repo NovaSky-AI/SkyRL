@@ -95,6 +95,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
+        multi_modal_data = input_batch.get("multi_modal_data")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
@@ -122,9 +123,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
             # index prompt_token_ids with prompt_ids
             cur_prompt_token_ids = [prompt_token_ids[i] for i in prompt_ids]
+            cur_mm_data = [multi_modal_data[i] for i in prompt_ids] if multi_modal_data else None
             engine_input = InferenceEngineInput(
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
+                multi_modal_data=cur_mm_data,
             )
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
