@@ -63,24 +63,6 @@ class EpisodeLogger:
         if not concat_generator_outputs.get("trajectory_ids") or not concat_generator_outputs.get("is_last_step"):
             logger.warning("trajectory_ids or is_last_step not available, skipping episode logging")
             return
-
-        # Find the first episode
-        trajectory_ids = concat_generator_outputs["trajectory_ids"]
-        first_instance_id = trajectory_ids[0].instance_id
-        first_repetition_id = trajectory_ids[0].repetition_id
-
-        # Collect all steps for the first episode
-        episode_indices = []
-        for i, traj_id in enumerate(trajectory_ids):
-            if traj_id.instance_id == first_instance_id and traj_id.repetition_id == first_repetition_id:
-                episode_indices.append(i)
-            else:  # Stop once we've collected the complete first episode
-                break
-
-        if not episode_indices:
-            logger.warning("No steps found for first episode")
-            return
-
         # Define columns - each step is a row
         columns = [
             "global_step",
@@ -99,10 +81,47 @@ class EpisodeLogger:
 
         # Create a new table with existing data (workaround for wandb issue #2981)
         new_table = wandb.Table(columns=columns, data=self.episode_table.data)
-
+        # ---- HARD-CODE: log first 5 episodes ----
+        num_episodes_to_log = 5
+    
+        # Collect indices belonging to the first N episodes (assuming contiguous episodes)
+        episode_indices = []
+        step_indices = []
+        episode_ids = []
+        episode_count = 0
+    
+        trajectory_ids = concat_generator_outputs["trajectory_ids"]
+        current_instance_id = trajectory_ids[0].instance_id
+        current_repetition_id = trajectory_ids[0].repetition_id
+        episode_count = 1  # we are in episode 1 already
+        episode_step_count = 0
+    
+        for i, traj_id in enumerate(trajectory_ids):
+            if traj_id.instance_id == current_instance_id and traj_id.repetition_id == current_repetition_id:
+                episode_indices.append(i)
+                episode_ids.append(current_instance_id)
+                step_indices.append(episode_step_count)
+                episode_step_count += 1
+                continue
+            # episode boundary
+            if episode_count >= num_episodes_to_log:
+                break
+            # move to next episode
+            current_instance_id = traj_id.instance_id
+            current_repetition_id = traj_id.repetition_id
+            episode_count += 1
+            episode_step_count = 0
+            episode_indices.append(i)
+            episode_ids.append(current_instance_id)
+            step_indices.append(episode_step_count)
+        
+        if not episode_indices:
+            logger.warning("No steps found for any episode")
+            return
         # Add rows for each step in the episode
-        episode_id = f"{first_instance_id}_rep{first_repetition_id}"
-        for step_num, idx in enumerate(episode_indices):
+        for index, idx in enumerate(episode_indices):
+            episode_id = episode_ids[index]
+            step_num = step_indices[index]
             true_rewards = [reward for reward in concat_generator_outputs["rewards"][idx] if reward != 0]
             new_table.add_data(
                 global_step,
