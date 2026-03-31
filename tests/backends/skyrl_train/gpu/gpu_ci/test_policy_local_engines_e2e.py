@@ -106,7 +106,7 @@ async def test_policy_local_engines_e2e(
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     async with InferenceEngineState.create(
-        model=MODEL,
+        model=model,
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
