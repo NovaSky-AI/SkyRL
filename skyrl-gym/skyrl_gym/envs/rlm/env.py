@@ -233,6 +233,10 @@ class RLMEnv(BaseTextEnv):
             merged.update(extras["custom_tools"])
             self.rlm_config.custom_tools = merged
 
+        # LM query callbacks — passed via extras to stay serialization-friendly
+        self.lm_callback = extras.get("lm_callback", None)
+        self.subcall_fn = extras.get("subcall_fn", None)
+
         self.repl: Optional[PersistentREPL] = None
         self._final_answer: Optional[str] = None
         self._turn_index = 0  # iteration counter for build_user_prompt
@@ -265,6 +269,8 @@ class RLMEnv(BaseTextEnv):
         self.repl = PersistentREPL(
             timeout=self.rlm_config.repl_timeout,
             custom_tools=self.rlm_config.custom_tools or {},
+            lm_callback=self.lm_callback,
+            subcall_fn=self.subcall_fn,
         )
         self.repl.add_context(context_payload, context_index=0)
 
@@ -292,11 +298,20 @@ class RLMEnv(BaseTextEnv):
         template = self.rlm_config.custom_system_prompt or DEFAULT_RLM_SYSTEM_PROMPT
 
         custom_tools_section = ""
+        if self.lm_callback is not None:
+            custom_tools_section += (
+                "\n4. LM query tools available in the REPL:\n"
+                "- `llm_query(prompt)` — make a direct LLM call, returns str\n"
+                "- `llm_query_batched(prompts)` — batch LLM calls, returns list[str]\n"
+                "- `rlm_query(prompt)` — recursive LM call that spawns a child agent with its own REPL, returns str\n"
+                "- `rlm_query_batched(prompts)` — batch recursive calls in parallel, returns list[str]"
+            )
         if self.rlm_config.custom_tools:
             from skyrl_gym.tools.repl import format_tools_for_prompt
             tools_formatted = format_tools_for_prompt(self.rlm_config.custom_tools)
             if tools_formatted:
-                custom_tools_section = f"\n4. Custom tools and data available in the REPL:\n{tools_formatted}"
+                section_num = 5 if self.lm_callback is not None else 4
+                custom_tools_section += f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"
 
         return template.format(custom_tools_section=custom_tools_section)
 

@@ -6,9 +6,10 @@ import signal
 import tempfile
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ _SAFE_BUILTINS = {
 # Names that are always restored after every execution so model overwrites don't persist.
 RESERVED_TOOL_NAMES: frozenset = frozenset({
     "FINAL_VAR", "SHOW_VARS", "context",
+    "llm_query", "llm_query_batched", "rlm_query", "rlm_query_batched",
 })
 
 
@@ -89,9 +91,13 @@ class PersistentREPL:
         self,
         timeout: float = 15.0,
         custom_tools: Optional[Dict[str, Any]] = None,
+        lm_callback: Optional[Callable[[List[str]], List[str]]] = None,
+        subcall_fn: Optional[Callable[[str], str]] = None,
     ):
         self.timeout = timeout
         self.custom_tools: Dict[str, Any] = custom_tools or {}
+        self.lm_callback = lm_callback
+        self.subcall_fn = subcall_fn
         self.temp_dir = tempfile.mkdtemp(prefix="skyrl_repl_")
         self._validate_custom_tools()
         self.setup()
@@ -111,6 +117,12 @@ class PersistentREPL:
         self._exec_combined: Optional[Dict[str, Any]] = None  # live combined dict during exec
         self.globals["FINAL_VAR"] = self._final_var
         self.globals["SHOW_VARS"] = self._show_vars
+
+        if self.lm_callback is not None:
+            self.globals["llm_query"] = self._llm_query
+            self.globals["llm_query_batched"] = self._llm_query_batched
+            self.globals["rlm_query"] = self._rlm_query
+            self.globals["rlm_query_batched"] = self._rlm_query_batched
 
         for name, entry in self.custom_tools.items():
             value = _extract_tool_value(entry)
@@ -197,6 +209,68 @@ class PersistentREPL:
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
 
+    # ------------------------------------------------------------------
+    # LM query functions (registered only when lm_callback is provided)
+    # ------------------------------------------------------------------
+
+    def _llm_query(self, prompt: str, model: Optional[str] = None) -> str:
+        """Make a direct LLM call. Returns the response as a string."""
+        try:
+            return self.lm_callback([prompt])[0]
+        except Exception as e:
+            return f"Error: LM query failed - {e}"
+
+    def _llm_query_batched(self, prompts: List[str], model: Optional[str] = None) -> List[str]:
+        """Make batched LLM calls. Returns list of responses in the same order as prompts."""
+        try:
+            return self.lm_callback(prompts)
+        except Exception as e:
+            return [f"Error: LM query failed - {e}"] * len(prompts)
+
+    def _rlm_query(self, prompt: str, model: Optional[str] = None) -> str:
+        """Spawn a child RLM agent with its own REPL for deeper reasoning on a subtask.
+
+        Falls back to a plain llm_query if no subcall_fn is configured.
+        """
+        if self.subcall_fn is not None:
+            try:
+                return self.subcall_fn(prompt)
+            except Exception as e:
+                return f"Error: RLM query failed - {e}"
+        return self._llm_query(prompt, model)
+
+    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None) -> List[str]:
+        """Spawn child RLM agents for multiple prompts in parallel.
+
+        Results are returned in the same order as input prompts.
+        Falls back to llm_query_batched if no subcall_fn is configured.
+        """
+        if self.subcall_fn is not None:
+            if len(prompts) <= 1:
+                return [self._rlm_query(p, model) for p in prompts]
+
+            results: List[str] = [""] * len(prompts)
+            lock = threading.Lock()
+            completions: List[tuple] = []
+
+            def _run(index: int, prompt: str) -> None:
+                try:
+                    result = self.subcall_fn(prompt)
+                    with lock:
+                        completions.append((index, result))
+                    results[index] = result
+                except Exception as e:
+                    results[index] = f"Error: RLM query failed - {e}"
+
+            with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as executor:
+                futures = [executor.submit(_run, i, p) for i, p in enumerate(prompts)]
+                for f in as_completed(futures):
+                    f.result()
+
+            return results
+
+        return self._llm_query_batched(prompts, model)
+
     def _restore_scaffold(self):
         """Restore reserved names after execution so model overwrites don't persist."""
         for name in RESERVED_TOOL_NAMES:
@@ -206,6 +280,14 @@ class PersistentREPL:
                 self.globals["SHOW_VARS"] = self._show_vars
             elif name == "context" and "context_0" in self.locals:
                 self.locals["context"] = self.locals["context_0"]
+            elif name == "llm_query" and self.lm_callback is not None:
+                self.globals["llm_query"] = self._llm_query
+            elif name == "llm_query_batched" and self.lm_callback is not None:
+                self.globals["llm_query_batched"] = self._llm_query_batched
+            elif name == "rlm_query" and self.lm_callback is not None:
+                self.globals["rlm_query"] = self._rlm_query
+            elif name == "rlm_query_batched" and self.lm_callback is not None:
+                self.globals["rlm_query_batched"] = self._rlm_query_batched
 
     # ------------------------------------------------------------------
     # Execution

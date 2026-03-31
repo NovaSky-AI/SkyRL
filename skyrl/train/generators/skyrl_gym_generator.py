@@ -10,7 +10,7 @@ import copy
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from loguru import logger
@@ -219,6 +219,74 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    def _make_lm_callback(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        sampling_params: Optional[Dict[str, Any]],
+    ) -> Callable[[List[str]], List[str]]:
+        """Build a sync callback that dispatches batched text prompts to the inference engine.
+
+        The callback can be called from a non-async thread (e.g. inside REPL exec()).
+        It blocks until all responses are returned.
+        """
+        async def _generate(prompts: List[str]) -> List[str]:
+            token_ids = [
+                self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=False,
+                )
+                for p in prompts
+            ]
+            engine_input = InferenceEngineInput(
+                prompt_token_ids=token_ids,
+                sampling_params=sampling_params,
+            )
+            output = await self.inference_engine_client.generate(engine_input)
+            return output["responses"]
+
+        def callback(prompts: List[str]) -> List[str]:
+            future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
+            return future.result(timeout=300)
+
+        return callback
+
+    def _make_subcall_fn(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        env_extras: Dict[str, Any],
+        sampling_params: Optional[Dict[str, Any]],
+        max_tokens: int,
+        max_input_length: int,
+    ) -> Callable[[str], str]:
+        """Build a sync subcall_fn that runs a full child agent_loop (child RLMEnv).
+
+        The child env gets the same lm_callback as the parent so it can make LLM
+        calls, but does NOT get a subcall_fn — preventing unbounded recursion.
+        """
+        async def _run_child(prompt: str) -> str:
+            child_prompt = [{"role": "user", "content": prompt}]
+            # Strip lm_callback/subcall_fn so the child cannot recurse further
+            child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
+            # Re-inject lm_callback so the child can still call llm_query
+            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            result = await self.agent_loop(
+                prompt=child_prompt,
+                env_class="rlm",
+                env_extras=child_extras,
+                max_tokens=max_tokens,
+                max_input_length=max_input_length,
+                sampling_params=sampling_params,
+            )
+            return self.tokenizer.decode(result.response_ids, skip_special_tokens=True)
+
+        def subcall_fn(prompt: str) -> str:
+            future = asyncio.run_coroutine_threadsafe(_run_child(prompt), loop)
+            return future.result(timeout=600)
+
+        return subcall_fn
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -261,6 +329,17 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
+
+        # For RLM envs, inject lm_callback and subcall_fn so REPL code can call llm_query /
+        # rlm_query. We only inject if not already present (allows caller to override).
+        if env_class == "rlm" and "lm_callback" not in env_extras:
+            loop = asyncio.get_running_loop()
+            env_extras = dict(env_extras)  # don't mutate caller's dict
+            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            env_extras["subcall_fn"] = self._make_subcall_fn(
+                loop, env_extras, sampling_params, max_tokens, max_input_length
+            )
+
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
