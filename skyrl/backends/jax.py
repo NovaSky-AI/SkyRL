@@ -118,7 +118,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         description="Options to pass to Ray actors (e.g., resources, num_cpus)",
         json_schema_extra={"argparse_type": json.loads},
     )
-    ray_placement_group_bundles: list = Field(
+    ray_pg_bundles: list = Field(
         default_factory=list,
         description="Bundles for the Ray placement group (e.g., [{'CPU': 1}] * num_processes)",
         json_schema_extra={"argparse_type": json.loads},

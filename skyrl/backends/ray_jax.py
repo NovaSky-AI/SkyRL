@@ -107,7 +107,7 @@ class RayJaxBackend(AbstractBackend):
         # Instantiate a Ray placement group
         from ray.util.placement_group import placement_group
         logger.info("Instantiating Ray placement group for JAX workers...")
-        bundles = self.config.ray_placement_group_bundles
+        bundles = self.config.ray_pg_bundles
         if not bundles:
             bundles = [{"CPU": 1}] * num_processes
         self.pg = placement_group(bundles, strategy="SPREAD")

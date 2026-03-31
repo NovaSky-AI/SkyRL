@@ -45,6 +45,10 @@ tinker = [
     "ray[default]==2.51.1",
 ]
 
+ray-jax = [
+    "ray[default]==2.51.1",
+]
+
 aws = [
     "cloudpathlib[s3]",
 ]
