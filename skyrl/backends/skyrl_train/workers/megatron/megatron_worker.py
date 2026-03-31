@@ -700,6 +700,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
+
         if not micro_buffer:
             return {}
 
@@ -718,9 +721,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
 
-        # Track number of micro-batches for metrics
-        self._micro_batches_accumulated += len(micro_buffer)
-
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
         for metrics in metrics_list:
@@ -730,10 +730,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # Reduce and all-reduce metrics
-        status = reduce_metrics(dict(all_metrics))
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
+        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        status = all_reduce_metrics(status, self.strategy)
+        group = mpu.get_data_parallel_group(with_context_parallel=True)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:

@@ -276,6 +276,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
+        "token_mean_legacy",
         "sequence_mean",
         "seq_mean_token_sum_norm",
     ), (
