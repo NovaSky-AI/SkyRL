@@ -457,9 +457,10 @@ class RemoteInferenceClient:
                 for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
             ]
             if topk_prompt_logprobs_k > 0:
+            if topk_prompt_logprobs_k > 0:
                 result_topk_prompt_logprobs = [
                     [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()] if pos_dict is not None else None
-                    for pos_dict in raw_prompt_logprobs
+                    for _, pos_dict in zip(token_ids, raw_prompt_logprobs)
                 ]
 
         # Transform response choices → sequences
