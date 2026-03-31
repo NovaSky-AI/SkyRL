@@ -716,6 +716,12 @@ class PolicyWorkerBase(Worker):
 
         result = reduce_metrics(dict(all_metrics))
 
+        # All-reduce metrics across DP workers AFTER all backward passes complete.
+        # This must NOT happen inside _forward_backward_micro because FSDP2's
+        # backward gradient reductions may still be in-flight on the NCCL stream;
+        # issuing dist.all_reduce there causes a deadlock with MoE/hybrid models.
+        result = all_reduce_metrics(result, self.strategy)
+
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
             result["loss_fn_outputs"] = all_loss_fn_outputs
@@ -905,15 +911,6 @@ class PolicyWorkerBase(Worker):
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        loss_fn_outputs = status.pop("loss_fn_outputs", None)
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
-
-        # Add back loss_fn_outputs after all_reduce
-        if loss_fn_outputs is not None:
-            status["loss_fn_outputs"] = loss_fn_outputs
-
         return status
 
     def optim_step(self) -> float:
@@ -1058,7 +1055,13 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        result = reduce_metrics(dict(all_metrics))
+
+        # All-reduce metrics across DP workers AFTER all backward passes complete.
+        # Same rationale as policy worker: avoid NCCL deadlock with FSDP2 + MoE.
+        result = all_reduce_metrics(result, self.strategy)
+
+        return result
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1108,9 +1111,6 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
 
         return status
 

@@ -190,7 +190,8 @@ class HFModelWrapper(nn.Module):
 
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
-            if "output_router_logits" in model_config:
+            num_experts = model_config.get("num_local_experts") or model_config.get("num_experts", 0)
+            if "output_router_logits" in model_config and num_experts > 0:
                 # Skip for granitemoehybrid: its decoder layers don't return router
                 # logits, so enabling this flag causes an IndexError in
                 # load_balancing_loss_func when it tries to access empty gate_logits.
@@ -653,7 +654,8 @@ def get_llm_for_sequence_regression(
 
     # MoE - balancing loss
     model_config = model.config.to_dict()
-    if "output_router_logits" in model_config:
+    num_experts = model_config.get("num_local_experts") or model_config.get("num_experts", 0)
+    if "output_router_logits" in model_config and num_experts > 0:
         if model_config.get("model_type") == "granitemoehybrid":
             logger.info(
                 "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"

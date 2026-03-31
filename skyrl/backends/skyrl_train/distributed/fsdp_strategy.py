@@ -169,11 +169,15 @@ class FSDPStrategy(DistributedStrategy):
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
+        import time as _time
+
+        rank = dist.get_rank() if dist.is_initialized() else -1
         grad_norm = None
         if isinstance(model, HFModelWrapper):
             model = model.model
 
         if self.max_norm > 0:
+            t0 = _time.time()
             # NOTE (sumanthrh): All `grad_norm`s returned here are the original grad norms before clipping.
             if isinstance(model, FSDP):
                 grad_norm = model.clip_grad_norm_(max_norm=self.max_norm)
@@ -181,19 +185,21 @@ class FSDPStrategy(DistributedStrategy):
                 grad_norm = fsdp2_clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
+            logger.info(f"[rank {rank}] clip_grad_norm_ done in {_time.time() - t0:.1f}s, grad_norm={grad_norm}")
 
-        # Skip update if gradient norm is not finite
-        if grad_norm is not None and not torch.isfinite(grad_norm):
-            if torch.distributed.is_initialized():
-                rank = torch.distributed.get_rank()
-                logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}")
-            else:
-                logger.warning(f"grad_norm is not finite: {grad_norm}")
-            optimizer.zero_grad()
-            return grad_norm
+        # NOTE: With FSDP, optimizer.step() involves NCCL collectives. ALL ranks
+        # must call it even if grad_norm is non-finite, otherwise NCCL deadlocks.
+        # We zero_grad before stepping so the non-finite update is harmless.
+        non_finite = grad_norm is not None and not torch.isfinite(grad_norm)
+        if non_finite:
+            logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}, zeroing grads before step")
+            optimizer.zero_grad(set_to_none=True)
 
+        t0 = _time.time()
         optimizer.step()
-        if scheduler is not None:
+        logger.info(f"[rank {rank}] optimizer.step() done in {_time.time() - t0:.1f}s")
+        # Only advance LR schedule when gradients were finite (non-finite steps are no-ops)
+        if scheduler is not None and not non_finite:
             scheduler.step()
         optimizer.zero_grad()
         return grad_norm
@@ -273,9 +279,12 @@ class FSDPStrategy(DistributedStrategy):
                 "reshard_after_forward": self.fsdp_config.reshard_after_forward,
             }
             module = model.model if is_wrapped else model
+            if getattr(module.config, "tie_word_embeddings", False):
+                module.tie_weights()
             full_state = module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
             fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            del full_state  # free CPU memory (rank 0 held full model copy)
             fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
