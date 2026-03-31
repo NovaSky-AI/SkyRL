@@ -70,6 +70,7 @@ from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
     cleanup_old_checkpoints,
+    dump_training_trajectories,
     extract_step_from_path,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
@@ -231,6 +232,10 @@ class RayPPOTrainer:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
                         # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
                         uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+                    elif "trajectory_ids" in generator_input and generator_input["trajectory_ids"] is not None:
+                        # Hint augmentation may extend trajectory_ids in-place during generate().
+                        # Re-derive uids to stay aligned with rewards/responses.
+                        uids = [tid.instance_id for tid in generator_input["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -243,6 +248,26 @@ class RayPPOTrainer:
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
+
+                    # 1.1.5 dump training trajectories
+                    if self.cfg.trainer.dump_training_trajectories:
+                        with Timer("dump_training_trajectories", self.all_timings):
+                            traj_file = dump_training_trajectories(
+                                dump_dir=self.cfg.trainer.export_path,
+                                tokenizer=self.tokenizer,
+                                generator_output=generator_output,
+                                env_extras=generator_input.get("env_extras", []),
+                                global_step=self.global_step,
+                            )
+                            try:
+                                from integrations.fleet.s3_checkpoints import upload_training_trajectories_to_s3
+                                upload_training_trajectories_to_s3(
+                                    local_path=traj_file,
+                                    run_name=self.cfg.trainer.run_name,
+                                    global_step=self.global_step,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to upload training trajectories to S3: {e}")
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -295,6 +320,16 @@ class RayPPOTrainer:
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
                             self.save_checkpoints()
+                        if self.cfg.trainer.dump_training_trajectories:
+                            try:
+                                from integrations.fleet.s3_checkpoints import upload_reward_rollouts_to_s3
+                                reward_rollout_dir = os.environ.get("REWARD_ROLLOUT_DIR", "/workspace/reward_rollouts")
+                                upload_reward_rollouts_to_s3(
+                                    rollout_dir=reward_rollout_dir,
+                                    run_name=self.cfg.trainer.run_name,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to upload reward rollouts to S3: {e}")
                     if (
                         self.cfg.trainer.hf_save_interval > 0
                         and self.global_step % self.cfg.trainer.hf_save_interval == 0
@@ -659,6 +694,9 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        # Track which samples are hint-augmented for first-turn baseline
+        if generator_output.get("is_hinted") is not None:
+            training_input.metadata["is_hinted"] = generator_output["is_hinted"]
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
@@ -798,10 +836,15 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
+        # Convert is_hinted metadata to numpy array for advantage computation
+        is_hinted_list = data.metadata.get("is_hinted")
+        is_hinted = np.array(is_hinted_list) if is_hinted_list is not None else None
+
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             index = np.array(data.metadata["uids"])
             values = data["values"]
+            last_step_is_hinted = is_hinted[is_last_step.cpu().numpy()] if is_hinted is not None else None
             # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
             # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
@@ -814,6 +857,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                is_hinted=last_step_is_hinted,
             )
             # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
@@ -836,6 +880,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                is_hinted=is_hinted,
             )
         data["returns"] = returns
         data["advantages"] = advantages
@@ -920,8 +965,10 @@ class RayPPOTrainer:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
+        if "is_hinted" in training_input.metadata:
+            new_training_input.metadata["is_hinted"] = training_input.metadata["is_hinted"] + [False] * pad_size
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
+            if key not in ["uids", "trajectory_ids", "is_hinted"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 

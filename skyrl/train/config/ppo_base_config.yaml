@@ -11,6 +11,7 @@ defaults:
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  env_filter: null
 
 trainer:
   placement:
@@ -250,11 +251,15 @@ trainer:
   run_name: "test_run"
   logger: "wandb"
   dump_data_batch: false
+  dump_training_trajectories: false
   dump_eval_results: true
 
   # YaRN:
   rope_scaling: null
   rope_theta: null
+  loss_chunk_size: null
+  use_hybrid_env_sampling: false
+  min_samples_per_env: 1
   # rope_scaling:
   #   rope_type: yarn
   #   factor: 1.0
@@ -262,6 +267,42 @@ trainer:
 
 
 generator:
+  # New structured inference_engine config (provides defaults for validate_cfg).
+  # Legacy flat fields below are translated into this section at runtime.
+  inference_engine:
+    model_dtype: "bfloat16"
+    run_engines_locally: true
+    num_engines: 1
+    backend: "vllm"
+    weight_sync_backend: "nccl"
+    weight_transfer_threshold_cuda_ipc_GB: 1.0
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    expert_parallel_size: 1
+    data_parallel_size: 1
+    async_engine: true
+    vllm_v1_disable_multiproc: true
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    enable_return_routed_experts: false
+    max_num_batched_tokens: 8192
+    enforce_eager: true
+    fully_sharded_loras: false
+    enable_ray_prometheus_stats: false
+    gpu_memory_utilization: 0.8
+    max_num_seqs: 1024
+    remote_urls: ["127.0.0.1:8001"]
+    enable_http_endpoint: false
+    http_endpoint_host: "127.0.0.1"
+    http_endpoint_port: 8000
+    served_model_name: null
+    distributed_executor_backend: "ray"
+    engine_init_kwargs: {}
+    override_existing_update_group: "auto"
+    external_proxy_url: null
+    external_server_urls: null
+
+  # ---- Legacy flat fields (kept for backward compat; translated at runtime) ----
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16" # should match dtype for inference engine
   run_engines_locally: true
@@ -381,6 +422,9 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  inject_context_status: false
+  context_warning_threshold: 0.90
+  trajectory_timeout_seconds: null
 
 environment:
   env_class: "gsm8k"

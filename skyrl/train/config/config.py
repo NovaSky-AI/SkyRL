@@ -41,6 +41,8 @@ class BaseConfig(ABC):
 class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
     val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
+    env_filter: Optional[str] = None
+    """Comma-separated list of data_source values to include (e.g. 'outlook,github'). None = no filtering."""
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +519,12 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    inject_context_status: bool = False
+    """Inject context length status into the conversation."""
+    context_warning_threshold: float = 0.90
+    """Threshold for context length warning (fraction of max_input_length)."""
+    trajectory_timeout_seconds: Optional[int] = None
+    """Timeout in seconds for each trajectory rollout."""
 
     def __post_init__(self):
 
@@ -544,6 +552,8 @@ class SkyRLGymConfig(BaseConfig):
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    fleet_task: Optional[Dict[str, Any]] = None
+    task_gen: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -607,8 +617,15 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     dump_data_batch: bool = False
     dump_eval_results: bool = True
+    dump_training_trajectories: bool = False
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    loss_chunk_size: Optional[int] = None
+    """Chunk size for loss computation to reduce memory usage."""
+    use_hybrid_env_sampling: bool = False
+    """Enable hybrid environment sampling for multi-env training."""
+    min_samples_per_env: int = 1
+    """Minimum number of samples per environment in each batch."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -786,25 +803,36 @@ class SkyRLTrainConfig(BaseConfig):
                 )
         overrides = OmegaConf.from_cli(args)
 
-        # Try new format first
+        # Always load base config and merge overrides.
+        # Our run scripts use legacy flat keys (e.g. generator.backend) that
+        # need translation to the new nested format (generator.inference_engine.backend).
+        # The direct from_dict_config path only works for fully-qualified new-format keys.
         try:
-            return cls.from_dict_config(overrides)
-        except ValueError:
-            # Fall back to legacy format: load base YAML, merge overrides, translate
-            try:
-                base_cfg = get_legacy_config()
-                merged = OmegaConf.merge(base_cfg, overrides)
-                merged_dict = OmegaConf.to_container(merged, resolve=True)
+            base_cfg = get_legacy_config()
+        except Exception:
+            # Hydra compose can fail (e.g., GlobalHydra already initialized).
+            # Fall back to loading YAML directly without Hydra defaults resolution.
+            import yaml
+            config_yaml = Path(__file__).parent / "ppo_base_config.yaml"
+            with open(config_yaml) as f:
+                raw_yaml = yaml.safe_load(f)
+            # Remove Hydra defaults key (not needed for direct loading)
+            raw_yaml.pop("defaults", None)
+            base_cfg = OmegaConf.create(raw_yaml)
 
-                if is_legacy_config(merged_dict):
-                    warn_legacy_config()
-                    translated = translate_legacy_config(merged_dict)
-                    return build_nested_dataclass(cls, translated)
-            except Exception:
-                pass  # Legacy translation failed, re-raise original error
+        # Disable struct flag so overrides can add new keys to dict-typed fields
+        # (e.g., chat_template_kwargs={enable_thinking:true}).
+        # OmegaConf loads empty dicts from YAML as closed structs by default.
+        OmegaConf.set_struct(base_cfg, False)
 
-            # Re-raise original error if not a legacy config issue
-            raise
+        merged = OmegaConf.merge(base_cfg, overrides)
+        merged_dict = OmegaConf.to_container(merged, resolve=True)
+
+        if is_legacy_config(merged_dict):
+            warn_legacy_config()
+            merged_dict = translate_legacy_config(merged_dict)
+
+        return build_nested_dataclass(cls, merged_dict)
 
 
 def make_config(
@@ -873,5 +901,18 @@ def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
     return asdict(cfg)
 
 
-def get_config_as_yaml_str(cfg: BaseConfig) -> str:
-    return yaml.dump(asdict(cfg))
+def get_config_as_yaml_str(cfg) -> str:
+    if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
+        try:
+            return yaml.dump(asdict(cfg))
+        except TypeError:
+            # asdict can fail in some Ray serialization edge cases; fall back to str
+            return str(cfg)
+    # Handle OmegaConf DictConfig (from Hydra entrypoints)
+    try:
+        from omegaconf import OmegaConf
+        if OmegaConf.is_config(cfg):
+            return OmegaConf.to_yaml(cfg, resolve=True)
+    except ImportError:
+        pass
+    return str(cfg)

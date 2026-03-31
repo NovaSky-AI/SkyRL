@@ -31,6 +31,9 @@ include = ["skyrl_gym*"]
 dev = [
     "pytest"
 ]
+fleet = [
+    "openenv[fleet]",
+]
 
 [tool.black]
 line-length = 120

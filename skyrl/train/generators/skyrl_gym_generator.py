@@ -7,6 +7,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -31,10 +32,14 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
+    apply_chat_template_with_images,
     apply_overlong_filtering,
+    extract_images_from_conversation,
     get_custom_chat_template,
     get_generation_prompt_ids,
     get_rollout_metrics,
+    is_multimodal_conversation,
+    try_load_processor,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
@@ -51,6 +56,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    multi_modal_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -69,6 +75,7 @@ class AgentLoopState:
     response_end_idx: Optional[int]
     done: bool
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    accumulated_images: Optional[List[Any]] = None
 
 
 @dataclass
@@ -139,17 +146,22 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        model_name: str = "",
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            model_name: HuggingFace model name (used for VL processor detection)
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.model_name = model_name
+        self.processor = try_load_processor(model_name) if model_name else None
+        self.is_vl_model = self.processor is not None
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
@@ -211,12 +223,75 @@ class SkyRLGymGenerator(GeneratorInterface):
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
 
+    def _apply_chat_template(
+        self,
+        conversation: ConversationType,
+        add_generation_prompt: bool = True,
+        **kwargs,
+    ) -> List[int]:
+        """Apply chat template, routing to VL processor for multimodal conversations."""
+        if self.is_vl_model and is_multimodal_conversation(conversation):
+            return apply_chat_template_with_images(
+                self.processor,
+                conversation,
+                add_generation_prompt=add_generation_prompt,
+                **kwargs,
+            )
+        return self.tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=False,
+            **self.generator_cfg.chat_template_kwargs,
+        )
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(executor, func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
+
+    async def _env_init(self, env, *args, **kwargs):
+        """Call env.init, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "init_async"):
+            return await env.init_async(*args, **kwargs)
+        return await self._run_in_executor_if_available(env.init, *args, **kwargs)
+
+    async def _env_step(self, env, action):
+        """Call env.step, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "step_async"):
+            return await env.step_async(action)
+        return await self._run_in_executor_if_available(env.step, action)
+
+    async def _env_close(self, env):
+        """Call env.close, using async path if available to avoid event loop isolation."""
+        if hasattr(env, "close_async"):
+            return await env.close_async()
+        return await self._run_in_executor_if_available(env.close)
+
+    def _make_zero_reward_output(
+        self,
+        prompt: ConversationType,
+        zero_reward: Union[float, list],
+        is_step_wise: bool,
+        stop_reason: str = "trajectory_error",
+        env_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Union[TrajectoryOutput, StepWiseOutput]:
+        """Create a zero-reward output for failed/cancelled trajectories."""
+        prompt_ids = self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+        output = TrajectoryOutput(
+            response_ids=[self.tokenizer.eos_token_id],
+            reward=zero_reward,
+            stop_reason=stop_reason,
+            loss_mask=[0],
+            prompt_ids=prompt_ids,
+            rollout_logprobs=[0.0],
+            env_metrics=env_metrics or {stop_reason: 1.0},
+        )
+        if is_step_wise:
+            return StepWiseOutput(step_outputs=[output])
+        return output
 
     async def agent_loop(
         self,
@@ -272,18 +347,53 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        try:
+            chat_history, _ = await self._env_init(env, chat_history)
+        except Exception as e:
+            logger.warning(f"Session {session_id}: env.init failed ({type(e).__name__}: {e}), returning zero-reward trajectory")
+            # Return a minimal failed trajectory so training can continue
+            dummy_ids = self.tokenizer.apply_chat_template(
+                chat_history, add_generation_prompt=False, tokenize=True, return_dict=False,
+                **self.generator_cfg.chat_template_kwargs,
+            )
+            eos_id = self.tokenizer.eos_token_id
+            # Match reward format: custom_chat_template uses float, otherwise per-token List[float]
+            reward_val = 0.0 if self.custom_chat_template else [0.0]
+            return TrajectoryOutput(
+                response_ids=[eos_id] if eos_id is not None else [0],
+                reward=reward_val,
+                stop_reason="env_init_error",
+                loss_mask=[0],
+                prompt_ids=dummy_ids,
+                rollout_logprobs=[0.0],
+                env_metrics={"env_init_error": str(e), "final_reward": 0.0},
+            )
         initial_chat_history_length = len(chat_history)
-        initial_input_ids = self.tokenizer.apply_chat_template(
-            chat_history,
-            # If retokenize_chat_history==True, avoid including the generation prompt in both the
-            # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
-            add_generation_prompt=not retokenize_chat_history,
-            chat_template=self.custom_chat_template if retokenize_chat_history else None,
-            tokenize=True,
-            return_dict=False,
-            **self.generator_cfg.chat_template_kwargs,
+
+        # VL: extract images from initial prompt for multimodal models
+        initial_images = (
+            extract_images_from_conversation(chat_history)
+            if self.is_vl_model and is_multimodal_conversation(chat_history)
+            else []
         )
+        if self.is_vl_model and initial_images:
+            logger.info(f"Session {session_id}: VL model, extracted {len(initial_images)} initial images")
+
+        # Tokenize initial prompt (VL-aware for multimodal content)
+        if self.is_vl_model and is_multimodal_conversation(chat_history):
+            initial_input_ids = self._apply_chat_template(
+                chat_history,
+                add_generation_prompt=not retokenize_chat_history,
+            )
+        else:
+            initial_input_ids = self.tokenizer.apply_chat_template(
+                chat_history,
+                add_generation_prompt=not retokenize_chat_history,
+                chat_template=self.custom_chat_template if retokenize_chat_history else None,
+                tokenize=True,
+                return_dict=False,
+                **self.generator_cfg.chat_template_kwargs,
+            )
 
         initial_prompt_length = len(initial_input_ids)
         loss_mask = []  # this excludes the prompt
@@ -310,6 +420,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs=[] if get_logprobs else None,
             response_end_idx=None,
             done=False,
+            accumulated_images=initial_images if initial_images else None,
         )
 
         while not agent_loop_state.done:
@@ -332,8 +443,16 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
+            # VL: build multimodal data for engine input
+            mm_data = None
+            if agent_loop_state.accumulated_images:
+                mm_data = [{"image": agent_loop_state.accumulated_images}]
+
             engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                prompt_token_ids=[agent_loop_state.input_ids],
+                session_ids=[session_id],
+                sampling_params=sampling_params,
+                multi_modal_data=mm_data,
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -367,7 +486,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos = True
 
             # 2. Environment step
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            env_step_output: BaseTextEnvStepOutput = await self._env_step(env, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
@@ -383,6 +502,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 output_ids = self.tokenizer.encode(output, add_special_tokens=False)
 
             obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
+
+            # VL: accumulate images from observations
+            if new_obs and is_multimodal_conversation(new_obs):
+                new_images = extract_images_from_conversation(new_obs)
+                if new_images:
+                    if agent_loop_state.accumulated_images is None:
+                        agent_loop_state.accumulated_images = []
+                    agent_loop_state.accumulated_images.extend(new_images)
 
             # final turn output containing generated response and environment observations
             turn_output = TurnOutput(
@@ -441,7 +568,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
         # Close the environment
-        await self._run_in_executor_if_available(env.close)
+        await self._env_close(env)
 
         prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
         rollout_logprobs = None
@@ -562,6 +689,37 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward_out = token_level_rewards
         return reward_out
 
+    @staticmethod
+    def _sanitize_messages_for_template(messages: ConversationType) -> ConversationType:
+        """Ensure message content is compatible with the model's chat template.
+
+        Converts list-format content (multimodal observations from fleet env) to
+        plain text. This handles two cases from OpenEnv:
+        1. List of strings (multiple text results): joined into one string
+        2. List of dicts (image_url / text blocks): text extracted, images replaced
+        """
+        sanitized = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        text_parts.append(item)
+                    elif isinstance(item, dict):
+                        if "text" in item:
+                            text_parts.append(item["text"])
+                        elif "image_url" in item or "image" in item:
+                            text_parts.append("[image]")
+                        else:
+                            text_parts.append(str(item))
+                    else:
+                        text_parts.append(str(item))
+                sanitized.append({**msg, "content": "\n".join(text_parts)})
+            else:
+                sanitized.append(msg)
+        return sanitized
+
     def get_obs_ids_from_obs(self, new_obs: ConversationType, is_done: bool) -> List[int]:
         """
         Returns observation token ids from observation messages for a turn.
@@ -578,10 +736,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. apply chat template for observations, also generate generation prompt for next turn
             obs_ids_to_add = []
             if len(new_obs) > 0:
+                # Sanitize list-format content (multimodal) to plain text for
+                # compatibility with text-only chat templates (e.g. Qwen3.5-35B-A3B)
+                safe_obs = self._sanitize_messages_for_template(new_obs)
                 # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
                 # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
                 obs_ids_to_add = self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
+                    [*self.base_conversation, *safe_obs],
                     add_generation_prompt=not is_done,
                     tokenize=True,
                     return_dict=False,
@@ -594,7 +755,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             # no generation prompt is added in this case
             obs_ids_to_add = []
             if len(new_obs) > 0:
-                for obs in new_obs:
+                safe_obs = self._sanitize_messages_for_template(new_obs)
+                for obs in safe_obs:
                     obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
                     obs_ids_to_add.extend(obs_tokens)
         return obs_ids_to_add
@@ -629,6 +791,127 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_history += new_obs
         return chat_history
 
+    async def _run_hint_augmentation(
+        self,
+        all_outputs: List[TrajectoryOutput],
+        prompts: List[ConversationType],
+        env_classes: List[str],
+        env_extras: List[Dict[str, Any]],
+        trajectory_ids: List[TrajectoryID],
+        max_tokens: int,
+        max_input_length: int,
+        sampling_params: Optional[Dict[str, Any]],
+        hint_cfg,
+    ) -> Tuple[List[TrajectoryOutput], List[TrajectoryID], List[str]]:
+        """Run hinted rollouts for prompts where all raw samples failed.
+
+        Groups raw outputs by instance_id, identifies groups where max_reward < threshold,
+        builds hint text from verifier feedback, and launches additional hinted rollouts.
+
+        Uses RLTF-SD: hinted rollout prompt_ids are replaced with the original unhinted
+        prompt_ids so the model learns to produce hint-quality outputs conditioned on the
+        original prompt alone: grad log pi(y_hint | x_0) instead of grad log pi(y_hint | x_0 + hint).
+
+        Returns:
+            Tuple of (hinted_outputs, hinted_trajectory_ids, hinted_env_classes)
+        """
+        from skyrl_gym.envs.fleet_task.env import FleetTaskEnv
+
+        # 1. Group outputs by instance_id
+        groups: Dict[str, List[Tuple[int, TrajectoryOutput]]] = defaultdict(list)
+        for i, output in enumerate(all_outputs):
+            iid = trajectory_ids[i].instance_id
+            groups[iid].append((i, output))
+
+        # 2. Identify prompts needing hints
+        hint_tasks = []
+        hint_tids = []
+        hint_envs = []
+        orig_prompt_ids = []  # unhinted prompt_ids for RLTF-SD
+        prompts_hinted = 0
+        hint_reward_threshold = hint_cfg.get("hint_reward_threshold", 0.0) if hasattr(hint_cfg, "get") else 0.0
+
+        for iid, items in groups.items():
+            rewards = []
+            for _, output in items:
+                r = output.reward
+                rewards.append(r if isinstance(r, (int, float)) else sum(r))
+            max_reward = max(rewards)
+
+            if max_reward > hint_reward_threshold:
+                continue  # at least one raw sample has signal
+
+            # Find best raw rollout (highest partial reward) for feedback
+            best_idx = max(range(len(items)), key=lambda j: rewards[j])
+            best_orig_idx, best_output = items[best_idx]
+            metrics = best_output.env_metrics
+
+            # Build hint from verifier feedback
+            hint_text = FleetTaskEnv.build_hint_text(
+                verifier_stdout=metrics.get("verifier_stdout"),
+                verifier_error=metrics.get("verifier_error"),
+                tool_error_messages=metrics.get("tool_error_messages"),
+            )
+            if not hint_text:
+                continue
+
+            logger.info(
+                f"Hint for instance {iid} (best_reward={rewards[best_idx]:.3f}, "
+                f"verifier_stdout={bool(metrics.get('verifier_stdout'))}, "
+                f"verifier_error={bool(metrics.get('verifier_error'))}):\n{hint_text}"
+            )
+            prompts_hinted += 1
+
+            # Create hinted agent_loop tasks (new env instances)
+            base_rep_id = max(item[0] for item in items) + 1
+            n_hint = hint_cfg.get("n_hint_samples", 2) if hasattr(hint_cfg, "get") else 2
+            for h in range(n_hint):
+                hinted_extras = dict(env_extras[best_orig_idx])
+                hinted_extras["hint"] = hint_text
+                hinted_extras["is_hinted"] = True
+                tid = TrajectoryID(instance_id=iid, repetition_id=base_rep_id + h)
+                hint_tasks.append(
+                    self.agent_loop(
+                        prompts[best_orig_idx],
+                        env_classes[best_orig_idx],
+                        hinted_extras,
+                        max_tokens,
+                        max_input_length,
+                        sampling_params=sampling_params,
+                        trajectory_id=tid,
+                    )
+                )
+                hint_tids.append(tid)
+                hint_envs.append(env_classes[best_orig_idx])
+                orig_prompt_ids.append(best_output.prompt_ids)
+
+        # 3. Run all hinted rollouts in parallel
+        if hint_tasks:
+            logger.info(
+                f"Hint augmentation: {prompts_hinted} prompts need hints, "
+                f"launching {len(hint_tasks)} hinted rollouts"
+            )
+            hint_outputs = await tqdm.gather(
+                *hint_tasks,
+                desc="Hinted Rollouts",
+                miniters=1,
+                mininterval=5,
+            )
+            # RLTF-SD: strip hint from training prompt. Replace hinted prompt_ids
+            # with the original unhinted prompt_ids so the model learns to produce
+            # hint-quality outputs conditioned on the original prompt alone.
+            hint_outputs = list(hint_outputs)
+            for i, output in enumerate(hint_outputs):
+                hinted_len = len(output.prompt_ids)
+                output.prompt_ids = orig_prompt_ids[i]
+                logger.debug(
+                    f"RLTF-SD: replaced hinted prompt ({hinted_len} tokens) "
+                    f"with original prompt ({len(output.prompt_ids)} tokens)"
+                )
+            return hint_outputs, hint_tids, hint_envs
+
+        return [], [], []
+
     async def generate_batched(
         self,
         prompts: List[ConversationType],
@@ -656,7 +939,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_extra["max_turns"] = self.max_turns
             env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
             env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
-            init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
+            init_prompt, _ = await self._env_init(env, prompt)
             init_prompts.append(init_prompt)
             envs.append(env)
 
@@ -684,7 +967,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            env_step_output: BaseTextEnvStepOutput = await self._env_step(env, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
@@ -703,7 +986,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())
             # Close the environment
-            await self._run_in_executor_if_available(env.close)
+            await self._env_close(env)
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
@@ -720,6 +1003,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
             "rollout_expert_indices": truncated_indices,
+            "env_metrics": env_metrics,
         }
 
         return generator_output
@@ -749,27 +1033,88 @@ class SkyRLGymGenerator(GeneratorInterface):
             return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
 
         # Async agent loop to generate trajectories in parallel.
-        tasks = []
-        for i in range(len(prompts)):
-            tasks.append(
-                self.agent_loop(
-                    prompts[i],
-                    env_classes[i],
-                    env_extras[i],
-                    max_tokens,
-                    max_input_length,
-                    sampling_params=sampling_params,
-                    trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
-                )
-            )
+        # Use asyncio.wait() instead of gather() so individual trajectory failures
+        # don't crash the entire batch — failed trajectories get zero-reward outputs.
+        is_step_wise = self.generator_cfg.step_wise_trajectories
+        zero_reward = 0.0 if self.custom_chat_template else [0.0]
 
-        all_outputs = await tqdm.gather(
-            *tasks,
+        async_tasks = []
+        for i in range(len(prompts)):
+            coro = self.agent_loop(
+                prompts[i],
+                env_classes[i],
+                env_extras[i],
+                max_tokens,
+                max_input_length,
+                sampling_params=sampling_params,
+                trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+            )
+            async_tasks.append(asyncio.ensure_future(coro))
+
+        task_to_idx = {id(t): i for i, t in enumerate(async_tasks)}
+
+        pbar = tqdm(
+            total=len(async_tasks),
             desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
+            miniters=max(1, len(async_tasks) // 10),
             mininterval=5,
             disable=disable_tqdm,
         )
+        for t in async_tasks:
+            t.add_done_callback(lambda _: pbar.update(1))
+
+        done, pending = await asyncio.wait(async_tasks)
+        pbar.close()
+
+        all_outputs: list = [None] * len(async_tasks)
+        for t in done:
+            idx = task_to_idx[id(t)]
+            if t.exception() is not None:
+                logger.error(f"Trajectory {idx} raised exception: {t.exception()}")
+                all_outputs[idx] = self._make_zero_reward_output(prompts[idx], zero_reward, is_step_wise)
+            else:
+                all_outputs[idx] = t.result()
+
+        # --- Hint augmentation: rescue GRPO signal on dead prompts ---
+        # Only during training; eval should not run hints.
+        n_raw = len(all_outputs)
+        batch_metadata = input_batch.get("batch_metadata")
+        is_training = batch_metadata is not None and batch_metadata.training_phase == "train"
+        hint_cfg = getattr(self.skyrl_gym_cfg, "fleet_task", None)
+        enable_hints = hint_cfg is not None and (hint_cfg.get("enable_hints", False) if hasattr(hint_cfg, "get") else False)
+        if (
+            enable_hints
+            and not self.generator_cfg.step_wise_trajectories
+            and trajectory_ids is not None
+            and is_training
+        ):
+            hint_outputs, hint_tids, hint_env_classes = await self._run_hint_augmentation(
+                all_outputs=list(all_outputs),
+                prompts=prompts,
+                env_classes=env_classes,
+                env_extras=env_extras,
+                trajectory_ids=trajectory_ids,
+                max_tokens=max_tokens,
+                max_input_length=max_input_length,
+                sampling_params=sampling_params,
+                hint_cfg=hint_cfg,
+            )
+            if hint_outputs:
+                all_outputs = list(all_outputs) + hint_outputs
+                # Extend in-place so input_batch references are updated (trainer reads these)
+                trajectory_ids.extend(hint_tids)
+                env_classes.extend(hint_env_classes)
+                # Also extend prompts and env_extras arrays to stay aligned
+                for tid in hint_tids:
+                    # Find original prompt index for this instance_id
+                    for orig_i, orig_tid in enumerate(input_batch.get("trajectory_ids", [])):
+                        if orig_tid.instance_id == tid.instance_id:
+                            prompts.append(prompts[orig_i])
+                            env_extras.append(env_extras[orig_i])
+                            break
+
+        # Build is_hinted array: raw samples are False, hint-augmented samples are True
+        is_hinted = [False] * n_raw + [True] * (len(all_outputs) - n_raw)
 
         if self.generator_cfg.step_wise_trajectories:
             responses = []
@@ -827,6 +1172,35 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
+        # Log hint augmentation metrics
+        hinted_metrics = [m for m in env_metrics if isinstance(m, dict) and m.get("is_hinted")]
+        if hinted_metrics:
+            n_hinted = len(hinted_metrics)
+            hinted_rewards = []
+            for m in hinted_metrics:
+                r = m.get("final_reward", 0.0)
+                hinted_rewards.append(r if r is not None else 0.0)
+            n_success = sum(1 for r in hinted_rewards if r > 0)
+            rollout_metrics["hint/total_hinted_rollouts"] = n_hinted
+            rollout_metrics["hint/hint_success_rate"] = n_success / n_hinted if n_hinted > 0 else 0.0
+            # Count unique prompts that were hinted (by instance_id)
+            hinted_iids = set()
+            for i, m in enumerate(env_metrics):
+                if m.get("is_hinted") and trajectory_ids is not None and i < len(trajectory_ids):
+                    hinted_iids.add(trajectory_ids[i].instance_id)
+            rollout_metrics["hint/prompts_hinted"] = len(hinted_iids)
+            # Signal rescued: prompts where at least 1 hinted sample scored > 0
+            rescued = 0
+            for iid in hinted_iids:
+                for j, m in enumerate(env_metrics):
+                    if m.get("is_hinted") and trajectory_ids is not None and j < len(trajectory_ids):
+                        if trajectory_ids[j].instance_id == iid:
+                            r = m.get("final_reward", 0.0)
+                            if r is not None and r > 0:
+                                rescued += 1
+                                break
+            rollout_metrics["hint/signal_rescued"] = rescued / len(hinted_iids) if hinted_iids else 0.0
+
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
             rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
@@ -845,7 +1219,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
+            "env_metrics": env_metrics,
             "is_last_step": is_last_step,
+            "is_hinted": is_hinted,
         }
 
         return generator_output

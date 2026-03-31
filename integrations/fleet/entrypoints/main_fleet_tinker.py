@@ -1,0 +1,1015 @@
+"""
+Fleet Task Training with Tinker Backend.
+
+This entrypoint uses Tinker (hosted) for training and inference,
+combined with Fleet environments via OpenEnv for rollout collection.
+
+Usage:
+    python -m integrations.fleet.entrypoints.main_fleet_tinker \
+        --model-name Qwen/Qwen3-VL-30B-A3B-Instruct \
+        --tasks-file /path/to/tasks.json \
+        --dataset-file /path/to/train.parquet \
+        --eval-dataset-file /path/to/validation.parquet
+
+Environment Variables:
+    TINKER_API_KEY: Tinker API key for authentication (required)
+    TINKER_API_URL: Tinker service URL (optional, SDK uses default if not set)
+    FLEET_API_KEY: Fleet API key for environment access
+    WANDB_API_KEY: Weights & Biases API key for logging
+
+Architecture:
+    1. Load tasks from JSON file (same format as SkyRL Fleet integration)
+    2. For each training step:
+       a. Save current model weights for sampling
+       b. Create SamplingClient from Tinker
+       c. Collect rollouts using FleetTaskEnv (OpenEnv) + Tinker inference
+       d. Compute GRPO advantages
+       e. Train using Tinker's forward_backward + optim_step
+    3. Checkpoints saved via Tinker API
+
+Metrics (matching SkyRL):
+    - reward/avg_pass_at_{n}: Pass@k across all prompts
+    - reward/variance_per_prompt: Mean within-prompt reward variance (GRPO learning signal)
+    - reward/{env_key}/pass_at_{n}: Per-environment pass@k
+    - reward/{env_key}/variance_per_prompt: Per-environment variance (learning signal)
+    - eval/all/pass_at_{n}: Evaluation pass@k
+    - eval/{env_key}/pass_at_{n}: Per-environment eval pass@k
+"""
+
+import asyncio
+import logging
+import os
+import random
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from pydantic import BaseModel
+from tqdm import tqdm
+import tinker
+import torch
+import wandb
+from tinker import types
+from tinker.types.tensor_data import TensorData
+from transformers import AutoTokenizer
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+
+# Use SkyRL's FleetTaskEnv wrapper (now supports async via init_async/step_async)
+from omegaconf import OmegaConf
+from skyrl_gym.envs.fleet_task.env import FleetTaskEnv
+
+# Import SkyRL's overlong filtering for parity
+from skyrl.train.generators.utils import apply_overlong_filtering
+
+# Import shared metrics module for consistent metric calculation with SkyRL trainer
+from integrations.fleet.reward_metrics import (
+    compute_pass_at_n as _compute_pass_at_n,
+    compute_reward_metrics,
+    compute_per_group_metrics,
+    sanitize_metric_key,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("mcp").setLevel(logging.WARNING)
+
+# Thread pool for env operations - isolates MCP connections per thread (like SkyRL)
+_env_executor: ThreadPoolExecutor = None
+
+
+def _get_env_executor(max_workers: int = 16) -> ThreadPoolExecutor:
+    global _env_executor
+    if _env_executor is None:
+        _env_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="fleet-env-")
+    return _env_executor
+
+
+async def _run_in_executor(func, *args):
+    """Run sync function in thread pool - each thread gets isolated event loop/connections."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_get_env_executor(), func, *args)
+
+
+class RolloutOutput(BaseModel):
+    """Output from a single rollout collection."""
+
+    prompt_ids: List[int]
+    response_ids: List[int]
+    logprobs: List[float]
+    loss_mask: List[int]
+    reward: float
+    task_key: str
+    env_key: str
+    turns: int
+    tool_calls: int
+    tool_errors: int = 0  # Count of tool call errors in this rollout
+    stop_reason: str
+    duration: float
+    # Timing breakdown for WandB
+    total_gen_time: float = 0.0  # Total Tinker generation time
+    total_step_time: float = 0.0  # Total MCP/Fleet step time
+    total_tokens: int = 0  # Total tokens generated
+    error: Optional[str] = None
+
+    class Config:
+        frozen = True
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def normalize_advantages(advantages: List[float]) -> List[float]:
+    """Normalize advantages to have mean 0 and std 1."""
+    if not advantages or len(advantages) == 1:
+        return advantages
+    mean = np.mean(advantages)
+    std = np.std(advantages)
+    if std < 1e-8:
+        return [0.0] * len(advantages)
+    return [(a - mean) / (std + 1e-8) for a in advantages]
+
+
+def compute_advantages_grpo(
+    rewards: List[float],
+    group_size: int = None,
+    normalize: bool = True,
+) -> List[float]:
+    """
+    GRPO (Group Relative Policy Optimization) advantage estimation.
+
+    For each group of trajectories from the same prompt, compute advantages
+    as deviations from the group mean.
+    """
+    rewards = np.array(rewards)
+
+    if group_size is None:
+        group_size = len(rewards)
+
+    n_groups = len(rewards) // group_size
+    advantages = []
+
+    for i in range(n_groups):
+        start_idx = i * group_size
+        end_idx = start_idx + group_size
+        group_rewards = rewards[start_idx:end_idx]
+        group_mean = group_rewards.mean()
+        group_advantages = group_rewards - group_mean
+        advantages.extend(group_advantages.tolist())
+
+    remaining = len(rewards) % group_size
+    if remaining > 0:
+        remaining_rewards = rewards[-remaining:]
+        remaining_mean = remaining_rewards.mean()
+        advantages.extend((remaining_rewards - remaining_mean).tolist())
+
+    if normalize:
+        advantages = normalize_advantages(advantages)
+
+    return advantages
+
+
+def compute_pass_at_n(rollouts: List[Dict[str, Any]], n_samples_per_prompt: int) -> float:
+    """
+    Compute pass@n metric using the shared metrics module.
+
+    For each unique prompt (task_key), if ANY of the n trajectories has reward > 0,
+    that counts as a "pass".
+
+    This function is a thin wrapper around the shared compute_pass_at_n for backward
+    compatibility with the rollout dict format.
+    """
+    rewards = [r.get("reward", 0.0) for r in rollouts]
+    uids = [r.get("task_key", "unknown") for r in rollouts]
+    return _compute_pass_at_n(rewards, uids)
+
+
+def compute_per_env_metrics(rollouts: List[Dict[str, Any]], n_samples_per_prompt: int) -> Dict[str, float]:
+    """
+    Compute per-environment metrics using the shared metrics module.
+
+    This function is a thin wrapper around the shared compute_per_group_metrics for
+    backward compatibility with the rollout dict format.
+    """
+    rewards = [r.get("reward", 0.0) for r in rollouts]
+    uids = [r.get("task_key", "unknown") for r in rollouts]
+    env_keys = [r.get("env_key", "unknown") for r in rollouts]
+
+    return compute_per_group_metrics(
+        rewards=rewards,
+        uids=uids,
+        groups=env_keys,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="reward",
+    )
+
+
+def compute_rollout_metrics(
+    rollouts: List[Dict[str, Any]],
+    valid_rollouts: List[Dict[str, Any]],
+    rewards: List[float],
+    advantages: List[float],
+    n_samples_per_prompt: int,
+) -> Dict[str, Any]:
+    """
+    Compute all rollout metrics using the shared metrics module.
+
+    Args:
+        rollouts: All rollouts (including failed ones)
+        valid_rollouts: Only valid rollouts
+        rewards: Rewards for valid rollouts
+        advantages: GRPO advantages for valid rollouts
+        n_samples_per_prompt: Number of samples per prompt
+
+    Returns:
+        Dict of metrics for wandb logging
+    """
+    metrics = {}
+
+    # Extract data for shared module
+    uids = [r.get("task_key", "unknown") for r in valid_rollouts]
+    env_keys = [r.get("env_key", "unknown") for r in valid_rollouts]
+
+    # Core reward metrics using shared module
+    core_metrics = compute_reward_metrics(rewards, uids, n_samples_per_prompt)
+    metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = core_metrics[f"pass_at_{n_samples_per_prompt}"]
+    metrics["reward/avg_raw_reward"] = np.mean(rewards)
+    metrics["reward/variance_per_prompt"] = core_metrics["variance_per_prompt"]
+    metrics["reward/mean_positive_reward"] = core_metrics["mean_positive_reward"]
+
+    # Advantage metrics (Tinker-specific)
+    metrics["advantage/mean"] = np.mean(advantages)
+    metrics["advantage/std"] = np.std(advantages)
+    metrics["rollouts/valid"] = len(valid_rollouts)
+    metrics["rollouts/total"] = len(rollouts)
+
+    # Per-environment reward metrics using shared module
+    per_env_metrics = compute_per_group_metrics(
+        rewards=rewards,
+        uids=uids,
+        groups=env_keys,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="reward",
+    )
+    metrics.update(per_env_metrics)
+
+    # Per-environment rollout stats (turns, tool_calls, tool_errors, duration) - Tinker-specific
+    rollout_stats = defaultdict(list)
+    for r in valid_rollouts:
+        env_key = sanitize_metric_key(r.get("env_key", "unknown"))
+        rollout_stats[f"rollout/{env_key}/turns"].append(r.get("turns", 0))
+        rollout_stats[f"rollout/{env_key}/tool_calls"].append(r.get("tool_calls", 0))
+        rollout_stats[f"rollout/{env_key}/tool_errors"].append(r.get("tool_errors", 0))
+        rollout_stats[f"rollout/{env_key}/duration"].append(r.get("duration", 0.0))
+
+    for key, values in rollout_stats.items():
+        metrics[key] = np.mean(values)
+
+    # Compute tool error rate per environment
+    env_keys_seen = set()
+    for r in valid_rollouts:
+        env_keys_seen.add(sanitize_metric_key(r.get("env_key", "unknown")))
+    for env_key in env_keys_seen:
+        total_calls = sum(rollout_stats[f"rollout/{env_key}/tool_calls"])
+        total_errors = sum(rollout_stats[f"rollout/{env_key}/tool_errors"])
+        if total_calls > 0:
+            metrics[f"rollout/{env_key}/tool_error_rate"] = total_errors / total_calls
+        else:
+            metrics[f"rollout/{env_key}/tool_error_rate"] = 0.0
+
+    # Overall rollout duration stats
+    durations = [r.get("duration", 0.0) for r in valid_rollouts]
+    metrics["rollout/avg_duration"] = np.mean(durations)
+    metrics["rollout/max_duration"] = np.max(durations)
+    metrics["rollout/min_duration"] = np.min(durations)
+
+    return metrics
+
+
+def prepare_training_data(
+    rollouts: List[Dict[str, Any]],
+    advantages: List[float],
+    tokenizer: AutoTokenizer,
+    max_sequence_length: int,
+) -> tuple:
+    """
+    Prepare training data from rollouts (matching SkyRL's generate_batched pattern).
+
+    Applies:
+    1. DAPO overlong filtering (zero loss mask if response doesn't end with EOS)
+    2. Sequence truncation for max_sequence_length
+    3. Builds Tinker Datum objects for training
+
+    Args:
+        rollouts: List of rollout dicts with prompt_ids, response_ids, logprobs, loss_mask
+        advantages: GRPO advantages for each rollout
+        tokenizer: Tokenizer for EOS token ID
+        max_sequence_length: Maximum sequence length for training
+
+    Returns:
+        Tuple of (training_datums, truncated_count)
+    """
+    # Apply DAPO overlong filtering (zero out loss mask for truncated responses)
+    all_loss_masks = [r.loss_mask for r in rollouts]
+    stop_reasons = [r.stop_reason for r in rollouts]
+    filtered_loss_masks = apply_overlong_filtering(all_loss_masks, stop_reasons)
+
+    training_datums = []
+    truncated_count = 0
+
+    for idx, rollout in enumerate(rollouts):
+        prompt_ids = rollout.prompt_ids
+        response_ids = rollout.response_ids
+        logprobs = rollout.logprobs
+        loss_mask_data = filtered_loss_masks[idx]
+
+        full_sequence = prompt_ids + response_ids
+        prompt_len = len(prompt_ids)
+
+        # Truncate sequences exceeding model's max length for Tinker API
+        if len(full_sequence) > max_sequence_length:
+            truncated_count += 1
+            full_sequence = full_sequence[:max_sequence_length]
+            response_len = len(full_sequence) - prompt_len
+            response_ids = response_ids[:response_len]
+            logprobs = logprobs[:response_len] if logprobs else []
+            loss_mask_data = loss_mask_data[:response_len]
+
+        # Ensure logprobs and response_ids are in sync before building training data
+        if len(logprobs) != len(response_ids):
+            logger.warning(
+                f"Datum {idx}: logprobs ({len(logprobs)}) != response_ids ({len(response_ids)}), fixing"
+            )
+            if len(logprobs) > len(response_ids):
+                logprobs = logprobs[: len(response_ids)]
+            else:
+                logprobs = logprobs + [0.0] * (len(response_ids) - len(logprobs))
+
+        # Target tokens (shifted by 1)
+        target_tokens = full_sequence[1:]
+        seq_len = len(target_tokens)
+
+        # Logprobs (0 for prompt, actual for response)
+        full_logprobs = [0.0] * prompt_len + logprobs
+        full_logprobs = full_logprobs[1:]
+
+        # Loss mask (0 for prompt, actual for response)
+        full_mask = [0] * prompt_len + loss_mask_data
+        full_mask = full_mask[1:]
+
+        # Safety: ensure all arrays match target_tokens length
+        full_logprobs = full_logprobs[:seq_len] + [0.0] * max(0, seq_len - len(full_logprobs))
+        full_mask = full_mask[:seq_len] + [0] * max(0, seq_len - len(full_mask))
+
+        # Advantages (apply only where loss mask is 1)
+        advantage_value = advantages[idx]
+        full_advantages = torch.zeros(len(full_sequence))
+        for i in range(prompt_len, len(full_sequence)):
+            if i - 1 < len(full_mask) and full_mask[i - 1] > 0:
+                full_advantages[i] = advantage_value
+        full_advantages = full_advantages[1:]
+
+        datum = types.Datum(
+            model_input=types.ModelInput.from_ints(tokens=full_sequence[:-1]),
+            loss_fn_inputs={
+                "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
+                "logprobs": TensorData.from_torch(torch.tensor(full_logprobs)),
+                "advantages": TensorData.from_torch(full_advantages),
+            },
+        )
+        training_datums.append(datum)
+
+    return training_datums, truncated_count
+
+
+def tokenize_chat(tokenizer: AutoTokenizer, chat_history: List[Dict], add_generation_prompt: bool = True) -> List[int]:
+    """
+    Tokenize chat history and ensure we get a plain list of token IDs.
+
+    apply_chat_template can return different types depending on the tokenizer:
+    - List[int] for some tokenizers
+    - BatchEncoding dict with 'input_ids' key for others
+
+    Tinker's ModelInput.from_ints() requires a plain list of integers.
+    """
+    result = tokenizer.apply_chat_template(chat_history, add_generation_prompt=add_generation_prompt, tokenize=True)
+    # Handle BatchEncoding (dict-like) vs plain list
+    if hasattr(result, "input_ids"):
+        return list(result.input_ids)
+    elif isinstance(result, dict) and "input_ids" in result:
+        return list(result["input_ids"])
+    else:
+        return list(result)
+
+
+async def collect_fleet_rollout(
+    task_config: Dict[str, Any],
+    tasks_file: str,
+    sampling_client: tinker.SamplingClient,
+    tokenizer: AutoTokenizer,
+    max_turns: int = 50,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
+) -> Dict[str, Any]:
+    """
+    Collect a single trajectory using Fleet environment and Tinker inference.
+
+    Uses SkyRL's FleetTaskEnv wrapper with async methods for environment interaction.
+
+    Args:
+        max_generate_length: Max tokens per generation step.
+        max_input_length: Max context length before ending rollout (matching SkyRL).
+    """
+    rollout_start = time.time()
+
+    task_key = task_config.get("task_key") or task_config.get("key")
+
+    # Create SkyRL FleetTaskEnv wrapper
+    # TTL of 2 hours - some rollouts with many turns can take 30+ minutes
+    env_config = OmegaConf.create({"tasks_file": tasks_file, "ttl_seconds": 7200})
+    extras = {"task_key": task_key, "max_turns": max_turns}
+
+    env = FleetTaskEnv(env_config=env_config, extras=extras)
+
+    try:
+        # Initialize environment in thread pool - isolates MCP connections
+        chat_history, metadata = await _run_in_executor(env.init, [])
+        env_key = metadata.get("env_key", "unknown")
+
+        # Tokenize initial prompt
+        prompt_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
+
+        all_response_ids = []
+        all_logprobs = []
+        loss_mask = []
+        done = False
+        total_reward = 0.0
+        stop_reason = "stop"
+        # Timing accumulators for WandB
+        total_gen_time = 0.0
+        total_step_time = 0.0
+        total_tokens = 0
+
+        while not done and env.turns < max_turns:
+            turn_num = env.turns + 1  # 1-indexed for logging
+
+            # Prepare input for Tinker (use env's chat_history)
+            input_ids = tokenize_chat(tokenizer, env.chat_history, add_generation_prompt=True)
+
+            # Check context length limit (matching SkyRL's skyrl_gym_generator.py:274)
+            if len(input_ids) > max_input_length:
+                logger.info(
+                    f"[{task_key}] Turn {turn_num}: context length ({len(input_ids)}) exceeds max ({max_input_length}), ending"
+                )
+                stop_reason = "length"
+                break
+
+            # Generate with Tinker
+            gen_start = time.time()
+            sampling_params_kwargs = {
+                "max_tokens": max_generate_length,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+            if stop_sequences:
+                sampling_params_kwargs["stop"] = stop_sequences
+            sampling_params = types.SamplingParams(**sampling_params_kwargs)
+
+            # Use async sampling to avoid blocking the event loop
+            result = await sampling_client.sample_async(
+                prompt=types.ModelInput.from_ints(tokens=input_ids),
+                num_samples=1,
+                sampling_params=sampling_params,
+            )
+            gen_time = time.time() - gen_start
+            total_gen_time += gen_time
+
+            if not result.sequences or len(result.sequences) == 0:
+                logger.warning(f"[{task_key}] Turn {turn_num}: no sequences returned from Tinker")
+                break
+
+            sequence = result.sequences[0]
+            output_ids = sequence.tokens
+            output_logprobs = sequence.logprobs if sequence.logprobs else []
+
+            # Guard: logprobs must match token count (Tinker may return different lengths)
+            if output_logprobs and len(output_logprobs) != len(output_ids):
+                logger.warning(
+                    f"[{task_key}] Turn {turn_num}: logprobs length ({len(output_logprobs)}) != tokens length ({len(output_ids)}), truncating/padding"
+                )
+                if len(output_logprobs) > len(output_ids):
+                    output_logprobs = output_logprobs[: len(output_ids)]
+                else:
+                    output_logprobs = output_logprobs + [0.0] * (len(output_ids) - len(output_logprobs))
+
+            # Decode output
+            output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+
+            # Collect trajectory data (assistant response tokens - trainable)
+            all_response_ids.extend(output_ids)
+            if output_logprobs:
+                all_logprobs.extend(output_logprobs)
+            else:
+                all_logprobs.extend([0.0] * len(output_ids))
+            loss_mask.extend([1] * len(output_ids))
+
+            # Step environment in thread pool - isolates MCP connections
+            step_start = time.time()
+            step_output = await _run_in_executor(env.step, output_text)
+            step_time = time.time() - step_start
+            total_step_time += step_time
+            total_tokens += len(output_ids)
+
+            # Get observation content for tokenization (masked out for loss)
+            # Note: BaseTextEnvStepOutput is a TypedDict, use dict access
+            if step_output["observations"]:
+                obs_content = step_output["observations"][0].get("content", "")
+                obs_ids = tokenizer.encode(obs_content, add_special_tokens=False)
+                all_response_ids.extend(obs_ids)
+                all_logprobs.extend([0.0] * len(obs_ids))
+                loss_mask.extend([0] * len(obs_ids))
+
+            total_reward = step_output["reward"]
+            done = step_output["done"]
+
+        return RolloutOutput(
+            prompt_ids=prompt_ids,
+            response_ids=all_response_ids,
+            logprobs=all_logprobs,
+            loss_mask=loss_mask,
+            reward=total_reward,
+            task_key=task_key,
+            env_key=env_key,
+            turns=env.turns,
+            tool_calls=env.tool_calls,
+            tool_errors=env.tool_errors,
+            stop_reason=stop_reason,
+            duration=time.time() - rollout_start,
+            total_gen_time=total_gen_time,
+            total_step_time=total_step_time,
+            total_tokens=total_tokens,
+        )
+
+    finally:
+        env.close()
+
+
+async def collect_batch_rollouts(
+    batch: List[Dict[str, Any]],
+    tasks_file: str,
+    sampling_client: tinker.SamplingClient,
+    tokenizer: AutoTokenizer,
+    max_turns: int = 50,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
+    n_samples_per_prompt: int = 1,
+    max_concurrent: int = 8,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
+) -> List[Dict[str, Any]]:
+    """Collect rollouts for a batch of tasks with limited concurrency.
+
+    Args:
+        max_concurrent: Maximum number of concurrent Fleet environment connections.
+            Now safe to increase since ThreadPoolExecutor isolates connections.
+    """
+    # Semaphore to limit concurrent Fleet environment connections
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def collect_single_rollout(task_config: Dict[str, Any], index: int) -> tuple:
+        """Wrapper to collect a single rollout with error handling and concurrency limit."""
+        async with semaphore:
+            rollout_start = time.time()
+            try:
+                rollout = await collect_fleet_rollout(
+                    task_config=task_config,
+                    tasks_file=tasks_file,
+                    sampling_client=sampling_client,
+                    tokenizer=tokenizer,
+                    max_turns=max_turns,
+                    max_generate_length=max_generate_length,
+                    max_input_length=max_input_length,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop_sequences=stop_sequences,
+                )
+                return index, rollout
+            except Exception as e:
+                logger.error(f"Failed to collect rollout for {task_config.get('task_key')}: {e}")
+                return index, RolloutOutput(
+                    prompt_ids=[],
+                    response_ids=[],
+                    logprobs=[],
+                    loss_mask=[],
+                    reward=0.0,
+                    task_key=task_config.get("task_key", "unknown"),
+                    env_key=task_config.get("env_key", "unknown"),
+                    turns=0,
+                    tool_calls=0,
+                    tool_errors=0,
+                    stop_reason="error",
+                    error=str(e),
+                    duration=time.time() - rollout_start,
+                )
+
+    # Create all rollout tasks (batch_size * n_samples_per_prompt)
+    tasks = []
+    index = 0
+    for task_config in batch:
+        for _ in range(n_samples_per_prompt):
+            tasks.append(collect_single_rollout(task_config, index))
+            index += 1
+
+    total = len(tasks)
+    logger.info(f"  Collecting {total} rollouts (max {max_concurrent} concurrent)...")
+    rollouts = [None] * total
+    completed = 0
+    last_logged = 0
+    log_interval = max(1, total // 4)  # Log at ~25%, 50%, 75%, 100%
+
+    # Run rollouts with limited concurrency via semaphore
+    for coro in asyncio.as_completed(tasks):
+        idx, rollout = await coro
+        rollouts[idx] = rollout
+        completed += 1
+
+        # Log progress at intervals
+        if completed - last_logged >= log_interval or completed == total:
+            logger.info(f"  Progress: {completed}/{total} rollouts completed")
+            last_logged = completed
+
+    return rollouts
+
+
+def collate_fn(batch):
+    """Return batch as-is without tensor collation."""
+    return batch
+
+
+async def main(
+    model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    tasks_file: str = None,
+    dataset_file: str = None,
+    eval_dataset_file: str = None,
+    batch_size: int = 8,
+    eval_batch_size: int = 32,
+    learning_rate: float = 4e-5,
+    lora_rank: int = 16,
+    max_steps: int = 200,
+    max_turns: int = 50,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
+    max_sequence_length: int = 32768,
+    n_samples_per_prompt: int = 4,
+    eval_every: int = 20,
+    seed: int = 42,
+    wandb_project: str = "fleet-tinker-grpo",
+    wandb_name: str = None,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_sequences: List[str] = None,
+    loss_fn: str = "ppo",
+):
+    """
+    Main training loop using Tinker for training/inference and Fleet for environments.
+    """
+    set_seed(seed)
+
+    # Setup WandB run name
+    if wandb_name is None:
+        wandb_name = f"{model_name.split('/')[-1]}_{datetime.now().strftime('%m%d_%H%M')}"
+
+    # Initialize WandB
+    if stop_sequences is None:
+        stop_sequences = []
+
+    wandb.init(
+        project=wandb_project,
+        name=wandb_name,
+        config={
+            "model_name": model_name,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "lora_rank": lora_rank,
+            "max_turns": max_turns,
+            "max_generate_length": max_generate_length,
+            "max_input_length": max_input_length,
+            "max_sequence_length": max_sequence_length,
+            "n_samples_per_prompt": n_samples_per_prompt,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop_sequences": stop_sequences,
+            "loss_fn": loss_fn,
+        },
+    )
+
+    # Load datasets
+    train_dataset = load_dataset("parquet", data_files=dataset_file)["train"]
+    eval_dataset = load_dataset("parquet", data_files=eval_dataset_file)["train"] if eval_dataset_file else None
+
+    logger.info(f"Loaded {len(train_dataset)} training samples")
+    if eval_dataset:
+        logger.info(f"Loaded {len(eval_dataset)} eval samples")
+
+    # Setup Tinker
+    tinker_url = os.environ.get("TINKER_API_URL")
+    tinker_api_key = os.environ.get("TINKER_API_KEY")
+
+    service_client_kwargs = {}
+    if tinker_url:
+        service_client_kwargs["base_url"] = tinker_url
+    if tinker_api_key:
+        service_client_kwargs["api_key"] = tinker_api_key
+
+    service_client = tinker.ServiceClient(**service_client_kwargs)
+    training_client = await service_client.create_lora_training_client_async(base_model=model_name, rank=lora_rank)
+
+    adam_params = types.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-8)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Create dataloader
+    def create_dataloader(epoch: int):
+        return DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            generator=torch.Generator().manual_seed(seed + epoch),
+        )
+
+    steps_per_epoch = (len(train_dataset) + batch_size - 1) // batch_size
+    current_epoch = 0
+    train_dataloader = create_dataloader(current_epoch)
+    train_iterator = iter(train_dataloader)
+
+    # Training loop
+    pbar = tqdm(range(max_steps), desc="Training", unit="step")
+    for step in pbar:
+        step_start = time.time()
+        metrics = {"step": step, "epoch": step // steps_per_epoch}
+
+        # Get sampler weights for rollout inference
+        sampling_path = training_client.save_weights_for_sampler(name=f"step_{step:06d}").result().path
+        sampling_client = service_client.create_sampling_client(model_path=sampling_path)
+
+        # Get batch
+        try:
+            batch = next(train_iterator)
+        except StopIteration:
+            current_epoch += 1
+            train_dataloader = create_dataloader(current_epoch)
+            train_iterator = iter(train_dataloader)
+            batch = next(train_iterator)
+
+        # Collect rollouts
+        logger.info(f"Step {step}: Collecting rollouts for {len(batch)} tasks...")
+        rollout_start = time.time()
+
+        rollouts = await collect_batch_rollouts(
+            batch=batch,
+            tasks_file=tasks_file,
+            sampling_client=sampling_client,
+            tokenizer=tokenizer,
+            max_turns=max_turns,
+            max_generate_length=max_generate_length,
+            max_input_length=max_input_length,
+            n_samples_per_prompt=n_samples_per_prompt,
+            temperature=temperature,
+            top_p=top_p,
+            stop_sequences=stop_sequences,
+        )
+
+        metrics["time/rollout"] = time.time() - rollout_start
+
+        # Filter valid rollouts and log invalid ones
+        # Note: rollouts are RolloutOutput Pydantic objects - use attribute access
+        valid_rollouts = []
+        invalid_rollouts = []
+        for r in rollouts:
+            if r.response_ids and not r.error:
+                valid_rollouts.append(r)
+            else:
+                invalid_rollouts.append(r)
+
+        if invalid_rollouts:
+            for r in invalid_rollouts:
+                task_key = r.task_key
+                error = r.error or "no response_ids"
+                stop_reason = r.stop_reason
+                logger.warning(f"Step {step}: Invalid rollout for {task_key}: {error} (stop_reason={stop_reason})")
+            metrics["rollouts/invalid"] = len(invalid_rollouts)
+
+        if not valid_rollouts:
+            logger.warning(f"Step {step}: No valid rollouts, skipping")
+            continue
+
+        # Compute GRPO advantages
+        rewards = [r.reward for r in valid_rollouts]
+        advantages = compute_advantages_grpo(rewards, group_size=n_samples_per_prompt, normalize=True)
+
+        # Compute all rollout metrics (convert to dicts for metrics functions)
+        rollout_metrics = compute_rollout_metrics(
+            rollouts=[r.model_dump() for r in rollouts],
+            valid_rollouts=[r.model_dump() for r in valid_rollouts],
+            rewards=rewards,
+            advantages=advantages,
+            n_samples_per_prompt=n_samples_per_prompt,
+        )
+        metrics.update(rollout_metrics)
+
+        # Compute timing metrics from valid rollouts
+        gen_times = [r.total_gen_time for r in valid_rollouts]
+        step_times = [r.total_step_time for r in valid_rollouts]
+        tokens = [r.total_tokens for r in valid_rollouts]
+        durations = [r.duration for r in valid_rollouts]
+
+        metrics["time/gen_total"] = sum(gen_times)
+        metrics["time/gen_mean"] = np.mean(gen_times)
+        metrics["time/step_total"] = sum(step_times)
+        metrics["time/step_mean"] = np.mean(step_times)
+        metrics["time/gen_pct"] = 100 * sum(gen_times) / sum(durations) if sum(durations) > 0 else 0
+        metrics["time/step_pct"] = 100 * sum(step_times) / sum(durations) if sum(durations) > 0 else 0
+        metrics["throughput/tokens_total"] = sum(tokens)
+        metrics["throughput/tokens_per_sec_gen"] = sum(tokens) / sum(gen_times) if sum(gen_times) > 0 else 0
+        metrics["throughput/tokens_per_sec_effective"] = sum(tokens) / sum(durations) if sum(durations) > 0 else 0
+
+        # Prepare training data (DAPO filtering + truncation + datum creation)
+        training_datums, truncated_count = prepare_training_data(
+            rollouts=valid_rollouts,
+            advantages=advantages,
+            tokenizer=tokenizer,
+            max_sequence_length=max_sequence_length,
+        )
+
+        metrics["rollouts/truncated_overlong"] = truncated_count
+        if truncated_count > 0:
+            logger.info(f"Step {step}: Truncated {truncated_count} overlong sequences")
+
+        if not training_datums:
+            logger.warning(f"Step {step}: No valid training sequences after filtering, skipping")
+            continue
+
+        # Training step
+        logger.info(f"Step {step}: Training on {len(training_datums)} sequences...")
+        train_start = time.time()
+
+        fwd_bwd_future = training_client.forward_backward(training_datums, loss_fn=loss_fn)
+        optim_step_future = training_client.optim_step(adam_params)
+
+        fwd_bwd_future.result()
+        optim_step_future.result()
+
+        metrics["time/train"] = time.time() - train_start
+        metrics["time/total"] = time.time() - step_start
+
+        # Log metrics (commit=True forces immediate sync)
+        wandb.log(metrics, step=step, commit=True)
+        pbar.set_postfix(
+            {
+                f"pass@{n_samples_per_prompt}": f"{metrics[f'reward/avg_pass_at_{n_samples_per_prompt}']:.3f}",
+                "reward": f"{metrics['reward/avg_raw_reward']:.3f}",
+                "time": f"{metrics['time/total']:.1f}s",
+            }
+        )
+
+        # Evaluation
+        if eval_every > 0 and eval_dataset and step % eval_every == 0:
+            logger.info(f"Step {step}: Running evaluation...")
+            eval_dataloader = DataLoader(eval_dataset, batch_size=eval_batch_size, shuffle=False, collate_fn=collate_fn)
+
+            all_eval_rollouts = []
+            for eval_batch in eval_dataloader:
+                eval_rollouts = await collect_batch_rollouts(
+                    batch=eval_batch,
+                    tasks_file=tasks_file,
+                    sampling_client=sampling_client,
+                    tokenizer=tokenizer,
+                    max_turns=max_turns,
+                    max_generate_length=max_generate_length,
+                    max_input_length=max_input_length,
+                    n_samples_per_prompt=1,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop_sequences=stop_sequences,
+                )
+                all_eval_rollouts.extend([r for r in eval_rollouts if not r.error])
+
+            if all_eval_rollouts:
+                eval_rewards = [r.reward for r in all_eval_rollouts]
+                # Convert to dicts for metrics functions
+                eval_rollouts_dicts = [r.model_dump() for r in all_eval_rollouts]
+                eval_pass_at_1 = compute_pass_at_n(eval_rollouts_dicts, 1)
+                eval_per_env = compute_per_env_metrics(eval_rollouts_dicts, 1)
+
+                eval_metrics = {
+                    "eval/all/pass_at_1": eval_pass_at_1,
+                    "eval/all/mean_positive_reward": (
+                        np.mean([r for r in eval_rewards if r > 0]) if any(r > 0 for r in eval_rewards) else 0.0
+                    ),
+                    "eval/num_samples": len(all_eval_rollouts),
+                }
+                # Add per-env eval metrics (rename from reward/ to eval/)
+                for key, value in eval_per_env.items():
+                    eval_key = key.replace("reward/", "eval/")
+                    eval_metrics[eval_key] = value
+
+                wandb.log(eval_metrics, step=step, commit=True)
+                logger.info(f"Step {step}: eval pass@1={eval_pass_at_1:.3f}, num_samples={len(all_eval_rollouts)}")
+
+    wandb.finish()
+    logger.info("Training completed!")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Fleet Task Training with Tinker")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-30B-A3B-Instruct")
+    parser.add_argument("--tasks-file", type=str, required=True, help="Path to tasks JSON file")
+    parser.add_argument("--dataset-file", type=str, required=True, help="Path to training parquet")
+    parser.add_argument("--eval-dataset-file", type=str, default=None, help="Path to eval parquet")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--eval-batch-size", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument("--max-steps", type=int, default=200)
+    parser.add_argument("--max-turns", type=int, default=50)
+    parser.add_argument("--max-generate-length", type=int, default=2048, help="Max tokens per generation")
+    parser.add_argument("--max-input-length", type=int, default=30720, help="Max context length before ending rollout")
+    parser.add_argument("--max-sequence-length", type=int, default=32768, help="Max sequence length for training")
+    parser.add_argument("--n-samples-per-prompt", type=int, default=4)
+    parser.add_argument("--eval-every", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--wandb-project", type=str, default="fleet-tinker-grpo")
+    parser.add_argument("--wandb-name", type=str, default=None)
+    parser.add_argument(
+        "--track-extra-gradient-metrics",
+        type=bool,
+        default=False,
+        help="Track additional gradient metrics (for parity with SkyRL config)",
+    )
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling")
+    parser.add_argument(
+        "--stop-sequences",
+        type=str,
+        default="[]",
+        help="JSON list of stop sequences (e.g. '[\"</tool_call>\"]')",
+    )
+    parser.add_argument(
+        "--loss-fn",
+        type=str,
+        default="ppo",
+        help="Loss function for Tinker forward_backward (e.g. ppo, grpo)",
+    )
+
+    args = parser.parse_args()
+
+    import json as _json
+
+    stop_sequences = _json.loads(args.stop_sequences)
+
+    asyncio.run(
+        main(
+            model_name=args.model_name,
+            tasks_file=args.tasks_file,
+            dataset_file=args.dataset_file,
+            eval_dataset_file=args.eval_dataset_file,
+            batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
+            learning_rate=args.learning_rate,
+            lora_rank=args.lora_rank,
+            max_steps=args.max_steps,
+            max_turns=args.max_turns,
+            max_generate_length=args.max_generate_length,
+            max_input_length=args.max_input_length,
+            max_sequence_length=args.max_sequence_length,
+            n_samples_per_prompt=args.n_samples_per_prompt,
+            eval_every=args.eval_every,
+            seed=args.seed,
+            wandb_project=args.wandb_project,
+            wandb_name=args.wandb_name,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            stop_sequences=stop_sequences,
+            loss_fn=args.loss_fn,
+        )
+    )

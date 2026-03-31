@@ -1,0 +1,60 @@
+# Task Generation GRPO Training via SkyPilot - Qwen3.5-9B
+# Usage: sky launch tasks/task-gen-grpo-qwen3_5-9b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Qwen3.5-9B: MoE with ~1B active params. Fits on single H200 GPU (TP=1).
+# 8 inference engines on 8x H200 node.
+
+name: task-gen-grpo-qwen3-5-9b
+
+resources:
+  disk_size: 500
+  memory: 800+
+  ports: 6479
+  any_of:
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
+      cloud: runpod
+    - accelerators: H200:8
+      cloud: lambda
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-v2.git
+  ref: fleet/all
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v55"
+  MODALITY: "tool_use"
+  MAX_TURNS: 10
+  MAX_INPUT_LENGTH: 65536
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 20
+  JUDGE_MODEL: "anthropic/claude-sonnet-4.5"
+  OPENROUTER_API_KEY: ""
+  EVALUATOR_MODEL: "anthropic/claude-sonnet-4.5"
+  K_ROLLOUTS: 4
+  ALPHA: "1.0"
+  MAX_EVAL_STEPS: 20
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh \
+    --env-class task_gen
+
+run: |
+  bash scripts/fleet-task-gen-run.sh

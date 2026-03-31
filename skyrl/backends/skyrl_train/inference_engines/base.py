@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict, Union
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
@@ -7,7 +7,30 @@ if TYPE_CHECKING:
         WeightSyncInitInfo,
     )
 
-MessageType = Dict[str, str]
+
+# --- Multimodal Message Types (OpenAI-compatible) ---
+class TextContent(TypedDict):
+    type: str  # "text"
+    text: str
+
+
+class ImageUrlContent(TypedDict):
+    url: str  # "data:image/png;base64,..." or URL
+
+
+class ImageContent(TypedDict):
+    type: str  # "image_url"
+    image_url: ImageUrlContent
+
+
+ContentType = Union[str, List[Union[TextContent, ImageContent]]]
+
+
+class MessageType(TypedDict):
+    role: str
+    content: ContentType
+
+
 ConversationType = List[MessageType]
 
 
@@ -17,6 +40,9 @@ class InferenceEngineInput(TypedDict):
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
+    # Multimodal data for VL models. Each element corresponds to a prompt.
+    # Format: {"image": [PIL.Image, ...]} or {"image": ["base64_string", ...]}
+    multi_modal_data: Optional[List[Optional[Dict[str, Any]]]]
 
 
 class InferenceEngineOutput(TypedDict):

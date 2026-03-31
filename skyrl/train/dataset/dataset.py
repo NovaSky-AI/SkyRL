@@ -15,12 +15,14 @@ class PromptDataset:
         num_workers: int = 8,
         prompt_key: str = "prompt",
         env_class_key: str = "env_class",
+        env_filter: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.prompt_key = prompt_key
         self.env_class_key = env_class_key
         self.num_workers = num_workers
+        self.env_filter = env_filter
 
         self.datasets = datasets
         if isinstance(self.datasets, str):
@@ -54,6 +56,17 @@ class PromptDataset:
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(loaded_datasets)
 
         logger.info(f"Total dataset size: {len(self.dataframe)}")
+
+        # Filter by data_source if env_filter is set
+        if self.env_filter:
+            allowed = {e.strip() for e in self.env_filter.split(",") if e.strip()}
+            before = len(self.dataframe)
+            self.dataframe = self.dataframe.filter(
+                lambda row: row.get("data_source", "") in allowed,
+                num_proc=self.num_workers,
+                desc=f"Filtering by env_filter ({allowed})",
+            )
+            logger.info(f"env_filter={allowed}: {before} -> {len(self.dataframe)} rows")
 
         # filter out too long prompts
         tokenizer = self.tokenizer
