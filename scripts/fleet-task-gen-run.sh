@@ -41,7 +41,7 @@ bash scripts/fleet-common-run.sh \
   trainer.epochs=${NUM_EPOCHS} \
   trainer.eval_batch_size=12 \
   trainer.eval_before_train=false \
-  trainer.eval_interval=20 \
+  trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=12 \
   trainer.use_hybrid_env_sampling=true \
@@ -86,5 +86,6 @@ bash scripts/fleet-common-run.sh \
   ++environment.skyrl_gym.task_gen.max_eval_steps=$MAX_EVAL_STEPS \
   ++environment.skyrl_gym.task_gen.evaluator_model="${EVALUATOR_MODEL:-anthropic/claude-sonnet-4.5}" \
   ++environment.skyrl_gym.task_gen.eval_k_rollouts=8 \
+  ++environment.skyrl_gym.task_gen.tool_call_reward_per_call=0.02 \
   "${ENV_FILTER_ARGS[@]}" \
   "$@"

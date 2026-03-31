@@ -34,8 +34,8 @@ envs:
   DATA_VERSION: "v55"
   MODALITY: "tool_use"
   MAX_TURNS: 10
-  MAX_INPUT_LENGTH: 30720
-  MAX_GENERATE_LENGTH: 2048
+  MAX_INPUT_LENGTH: 65536
+  MAX_GENERATE_LENGTH: 4096
   NUM_EPOCHS: 20
   JUDGE_MODEL: "anthropic/claude-sonnet-4.5"
   EVALUATOR_MODEL: "anthropic/claude-sonnet-4.5"

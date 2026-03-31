@@ -191,12 +191,16 @@ class TaskGenEnv(BaseTextEnv):
         # Provides GRPO gradient signal even when all harness evals return 0.
         self.base_quality_reward = float(env_config.get("base_quality_reward", 0.1)) if env_config else 0.1
 
+        # Small per-tool-call reward to incentivize DB exploration (describe_db, query_db).
+        # Default 0.0 = off (no behavior change for existing runs).
+        self.tool_call_reward_per_call = float(env_config.get("tool_call_reward_per_call", 0.0)) if env_config else 0.0
+
         logger.info(
             f"TaskGenEnv: env={self.env_key}, max_turns={self.max_turns}, "
             f"judge={self.judge_model or 'none'}, "
             f"tools={len(self.env_tools)}, k={self.k_rollouts}, eval_k={self.eval_k_rollouts}, "
             f"evaluator={self.evaluator_model}, is_eval={self.is_eval}, "
-            f"base_quality={self.base_quality_reward}"
+            f"base_quality={self.base_quality_reward}, tool_call_reward={self.tool_call_reward_per_call}"
         )
 
     def _format_tool_schema(self, tool: Dict[str, Any]) -> str:
@@ -1020,18 +1024,22 @@ Generate exactly ONE task. Output it in this format:
         # 4. Hint-based evaluation via Fleet harness
         eval_result = await self._evaluate_task(prompt, verifier)
 
-        # 5. R = base_quality + eval_signal
+        # 5. R = base_quality + tool_call_reward + eval_signal
         # base_quality: small reward for passing sandbox+judge (structural validity)
+        # tool_call_reward: incentivize DB exploration (describe_db, query_db)
         # eval_signal: judge_gate * compute_task_reward (harness-based quality)
         # This prevents GRPO zero-signal deadlock when all harness evals fail.
         base_quality = self.base_quality_reward
+        tool_call_reward = self.meta_tool_calls * self.tool_call_reward_per_call
         eval_signal = judge_gate * eval_result["total"]
-        reward = base_quality + eval_signal
+        reward = base_quality + tool_call_reward + eval_signal
 
         metadata["reward_breakdown"] = {
             "sandbox": 1.0,
             "judge": judge_gate,
             "base_quality": base_quality,
+            "tool_call_reward": tool_call_reward,
+            "meta_tool_calls": self.meta_tool_calls,
             "eval_signal": eval_signal,
             **eval_result,
             "total": reward,
