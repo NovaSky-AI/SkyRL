@@ -248,7 +248,7 @@ class MegatronModelWrapper:
             action_mask = data.get("action_mask")
             num_microbatches = data.get("num_microbatches")
 
-            dp_size = mpu.get_data_parallel_world_size()
+            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
@@ -346,7 +346,7 @@ class MegatronModelWrapper:
             # when summing across the entire minibatch (see `apply_loss_reduction_to_advantages_minibatch`).
             # Megatron divides loss by num_microbatches
             # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
-            # and the data parallel all-reduce averages gradients across dp_size
+            # and the data parallel all-reduce averages gradients across dp_size (including CP ranks)
             # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
             # so we multiply by both factors to recover the correct sum reduction.
             grad_sum_correction_factor = num_microbatches * dp_size

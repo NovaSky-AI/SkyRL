@@ -740,7 +740,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        group = mpu.get_data_parallel_group(with_context_parallel=True)
+        group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
