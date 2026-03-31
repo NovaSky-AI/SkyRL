@@ -440,7 +440,10 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
             new_A = nnx.initializers.he_uniform()(rngs.params(), value[idx].shape, value.dtype)
-            new_A = new_A.at[..., effective_rank:].set(0.0)
+            # Zero columns beyond rank using multiplication (avoids MPS zero-sized tensor issues)
+            if new_A.shape[-1] > 0:
+                mask = jnp.arange(new_A.shape[-1]) < effective_rank
+                new_A = new_A * mask.astype(new_A.dtype)
             return value.at[idx].set(new_A)
         if key_name == "lora_B":
             # Explicitly zero lora_B

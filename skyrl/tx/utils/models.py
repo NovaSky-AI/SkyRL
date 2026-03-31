@@ -229,7 +229,8 @@ def load_safetensors(
                 tensor = tensor.reshape(param.shape)
             assert param.shape == tensor.shape, f"shape mismatch for {key}"
             # ArrayRef.set_raw_value writes through to the stacked parent variable
-            param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
+            # Use np.ascontiguousarray to ensure data is contiguous (required by jax-mps backend)
+            param.set_raw_value(jax.device_put(np.ascontiguousarray(tensor.astype(param.dtype)), param.sharding))
 
 
 def save_safetensors(

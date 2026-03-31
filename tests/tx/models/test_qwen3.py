@@ -55,11 +55,11 @@ def test_qwen3(tp: int):
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight.detach().numpy().T
+    jax_moe_layer.gate.kernel[:] = np.ascontiguousarray(hf_moe_layer.gate.weight.detach().numpy().T)
     for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+        jax_moe_layer.experts.gate_proj.weight[i, :, :] = np.ascontiguousarray(expert.gate_proj.weight.detach().numpy().T)
+        jax_moe_layer.experts.up_proj.weight[i, :, :] = np.ascontiguousarray(expert.up_proj.weight.detach().numpy().T)
+        jax_moe_layer.experts.down_proj.weight[i, :, :] = np.ascontiguousarray(expert.down_proj.weight.detach().numpy().T)
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
@@ -100,8 +100,9 @@ def load_lora_weights(
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(lora_A_weights))
-    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(lora_B_weights))
+    # Use np.ascontiguousarray to ensure data is contiguous (required by jax-mps backend)
+    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(np.ascontiguousarray(lora_A_weights)))
+    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(np.ascontiguousarray(lora_B_weights)))
     jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[adapter_idx].set(scaling)
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
