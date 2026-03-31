@@ -37,7 +37,8 @@ envs:
   MAX_INPUT_LENGTH: 65536
   MAX_GENERATE_LENGTH: 4096
   NUM_EPOCHS: 20
-  JUDGE_MODEL: "anthropic/claude-sonnet-4.5"
+  JUDGE_MODEL: "anthropic/claude-3.5-haiku"
+  OPENROUTER_API_KEY: ""
   EVALUATOR_MODEL: "anthropic/claude-sonnet-4.5"
   K_ROLLOUTS: 4
   ALPHA: "1.0"

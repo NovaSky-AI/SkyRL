@@ -548,31 +548,54 @@ Generate exactly ONE task. Output it in this format:
         return "\n".join(parts)
 
     def _judge_task(self, prompt: str, verifier: str) -> float:
-        """LLM-as-a-judge gate: returns 0.0 (invalid) or 1.0 (valid).
+        """LLM classifier gate: returns 0.0 (reject) or 1.0 (accept).
 
-        Uses a model to check if the generated (prompt, verifier) pair
-        is valid and coherent. This is the binary gate in the reward formula.
+        Predicts whether the (prompt, verifier) pair will produce meaningful
+        evaluation signal. Optimized for very low false positive rate — only
+        rejects tasks that are near-certain to waste harness compute.
+
+        Checks:
+            1. Phantom tables: verifier references tables not in env schema
+            2. Undefined references: calls to functions/constants not defined
+            3. Vacuous checks: verifier only checks user existence or len>0
+            4. Prompt-verifier misalignment: verifier checks outcomes the
+               prompt never asked for (e.g., write checks for read prompts)
         """
         if not self.judge_model or not self.openrouter_api_key:
             return 1.0  # No judge configured, pass through
 
-        # Build concise tool list for context
+        # Build context for the classifier
         tool_names = [t for t in self.env_tools if t != "computer"]
         tools_str = ", ".join(tool_names[:20]) if tool_names else "none discovered"
 
+        schema_block = self.env_schema if self.env_schema else "Schema not available."
+
         judge_prompt = (
-            f'Evaluate this task for the "{self.env_key}" environment.\n\n'
+            "You are a pre-filter that decides whether to run an expensive evaluation harness "
+            "on a generated (prompt, verifier) pair. Your goal: reject tasks that will CERTAINLY "
+            "produce zero useful signal, while accepting anything that MIGHT work.\n\n"
+            "ACCEPT unless you find a clear, concrete defect from this list:\n\n"
+            "1. PHANTOM TABLES — The verifier calls .table(\"X\") where X does not exist in the "
+            "schema below. If the table doesn't exist, the verifier crashes → zero signal.\n\n"
+            "2. UNDEFINED REFERENCES — The verifier calls functions (e.g., find_new_entries()) or "
+            "uses constants (e.g., TASK_FAILED_SCORE) that are not defined in the code and are "
+            "not Python builtins. These cause NameError → zero signal.\n\n"
+            "3. VACUOUS CHECKS — The verifier's ONLY checks are whether a user/account exists or "
+            "whether any table has rows (len > 0), without validating any task-specific outcome. "
+            "These always pass regardless of agent behavior → zero variance → zero signal.\n\n"
+            "4. PROMPT-VERIFIER MISMATCH — The prompt asks for read-only operations (search, list, "
+            "view, find, get) but the verifier checks for write operations (new rows in tables, "
+            "saved items, created records). Read operations don't create DB entries, so the "
+            "verifier will find nothing → zero signal.\n\n"
+            "IMPORTANT: When in doubt, ACCEPT. A false reject wastes a potentially good task. "
+            "A false accept only wastes one harness call. Err heavily toward ACCEPT.\n\n"
+            f'--- Environment: "{self.env_key}" ---\n\n'
             f"Available tools: {tools_str}\n\n"
-            f"Task prompt:\n{prompt}\n\n"
-            f"Verifier code:\n```python\n{verifier}\n```\n\n"
-            "A valid task must:\n"
-            "1. Have a clear, specific prompt describing what an agent should do\n"
-            "2. Have a verifier that checks the correct outcome via the DB API "
-            '(env.db("seed"), env.db("current"), .table().eq().all())\n'
-            "3. The verifier must check what the prompt actually asks\n"
-            "4. The prompt must not leak the answer or expected values\n"
-            "5. The verifier must return 0.0 on a fresh env (before agent acts)\n\n"
-            "Answer with exactly one word: VALID or INVALID"
+            f"Database schema (these are the ONLY valid tables):\n```\n{schema_block}\n```\n\n"
+            f"--- Generated task ---\n\n"
+            f"Prompt:\n{prompt}\n\n"
+            f"Verifier:\n```python\n{verifier}\n```\n\n"
+            "Answer with exactly one word: ACCEPT or REJECT"
         )
 
         try:
@@ -586,11 +609,14 @@ Generate exactly ONE task. Output it in this format:
                 api_key=self.openrouter_api_key,
             )
             answer = response.choices[0].message.content.strip().upper()
-            is_valid = "VALID" in answer and "INVALID" not in answer
-            logger.info(f"LLM judge [{self.env_key}]: {answer} -> {'VALID' if is_valid else 'INVALID'}")
-            return 1.0 if is_valid else 0.0
+            accepted = "ACCEPT" in answer and "REJECT" not in answer
+            logger.info(
+                f"LLM classifier [{self.env_key}]: {answer} -> "
+                f"{'ACCEPT' if accepted else 'REJECT'}"
+            )
+            return 1.0 if accepted else 0.0
         except Exception as e:
-            logger.warning(f"LLM judge failed, defaulting to valid: {e}")
+            logger.warning(f"LLM classifier failed, defaulting to accept: {e}")
             return 1.0
 
     @staticmethod
