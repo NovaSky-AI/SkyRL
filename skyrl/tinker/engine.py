@@ -175,7 +175,7 @@ def get_backend_classes(backend_name: str):
         )
 
         return SkyRLTrainBackend, MegatronBackendOverrides
-    elif backend_name == "ray_jax":
+    elif backend_name == "ray-jax":
         from skyrl.backends.jax import JaxBackendConfig
         from skyrl.backends.ray_jax import RayJaxBackend
 

@@ -1,11 +1,14 @@
 import time
 import argparse
 import ray
+import threading
+import uvicorn
 
 from skyrl.tinker.config import APIConfig, EngineConfig, SkyRLTxConfig, add_model
 from skyrl.backends.jax import JaxBackendConfig
-from skyrl.tinker.ray import run_ray_detached_actors
 from skyrl.utils.log import logger
+from skyrl.tinker.api import app
+from skyrl.tinker.engine import TinkerEngine
 
 import tinker
 import numpy as np
@@ -39,16 +42,37 @@ def main():
     engine_config.backend_config = jax_backend_config.model_dump()
     engine_config.database_url = "sqlite:////tmp/tinker.db"
     config = SkyRLTxConfig(api=api_config, engine=engine_config, jax_backend=jax_backend_config)
-    
+
     # Force Ray orchestrated mode and ray_jax backend
     config.engine.use_ray = True
     config.engine.backend = "ray_jax"
-    
+
     logger.info(f"Initializing Ray with address: {config.engine.ray_address or 'local'}")
     ray.init(address=config.engine.ray_address)
-    tinker_address = run_ray_detached_actors(config)
-    logger.info(f"Tinker address: {tinker_address}")
-    time.sleep(120)
+    logger.info("Starting Tinker API and Engine in driver process threads...")
+
+    app.state.engine_config = config.engine
+
+    def run_api():
+        from skyrl.utils.log import get_uvicorn_log_config
+        uvicorn.run(app, host=config.api.host, port=config.api.port, log_config=get_uvicorn_log_config())
+
+    api_thread = threading.Thread(target=run_api, daemon=True)
+    api_thread.start()
+
+    engine_instance = TinkerEngine(config.engine)
+
+    def run_engine():
+        engine_instance.run()
+
+    engine_thread = threading.Thread(target=run_engine, daemon=True)
+    engine_thread.start()
+
+    tinker_address = "localhost"
+    logger.info(f"Tinker API and Engine started. API address: {tinker_address}:{config.api.port}")
+
+    logger.info("Waiting for services to initialize...")
+    time.sleep(30)
     service_client = tinker.ServiceClient(base_url=f"http://{tinker_address}:8000", api_key="tml-dummy")
     training_client = service_client.create_lora_training_client(base_model="Qwen/Qwen3-0.6B")
     tokenizer = training_client.get_tokenizer()
