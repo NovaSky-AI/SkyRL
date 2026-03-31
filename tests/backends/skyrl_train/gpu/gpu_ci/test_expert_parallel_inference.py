@@ -9,7 +9,6 @@ import asyncio
 import pytest
 import pytest_asyncio
 import ray
-from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -88,11 +87,8 @@ async def inference_state(module_scoped_ray_init_fixture, test_config):
 
 
 async def _run_single_generation(client, prompts, sampling_params, tokenizer):
-    logger.info("Running single generation now")
     tasks = [run_inference(client, [p], sampling_params, tokenizer=tokenizer) for p in prompts]
-    logger.info("About to wait for all the tasks")
     results = await asyncio.gather(*tasks)
-    logger.info("Finished waiting for all the tasks")
     responses, reasons = [], []
     for r in results:
         responses.extend(r["responses"])
@@ -110,7 +106,6 @@ async def test_ep_generation(inference_state: InferenceEngineState, test_config:
     _ensure_chat_template(tokenizer)
     inference_state.client.tokenizer = tokenizer
     prompts = get_test_prompts(MODEL, num_samples=4)
-    logger.info("Came here - got all the prompts")
     sampling_params = get_sampling_params_for_backend(
         test_config.generator.inference_engine.backend, test_config.generator.sampling_params
     )
