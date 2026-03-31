@@ -558,8 +558,6 @@ Generate exactly ONE task. Output it in this format:
             1. Phantom tables: verifier references tables not in env schema
             2. Undefined references: calls to functions/constants not defined
             3. Vacuous checks: verifier only checks user existence or len>0
-            4. Prompt-verifier misalignment: verifier checks outcomes the
-               prompt never asked for (e.g., write checks for read prompts)
         """
         if not self.judge_model or not self.openrouter_api_key:
             return 1.0  # No judge configured, pass through
@@ -583,10 +581,6 @@ Generate exactly ONE task. Output it in this format:
             "3. VACUOUS CHECKS — The verifier's ONLY checks are whether a user/account exists or "
             "whether any table has rows (len > 0), without validating any task-specific outcome. "
             "These always pass regardless of agent behavior → zero variance → zero signal.\n\n"
-            "4. PROMPT-VERIFIER MISMATCH — The prompt asks for read-only operations (search, list, "
-            "view, find, get) but the verifier checks for write operations (new rows in tables, "
-            "saved items, created records). Read operations don't create DB entries, so the "
-            "verifier will find nothing → zero signal.\n\n"
             "IMPORTANT: When in doubt, ACCEPT. A false reject wastes a potentially good task. "
             "A false accept only wastes one harness call. Err heavily toward ACCEPT.\n\n"
             f'--- Environment: "{self.env_key}" ---\n\n'
