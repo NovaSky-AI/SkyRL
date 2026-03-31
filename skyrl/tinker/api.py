@@ -120,62 +120,54 @@ async def lifespan(app: FastAPI):
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters.
-    if not app.state.engine_config.use_ray:
-        parent_cmd = psutil.Process(os.getppid()).cmdline()
-        cmd = _build_uv_run_cmd_engine(parent_cmd, app.state.engine_config)
+    parent_cmd = psutil.Process(os.getppid()).cmdline()
+    cmd = _build_uv_run_cmd_engine(parent_cmd, app.state.engine_config)
 
-        background_engine = await asyncio.create_subprocess_exec(*cmd)
-        app.state.background_engine = background_engine
-        logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
+    background_engine = await asyncio.create_subprocess_exec(*cmd)
+    app.state.background_engine = background_engine
+    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
 
-        shutting_down = False
+    shutting_down = False
 
-        async def monitor_engine():
-            """Monitor engine process and exit API server if it crashes."""
-            exit_code = await background_engine.wait()
-            if not shutting_down:
-                logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
+    async def monitor_engine():
+        """Monitor engine process and exit API server if it crashes."""
+        exit_code = await background_engine.wait()
+        if not shutting_down:
+            logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
 
-                # Start a background timer that force-exits after timeout.
-                # Using a thread instead of asyncio task because SIGTERM handling
-                # may wait for pending asyncio tasks to complete before exiting.
-                def force_exit():
-                    logger.warning("Graceful shutdown timed out, forcing exit")
-                    os._exit(1)
+            # Start a background timer that force-exits after timeout.
+            # Using a thread instead of asyncio task because SIGTERM handling
+            # may wait for pending asyncio tasks to complete before exiting.
+            def force_exit():
+                logger.warning("Graceful shutdown timed out, forcing exit")
+                os._exit(1)
 
-                timer = threading.Timer(SHUTDOWN_TIMEOUT_SECONDS, force_exit)
-                timer.daemon = True
-                timer.start()
+            timer = threading.Timer(SHUTDOWN_TIMEOUT_SECONDS, force_exit)
+            timer.daemon = True
+            timer.start()
 
-                # Request graceful shutdown. Uvicorn will stop accepting new
-                # connections and wait for active requests to complete.
-                # If shutdown doesn't complete in time, force_exit() will terminate.
-                os.kill(os.getpid(), signal.SIGTERM)
+            # Request graceful shutdown. Uvicorn will stop accepting new
+            # connections and wait for active requests to complete.
+            # If shutdown doesn't complete in time, force_exit() will terminate.
+            os.kill(os.getpid(), signal.SIGTERM)
 
-        monitor_task = asyncio.create_task(monitor_engine())
-    else:
-        logger.info("Running in Ray orchestrated mode. Background engine will not be started here.")
-        shutting_down = False
-        monitor_task = None
+    monitor_task = asyncio.create_task(monitor_engine())
 
     yield
 
     shutting_down = True
-    if monitor_task:
-        monitor_task.cancel()
+    monitor_task.cancel()
 
-    if getattr(app.state, "background_engine", None):
-        logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-        with suppress(ProcessLookupError):
-            background_engine = app.state.background_engine
-            background_engine.terminate()
-            try:
-                await asyncio.wait_for(background_engine.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-                background_engine.kill()
-                await background_engine.wait()
-        logger.info("Background engine stopped")
+    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
+    with suppress(ProcessLookupError):
+        background_engine.terminate()
+        try:
+            await asyncio.wait_for(background_engine.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+            background_engine.kill()
+            await background_engine.wait()
+    logger.info("Background engine stopped")
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
