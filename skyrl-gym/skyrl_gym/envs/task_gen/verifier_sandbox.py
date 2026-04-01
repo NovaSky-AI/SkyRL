@@ -66,7 +66,7 @@ BLOCKED_BUILTINS = {
 
 # Min/max AST node count for verifier complexity
 MIN_AST_NODES = 5  # reject trivial verifiers like `return 1.0`
-MAX_AST_NODES = 500  # reject overly complex verifiers
+MAX_AST_NODES = 700  # reject overly complex verifiers
 
 
 class VerifierSandbox:

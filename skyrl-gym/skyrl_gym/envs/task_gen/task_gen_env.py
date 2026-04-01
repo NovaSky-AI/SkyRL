@@ -569,24 +569,58 @@ Generate exactly ONE task. Output it in this format:
         schema_block = self.env_schema if self.env_schema else "Schema not available."
 
         judge_prompt = (
-            "You are a pre-filter that decides whether to run an expensive evaluation harness "
-            "on a generated (prompt, verifier) pair. Your goal: reject tasks that will CERTAINLY "
-            "produce zero useful signal, while accepting anything that MIGHT work.\n\n"
-            "ACCEPT unless you find a clear, concrete defect from this list:\n\n"
-            "1. PHANTOM TABLES — The verifier calls .table(\"X\") where X does not exist in the "
-            "schema below. If the table doesn't exist, the verifier crashes → zero signal.\n\n"
-            "2. UNDEFINED REFERENCES — The verifier calls functions (e.g., find_new_entries()) or "
-            "uses constants (e.g., TASK_FAILED_SCORE) that are not defined in the code and are "
-            "not Python builtins. These cause NameError → zero signal.\n\n"
-            "3. VACUOUS CHECKS — The verifier's ONLY checks are whether a user/account exists or "
-            "whether any table has rows (len > 0), without validating any task-specific outcome. "
-            "These always pass regardless of agent behavior → zero variance → zero signal.\n\n"
-            "IMPORTANT: When in doubt, ACCEPT. A false reject wastes a potentially good task. "
-            "A false accept only wastes one harness call. Err heavily toward ACCEPT.\n\n"
-            f'--- Environment: "{self.env_key}" ---\n\n'
+            "You are a verifier quality judge for an AI task-generation system. You evaluate "
+            "whether a generated verifier function can reliably determine if an AI agent "
+            "correctly completed a task.\n\n"
+            "## Context\n\n"
+            "The verifier has access to:\n"
+            "- `env.db(\"seed\")` — database state BEFORE the agent acted\n"
+            "- `env.db(\"current\")` — database state AFTER the agent acted\n"
+            "- `final_answer` — the agent's text response\n"
+            "- DB query methods: `.table(name)`, `.eq(col, val)`, `.first()`, `.all()`, "
+            "`.select()`, `.neq()`, `.gt()`, `.lt()`\n\n"
+            f"Database schema (valid tables and columns):\n```\n{schema_block}\n```\n\n"
+            f'Environment: "{self.env_key}"\n'
             f"Available tools: {tools_str}\n\n"
-            f"Database schema (these are the ONLY valid tables):\n```\n{schema_block}\n```\n\n"
-            f"--- Generated task ---\n\n"
+            "## Classification Criteria\n\n"
+            "### ACCEPT if the verifier does ANY of:\n\n"
+            "1. **Mutation verification**: Compares seed vs current database state to detect "
+            "that the agent created, modified, or deleted records.\n\n"
+            "2. **DB-grounded answer validation**: Queries the database for specific records "
+            "and validates that values FROM those records appear in `final_answer`. The "
+            "expected values must come from the database, not from hardcoded strings or "
+            "the task prompt.\n\n"
+            "3. **Specific record validation**: Looks up a record by ID or unique field and "
+            "checks its field values match expected values.\n\n"
+            "### REJECT if the verifier does ANY of:\n\n"
+            "1. **Generic keyword checking**: Checks if generic category words appear in "
+            "`final_answer` (e.g., \"event\", \"venue\", \"concert\", \"price\", \"bedroom\", "
+            "\"listing\"). These words appear in any topically-relevant response regardless "
+            "of task completion.\n\n"
+            "2. **Prompt echo checking**: Checks if values from the task prompt appear in "
+            "`final_answer` (e.g., \"Los Angeles\" when the prompt asked about LA events). "
+            "The agent could echo prompt values without doing any work.\n\n"
+            "3. **Exists-check-only**: Only checks `final_answer is not None` or "
+            "`len(answer) > 0`.\n\n"
+            "4. **Dead code DB queries**: Has `seed.table()` or `current.table()` calls but "
+            "never uses the query results in conditional logic that affects the return value.\n\n"
+            "5. **Nonexistent API access**: References `env.instance.tool_calls`, "
+            "`get_call_history()`, or `env.call_tool()` — these don't exist in the verifier "
+            "runtime.\n\n"
+            "6. **Cargo-cult DB**: Queries the DB only for user/account existence (which always "
+            "passes for pre-existing entities), then gates on keyword checks for actual "
+            "validation.\n\n"
+            "7. **Phantom tables**: The verifier calls `.table(\"X\")` where X does not exist "
+            "in the schema above.\n\n"
+            "8. **Undefined references**: The verifier calls functions or uses constants that "
+            "are not defined in the code and are not Python builtins.\n\n"
+            "### Edge Cases:\n\n"
+            "- Read-only tasks with DB-grounded keywords: ACCEPT — if the verifier queries a "
+            "DB table to get specific values then checks those values appear in `final_answer`.\n"
+            "- JSON structure validation without DB cross-reference: REJECT.\n"
+            "- Existence checks on initially-empty tables (e.g., orders after \"place order\"): "
+            "weak ACCEPT.\n\n"
+            f"## Generated Task\n\n"
             f"Prompt:\n{prompt}\n\n"
             f"Verifier:\n```python\n{verifier}\n```\n\n"
             "Answer with exactly one word: ACCEPT or REJECT"
@@ -1085,6 +1119,29 @@ Generate exactly ONE task. Output it in this format:
 
         # 1. Check for <task> block → evaluation pipeline
         if "<task>" in action:
+            # Gate: model must call describe_db before submitting a task.
+            # This forces at least 2 turns (describe_db → submit) and ensures
+            # the model has seen the actual schema before generating a verifier.
+            if not self.called_describe_db and self.max_turns > 1:
+                remaining = self.max_turns - self.turns
+                nudge = (
+                    "You must call `describe_db` to see the database schema before submitting a task. "
+                    "Use `describe_db` first, then explore with `query_db`, and finally submit your `<task>` block."
+                )
+                if remaining <= 1:
+                    # Last turn and never explored — game over
+                    return BaseTextEnvStepOutput(
+                        observations=[],
+                        reward=0.0,
+                        done=True,
+                        metadata={"env_key": self.env_key, "turn": self.turns, "done_reason": "no_exploration"},
+                    )
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": nudge}],
+                    reward=0.0,
+                    done=False,
+                    metadata={"env_key": self.env_key, "turn": self.turns, "rejected": "no_describe_db"},
+                )
             return await self._handle_task_generation(action)
 
         # 2. Check for tool calls → execute all via Fleet orchestrator or MCP
@@ -1233,6 +1290,28 @@ Generate exactly ONE task. Output it in this format:
                 # instance.load() is async — must await directly, not via to_thread
                 await self.orch._fleet_env.instance.load()
                 logger.info(f"TaskGenEnv [{self.env_key}]: Fleet env provisioned for DB + tool exploration")
+
+                # Auto-populate env_schema from describe_db if not provided in dataset.
+                # This ensures the judge prompt and system prompt always have the real schema.
+                if not self.env_schema:
+                    try:
+                        schema_result = await self.orch.describe_db_async(db_name="seed")
+                        if isinstance(schema_result, dict):
+                            # Format as compact "table: col1, col2, ..." lines
+                            lines = []
+                            for table_name, columns in schema_result.items():
+                                if isinstance(columns, list):
+                                    col_names = ", ".join(str(c) for c in columns)
+                                else:
+                                    col_names = str(columns)
+                                lines.append(f"{table_name}: {col_names}")
+                            self.env_schema = "\n".join(lines)
+                        elif isinstance(schema_result, str):
+                            self.env_schema = schema_result
+                        if self.env_schema:
+                            logger.info(f"TaskGenEnv [{self.env_key}]: Auto-populated env_schema from describe_db")
+                    except Exception as e:
+                        logger.warning(f"TaskGenEnv [{self.env_key}]: Failed to auto-populate env_schema: {e}")
 
                 # Discover MCP tools so the model can call them
                 if self.mcp_tools:
