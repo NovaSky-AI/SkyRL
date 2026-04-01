@@ -422,6 +422,11 @@ class InferenceEngineState:
     router: Optional[VLLMRouter]
     server_group: Optional[ServerGroup]
 
+    def __post_init__(self):
+        # internal attribute to track if the inference engines need a wake_up()
+        # call before generation
+        self._needs_wake_up = False
+
     def _close_common(self):
         """Shutdown router, server_group, and Ray actors (sync resources).
 
@@ -460,7 +465,7 @@ class InferenceEngineState:
         return False
 
     async def __aenter__(self):
-        if getattr(self, "_needs_wake_up", False):
+        if self._needs_wake_up:
             await self.client.wake_up()
             self._needs_wake_up = False
         return self
