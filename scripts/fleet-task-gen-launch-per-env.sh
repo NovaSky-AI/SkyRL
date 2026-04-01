@@ -8,10 +8,9 @@
 #   bash scripts/fleet-task-gen-launch-per-env.sh [env1 env2 ...]
 #
 # If no envs specified, defaults to: ticketmaster zillow outlook
-set -euo pipefail
+set -eo pipefail
 
 YAML="tasks/task-gen-grpo-qwen3_5-9b.yaml"
-EVAL_RATIO="0.05"
 TARGET_STEPS=40
 BATCH_SIZE=12
 
@@ -23,19 +22,23 @@ BATCH_SIZE=12
 : "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 
 # Seed counts per env from v55 dataset (after EVAL_RATIO=0.05 split)
-declare -A SEEDS=(
-  [booking]=539 [budget]=567 [carlisle]=336 [outlook]=181
-  [reddit]=505 [rops-mail]=44 [ticketmaster]=212 [zillow]=106
-)
+get_seeds() {
+  case "$1" in
+    booking) echo 539 ;; budget) echo 567 ;; carlisle) echo 336 ;;
+    outlook) echo 181 ;; reddit) echo 505 ;; rops-mail) echo 44 ;;
+    ticketmaster) echo 212 ;; zillow) echo 106 ;; *) echo 100 ;;
+  esac
+}
 
 # Default envs if none specified on command line
-ENVS=("${@:-ticketmaster zillow outlook}")
-if [[ $# -eq 0 ]]; then
+if [[ $# -gt 0 ]]; then
+  ENVS=("$@")
+else
   ENVS=(ticketmaster zillow outlook)
 fi
 
 for env in "${ENVS[@]}"; do
-  seeds=${SEEDS[$env]:-100}
+  seeds=$(get_seeds "$env")
   steps_per_epoch=$(( (seeds + BATCH_SIZE - 1) / BATCH_SIZE ))
   num_epochs=$(( (TARGET_STEPS + steps_per_epoch - 1) / steps_per_epoch ))
   total_steps=$(( steps_per_epoch * num_epochs ))
