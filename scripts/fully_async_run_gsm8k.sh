@@ -1,26 +1,22 @@
-set -x
-
+#!/usr/bin/env bash
 # Fully async GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
-# This bash script is copied from examples/train/async/async_run_gsm8k.sh, except for:
-# - running examples.train.fully_async.main_fully_async
-# - setting the generator.batched=false.
-# - colocate_all=false
-# - the various generator configs at the end (http, chat template, etc.)
+# Routes through fleet-common-run.sh for multi-node Ray cluster setup.
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/train/fully_async/fully_async_run_gsm8k.sh
+export LOGGER="${LOGGER:-wandb}"
+export INFERENCE_BACKEND="${INFERENCE_BACKEND:-vllm}"
+export MODALITY="${MODALITY:-gsm8k}"
 
-# NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
+: "${WANDB_API_KEY:?Set WANDB_API_KEY before running}"
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train/fully_async/fully_async_run_gsm8k.sh`.
-
-: "${DATA_DIR:="$HOME/data/gsm8k"}"
-: "${NUM_INFERENCE_GPUS:=8}"
-: "${NUM_POLICY_GPUS:=8}"
-: "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
-
-: "${INFERENCE_BACKEND:=vllm}"
+# --- Prepare GSM8K dataset if not already present ---
+GSM8K_DATA_DIR="$HOME/data/fleet/gsm8k"
+if [ ! -f "$GSM8K_DATA_DIR/train.parquet" ]; then
+  echo "Preparing GSM8K dataset at $GSM8K_DATA_DIR..."
+  source .venv/bin/activate
+  uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir "$GSM8K_DATA_DIR"
+fi
 
 # Fully async specific configuration knobs:
 : "${MINI_BATCH_SIZE:=256}"
@@ -30,11 +26,13 @@ set -x
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
-RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
 
-uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
-  data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
+bash scripts/fleet-common-run.sh \
+  --entrypoint examples.train.fully_async.main_fully_async \
+  --env-class gsm8k \
+  --data-dir-name gsm8k \
+  -- \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -43,9 +41,8 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_POLICY_GPUS \
-  trainer.placement.critic_num_gpus_per_node=$NUM_POLICY_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_POLICY_GPUS \
+  trainer.placement.policy_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE \
+  trainer.placement.ref_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
@@ -76,4 +73,4 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
-  $@
+  "$@"

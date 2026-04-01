@@ -19,7 +19,7 @@ uv sync --extra fsdp
 uv pip install wandb
 
 # --- Download and prepare GSM8K dataset ---
-DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
+DATA_DIR="${DATA_DIR:-$HOME/data/fleet/gsm8k}"
 echo "Preparing GSM8K dataset at $DATA_DIR..."
 uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir "$DATA_DIR"
 echo "GSM8K dataset ready."
