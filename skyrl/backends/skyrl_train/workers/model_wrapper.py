@@ -385,7 +385,7 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
-        use_chunked = self.loss_chunk_size > 0
+        use_chunked = self.loss_chunk_size is not None and self.loss_chunk_size > 0
 
         if use_chunked:
             # Chunked lm_head: avoid materializing full (B, S, vocab_size) logits tensor.
