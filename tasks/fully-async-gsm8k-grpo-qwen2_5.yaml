@@ -1,0 +1,59 @@
+# Fleet Task GRPO Training via SkyPilot - Qwen3.5-35B-A3B (MoE, Multi-Node)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# MoE: 35B total, 3B active (256 experts, 9 active/token). GatedDeltaNet architecture.
+# 262K native context. All 35B params in memory (~70GB fp16), optimizer ~140GB, gradients ~70GB.
+#
+# Multi-node (2-node default, 16 GPUs total): 8x H200 per node
+# NOTE: Requires vLLM >= 0.17.0 for native Qwen3.5/GDN support + FlashAttention 4
+
+name: xiaohan-repro-fleet-task-grpo-qwen3-5-35b
+
+resources:
+  disk_size: 750
+  memory: 1500+
+  ports: 6479
+  any_of:
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+
+num_nodes: 2
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
+  ref: xiaohan/fully_async_gsm8k
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v55"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "tool_use"
+  MAX_TURNS: 50
+  MAX_INPUT_LENGTH: 72000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 10
+  RUN_ID: "xiaohan-0401"
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  # TP=2 -> 8 engines (each uses 2 GPUs) to match 16 policy GPUs with colocate_all
+  NUM_INFERENCE_ENGINES: 8
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+
+run: |
+  bash scripts/fully_async_run_gsm8k.sh
