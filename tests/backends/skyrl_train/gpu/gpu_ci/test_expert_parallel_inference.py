@@ -147,7 +147,7 @@ async def test_ep_weight_sync(inference_state: InferenceEngineState, test_config
     ray.get(
         policy.async_run_ray_method(
             "pass_through",
-            "init_weight_sync_engines",
+            "init_weight_sync_state",
             inference_state.client,
             test_config.generator.inference_engine,
         )
