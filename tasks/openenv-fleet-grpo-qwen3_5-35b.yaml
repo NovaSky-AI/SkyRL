@@ -7,7 +7,7 @@
 # Multi-node (2-node default, 16 GPUs total): 8x H200 per node
 # NOTE: Requires vLLM >= 0.17.0 for native Qwen3.5/GDN support + FlashAttention 4
 
-name: fleet-task-grpo-qwen3-5-35b
+name: xiaohan-repro-fleet-task-grpo-qwen3-5-35b
 
 resources:
   disk_size: 750
@@ -18,22 +18,12 @@ resources:
       cloud: gcp
       use_spot: true
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
-    - accelerators: H200:8
-      cloud: kubernetes
-      network_tier: best
-      use_spot: true
-    - accelerators: H200:8
-      cloud: runpod
-    - accelerators: H200:8
-      cloud: lambda
-    - accelerators: H200:8
-      cloud: nebius
 
 num_nodes: 2
 
 workdir:
-  url: https://github.com/fleet-ai/SkyRL-v2.git
-  ref: main
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
+  ref: xiaohan/repro-qwen35_35b_tool_use_9cef4bce
 
 envs:
   WANDB_API_KEY: ""
