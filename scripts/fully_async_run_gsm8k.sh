@@ -30,6 +30,7 @@ TIS_IMP_RATIO_CAP=2.0
 RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
 
 bash scripts/fleet-common-run.sh \
+  --use-python-direct \
   --entrypoint examples.train.fully_async.main_fully_async \
   --env-class gsm8k \
   --data-dir-name gsm8k \
