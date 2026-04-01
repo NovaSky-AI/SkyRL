@@ -226,6 +226,17 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
+                        if 400 <= resp.status < 500:
+                            # Non-JSON client error (e.g. plain text 422 from vllm-router).
+                            # Raise immediately — client errors won't succeed on retry.
+                            text = await resp.text()
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info,
+                                resp.history,
+                                status=resp.status,
+                                message=text or resp.reason,
+                                headers=resp.headers,
+                            )
                         last_exc = e
                         logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                         await asyncio.sleep(1)
