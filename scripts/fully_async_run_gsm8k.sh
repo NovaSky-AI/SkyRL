@@ -8,6 +8,7 @@ export LOGGER="${LOGGER:-wandb}"
 export INFERENCE_BACKEND="${INFERENCE_BACKEND:-vllm}"
 export MODALITY="${MODALITY:-gsm8k}"
 
+: "${NUM_INFERENCE_GPUS:=8}"
 : "${WANDB_API_KEY:?Set WANDB_API_KEY before running}"
 
 # --- Prepare GSM8K dataset if not already present ---
