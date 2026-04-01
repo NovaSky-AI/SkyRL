@@ -46,6 +46,9 @@ def test_config() -> SkyRLTrainConfig:
     # Use MoE policy model
     cfg.trainer.policy.model.path = MODEL
 
+    # Colocated
+    cfg.trainer.placement.colocate_all = True
+
     # vLLM generator with EP enabled
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.async_engine = True
