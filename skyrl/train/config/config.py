@@ -142,6 +142,7 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
     "recompute_modules": ["core_attn"],
     "recompute_method": "uniform",
     "recompute_num_layers": 1,
+    "gradient_accumulation_fusion": False,
 }
 
 

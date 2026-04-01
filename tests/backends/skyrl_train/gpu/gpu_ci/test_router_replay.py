@@ -46,7 +46,7 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
     # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
     cfg.trainer.logger = "console"
-    if "moonlight" in model_name:
+    if "Moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
 
