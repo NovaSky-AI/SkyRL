@@ -44,7 +44,9 @@ bash scripts/fleet-common-run.sh \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE \
+  trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE \
+  trainer.placement.ref_num_nodes=1 \
   generator.inference_engine.num_engines=$NUM_INFERENCE_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
