@@ -144,6 +144,6 @@ async def test_policy_local_engines_e2e(
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer)
+        outputs = await run_inference(client, get_test_prompts(model), sampling_params, tokenizer=tokenizer)
 
         print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
