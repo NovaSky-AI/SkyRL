@@ -224,9 +224,9 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
-                        if resp.status >= 400:
-                            # Non-JSON error response (e.g. plain text from vllm-router).
-                            # Read the text body and raise immediately instead of retrying.
+                        if 400 <= resp.status < 500:
+                            # Non-JSON client error (e.g. plain text 422 from vllm-router).
+                            # Raise immediately — client errors won't succeed on retry.
                             text = await resp.text()
                             raise aiohttp.ClientResponseError(
                                 resp.request_info,
