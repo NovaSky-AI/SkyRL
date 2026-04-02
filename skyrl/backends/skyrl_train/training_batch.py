@@ -148,6 +148,63 @@ class TensorBatch(dict, Generic[DictType]):
         new_batch.metadata = selected_metadata
         return new_batch
 
+    def _take_metadata_value(self, value: Any, indices: List[int]) -> Any:
+        if isinstance(value, list):
+            if len(value) != self.batch_size:
+                raise ValueError(f"Metadata list length mismatch. Expected {self.batch_size}, got {len(value)}.")
+            return [value[i] for i in indices]
+        if isinstance(value, tuple):
+            if len(value) != self.batch_size:
+                raise ValueError(f"Metadata tuple length mismatch. Expected {self.batch_size}, got {len(value)}.")
+            return tuple(value[i] for i in indices)
+        if isinstance(value, np.ndarray):
+            if len(value) != self.batch_size:
+                raise ValueError(
+                    f"Metadata array length mismatch. Expected {self.batch_size}, got {len(value)}."
+                )
+            return value[indices].copy()
+        if isinstance(value, torch.Tensor):
+            if len(value) != self.batch_size:
+                raise ValueError(
+                    f"Metadata tensor length mismatch. Expected {self.batch_size}, got {len(value)}."
+                )
+            take_indices = torch.as_tensor(indices, dtype=torch.long, device=value.device)
+            return value.index_select(0, take_indices)
+        raise TypeError(f"Unsupported metadata type for reordering: {type(value)}")
+
+    def take(self, indices: List[int], metadata_keys: Optional[List[str]] = None) -> "TensorBatch[DictType]":
+        """Take rows in an arbitrary order.
+
+        Args:
+            indices: Batch indices to select in-order.
+            metadata_keys: Metadata keys to reorder alongside the tensors. All
+                other metadata entries are copied through unchanged.
+
+        Returns:
+            A new batch with rows reordered by ``indices``.
+        """
+        take_indices = list(indices)
+        take_data = {}
+        for key, value in self.items():
+            if value is None:
+                take_data[key] = value
+            elif isinstance(value, TensorList):
+                take_data[key] = TensorList([value[i] for i in take_indices])
+            else:
+                assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
+                tensor_indices = torch.as_tensor(take_indices, dtype=torch.long, device=value.device)
+                take_data[key] = value.index_select(0, tensor_indices)
+
+        metadata = None if self.metadata is None else dict(self.metadata)
+        if metadata is not None:
+            for key in metadata_keys or []:
+                if key in metadata:
+                    metadata[key] = self._take_metadata_value(metadata[key], take_indices)
+
+        new_batch = self.__class__(take_data)
+        new_batch.metadata = metadata
+        return new_batch
+
     def _check_consistency(self):
         """Check consistency of all present fields"""
         keys = list(self.keys())

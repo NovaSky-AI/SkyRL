@@ -25,6 +25,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils.packing_balance import (
+    compute_effective_sequence_costs,
+    invert_permutation,
+    plan_balanced_slot_permutation,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
 
@@ -152,14 +157,63 @@ class WorkerDispatch:
         for model in self._actor_groups:
             self._gpu_state[model] = GPUState()
 
+    @staticmethod
+    def _reorderable_metadata_keys(batch: TrainingInputBatch | TrainingOutputBatch) -> List[str]:
+        if batch.metadata is None:
+            return []
+        return [key for key in ("uids", "trajectory_ids") if key in batch.metadata]
+
+    def _get_dp_size(self, model: str) -> int:
+        return self._actor_groups[model].actor_infos[0].rank.dp_size
+
+    def _balance_batch_for_dispatch(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        local_micro_bsz: int,
+    ) -> tuple[TrainingInputBatch, Optional[List[int]]]:
+        if not self.cfg.trainer.use_sample_packing:
+            return data, None
+
+        costs = compute_effective_sequence_costs(data, model, self.cfg)
+        permutation = plan_balanced_slot_permutation(costs, self._get_dp_size(model), local_micro_bsz)
+        if permutation == list(range(len(costs))):
+            return data, None
+
+        balanced = data.take(permutation, metadata_keys=self._reorderable_metadata_keys(data))
+        return balanced, invert_permutation(permutation)
+
+    @staticmethod
+    def _stage_dp_chunks(data: TrainingInputBatch, dp_size: int) -> List[ObjectRef]:
+        assert len(data) % dp_size == 0, f"data batch size must be divisible by dp_size, got {len(data)} and {dp_size}"
+        chunk_size = len(data) // dp_size
+        return [ray.put(chunk) for chunk in data.chunk(chunk_size)]
+
     def forward(self, model: str, data: TrainingInputBatch) -> TrainingOutputBatch:
         """Run inference forward pass. Only loads model (not optimizer)."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data)
-        results = ray.get(refs)
+        if not self.cfg.trainer.use_sample_packing:
+            refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data)
+            results = ray.get(refs)
+            output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
+            return output
 
+        balanced_data, inverse_permutation = self._balance_batch_for_dispatch(
+            model,
+            data,
+            self.cfg.trainer.micro_forward_batch_size_per_gpu,
+        )
+        chunk_refs = self._stage_dp_chunks(balanced_data, self._get_dp_size(model))
+        refs = MeshDispatch.dispatch_from_staged(
+            self._actor_groups[model].actor_infos,
+            "forward",
+            chunk_refs=chunk_refs,
+        )
+        results = ray.get(refs)
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
+        if inverse_permutation is not None:
+            output = output.take(inverse_permutation, metadata_keys=self._reorderable_metadata_keys(output))
         return output
 
     def stage_data(self, model: str, data: TrainingInputBatch, mini_batch_size: int) -> List[List[ObjectRef]]:
@@ -178,8 +232,27 @@ class WorkerDispatch:
             ``result[i][dp_rank]`` is the ObjectRef for mini-batch *i*,
             DP rank *dp_rank*.
         """
-        dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_size)
+        dp_size = self._get_dp_size(model)
+        if not self.cfg.trainer.use_sample_packing:
+            return MeshDispatch.stage_chunks(dp_size, data, mini_batch_size)
+
+        assert (
+            len(data) % mini_batch_size == 0
+        ), f"data batch size must be divisible by mini_batch_size, got {len(data)} and {mini_batch_size}"
+        assert (
+            mini_batch_size % dp_size == 0
+        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
+
+        all_chunk_refs: List[List[ObjectRef]] = []
+        for start in range(0, len(data), mini_batch_size):
+            mini_batch = data[start : start + mini_batch_size]
+            balanced_mini_batch, _ = self._balance_batch_for_dispatch(
+                model,
+                mini_batch,
+                self.cfg.trainer.micro_train_batch_size_per_gpu,
+            )
+            all_chunk_refs.append(self._stage_dp_chunks(balanced_mini_batch, dp_size))
+        return all_chunk_refs
 
     def forward_backward(
         self,

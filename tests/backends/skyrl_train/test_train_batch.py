@@ -334,6 +334,25 @@ def test_train_batch_get_item():
     assert torch.equal(new_data["b"], torch.tensor([4, 5]))
 
 
+def test_train_batch_take_reorders_tensor_list_and_explicit_metadata():
+    batch = _make_mixed_batch(batch_size=3)
+    batch.metadata = {
+        "uids": np.array(["u0", "u1", "u2"]),
+        "trajectory_ids": ["t0", "t1", "t2"],
+        "response_length": 7,
+    }
+
+    taken = batch.take([2, 0], metadata_keys=["uids", "trajectory_ids"])
+
+    assert taken.batch_size == 2
+    assert torch.equal(taken["sequences"], batch["sequences"][torch.tensor([2, 0])])
+    assert torch.equal(taken["pixel_values"][0], batch["pixel_values"][2])
+    assert torch.equal(taken["pixel_values"][1], batch["pixel_values"][0])
+    assert taken.metadata["uids"].tolist() == ["u2", "u0"]
+    assert taken.metadata["trajectory_ids"] == ["t2", "t0"]
+    assert taken.metadata["response_length"] == 7
+
+
 # ── TensorList unit tests ────────────────────────────────────────────────────
 
 

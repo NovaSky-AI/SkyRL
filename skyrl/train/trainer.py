@@ -27,7 +27,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -887,34 +887,46 @@ class RayPPOTrainer:
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
-        import math
-
         dp_size = self.dispatch.get_lcm_dp_size()
         pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
         new_tensors = {}
+        if training_input.metadata is None:
+            training_input.metadata = {}
         training_input.metadata["pad_size"] = pad_size
         if pad_size == 0:
             return training_input
+
+        pad_source_positions = list(range(training_input.batch_size))
+        if self.cfg.trainer.use_sample_packing and training_input.get("attention_mask") is not None:
+            assert training_input["attention_mask"] is not None
+            real_token_counts = training_input["attention_mask"].sum(dim=-1, dtype=torch.int64).tolist()
+            pad_source_positions = sorted(range(training_input.batch_size), key=lambda idx: (real_token_counts[idx], idx))
+        pad_source_positions = [pad_source_positions[i % len(pad_source_positions)] for i in range(pad_size)]
+
         for key, tensor in training_input.items():
             if tensor is not None:
-                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-
-                if key == "is_last_step":
-                    padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                elif key == "loss_mask":
-                    # ensures that padding tensors don't count towards the loss
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                if isinstance(tensor, TensorList):
+                    padding_tensor = TensorList([tensor[idx].clone() for idx in pad_source_positions])
+                    new_tensors[key] = TensorList.cat([tensor, padding_tensor])
                 else:
-                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                    additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
+                    if key == "is_last_step":
+                        padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    elif key == "loss_mask":
+                        # ensures that padding tensors don't count towards the loss
+                        padding_tensor = torch.zeros(
+                            pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device
+                        )
+                    else:
+                        pad_indices = torch.as_tensor(pad_source_positions, dtype=torch.long, device=tensor.device)
+                        padding_tensor = tensor.index_select(0, pad_indices).clone()
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
-        new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
+        new_training_input.metadata["uids"] = list(training_input.metadata["uids"]) + [f"pad{i}" for i in range(pad_size)]
         if "trajectory_ids" in training_input.metadata:
-            new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
+            new_training_input.metadata["trajectory_ids"] = list(training_input.metadata["trajectory_ids"]) + [
                 f"pad{i}" for i in range(pad_size)
             ]
         for key, value in training_input.metadata.items():

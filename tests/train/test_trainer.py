@@ -202,6 +202,55 @@ def test_micro_batches_accumulated_initialized():
     assert critic_worker._micro_batches_accumulated == 0
 
 
+def test_pad_batch_prefers_shortest_rows_when_sample_packing_enabled(dummy_config, dummy_generator):
+    dummy_config.trainer.use_sample_packing = True
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 4
+
+    sequences = torch.tensor(
+        [
+            [10, 11, 12, 13, 14],
+            [20, 21, 22, 23, 24],
+            [30, 31, 32, 33, 34],
+        ]
+    )
+    attention_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 0],
+        ]
+    )
+    loss_mask = torch.ones_like(attention_mask)
+
+    batch = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+            "loss_mask": loss_mask,
+        }
+    )
+    batch.metadata = {"uids": ["u0", "u1", "u2"], "response_length": 2}
+
+    padded = trainer.pad_batch(batch)
+
+    assert padded.batch_size == 4
+    assert torch.equal(padded["sequences"][-1], sequences[1])
+    assert torch.equal(padded["attention_mask"][-1], attention_mask[1])
+    assert torch.equal(padded["loss_mask"][-1], torch.zeros_like(loss_mask[1]))
+    assert padded.metadata["uids"][-1] == "pad0"
+
+
 def test_validate_batch_sizes():
     """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
 
