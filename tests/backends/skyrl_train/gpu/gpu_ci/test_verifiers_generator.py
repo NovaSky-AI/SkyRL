@@ -8,19 +8,18 @@ import pytest
 import ray
 from transformers import AutoTokenizer
 
+pytest.importorskip("verifiers")
+
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.train.config import GeneratorConfig, SamplingParams
+from skyrl.train.config import GeneratorConfig, InferenceEngineConfig, SamplingParams
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_actor_config,
 )
 
-# Mark all tests in this file as "integrations"
-# NOTE (sumanthrh): Skipping these tests until we make the verifiers integration compatible with verifiers repo `main` again.
-# Error: cannot import name 'GenerateInputs' from 'verifiers.types'
-pytestmark = [pytest.mark.integrations, pytest.mark.skip]
+pytestmark = pytest.mark.integrations
 
 
 def _get_free_port() -> int:
@@ -31,21 +30,23 @@ def _get_free_port() -> int:
 
 @pytest.fixture(scope="module")
 def verifiers_runtime():
-    model = "Qwen/Qwen2.5-1.5B-Instruct"
+    backing_model = "Qwen/Qwen2.5-1.5B-Instruct"
+    served_model_name = "verifiers-test-model"
     http_port = _get_free_port()
 
     cfg = get_test_actor_config()
-    cfg.trainer.policy.model.path = model
+    cfg.trainer.policy.model.path = backing_model
     cfg.generator.max_input_length = 2048
     cfg.generator.inference_engine.enable_http_endpoint = True
     cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
     cfg.generator.inference_engine.http_endpoint_port = http_port
+    cfg.generator.inference_engine.served_model_name = served_model_name
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client
     engines = InferenceEngineState.create(
         cfg=cfg,
-        model=model,
+        model=backing_model,
         use_local=True,
         async_engine=True,
         tp_size=1,
@@ -55,10 +56,16 @@ def verifiers_runtime():
         sleep_level=1,  # since we do not explicitly sync weights
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    tokenizer = AutoTokenizer.from_pretrained(backing_model)
 
     try:
-        yield {"client": engines.client, "tokenizer": tokenizer, "http_port": http_port, "model": model}
+        yield {
+            "client": engines.client,
+            "tokenizer": tokenizer,
+            "http_port": http_port,
+            "model": served_model_name,
+            "backing_model": backing_model,
+        }
     finally:
         engines.close()
         ray.shutdown()
@@ -87,13 +94,16 @@ async def _run_verifiers_end_to_end(
     generator_cfg = GeneratorConfig(
         sampling_params=SamplingParams(max_generate_length=max_generate_length, logprobs=None),
         max_input_length=max_input_length,
-        backend="vllm",
-        enable_http_endpoint=True,
-        http_endpoint_host=http_host,
-        http_endpoint_port=http_port,
+        inference_engine=InferenceEngineConfig(
+            backend="vllm",
+            enable_http_endpoint=True,
+            http_endpoint_host=http_host,
+            http_endpoint_port=http_port,
+            served_model_name=model,
+        ),
     )
 
-    from integrations.verifiers.verifiers_generator import VerifiersGenerator
+    from examples.train_integrations.verifiers.verifiers_generator import VerifiersGenerator
 
     generator = VerifiersGenerator(
         generator_cfg=generator_cfg,
@@ -166,9 +176,14 @@ async def test_verifiers_e2e_wordle_http(verifiers_runtime):
 
     assert len(out["response_ids"]) == 2
     assert len(out["prompt_token_ids"]) == 2
-    for resp, mask, logp in zip(
-        out["response_ids"], out["loss_masks"], out["rollout_logprobs"] or [[]] * len(out["response_ids"])
+    for prompt_ids, resp, mask, logp in zip(
+        out["prompt_token_ids"],
+        out["response_ids"],
+        out["loss_masks"],
+        out["rollout_logprobs"] or [[]] * len(out["response_ids"]),
     ):
+        assert isinstance(prompt_ids, list) and prompt_ids
+        assert all(isinstance(t, int) for t in prompt_ids)
         assert isinstance(resp, list) and all(isinstance(t, int) for t in resp)
         assert len(resp) == len(mask)
         if out["rollout_logprobs"] is not None:

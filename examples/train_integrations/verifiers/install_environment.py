@@ -3,7 +3,7 @@
 # Helper that installs the Verifiers environment and adds it to the uv project.
 #
 # Example:
-#   uv run integrations/verifiers/install_environment.py will/wordle@0.1.4
+#   uv run examples/train_integrations/verifiers/install_environment.py will/wordle@0.1.4
 #
 
 import argparse

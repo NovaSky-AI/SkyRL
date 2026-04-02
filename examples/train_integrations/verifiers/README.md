@@ -22,14 +22,14 @@ export ENV_ID="will/wordle"
 
 Then, install the environment, which adds it to the `uv` project:
 ```bash
-uv run integrations/verifiers/install_environment.py $ENV_ID
+uv run examples/train_integrations/verifiers/install_environment.py $ENV_ID
 ```
 
 ### 2) Prepare the dataset
 Next, load the environment's dataset and convert to SkyRL format:
 ```bash
 uv run --isolated --with verifiers \
-  python integrations/verifiers/prepare_dataset.py \
+  python examples/train_integrations/verifiers/prepare_dataset.py \
   --env_id $ENV_ID
 ```
 
@@ -58,12 +58,14 @@ LOGGER="wandb"
 Finally, launch your training run:
 
 ```bash
-bash integrations/verifiers/run_verifiers.sh
+bash examples/train_integrations/verifiers/run_verifiers.sh
 ```
 
 All training parameters can be modified in `run_verifiers.sh`, such as the model choice (`trainer.policy.model.path`), GRPO group size (`generator.n_samples_per_prompt`), or training batch size (`trainer.train_batch_size`).
 
 See all available training configuration parameters in `skyrl/train/config/config.py` (Python dataclass definitions).
+
+This integration relies on SkyRL's OpenAI-compatible HTTP endpoint and the endpoint returning raw token IDs from `/chat/completions`. If `generator.inference_engine.served_model_name` is set, that is the model name the Verifiers client must use instead of the underlying model path.
 
 
 ## Troubleshooting

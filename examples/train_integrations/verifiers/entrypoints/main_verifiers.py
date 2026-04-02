@@ -16,10 +16,11 @@ class VerifiersEntrypoint(BasePPOExp):
         tokenizer: PreTrainedTokenizer,
         inference_engine_client: InferenceEngineClient,
     ):
+        model_name = cfg.generator.inference_engine.served_model_name or cfg.trainer.policy.model.path
         return VerifiersGenerator(
             generator_cfg=cfg.generator,
             tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
+            model_name=model_name,
         )
 
 

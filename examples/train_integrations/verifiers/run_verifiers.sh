@@ -1,7 +1,7 @@
 # Launches SkyRL training on the Verifiers environment.
 #
 # Example:
-#   bash integrations/verifiers/run_verifiers.sh
+#   bash examples/train_integrations/verifiers/run_verifiers.sh
 #
 set -x
 
@@ -38,5 +38,5 @@ uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.v
   trainer.project_name="verifiers" \
   trainer.run_name="verifiers_test" \
   trainer.ckpt_interval=-1 \
-  trainer.ckpt_path="$HOME/ckpts/verifiers_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/verifiers_ckpt" \
   $@

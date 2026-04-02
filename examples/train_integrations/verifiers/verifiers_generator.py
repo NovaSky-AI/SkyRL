@@ -1,12 +1,24 @@
-from typing import Optional
-from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from openai import AsyncOpenAI
+from copy import deepcopy
+from typing import Any, Optional
+
 import httpx
+from openai import AsyncOpenAI
 from verifiers import load_environment
 from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
+
+from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl.train.config import GeneratorConfig
 from skyrl.train.generators.utils import get_rollout_metrics
 
-from skyrl.train.config import GeneratorConfig
+
+_VERIFIERS_EXTRA_BODY_KEYS = (
+    "include_stop_str_in_output",
+    "min_p",
+    "min_tokens",
+    "repetition_penalty",
+    "skip_special_tokens",
+    "top_k",
+)
 
 
 class VerifiersGenerator(GeneratorInterface):
@@ -44,6 +56,30 @@ class VerifiersGenerator(GeneratorInterface):
             http_client=http_client,
         )
 
+    def _build_verifiers_sampling_args(self, input_batch: GeneratorInput) -> dict[str, Any]:
+        """Build sampling args for Verifiers' OpenAI client path.
+
+        Verifiers' current chat parsing expects prompt token IDs in the response, which vLLM
+        exposes when `return_token_ids` is requested. We pass this through `extra_body`
+        because the request is made via the OpenAI client.
+        """
+        sampling_params = deepcopy(input_batch.get("sampling_params", {}))
+        sampling_params["logprobs"] = True
+        sampling_params["top_logprobs"] = 1
+
+        extra_body = dict(sampling_params.pop("extra_body", {}) or {})
+        extra_body["return_token_ids"] = True
+        # Preserve existing behavior for token strings in logprob content until we confirm
+        # Verifiers no longer needs it.
+        extra_body.setdefault("return_tokens_as_token_ids", True)
+
+        for key in _VERIFIERS_EXTRA_BODY_KEYS:
+            if key in sampling_params:
+                extra_body[key] = sampling_params.pop(key)
+
+        sampling_params["extra_body"] = extra_body
+        return sampling_params
+
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         assert "env_extras" in input_batch, "Verifiers dataset fields are passed through env_extras"
 
@@ -66,35 +102,28 @@ class VerifiersGenerator(GeneratorInterface):
         environment_id = verifiers_dicts[0]["environment"]
         vf_env = load_environment(environment_id)
 
-        # Verifiers requires logprobs from vLLM for post-processing.
-        sampling_params = input_batch.get("sampling_params", {}).copy()
-        sampling_params["logprobs"] = True
-        sampling_params["top_logprobs"] = 1
-        sampling_params["extra_body"] = {
-            "return_tokens_as_token_ids": True,
-        }
-
-        # Clean the sampling params for Verifiers' generate.
-        extra_body_keys = [
-            "min_tokens",
-            "skip_special_tokens",
-            "include_stop_str_in_output",
-            "top_k",
-            "min_p",
-            "repetition_penalty",
-        ]
-        for key in extra_body_keys:
-            if key in sampling_params:
-                sampling_params["extra_body"][key] = sampling_params[key]
-                del sampling_params[key]
+        sampling_params = self._build_verifiers_sampling_args(input_batch)
 
         # Generate the trajectories.
-        generate_outputs: GenerateOutputs = await vf_env.generate(
-            inputs=rollout_inputs,
-            client=self.client,
-            model=self.model_name,
-            sampling_args=sampling_params,
-        )
+        try:
+            generate_outputs: GenerateOutputs = await vf_env.generate(
+                inputs=rollout_inputs,
+                client=self.client,
+                model=self.model_name,
+                sampling_args=sampling_params,
+            )
+        except Exception as exc:
+            if "prompt_token_ids" in str(exc) or (
+                isinstance(exc, TypeError) and "NoneType" in str(exc) and "len()" in str(exc)
+            ):
+                raise RuntimeError(
+                    "Verifiers generation failed while parsing token metadata from "
+                    "/chat/completions. This integration requires the HTTP endpoint to return "
+                    "prompt_token_ids, completion token_ids, and logprobs. Verify that "
+                    "`return_token_ids` is being requested through `extra_body` and that the "
+                    "served OpenAI-compatible vLLM endpoint supports it."
+                ) from exc
+            raise
 
         processed_outputs: ProcessedOutputs = vf_env.process_env_results_vllm(
             prompts=generate_outputs.prompt,
