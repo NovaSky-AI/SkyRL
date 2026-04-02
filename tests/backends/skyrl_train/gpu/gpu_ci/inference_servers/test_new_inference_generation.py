@@ -45,9 +45,12 @@ TP_SIZE = 1
 def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
-    sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
+        sampling_params["logprobs"] = True
         sampling_params["top_logprobs"] = 1
+    else:
+        # /v1/completions expects logprobs as an integer (number of top logprobs)
+        sampling_params["logprobs"] = 1
     sampling_params["return_tokens_as_token_ids"] = True
     return sampling_params
 
@@ -312,7 +315,10 @@ def test_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     response = requests.post(f"{base_url}/chat/completions", json={"model": SERVED_MODEL_NAME})
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert response.status_code in (
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+    )
 
     # Wrong model name
     response = requests.post(
@@ -592,3 +598,90 @@ def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState)
 
     decoded = asyncio.run(client.detokenize([token_ids]))[0]
     assert decoded == text
+
+
+# --- Group C: RemoteInferenceClient.sample() (Tinker API) ---
+
+
+def _build_sample_payload(
+    token_ids: List[int],
+    num_samples: int = 1,
+    sampling_params: Dict[str, Any] | None = None,
+    session_id: str | None = None,
+) -> Dict[str, Any]:
+    """Build a Tinker-format sample request payload."""
+    body: Dict[str, Any] = {
+        "prompt": {"chunks": [{"tokens": token_ids}]},
+        "num_samples": num_samples,
+        "sampling_params": sampling_params or {"temperature": 0.7, "max_tokens": 64},
+    }
+    if session_id is not None:
+        body["session_id"] = session_id
+    return {"json": body}
+
+
+def _get_test_token_ids(model: str) -> List[int]:
+    """Tokenize a single test prompt into token IDs."""
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    conv = get_test_prompts(model, num_samples=1)[0]
+    token_ids = tokenizer.apply_chat_template(
+        conv,
+        add_generation_prompt=True,
+        tokenize=True,
+    )
+    return token_ids
+
+
+@pytest.mark.vllm
+def test_client_sample(vllm_server: InferenceEngineState):
+    """Test sample with n=1 returns correct Tinker response structure."""
+    client = vllm_server.client
+    token_ids = _get_test_token_ids(MODEL_QWEN2_5)
+    payload = _build_sample_payload(token_ids, num_samples=1, sampling_params={"temperature": 0.7, "max_tokens": 64})
+
+    result = asyncio.run(client.sample(payload))
+
+    assert result["type"] == "sample"
+    assert len(result["sequences"]) == 1
+
+    seq = result["sequences"][0]
+    assert isinstance(seq["tokens"], list) and len(seq["tokens"]) > 0
+    assert all(isinstance(t, int) for t in seq["tokens"])
+    assert isinstance(seq["logprobs"], list) and len(seq["logprobs"]) > 0
+    assert all(isinstance(lp, float) for lp in seq["logprobs"])
+    assert seq["stop_reason"] in ["stop", "length"]
+
+
+@pytest.mark.vllm
+def test_client_sample_multiple(vllm_server: InferenceEngineState):
+    """Test sample with n=3 returns three independent sequences."""
+    client = vllm_server.client
+    token_ids = _get_test_token_ids(MODEL_QWEN2_5)
+    payload = _build_sample_payload(token_ids, num_samples=3, sampling_params={"temperature": 1.0, "max_tokens": 64})
+
+    result = asyncio.run(client.sample(payload))
+
+    assert result["type"] == "sample"
+    assert len(result["sequences"]) == 3
+
+    for seq in result["sequences"]:
+        assert isinstance(seq["tokens"], list) and len(seq["tokens"]) > 0
+        assert isinstance(seq["logprobs"], list) and len(seq["logprobs"]) > 0
+        assert seq["stop_reason"] in ["stop", "length"]
+
+    # With temperature=1.0, at least two sequences should differ
+    all_tokens = [tuple(seq["tokens"]) for seq in result["sequences"]]
+    assert len(set(all_tokens)) > 1, "All 3 sequences are identical at temperature=1.0"
+
+
+@pytest.mark.vllm
+def test_client_sample_deterministic(vllm_server: InferenceEngineState):
+    """Test that sample with seed + temperature=0 is deterministic across calls."""
+    client = vllm_server.client
+    token_ids = _get_test_token_ids(MODEL_QWEN2_5)
+    params = {"temperature": 0.0, "max_tokens": 32, "seed": 42}
+
+    result1 = asyncio.run(client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params)))
+    result2 = asyncio.run(client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params)))
+
+    assert result1["sequences"][0]["tokens"] == result2["sequences"][0]["tokens"]

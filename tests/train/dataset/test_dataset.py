@@ -7,6 +7,8 @@ from skyrl.train.dataset import PromptDataset
 
 
 class SimpleTokenizer:
+    name_or_path = "simple-tokenizer"
+
     def apply_chat_template(self, x, add_generation_prompt=False, **kwargs):
         return x
 

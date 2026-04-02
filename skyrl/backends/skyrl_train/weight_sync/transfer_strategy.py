@@ -36,7 +36,7 @@ class WeightSyncInitInfo(ABC):
         """Return the strategy class for this init info type."""
         ...
 
-    def for_engine(self, engine_index: int, tp_size: int, pp_size: int) -> "WeightSyncInitInfo":
+    def for_engine(self, engine_index: int, tp_size: int, pp_size: int, dp_size: int) -> "WeightSyncInitInfo":
         """Return init_info adjusted for a specific engine.
 
         Override in subclasses that need per-engine adjustments (e.g., rank offset).
@@ -46,6 +46,7 @@ class WeightSyncInitInfo(ABC):
             engine_index: Index of the engine (0-based).
             tp_size: Tensor parallel size of the engine.
             pp_size: Pipeline parallel size of the engine.
+            dp_size: Data parallel size of the engine.
 
         Returns:
             Adjusted init_info for the specific engine.
@@ -126,7 +127,7 @@ class WeightTransferStrategy(ABC):
         sender = Strategy.create_sender(init_info, inference_client)
 
     Usage on receiver side (for each engine):
-        engine_init_info = init_info.for_engine(engine_index, tp_size, pp_size)
+        engine_init_info = init_info.for_engine(engine_index, tp_size, pp_size, dp_size)
         receiver = engine_init_info.strategy_type().create_receiver(engine_init_info)
     """
 

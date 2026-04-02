@@ -11,7 +11,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 1. Data Plane (routed through proxy_url):
    - generate, chat_completion, completion, tokenize, detokenize, render
-   - Uses proxy_url which points to a router (vllm-router, sglang-router, InferenceRouter)
+   - Uses proxy_url which points to a router (VLLMRouter or external)
    - Router handles load balancing and session-aware routing
 
 2. Control Plane (fan-out to all server_urls):
@@ -64,6 +64,16 @@ from skyrl.env_vars import (
 )
 
 _DATA_PLANE_RETRIES = 30
+
+_TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
+    "temperature": "temperature",
+    "max_tokens": "max_tokens",
+    "seed": "seed",
+    "top_k": "top_k",
+    "top_p": "top_p",
+    "stop_strings": "stop",
+    "stop_tokens": "stop_token_ids",
+}
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -118,7 +128,7 @@ class RemoteInferenceClient:
     - server_urls: List of backend URLs for control plane operations (fan-out)
 
     The router (proxy_url) is expected to be a data-plane-only router (like
-    vllm-router, sglang-router, or InferenceRouter). Control plane operations
+    VLLMRouter or an external router). Control plane operations
     are always fanned out to all backends directly by this client.
 
     Usage:
@@ -219,6 +229,17 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
+                        if 400 <= resp.status < 500:
+                            # Non-JSON client error (e.g. plain text 422 from vllm-router).
+                            # Raise immediately — client errors won't succeed on retry.
+                            text = await resp.text()
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info,
+                                resp.history,
+                                status=resp.status,
+                                message=text or resp.reason,
+                                headers=resp.headers,
+                            )
                         last_exc = e
                         logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                         await asyncio.sleep(1)
@@ -369,6 +390,81 @@ class RemoteInferenceClient:
             "response_ids": token_ids,
             "response_logprobs": response_logprobs,
             "routed_experts": routed_experts,
+        }
+
+    async def sample(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Sample completions via /inference/v1/generate (Tinker API).
+
+        Maps Tinker-style sample requests to the vLLM generate endpoint.
+        Uses self._post() for automatic retry + backoff on transient errors.
+
+        Args:
+            request_payload: Dict with {"json": <request-body>}.
+                Expected keys in json: prompt, num_samples, sampling_params, session_id.
+
+        Returns:
+            Dict with type="sample", sequences list, and stub prompt_logprobs fields.
+        """
+        session_id, body = _extract_session_id_and_body(request_payload)
+
+        prompt = body.get("prompt", {})
+        num_samples = body.get("num_samples", 1)
+        tinker_params = body.get("sampling_params", {})
+
+        # Flatten prompt chunks → token IDs
+        token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
+
+        # Map Tinker SamplingParams → vLLM format
+        sampling_params: Dict[str, Any] = {
+            "n": num_samples,
+            "logprobs": 0,
+            "output_kind": 2,
+        }
+
+        for tinker_key, vllm_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
+            val = tinker_params.get(tinker_key)
+            if val is not None:
+                sampling_params[vllm_key] = val
+
+        effective_model = self.active_lora_name if self.active_lora_name else self.model_name
+
+        payload = {
+            "sampling_params": sampling_params,
+            "model": effective_model,
+            "token_ids": token_ids,
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        url = f"{self.proxy_url}/inference/v1/generate"
+        response = await self._post(url, json=payload, headers=headers)
+
+        # Transform response choices → sequences
+        sequences = []
+        for choice in response.get("choices", []):
+            seq_logprobs: Optional[List[float]] = None
+            logprobs_data = choice.get("logprobs")
+            if logprobs_data is not None:
+                logprobs_content = logprobs_data.get("content", [])
+                if logprobs_content:
+                    seq_logprobs = [lp["logprob"] for lp in logprobs_content]
+
+            sequences.append(
+                {
+                    "tokens": choice["token_ids"],
+                    "logprobs": seq_logprobs,
+                    "stop_reason": choice.get("finish_reason"),
+                }
+            )
+
+        return {
+            "type": "sample",
+            "sequences": sequences,
+            "prompt_logprobs": None,
+            "topk_prompt_logprobs": None,
         }
 
     async def chat_completion(

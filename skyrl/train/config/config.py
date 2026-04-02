@@ -142,6 +142,7 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
     "recompute_modules": ["core_attn"],
     "recompute_method": "uniform",
     "recompute_num_layers": 1,
+    "gradient_accumulation_fusion": False,
 }
 
 
@@ -478,11 +479,6 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
-    router_type: str = "default"
-    """Router type for data-plane load balancing.
-    ``"default"`` uses the built-in Python InferenceRouter.
-    ``"vllm-router"`` uses the external vllm-router binary (requires `vllm-router` extra).
-    Only relevant when SkyRL creates its own router (i.e., when ``external_proxy_url`` is not set)."""
 
 
 # ---------------------------------------------------------------------------

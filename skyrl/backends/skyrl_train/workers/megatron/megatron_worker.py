@@ -60,68 +60,7 @@ if TYPE_CHECKING:
     )
     from skyrl.train.config.config import InferenceEngineConfig
 
-# ---------------------------------------------------------------------------
-# Register additional model bridges for architectures not yet in the upstream
-# Megatron-Bridge package. GLM-4.7-Flash uses the same architecture as
-# DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
-# ---------------------------------------------------------------------------
-try:
-    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-    from megatron.bridge.models.deepseek.common import get_common_configs
-    from megatron.bridge.models.deepseek.deepseek_provider import (
-        DeepSeekV3ModelProvider,
-    )
-    from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
-    from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
-    from megatron.core.models.gpt.gpt_model import GPTModel
-
-    @MegatronModelBridge.register_bridge(
-        source="Glm4MoeLiteForCausalLM",
-        target=GPTModel,
-    )
-    class _GLM47FlashBridge(DeepSeekV3Bridge):
-        """Bridge for GLM-4.7-Flash (Glm4MoeLiteForCausalLM).
-
-        GLM-4.7-Flash is architecturally identical to DeepSeek-V3 (MLA + MoE)
-        but its HF config differs in rope_scaling format:
-        - DeepSeek: rope_scaling has factor/mscale/mscale_all_dim, top-level rope_theta
-        - GLM-4.7-Flash: rope_scaling has rope_theta/rope_type, no mscale fields
-        """
-
-        def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> DeepSeekV3ModelProvider:
-            hf_config = hf_pretrained.config
-
-            # Temporarily normalize rope_scaling so get_common_configs works.
-            # GLM-4.7-Flash uses default rope (no scaling), so set factor=1.0.
-            orig_rope_scaling = hf_config.rope_scaling
-            orig_rope_theta = getattr(hf_config, "rope_theta", None)
-            rope_theta = orig_rope_scaling.get("rope_theta", 10000.0) if orig_rope_scaling else 10000.0
-            hf_config.rope_scaling = None  # triggers the else branch (defaults to 1.0)
-            hf_config.rope_theta = rope_theta
-
-            try:
-                configs = get_common_configs(hf_pretrained)
-            finally:
-                hf_config.rope_scaling = orig_rope_scaling
-                if orig_rope_theta is None:
-                    delattr(hf_config, "rope_theta")
-                else:
-                    hf_config.rope_theta = orig_rope_theta
-
-            configs["fp16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.float16
-            configs["bf16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.bfloat16
-            configs["params_dtype"] = self.dtype_from_hf(hf_config, default=torch.float32)
-
-            configs["make_vocab_size_divisible_by"] = 1280
-            configs["moe_router_score_function"] = "sigmoid"
-            configs["moe_router_enable_expert_bias"] = True
-            if hasattr(hf_config, "aux_loss_alpha"):
-                configs["moe_aux_loss_coeff"] = hf_config.aux_loss_alpha
-
-            return DeepSeekV3ModelProvider(**configs)
-
-except ImportError:
-    pass  # megatron-bridge not installed (e.g. CPU-only environment)
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -340,6 +279,15 @@ class MegatronWorker:
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
+
+        # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
+        # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
+        # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
+        # (512) is used instead, causing the wrong model architecture to be built.
+        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
+        if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
+            provider.q_lora_rank = hf_config.q_lora_rank
+
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -700,6 +648,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
+
         if not micro_buffer:
             return {}
 
@@ -718,9 +669,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
 
-        # Track number of micro-batches for metrics
-        self._micro_batches_accumulated += len(micro_buffer)
-
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
         for metrics in metrics_list:
@@ -730,10 +678,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # Reduce and all-reduce metrics
-        status = reduce_metrics(dict(all_metrics))
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
+        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        status = all_reduce_metrics(status, self.strategy)
+        group = mpu.get_data_parallel_group(with_context_parallel=False)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:

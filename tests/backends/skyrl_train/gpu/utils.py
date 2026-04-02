@@ -31,9 +31,9 @@ from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
     TrainingInputBatch,
@@ -389,6 +389,8 @@ def ray_init_for_tests():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
     env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
+    if _SKYRL_USE_NEW_INFERENCE:
+        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
     ray.init(runtime_env={"env_vars": env_vars})
 
 
@@ -400,6 +402,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             from skyrl.utils.tok import get_tokenizer
 
             tokenizer = get_tokenizer(client.model_name)
+            _ensure_chat_template(tokenizer)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
@@ -416,7 +419,7 @@ class InferenceEngineState:
 
     client: Union[InferenceEngineClient, RemoteInferenceClient]
     pg: Optional[Any]  # placement group
-    router: Optional[InferenceRouter]
+    router: Optional[VLLMRouter]
     server_group: Optional[ServerGroup]
 
     def close(self):
@@ -464,6 +467,7 @@ class InferenceEngineState:
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
         distributed_executor_backend: Optional[str] = None,
+        expert_parallel_size: Optional[int] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -495,6 +499,8 @@ class InferenceEngineState:
             ie_cfg.engine_init_kwargs = engine_init_kwargs
         if distributed_executor_backend is not None:
             ie_cfg.distributed_executor_backend = distributed_executor_backend
+        if expert_parallel_size is not None:
+            ie_cfg.expert_parallel_size = expert_parallel_size
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
@@ -541,10 +547,6 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-                VLLMRouter,
-            )
-
             router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()
             logger.info(
@@ -565,6 +567,7 @@ class InferenceEngineState:
             eps = create_ray_wrapped_inference_engines(
                 num_inference_engines=ie_cfg.num_engines,
                 tensor_parallel_size=ie_cfg.tensor_parallel_size,
+                expert_parallel_size=ie_cfg.expert_parallel_size,
                 model_dtype="bfloat16",
                 pretrain=cfg.trainer.policy.model.path,
                 seed=42,

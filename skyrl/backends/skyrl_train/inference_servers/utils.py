@@ -31,6 +31,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         enable_prefix_caching=ie_cfg.enable_prefix_caching,
         enforce_eager=ie_cfg.enforce_eager,
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
+        enable_expert_parallel=ie_cfg.expert_parallel_size > 1,
         max_num_seqs=ie_cfg.max_num_seqs,
         enable_sleep_mode=cfg.trainer.placement.colocate_all,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
