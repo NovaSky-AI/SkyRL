@@ -29,10 +29,10 @@ INFERENCE_ENGINE_TP=8
 
 # flash attn is not supported for moonlight16b since it is a DeepSeekV3 like model, and uses Multi-Head Latent Attention (MLA)
 # https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
-FLASH_ATTN=true
+FLASH_ATTN=false
 
 # router replay (r3)
-ROUTER_REPLAY=false
+ROUTER_REPLAY=true
 DISTRIBUTED_EXECUTION_BACKEND="mp"
 
 SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile -m skyrl.train.entrypoints.main_base \
@@ -54,7 +54,6 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile
   trainer.policy.megatron_config.moe_enable_routing_replay=$ROUTER_REPLAY \
   generator.inference_engine.distributed_executor_backend=$DISTRIBUTED_EXECUTION_BACKEND \
   generator.inference_engine.enable_return_routed_experts=$ROUTER_REPLAY \
-  generator.inference_engine.router_type=vllm-router \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
