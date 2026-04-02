@@ -622,6 +622,8 @@ class TrainerConfig(BaseConfig):
     rope_theta: Optional[float] = None
     loss_chunk_size: Optional[int] = None
     """Chunk size for loss computation to reduce memory usage."""
+    use_unsloth: bool = False
+    """Use Unsloth's optimized Triton kernels for model loading and training."""
     use_hybrid_env_sampling: bool = False
     """Enable hybrid environment sampling for multi-env training."""
     min_samples_per_env: int = 1

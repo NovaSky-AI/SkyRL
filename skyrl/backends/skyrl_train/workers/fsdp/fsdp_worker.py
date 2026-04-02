@@ -148,6 +148,42 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
+    def _load_model_unsloth(self, model_path):
+        """Load and patch model using Unsloth's optimized Triton kernels."""
+        from unsloth import FastModel
+
+        model, _processor = FastModel.from_pretrained(
+            model_name=model_path,
+            max_seq_length=self.cfg.max_prompt_length + 4096,
+            load_in_4bit=False,
+            load_in_16bit=True,
+            full_finetuning=self.cfg.policy.model.lora.rank == 0,
+        )
+
+        lora_rank = self.cfg.policy.model.lora.rank
+        if lora_rank > 0:
+            model = FastModel.get_peft_model(
+                model,
+                r=lora_rank,
+                target_modules=self.cfg.policy.model.lora.target_modules or [
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj",
+                ],
+                lora_alpha=self.cfg.policy.model.lora.alpha or lora_rank,
+                lora_dropout=self.cfg.policy.model.lora.dropout or 0,
+                bias="none",
+                use_gradient_checkpointing="unsloth",
+                random_state=self.cfg.seed,
+            )
+
+        wrapped_model = HFModelWrapper(
+            model,
+            sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            loss_chunk_size=self.cfg.loss_chunk_size,
+        )
+        return wrapped_model
+
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
@@ -164,39 +200,43 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         self._is_lora = self.cfg.policy.model.lora.rank > 0
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
-        )
-        with init_context():
-
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.policy.model.lora.rank,
-                lora_alpha=self.cfg.policy.model.lora.alpha,
-                lora_dropout=self.cfg.policy.model.lora.dropout,
-                lora_init_method=self.cfg.policy.model.lora.init_method,
-                target_modules=self.cfg.policy.model.lora.target_modules,
-                exclude_modules=self.cfg.policy.model.lora.exclude_modules,
-                sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                use_torch_compile=self.cfg.policy.use_torch_compile,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.policy.model_config_kwargs,
-                loss_chunk_size=self.cfg.loss_chunk_size,
-            )
-            # in-place patch
+        if self.cfg.use_unsloth:
+            wrapped_model = self._load_model_unsloth(model_path)
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        else:
+            model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            )
+            with init_context():
 
-            if self.cfg.gradient_checkpointing:
-                wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+                wrapped_model = HFModelWrapper(
+                    model_path,
+                    use_flash_attention_2=self.cfg.flash_attn,
+                    # NOTE (sumanthrh): Model initialization should always be in fp32
+                    # during training
+                    bf16=False,
+                    lora_rank=self.cfg.policy.model.lora.rank,
+                    lora_alpha=self.cfg.policy.model.lora.alpha,
+                    lora_dropout=self.cfg.policy.model.lora.dropout,
+                    lora_init_method=self.cfg.policy.model.lora.init_method,
+                    target_modules=self.cfg.policy.model.lora.target_modules,
+                    exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+                    sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
+                    use_sample_packing=self.cfg.use_sample_packing,
+                    use_torch_compile=self.cfg.policy.use_torch_compile,
+                    rope_scaling=get_rope_scaling_config(self.cfg),
+                    rope_theta=get_rope_theta_config(self.cfg),
+                    model_config_kwargs=self.cfg.policy.model_config_kwargs,
+                    loss_chunk_size=self.cfg.loss_chunk_size,
                 )
+                # in-place patch
+                self._seq_parallel_monkey_patch(model=wrapped_model.model)
+
+                if self.cfg.gradient_checkpointing:
+                    wrapped_model.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+                    )
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
@@ -408,6 +448,25 @@ class FSDPRefWorkerBase(RefWorkerBase):
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
+    def _load_model_unsloth(self, model_path):
+        """Load and patch ref model using Unsloth's optimized Triton kernels (no LoRA)."""
+        from unsloth import FastModel
+
+        model, _processor = FastModel.from_pretrained(
+            model_name=model_path,
+            max_seq_length=self.cfg.max_prompt_length + 4096,
+            load_in_4bit=False,
+            load_in_16bit=True,
+            full_finetuning=False,
+        )
+        wrapped_model = HFModelWrapper(
+            model,
+            sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            loss_chunk_size=self.cfg.loss_chunk_size,
+        )
+        return wrapped_model
+
     def init_model(self, model_path):
         assert self.cfg.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
@@ -419,24 +478,28 @@ class FSDPRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
-        )
-
-        with init_context():
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                bf16=self.cfg.bf16,
-                sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.ref.model_config_kwargs,
-                loss_chunk_size=self.cfg.loss_chunk_size,
-            )
+        if self.cfg.use_unsloth:
+            wrapped_model = self._load_model_unsloth(model_path)
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        else:
+            model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            )
+
+            with init_context():
+                wrapped_model = HFModelWrapper(
+                    model_path,
+                    use_flash_attention_2=self.cfg.flash_attn,
+                    bf16=self.cfg.bf16,
+                    sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
+                    use_sample_packing=self.cfg.use_sample_packing,
+                    rope_scaling=get_rope_scaling_config(self.cfg),
+                    rope_theta=get_rope_theta_config(self.cfg),
+                    model_config_kwargs=self.cfg.ref.model_config_kwargs,
+                    loss_chunk_size=self.cfg.loss_chunk_size,
+                )
+                self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()

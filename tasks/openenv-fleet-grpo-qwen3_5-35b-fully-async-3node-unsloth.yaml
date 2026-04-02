@@ -1,0 +1,60 @@
+# Fleet Task Fully Async GRPO with Unsloth - Qwen3.5-35B-A3B (MoE, 3-Node)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-35b-fully-async-3node-unsloth.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Same topology as the 3-node smoketest, but uses Unsloth's optimized Triton kernels
+# for faster MoE training (~12x faster, ~35% less VRAM vs standard PyTorch).
+
+name: xiaohan-repro-fleet-task-grpo-qwen3-5-35b-fully-async-3node-unsloth
+
+resources:
+  disk_size: 750
+  memory: 1500+
+  ports: 6479
+  any_of:
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+
+num_nodes: 3
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
+  ref: xiaohan/fleet-grpo-qwen3_5-35b-fully-async-3nodes
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v55"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "tool_use"
+  MAX_TURNS: 4
+  MAX_INPUT_LENGTH: 72000
+  MAX_GENERATE_LENGTH: 256
+  NUM_EPOCHS: 1
+  RUN_ID: "xiaohan-unsloth-0402"
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  MINI_BATCH_SIZE: 4
+  MAX_STALENESS_STEPS: 2
+  NUM_PARALLEL_GENERATION_WORKERS: 8
+  # TP=2 -> 8 engines (each uses 2 GPUs) on 16 inference GPUs total
+  NUM_INFERENCE_ENGINES: 8
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client
+  source .venv/bin/activate
+  source scripts/fleet-qwen35-unsloth-extra-setup.sh
+
+run: |
+  bash scripts/fleet-35b-run-fully-async-unsloth.sh
