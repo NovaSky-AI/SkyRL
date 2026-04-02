@@ -80,7 +80,7 @@ bash scripts/fleet-common-run.sh \
   generator.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=true \
-  generator.n_samples_per_prompt=1 \
+  generator.n_samples_per_prompt=2 \
   generator.eval_n_samples_per_prompt=1 \
   generator.enforce_eager=false \
   generator.gpu_memory_utilization=0.65 \
