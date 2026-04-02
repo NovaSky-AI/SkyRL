@@ -448,10 +448,10 @@ class RemoteInferenceClient:
 
         # vLLM prompt logprob mapping
         prompt_logprobs_sp = None
-        if topk_prompt_logprobs_k > 0:
-            prompt_logprobs_sp = topk_prompt_logprobs_k
-        elif include_prompt_logprobs:
+        if include_prompt_logprobs:
             prompt_logprobs_sp = 0
+        if topk_prompt_logprobs_k > 0 and include_prompt_logprobs:
+            prompt_logprobs_sp = topk_prompt_logprobs_k
 
         # Flatten prompt chunks → token IDs
         token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
