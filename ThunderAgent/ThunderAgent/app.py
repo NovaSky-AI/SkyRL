@@ -226,6 +226,20 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
         """Return structured router state and recent lifecycle events."""
         return JSONResponse(ta_router.get_observability_snapshot(since_seq=since_seq))
 
+    # -- Weight sync coordination --
+
+    @app.post("/weight_sync/begin")
+    async def weight_sync_begin():
+        """Notify TA that weight sync is starting. Holds new requests."""
+        await ta_router.begin_weight_sync()
+        return JSONResponse({"status": "ok", "weight_sync_active": True})
+
+    @app.post("/weight_sync/end")
+    async def weight_sync_end():
+        """Notify TA that weight sync has completed. Releases held requests."""
+        await ta_router.end_weight_sync()
+        return JSONResponse({"status": "ok", "weight_sync_active": False})
+
 
 # =============================================================================
 # Standalone Application

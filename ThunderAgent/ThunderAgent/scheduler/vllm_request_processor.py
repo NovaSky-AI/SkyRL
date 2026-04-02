@@ -6,11 +6,18 @@ Handles HTTP communication with vLLM backends, including:
 - Usage info extraction from responses
 """
 import json
+import logging
 import math
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
+import httpcore
 import httpx
 from fastapi.responses import Response, StreamingResponse
+
+logger = logging.getLogger(__name__)
+
+# Maximum retries for httpcore.ReadError (stale keepalive connections)
+_MAX_READ_ERROR_RETRIES = 2
 
 
 def extract_usage_info(payload: Any) -> Tuple[Optional[int], Optional[int], Optional[int]]:
@@ -120,8 +127,17 @@ async def forward_streaming_request(
         elif isinstance(stream_options, dict):
             stream_options.setdefault("include_usage", True)
 
-    resp_cm = client.stream("POST", url, json=payload)
-    resp = await resp_cm.__aenter__()
+    # Retry on ReadError during initial connection (stale keepalive connections)
+    for attempt in range(_MAX_READ_ERROR_RETRIES):
+        try:
+            resp_cm = client.stream("POST", url, json=payload)
+            resp = await resp_cm.__aenter__()
+            break
+        except (httpcore.ReadError, httpx.ReadError) as exc:
+            if attempt < _MAX_READ_ERROR_RETRIES - 1:
+                logger.warning("ReadError on stream POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                continue
+            raise
     headers = filtered_headers(resp.headers)
     status = resp.status_code
     media_type = resp.headers.get("content-type")
@@ -211,8 +227,17 @@ async def forward_non_streaming_request(
     """
     # Remove program_id before forwarding
     payload = remove_program_id(payload)
-    
-    resp = await client.post(url, json=payload)
+
+    # Retry on ReadError (stale keepalive connections closed by server)
+    for attempt in range(_MAX_READ_ERROR_RETRIES):
+        try:
+            resp = await client.post(url, json=payload)
+            break
+        except (httpcore.ReadError, httpx.ReadError) as exc:
+            if attempt < _MAX_READ_ERROR_RETRIES - 1:
+                logger.warning("ReadError on POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                continue
+            raise
     
     # Extract usage info
     total_tokens: Optional[int] = None
@@ -250,7 +275,15 @@ async def forward_get_request(client: httpx.AsyncClient, url: str) -> Response:
     Returns:
         FastAPI Response with vLLM response content
     """
-    resp = await client.get(url)
+    for attempt in range(_MAX_READ_ERROR_RETRIES):
+        try:
+            resp = await client.get(url)
+            break
+        except (httpcore.ReadError, httpx.ReadError) as exc:
+            if attempt < _MAX_READ_ERROR_RETRIES - 1:
+                logger.warning("ReadError on GET %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                continue
+            raise
     return Response(
         content=resp.content,
         status_code=resp.status_code,

@@ -118,9 +118,18 @@ class MultiBackendRouter:
         # Scheduling mode: True = "tr" (capacity scheduling), False = "default" (pure proxy)
         self.scheduling_enabled = scheduling_enabled
 
+        transport_limits = httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=None,
+            keepalive_expiry=3.0,  # Must be < uvicorn's timeout-keep-alive (5s default)
+        )
         self.client = httpx.AsyncClient(
             timeout=1800.0,
-            limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
+            limits=transport_limits,
+            transport=httpx.AsyncHTTPTransport(
+                limits=transport_limits,
+                retries=1,  # Retry on ConnectError (stale pool connections)
+            ),
         )
         
         # Scheduler task for periodic capacity check
@@ -134,6 +143,12 @@ class MultiBackendRouter:
         self._ratio_initialized: bool = False
         self._event_seq: int = 0
         self._recent_events: deque[RouterEvent] = deque(maxlen=50000)
+
+        # Weight sync coordination
+        self._weight_sync_active: bool = False
+        self._weight_sync_event: asyncio.Event = asyncio.Event()
+        self._weight_sync_event.set()  # Not blocking initially
+        self._weight_sync_watchdog: Optional[asyncio.Task] = None
         self._event_counters: Dict[str, int] = {
             "created": 0,
             "paused": 0,
@@ -212,6 +227,15 @@ class MultiBackendRouter:
 
     async def stop(self):
         """Stop the router."""
+        # Stop the weight sync watchdog if running
+        if self._weight_sync_watchdog is not None:
+            self._weight_sync_watchdog.cancel()
+            try:
+                await self._weight_sync_watchdog
+            except asyncio.CancelledError:
+                pass
+            self._weight_sync_watchdog = None
+
         # Stop the scheduler
         if self._scheduler_task:
             self._scheduler_stop = True
@@ -222,13 +246,76 @@ class MultiBackendRouter:
                 pass
             self._scheduler_task = None
             logger.info("Stopped scheduler loop")
-        
+
         # Stop metrics monitoring on each backend
         for backend in self.backends.values():
             await backend.stop_monitoring()
-        
+
         await self.client.aclose()
         logger.info("Router stopped")
+
+    # -------------------------------------------------------------------------
+    # Weight Sync Coordination
+    # -------------------------------------------------------------------------
+
+    @property
+    def weight_sync_active(self) -> bool:
+        return self._weight_sync_active
+
+    async def begin_weight_sync(self) -> None:
+        """Enter weight sync mode. Called by trainer before pausing vLLM backends.
+
+        Effects:
+        1. Sets weight_sync_active flag
+        2. Clears _weight_sync_event so new data-plane requests block
+        3. Scheduler loop will skip ticks while flag is set
+        4. Starts a watchdog timer that auto-exits after 300s
+        """
+        if self._weight_sync_active:
+            logger.warning("begin_weight_sync called while already in weight sync mode")
+            return
+        self._weight_sync_active = True
+        self._weight_sync_event.clear()
+        self._weight_sync_watchdog = asyncio.create_task(self._weight_sync_timeout(300.0))
+        logger.info("Weight sync mode ENTERED - holding new requests, suspending scheduler")
+
+    async def end_weight_sync(self) -> None:
+        """Exit weight sync mode. Called by trainer after vLLM backends resume.
+
+        Effects:
+        1. Cancels the watchdog timer
+        2. Clears weight_sync_active flag
+        3. Sets _weight_sync_event to release all held requests
+        4. Scheduler resumes normal ticks
+        """
+        if not self._weight_sync_active:
+            logger.warning("end_weight_sync called while not in weight sync mode")
+            return
+        if self._weight_sync_watchdog is not None:
+            self._weight_sync_watchdog.cancel()
+            try:
+                await self._weight_sync_watchdog
+            except asyncio.CancelledError:
+                pass
+            self._weight_sync_watchdog = None
+        self._weight_sync_active = False
+        self._weight_sync_event.set()
+        logger.info("Weight sync mode EXITED - releasing held requests, resuming scheduler")
+
+    async def _weight_sync_timeout(self, timeout: float = 300.0) -> None:
+        """Watchdog: auto-exit weight sync mode if end_weight_sync is never called."""
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if self._weight_sync_active:
+            logger.error(
+                f"Weight sync watchdog fired after {timeout}s - "
+                "auto-exiting weight sync mode to unblock requests"
+            )
+            self._weight_sync_active = False
+            self._weight_sync_event.set()
+            self._weight_sync_watchdog = None
 
     # -------------------------------------------------------------------------
     # Backend Selection
@@ -374,12 +461,17 @@ class MultiBackendRouter:
 
     async def update_program_before_request(self, program_id: str, state: Program, payload: Dict[str, Any]) -> bool:
         """Update program state before sending request to vLLM.
-        
+
         If scheduling_enabled=False (default mode): pure proxy, no capacity checks.
         If scheduling_enabled=True (tr mode): wait for scheduler to resume if PAUSED.
-        
+
         Returns: True if can proceed
         """
+        # Block if weight sync is in progress - all data-plane requests wait here
+        if not self._weight_sync_event.is_set():
+            logger.debug(f"Program {program_id} waiting for weight sync to complete")
+            await self._weight_sync_event.wait()
+
         state.step_count += 1
         is_new_program = state.step_count == 1
         
@@ -790,6 +882,8 @@ class MultiBackendRouter:
         while not self._scheduler_stop:
             try:
                 await asyncio.sleep(self._scheduler_interval)
+                if self._weight_sync_active:
+                    continue  # Skip scheduler tick during weight sync
                 await self._scheduled_check()
             except asyncio.CancelledError:
                 break
@@ -817,7 +911,9 @@ class MultiBackendRouter:
         """
         paused_count = 0
         
-        while backend.remaining_capacity() < 0:
+        # Count already-marked REASONING programs as future release so we stop
+        # once the current pause plan is sufficient to restore capacity.
+        while backend.remaining_capacity(include_future_release=True) < 0:
             # Priority 1: Pause ACTING programs (smallest first)
             acting_programs = self._get_acting_programs_sorted(backend.url, ascending=True)
             if acting_programs:
