@@ -46,7 +46,7 @@ bash scripts/fleet-common-run.sh \
   trainer.flash_attn=false \
   trainer.loss_chunk_size=4096 \
   trainer.use_sample_packing=false \
-  +generator.chat_template_kwargs='{enable_thinking:true}' \
+  generator.chat_template_kwargs='{enable_thinking:true}' \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE \
