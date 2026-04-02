@@ -273,7 +273,11 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     from skyrl.train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result)
+    validate_generator_output(
+        num_prompts,
+        result,
+        step_wise=result.get("is_last_step") is not None and result.get("trajectory_ids") is not None,
+    )
 
     return result
 

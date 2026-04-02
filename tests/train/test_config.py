@@ -16,6 +16,8 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
+from tests.train.util import example_dummy_config
 
 
 # Helper dataclasses for testing
@@ -212,3 +214,37 @@ class TestMaxSeqLenValidation:
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
 
         assert cfg.trainer.algorithm.max_seq_len == 32768
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (("trainer.algorithm.use_kl_in_reward", True), "use_kl_in_reward"),
+        (("generator.apply_overlong_filtering", True), "apply_overlong_filtering"),
+        (("trainer.algorithm.policy_loss_type", "gspo"), "policy_loss_type='gspo'"),
+        (("trainer.algorithm.loss_reduction", "sequence_mean"), "sequence-scoped loss reductions"),
+        (("trainer.algorithm.loss_reduction", "seq_mean_token_sum_norm"), "sequence-scoped loss reductions"),
+        (("trainer.algorithm.off_policy_correction.tis_ratio_type", "sequence"), "token-level off-policy correction"),
+        (("trainer.algorithm.off_policy_correction.sequence_mask_metric", "product"), "token-level off-policy correction"),
+    ],
+)
+def test_validate_cfg_blocks_unsupported_stepwise_feature_combinations(overrides, match):
+    cfg = example_dummy_config()
+    cfg.generator.step_wise_trajectories = True
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.placement.policy_num_nodes = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
+
+    dotted_key, value = overrides
+    target = cfg
+    parts = dotted_key.split(".")
+    for part in parts[:-1]:
+        target = getattr(target, part)
+    setattr(target, parts[-1], value)
+
+    with pytest.raises(NotImplementedError, match=match):
+        validate_cfg(cfg)

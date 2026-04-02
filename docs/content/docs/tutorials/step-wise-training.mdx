@@ -39,6 +39,22 @@ Some algorithms have their behavior altered by step-wise decomposition, since ea
 
 That said, some research suggests that treating each turn as a separate sequence may actually be beneficial. See the section on [Modelling Multi-Turn Agentic Task as Chunked MDP](https://faithful-almanac-add.notion.site/The-Bitter-Lesson-Behind-Building-Agentic-RL-in-Terminal-Environments-2eaddd45837f80c9ad2ed6a15ef3c1a1#305ddd45837f80af9807ead712e8d343).
 
+### Current support matrix
+
+With `generator.step_wise_trajectories=true`, SkyRL currently supports:
+
+- regular GRPO/PPO-style training with last-step reward broadcast
+- token-level TIS (`trainer.algorithm.off_policy_correction.tis_ratio_type="token"`)
+- dynamic sampling and zero-variance filtering using final-step trajectory outcomes
+
+SkyRL currently does **not** support the following combinations in step-wise mode and will fail fast during config validation:
+
+- `trainer.algorithm.use_kl_in_reward=true`
+- `generator.apply_overlong_filtering=true`
+- `trainer.algorithm.policy_loss_type="gspo"`
+- `trainer.algorithm.loss_reduction in {"sequence_mean", "seq_mean_token_sum_norm"}`
+- sequence-scoped off-policy correction (`tis_ratio_type="sequence"` or any sequence mask metric)
+
 ## Configuration
 
 Enable step-wise training by setting:
@@ -88,6 +104,8 @@ When `step_wise_trajectories=True`, some related fields:
 
 ### Concrete Example
 
+The example below shows the **preferred conceptual representation** where each step row contains only model-generated tokens.
+
 Consider 2 trajectories: trajectory A has 3 turns, trajectory B has 2 turns.
 
 ```python
@@ -134,6 +152,8 @@ GeneratorOutput(
 )
 ```
 
+For `SkyRLGymGenerator` specifically, the current runtime is slightly lower level: each step row's `response_ids` may contain `assistant_tokens + observation_tokens`, with `loss_masks` set to `1` on assistant positions and `0` on observation positions. If `rollout_logprobs` are present, observation positions are filled with dummy values so the tensors still align.
+
 ### Key Invariants
 
 The following are validated by `_validate_step_wise_fields()` in [skyrl/train/utils/trainer_utils.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/utils/trainer_utils.py):
@@ -167,7 +187,13 @@ response = await litellm.acompletion(
 
 ### 2. Set Loss Masks
 
-Set `loss_mask = [1] * len(response_ids[i])` for each step. Since each step's response contains only the model's completion tokens (no interleaved observations), all tokens are trainable.
+If each step row contains only model-generated tokens, you can set:
+
+```python
+loss_mask = [1] * len(response_ids[i])
+```
+
+If your generator appends non-trainable observation tokens to `response_ids`, set those positions to `0` in `loss_mask` and, if applicable, pad `rollout_logprobs` with dummy values on the observation suffix.
 
 ### 3. Assign Rewards
 

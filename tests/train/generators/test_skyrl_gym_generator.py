@@ -1618,6 +1618,15 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         ), f"loss_masks[{i}] length should match response_ids[{i}] length"
         assert all(isinstance(val, int) for val in loss_mask), f"loss_masks[{i}] should contain integers"
 
+    # SkyRLGymGenerator currently appends observation tokens to step-wise response_ids and
+    # masks them out from the loss. The first step has one observation turn; the last step does not.
+    assert generator_output["response_ids"][0][:4] == [10, 11, 12, mock_tokenizer.eos_token_id]
+    assert len(generator_output["response_ids"][0]) > 4
+    assert generator_output["loss_masks"][0][:4] == [1, 1, 1, 1]
+    assert all(val == 0 for val in generator_output["loss_masks"][0][4:])
+    assert generator_output["response_ids"][1] == [10, 11, 12, mock_tokenizer.eos_token_id]
+    assert generator_output["loss_masks"][1] == [1, 1, 1, 1]
+
     # Validate stop_reasons
     for i, stop_reason in enumerate(generator_output["stop_reasons"]):
         assert isinstance(stop_reason, str), f"stop_reasons[{i}] should be a string"

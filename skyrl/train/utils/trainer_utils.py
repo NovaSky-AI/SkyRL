@@ -307,6 +307,64 @@ class DynamicSamplingState(TypedDict, total=False):
     num_prompts_in_batch: Optional[int]
 
 
+def is_step_wise_generator_output(generator_output: GeneratorOutput) -> bool:
+    return generator_output.get("is_last_step") is not None and generator_output.get("trajectory_ids") is not None
+
+
+def get_trajectory_row_groups(generator_output: GeneratorOutput) -> List[List[int]]:
+    """Return contiguous row indices for each trajectory.
+
+    In non-step-wise mode, each row is already a full trajectory.
+    """
+    num_rows = len(generator_output["response_ids"])
+    if not is_step_wise_generator_output(generator_output):
+        return [[i] for i in range(num_rows)]
+
+    groups: List[List[int]] = []
+    current_group: List[int] = []
+    is_last_step = generator_output["is_last_step"]
+    assert is_last_step is not None, "Expected non-null is_last_step for step-wise generator output"
+
+    for idx, is_last in enumerate(is_last_step):
+        current_group.append(idx)
+        if is_last:
+            groups.append(current_group)
+            current_group = []
+
+    assert not current_group, "Malformed step-wise output: final trajectory must end with is_last_step=True"
+    return groups
+
+
+def get_last_step_indices(generator_output: GeneratorOutput) -> List[int]:
+    return [group[-1] for group in get_trajectory_row_groups(generator_output)]
+
+
+def expand_last_step_indices_to_rows(generator_output: GeneratorOutput, last_step_indices: List[int]) -> List[int]:
+    selected_last_steps = set(last_step_indices)
+    return [
+        row_idx
+        for group in get_trajectory_row_groups(generator_output)
+        if group[-1] in selected_last_steps
+        for row_idx in group
+    ]
+
+
+def get_sequence_level_rewards(rewards: Union[List[float], List[List[float]]]) -> np.ndarray:
+    if rewards and isinstance(rewards[0], list):
+        return np.array([sum(reward) for reward in rewards], dtype=float)
+    return np.array(rewards, dtype=float)
+
+
+def select_generator_output_for_metrics(
+    generator_output: GeneratorOutput, uids: List[str]
+) -> Tuple[GeneratorOutput, List[str], List[int]]:
+    """Return the trajectory-final view used for step-wise metrics and grouping."""
+    kept_indices = get_last_step_indices(generator_output)
+    if not is_step_wise_generator_output(generator_output):
+        return generator_output, uids, kept_indices
+    return filter_generator_output(generator_output, kept_indices), [uids[i] for i in kept_indices], kept_indices
+
+
 def handle_dynamic_sampling(
     generator_output: GeneratorOutput,
     uids: List[str],
@@ -365,18 +423,15 @@ def handle_replace_sampling(
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
     min_replace_ratio = sampling_config["min_replace_ratio"]
 
-    # Extract rewards and convert to sequence-level if needed
-    rewards_list = generator_output["rewards"]
-    if rewards_list and isinstance(rewards_list[0], list):
-        # Token-level rewards: sum to get sequence rewards
-        rewards = np.array([sum(r) for r in rewards_list])
-    else:
-        rewards = np.array(rewards_list)
+    is_step_wise = is_step_wise_generator_output(generator_output)
+    trajectory_row_groups = get_trajectory_row_groups(generator_output)
+    grouped_output, grouped_uids, _ = select_generator_output_for_metrics(generator_output, uids)
+    rewards = get_sequence_level_rewards(grouped_output["rewards"])
 
     # get mapping of uids to list of indices and metrics
     uid2indices = defaultdict(list)
     uid2metric_vals = defaultdict(list)
-    for idx, uid in enumerate(uids):
+    for idx, uid in enumerate(grouped_uids):
         uid2indices[uid].append(idx)
         uid2metric_vals[uid].append(rewards[idx])
 
@@ -386,8 +441,8 @@ def handle_replace_sampling(
         uid2metric_std[uid] = np.std(metric_vals)
 
     # Determine good UIDs: those with std > 0 (or group size == 1)
-    good_uids = set([uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1])
-    bad_uids = set([uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1])
+    good_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
+    bad_uids = [uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1]
 
     logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total prompts")
 
@@ -408,30 +463,47 @@ def handle_replace_sampling(
         for uid in bad_uids:
             bad_indices.extend(uid2indices[uid])
 
-        # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][replacement_idx].copy()
-            generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
-            replacement_reward = generator_output["rewards"][replacement_idx]
-            generator_output["rewards"][bad_idx] = (
-                replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
-            )
-            generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
-            if generator_output["stop_reasons"]:
-                generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
+        if is_step_wise:
+            selected_group_indices = list(range(len(trajectory_row_groups)))
+            for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
+                selected_group_indices[bad_idx] = replacement_idx
 
-            if generator_output["rollout_logprobs"]:
-                generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+            selected_row_indices = [
+                row_idx for group_idx in selected_group_indices for row_idx in trajectory_row_groups[group_idx]
+            ]
+            replaced_output = filter_generator_output(generator_output, selected_row_indices)
+            replaced_uids = [
+                grouped_uids[group_idx] for group_idx in selected_group_indices for _ in trajectory_row_groups[group_idx]
+            ]
+        else:
+            # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
+            for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
+                generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][
+                    replacement_idx
+                ].copy()
+                generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
+                replacement_reward = generator_output["rewards"][replacement_idx]
+                generator_output["rewards"][bad_idx] = (
+                    replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
+                )
+                generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
+                if generator_output["stop_reasons"]:
+                    generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
 
-        # Update UIDs accordingly
-        replaced_uids = uids.copy()
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            replaced_uids[bad_idx] = uids[replacement_idx]
+                if generator_output["rollout_logprobs"]:
+                    generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][
+                        replacement_idx
+                    ]
+
+            replaced_output = generator_output
+            replaced_uids = uids.copy()
+            for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
+                replaced_uids[bad_idx] = grouped_uids[replacement_idx]
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
         logger.info("==================================================")
 
-        return generator_output, replaced_uids, False
+        return replaced_output, replaced_uids, False
     else:
         logger.warning("===================== Warning (Dynamic sampling replace) ====================")
         logger.warning("In this mini-batch, most training samples receive low variance rewards.")
@@ -462,17 +534,14 @@ def handle_filter_sampling(
     target_batch_size = sampling_config["train_batch_size"]
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
-    # Extract rewards from collected output
-    rewards_list = generator_output["rewards"]
-    if rewards_list and isinstance(rewards_list[0], list):
-        # Token-level rewards: sum to get sequence rewards
-        rewards = np.array([sum(r) for r in rewards_list])
-    else:
-        rewards = np.array(rewards_list)
+    is_step_wise = is_step_wise_generator_output(generator_output)
+    trajectory_row_groups = get_trajectory_row_groups(generator_output)
+    grouped_output, grouped_uids, _ = select_generator_output_for_metrics(generator_output, uids)
+    rewards = get_sequence_level_rewards(grouped_output["rewards"])
 
     # Group by UID and calculate standard deviation
     uid2metric_vals = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
+    for uid, reward in zip(grouped_uids, rewards):
         uid2metric_vals[uid].append(reward)
 
     uid2metric_std = {}
@@ -485,13 +554,18 @@ def handle_filter_sampling(
 
     # Filter trajectories based on kept UIDs
     kept_traj_idxs = []
-    for idx, traj_uid in enumerate(uids):
+    for idx, traj_uid in enumerate(grouped_uids):
         if traj_uid in kept_uids_set:
             kept_traj_idxs.append(idx)
 
+    if is_step_wise:
+        kept_row_indices = [row_idx for traj_idx in kept_traj_idxs for row_idx in trajectory_row_groups[traj_idx]]
+    else:
+        kept_row_indices = kept_traj_idxs
+
     # Apply filtering to generator output
-    filtered_output = filter_generator_output(generator_output, kept_traj_idxs)
-    filtered_uids = [uids[idx] for idx in kept_traj_idxs]
+    filtered_output = filter_generator_output(generator_output, kept_row_indices)
+    filtered_uids = [uids[idx] for idx in kept_row_indices]
 
     if "collected_generator_output" not in collected_state:
         collected_state.update(
@@ -527,7 +601,13 @@ def handle_filter_sampling(
         final_output = collected_state["collected_generator_output"]
         final_uids = collected_state["collected_uids"]
 
-        if len(final_uids) > max_trajectories:
+        if is_step_wise_generator_output(final_output):
+            trajectory_groups = get_trajectory_row_groups(final_output)
+            if len(trajectory_groups) > max_trajectories:
+                kept_row_indices = [row_idx for group in trajectory_groups[:max_trajectories] for row_idx in group]
+                final_output = filter_generator_output(final_output, kept_row_indices)
+                final_uids = [final_uids[idx] for idx in kept_row_indices]
+        elif len(final_uids) > max_trajectories:
             final_output = filter_generator_output(final_output, list(range(max_trajectories)))
             final_uids = final_uids[:max_trajectories]
 
@@ -550,38 +630,38 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
     """Filter GeneratorOutput based on kept indices."""
-    filtered = {
-        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
-        "response_ids": [output["response_ids"][i] for i in kept_indices],
-        "rewards": [output["rewards"][i] for i in kept_indices],
-        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
-        "stop_reasons": None,
-        "rollout_metrics": output.get("rollout_metrics"),
-        "rollout_logprobs": (
-            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
-        ),
-    }
-
-    if output.get("stop_reasons"):
-        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
+    filtered = {"rollout_metrics": output.get("rollout_metrics")}
+    num_rows = len(output["response_ids"])
+    for key, value in output.items():
+        if key == "rollout_metrics":
+            continue
+        if isinstance(value, list):
+            if len(value) == num_rows:
+                filtered[key] = [value[i] for i in kept_indices]
+            else:
+                filtered[key] = value
+        else:
+            filtered[key] = value
 
     return filtered
 
 
-def zero_variance_filter(rewards: List[float], uids: List[str]) -> List[int]:
+def zero_variance_filter(rewards: Union[List[float], List[List[float]]], uids: List[str]) -> List[int]:
     """
-    Given a list of trajectory level rewards and uids, return the indices of the trajectories with non-zero variance rewards.
+    Given sequence-level rewards and uids, return indices for prompts with non-zero reward variance.
 
     Args:
-        rewards: List[float]
+        rewards: List[float] or token-level rewards per sequence
         uids: List[str]
 
     Returns:
         List[int]
     """
+    rewards_arr = get_sequence_level_rewards(rewards)
+
     # Group by UID and calculate standard deviation
     uid2metric_vals = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
+    for uid, reward in zip(uids, rewards_arr):
         uid2metric_vals[uid].append(reward)
 
     # Identify UIDs to keep: non-zero variance or singletons

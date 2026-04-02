@@ -19,12 +19,15 @@ from skyrl.train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     cleanup_old_checkpoints,
     dump_per_dataset_eval_results,
+    expand_last_step_indices_to_rows,
     filter_generator_output,
+    get_last_step_indices,
     handle_dynamic_sampling,
     handle_filter_sampling,
     handle_replace_sampling,
     run_on_each_node,
     sanitize_data_source,
+    select_generator_output_for_metrics,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -1063,3 +1066,140 @@ def test_validate_stepwise_multiple_is_last_step_true_per_trajectory():
     output["is_last_step"] = [True, True, True]
     with pytest.raises(AssertionError, match="is_last_step.*True.*trajectory continues"):
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def _make_stepwise_sampling_output(specs):
+    """Build a step-wise output and per-row uids from trajectory specs.
+
+    Each spec is `(uid, repetition_id, num_steps, final_reward)`.
+    """
+    prompt_token_ids = []
+    response_ids = []
+    rewards = []
+    loss_masks = []
+    trajectory_ids = []
+    is_last_step = []
+    uids = []
+
+    for traj_idx, (uid, repetition_id, num_steps, final_reward) in enumerate(specs):
+        tid = TrajectoryID(instance_id=uid, repetition_id=repetition_id)
+        for step in range(num_steps):
+            prompt_token_ids.append([10 + traj_idx, 20 + step])
+            response_ids.append([100 + traj_idx, 200 + step, 300 + step])
+            rewards.append([0.0, 0.0, final_reward if step == num_steps - 1 else 0.0])
+            loss_masks.append([1, 1, 1])
+            trajectory_ids.append(tid)
+            is_last_step.append(step == num_steps - 1)
+            uids.append(uid)
+
+    return (
+        {
+            "prompt_token_ids": prompt_token_ids,
+            "response_ids": response_ids,
+            "rewards": rewards,
+            "loss_masks": loss_masks,
+            "stop_reasons": ["stop"] * len(response_ids),
+            "rollout_metrics": {},
+            "rollout_logprobs": None,
+            "trajectory_ids": trajectory_ids,
+            "is_last_step": is_last_step,
+        },
+        uids,
+    )
+
+
+def test_select_generator_output_for_metrics_stepwise():
+    output, uids = _make_stepwise_sampling_output(
+        [
+            ("uid-a", 0, 2, 0.2),
+            ("uid-a", 1, 3, 0.8),
+            ("uid-b", 0, 1, 0.5),
+        ]
+    )
+
+    metric_output, metric_uids, metric_indices = select_generator_output_for_metrics(output, uids)
+
+    assert metric_indices == [1, 4, 5]
+    assert metric_uids == ["uid-a", "uid-a", "uid-b"]
+    assert metric_output["trajectory_ids"] == [
+        TrajectoryID(instance_id="uid-a", repetition_id=0),
+        TrajectoryID(instance_id="uid-a", repetition_id=1),
+        TrajectoryID(instance_id="uid-b", repetition_id=0),
+    ]
+
+
+def test_expand_last_step_indices_to_rows_stepwise():
+    output, _ = _make_stepwise_sampling_output(
+        [
+            ("uid-a", 0, 2, 0.2),
+            ("uid-a", 1, 3, 0.8),
+            ("uid-b", 0, 1, 0.5),
+        ]
+    )
+
+    assert expand_last_step_indices_to_rows(output, [4]) == [2, 3, 4]
+
+
+def test_filter_generator_output_preserves_stepwise_fields():
+    output, _ = _make_stepwise_sampling_output(
+        [
+            ("uid-a", 0, 2, 0.2),
+            ("uid-a", 1, 3, 0.8),
+        ]
+    )
+
+    filtered = filter_generator_output(output, [2, 3, 4])
+
+    assert filtered["trajectory_ids"] == [TrajectoryID(instance_id="uid-a", repetition_id=1)] * 3
+    assert filtered["is_last_step"] == [False, False, True]
+
+
+def test_handle_dynamic_sampling_filter_stepwise_keeps_full_trajectories():
+    generator_output, uids = _make_stepwise_sampling_output(
+        [
+            ("uid-good", 0, 2, 0.1),
+            ("uid-good", 1, 3, 0.9),
+            ("uid-bad", 0, 1, 0.5),
+            ("uid-bad", 1, 2, 0.5),
+        ]
+    )
+    sampling_config = {
+        "type": "filter",
+        "train_batch_size": 1,
+        "n_samples_per_prompt": 2,
+        "min_replace_ratio": 0.0,
+    }
+    state = {"sample_batch_count": 1}
+
+    result_output, result_uids, keep_sampling, updated_state = handle_dynamic_sampling(
+        generator_output, uids, sampling_config, state
+    )
+
+    assert keep_sampling is False
+    assert updated_state is None
+    assert set(result_uids) == {"uid-good"}
+    assert get_last_step_indices(result_output) == [1, 4]
+    assert [tid.instance_id for tid in result_output["trajectory_ids"]] == ["uid-good"] * len(result_uids)
+
+
+def test_handle_dynamic_sampling_replace_stepwise_replaces_full_trajectories():
+    generator_output, uids = _make_stepwise_sampling_output(
+        [
+            ("uid-good", 0, 2, 0.1),
+            ("uid-good", 1, 3, 0.9),
+            ("uid-bad", 0, 1, 0.5),
+            ("uid-bad", 1, 2, 0.5),
+        ]
+    )
+    sampling_config = {
+        "type": "replace",
+        "n_samples_per_prompt": 2,
+        "min_replace_ratio": 0.0,
+    }
+
+    result_output, result_uids, keep_sampling, _ = handle_dynamic_sampling(generator_output, uids, sampling_config)
+
+    assert keep_sampling is False
+    assert set(result_uids) == {"uid-good"}
+    assert len(get_last_step_indices(result_output)) == 4
+    assert [tid.instance_id for tid in result_output["trajectory_ids"]] == ["uid-good"] * len(result_uids)

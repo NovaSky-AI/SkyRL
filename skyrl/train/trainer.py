@@ -70,8 +70,10 @@ from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
     cleanup_old_checkpoints,
+    expand_last_step_indices_to_rows,
     extract_step_from_path,
     run_on_each_node,
+    select_generator_output_for_metrics,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -718,20 +720,9 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        generator_output_for_metrics = generator_output
-        uids_for_metrics = uids
-        if self.cfg.generator.step_wise_trajectories:
-            generator_output_for_metrics = defaultdict(list)
-            for key in generator_output:
-                if isinstance(generator_output[key], list):
-                    generator_output_for_metrics[key] = [
-                        generator_output[key][i]
-                        for i in range(len(generator_output[key]))
-                        if generator_output["is_last_step"][i]
-                    ]
-            uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
-            ]
+        generator_output_for_metrics, uids_for_metrics, metric_indices = select_generator_output_for_metrics(
+            generator_output, uids
+        )
 
         # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
@@ -751,7 +742,12 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                kept_metric_indices = zero_variance_filter(generator_output_for_metrics["rewards"], uids_for_metrics)
+                if self.cfg.generator.step_wise_trajectories:
+                    kept_last_step_indices = [metric_indices[i] for i in kept_metric_indices]
+                    kept_indices_set = set(expand_last_step_indices_to_rows(generator_output, kept_last_step_indices))
+                else:
+                    kept_indices_set = set(kept_metric_indices)
                 generator_output["loss_masks"] = [
                     [0] * len(mask) if i not in kept_indices_set else mask
                     for i, mask in enumerate(generator_output["loss_masks"])

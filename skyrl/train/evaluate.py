@@ -1,4 +1,3 @@
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -26,6 +25,7 @@ from skyrl.train.utils.logging_utils import log_example
 from skyrl.train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    select_generator_output_for_metrics,
     validate_generator_output,
 )
 
@@ -181,7 +181,7 @@ async def evaluate_step_wise(
             concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
             concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
             concat_uids.append(traj_id.instance_id)
-        validate_generator_output(generator_input, generator_output, step_wise=True)
+        validate_generator_output(len(generator_input["prompts"]), generator_output, step_wise=True)
         generator_outputs.append(generator_output)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
@@ -190,21 +190,10 @@ async def evaluate_step_wise(
     vis = tokenizer.decode(generator_output["response_ids"][0])
     logger.info(f"Eval output example: {vis}")
 
-    # Only use the final step metrics
-    generator_output_last_step = defaultdict(list)
-    is_last_step_mask = concat_generator_outputs["is_last_step"]
-    for key in concat_generator_outputs:
-        if isinstance(concat_generator_outputs[key], list):
-            assert len(concat_generator_outputs[key]) == len(
-                is_last_step_mask
-            ), f"Length mismatch: {len(concat_generator_outputs[key])} != {len(is_last_step_mask)} for key {key}"
-            generator_output_last_step[key] = [
-                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
-            ]
-    uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
-    data_sources_last_step = [
-        data_source for data_source, is_last_step in zip(concat_data_sources, is_last_step_mask) if is_last_step
-    ]
+    generator_output_last_step, uids_last_step, last_step_indices = select_generator_output_for_metrics(
+        concat_generator_outputs, concat_uids
+    )
+    data_sources_last_step = [concat_data_sources[i] for i in last_step_indices]
 
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(

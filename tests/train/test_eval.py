@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from skyrl.train.config import EnvironmentConfig, SamplingParams
-from skyrl.train.evaluate import evaluate
-from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput
+from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput, TrajectoryID
 from tests.train.util import example_dummy_config
 
 
@@ -111,3 +111,73 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_step_wise_uses_last_step_rewards(dummy_config, tmp_path):
+    cfg = dummy_config
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.eval_sampling_params = SamplingParams(
+        max_generate_length=20,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        min_p=0.0,
+        logprobs=None,
+        stop=None,
+    )
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.step_wise_trajectories = True
+    cfg.environment = EnvironmentConfig(env_class="gsm8k")
+    cfg.trainer.dump_eval_results = False
+    cfg.trainer.export_path = str(tmp_path)
+
+    prompts_batch = [
+        {
+            "prompt": [{"role": "user", "content": "question-1"}],
+            "env_class": None,
+            "env_extras": {"data_source": "dataset/a"},
+            "uid": "uid-1",
+        },
+        {
+            "prompt": [{"role": "user", "content": "question-2"}],
+            "env_class": None,
+            "env_extras": {"data_source": "dataset/b"},
+            "uid": "uid-2",
+        },
+    ]
+    eval_dataloader = DummyStatefulDataLoader([prompts_batch])
+
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[101], [101, 102], [201], [201, 202]],
+        "response_ids": [[11], [12], [21], [22]],
+        "rewards": [0.0, 1.0, 0.0, 0.0],
+        "loss_masks": [[1], [1], [1], [1]],
+        "stop_reasons": ["tool_call", "stop", "tool_call", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+        "trajectory_ids": [
+            TrajectoryID(instance_id="uid-1", repetition_id=0),
+            TrajectoryID(instance_id="uid-1", repetition_id=0),
+            TrajectoryID(instance_id="uid-2", repetition_id=0),
+            TrajectoryID(instance_id="uid-2", repetition_id=0),
+        ],
+        "is_last_step": [False, True, False, True],
+    }
+    generator = DummyGenerator(generator_output)
+
+    tokenizer = MagicMock()
+    tokenizer.decode.side_effect = lambda tokens: "decoded"
+
+    metrics = await evaluate_step_wise(
+        eval_dataloader=eval_dataloader,
+        generator=generator,
+        cfg=cfg,
+        global_step=5,
+        tokenizer=tokenizer,
+    )
+
+    assert metrics["eval/dataset_a/avg_score"] == pytest.approx(1.0)
+    assert metrics["eval/dataset_b/avg_score"] == pytest.approx(0.0)
+    assert metrics["eval/all/avg_score"] == pytest.approx(0.5)
+    assert metrics["eval/all/pass_at_1"] == pytest.approx(0.5)

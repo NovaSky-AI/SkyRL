@@ -328,6 +328,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
             )
 
+    validate_step_wise_cfg(cfg)
+
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
@@ -472,6 +474,41 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
+
+
+def validate_step_wise_cfg(cfg: SkyRLTrainConfig):
+    """Validate step-wise specific feature compatibility."""
+    if not cfg.generator.step_wise_trajectories:
+        return
+
+    algorithm_cfg = cfg.trainer.algorithm
+    off_policy_correction = algorithm_cfg.off_policy_correction
+
+    if algorithm_cfg.use_kl_in_reward:
+        raise NotImplementedError(
+            "`generator.step_wise_trajectories=True` does not support `trainer.algorithm.use_kl_in_reward` yet."
+        )
+
+    if cfg.generator.apply_overlong_filtering:
+        raise NotImplementedError(
+            "`generator.step_wise_trajectories=True` does not support `generator.apply_overlong_filtering` yet."
+        )
+
+    if algorithm_cfg.policy_loss_type == "gspo":
+        raise NotImplementedError(
+            "`generator.step_wise_trajectories=True` does not support `trainer.algorithm.policy_loss_type='gspo'` yet."
+        )
+
+    if algorithm_cfg.loss_reduction in ("sequence_mean", "seq_mean_token_sum_norm"):
+        raise NotImplementedError(
+            "`generator.step_wise_trajectories=True` does not support sequence-scoped loss reductions "
+            f"like `{algorithm_cfg.loss_reduction}` yet."
+        )
+
+    if off_policy_correction.tis_ratio_type == "sequence" or off_policy_correction.sequence_mask_metric is not None:
+        raise NotImplementedError(
+            "`generator.step_wise_trajectories=True` only supports token-level off-policy correction today."
+        )
 
 
 def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
