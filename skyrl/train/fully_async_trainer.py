@@ -618,12 +618,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         uids = []
         stalenesses = []
         staleness_violation_count = 0
-        group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
-            uids.extend([cur_generated_output_group.uid] * group_size)
+            actual_size = len(cur_generated_output_group.generator_output["response_ids"])
+            uids.extend([cur_generated_output_group.uid] * actual_size)
 
             # Check staleness violation.
             if cur_staleness > self.max_staleness_steps:
