@@ -49,6 +49,8 @@ In `generate_trajectory` we start a Ray task to generate a trajectory and evalua
 
 By running this workflow as a Ray task, we are also able to scale up generation across all the nodes in the Ray cluster. 
 
+For training, the Mini-SWE integration uses SkyRL's step-wise trajectory format. Each assistant turn keeps the exact prompt token IDs, completion token IDs, and rollout logprobs returned by the HTTP `/chat/completions` endpoint, so SkyRL does not need to reconstruct training tokens from chat messages after rollout generation.
+
  At a high level, the code looks as follows:
 
 ```python
@@ -99,6 +101,8 @@ bash examples/train/mini_swe_agent/run_mini_swe_8B.sh
 # bash examples/train/mini_swe_agent/run_mini_swe_30B.sh
 
 ```
+
+These scripts enable `generator.step_wise_trajectories=true` and `generator.batched=false` so each Mini-SWE turn is trained with exact token-in/token-out data from the serving stack.
 
 ### Tips
 

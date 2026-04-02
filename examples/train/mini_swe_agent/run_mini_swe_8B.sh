@@ -59,7 +59,8 @@ uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_sw
   generator.inference_engine.http_endpoint_port=8001 \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.batched=true \
+  generator.batched=false \
+  generator.step_wise_trajectories=true \
   generator.n_samples_per_prompt=4 \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
@@ -67,6 +68,6 @@ uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_sw
   trainer.run_name="mini_swe_8B_swe_gym" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_PATH" \
-  generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
-  generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
+  generator.miniswe_config_path="examples/train/mini_swe_agent/swebench.yaml" \
+  generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR \
   $@
