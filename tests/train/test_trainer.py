@@ -2,6 +2,8 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -30,6 +32,20 @@ class DummyDataset:
 
     def __getitem__(self, idx):
         return "dummy"
+
+    def collate_fn(self, batch):
+        return batch
+
+
+class MultiItemDummyDataset:
+    def __init__(self, size=6):
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        return [{"role": "user", "content": f"prompt-{idx}"}], None, {}, str(idx)
 
     def collate_fn(self, batch):
         return batch
@@ -537,3 +553,105 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_adaptive_prompt_filtering_checkpoint_state_round_trip(dummy_config, dummy_generator):
+    dummy_config.trainer.algorithm.adaptive_prompt_filtering.enabled = True
+    dummy_config.trainer.algorithm.adaptive_prompt_filtering.threshold = 0.9
+    dummy_config.trainer.algorithm.adaptive_prompt_filtering.min_history = 1
+    dummy_config.generator.inference_engine.enable_http_endpoint = True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dummy_config.trainer.ckpt_path = tmpdir
+        dummy_config.trainer.export_path = tmpdir
+
+        train_dataset = MultiItemDummyDataset(size=6)
+        trainer = RayPPOTrainer(
+            cfg=dummy_config,
+            tracker=None,
+            tokenizer=None,
+            train_dataset=train_dataset,
+            eval_dataset=None,
+            inference_engine_client=None,
+            generator=dummy_generator,
+        )
+        trainer.dispatch = MagicMock()
+        trainer._cleanup_old_checkpoints = MagicMock()
+        trainer.global_step = 3
+        trainer.current_epoch = 1
+        trainer.steps_completed_in_epoch = 0
+        trainer.completed_batches = 2
+        trainer.adaptive_prompt_history = {
+            "1": {"positive_count": 2, "total_count": 2},
+            "4": {"positive_count": 0, "total_count": 2},
+        }
+        trainer.active_prompt_indices = [1, 2, 4, 5]
+        trainer._build_train_dataloader_and_compute_training_steps()
+
+        trainer.save_checkpoints()
+
+        checkpoint_dir = os.path.join(tmpdir, "global_step_3")
+        resumed_cfg = example_dummy_config()
+        resumed_cfg.trainer.algorithm.adaptive_prompt_filtering.enabled = True
+        resumed_cfg.generator.inference_engine.enable_http_endpoint = True
+        resumed_cfg.trainer.resume_mode = "from_path"
+        resumed_cfg.trainer.resume_path = checkpoint_dir
+        resumed_cfg.trainer.ckpt_path = tmpdir
+        resumed_cfg.trainer.export_path = tmpdir
+
+        resumed_trainer = RayPPOTrainer(
+            cfg=resumed_cfg,
+            tracker=None,
+            tokenizer=None,
+            train_dataset=train_dataset,
+            eval_dataset=None,
+            inference_engine_client=None,
+            generator=dummy_generator,
+        )
+        resumed_trainer.dispatch = MagicMock()
+
+        loaded_step, loaded_checkpoint_dir = resumed_trainer.load_checkpoints()
+
+        assert loaded_step == 3
+        assert loaded_checkpoint_dir == checkpoint_dir
+        assert resumed_trainer.current_epoch == 1
+        assert resumed_trainer.steps_completed_in_epoch == 0
+        assert resumed_trainer.completed_batches == 2
+        assert resumed_trainer.active_prompt_indices == [1, 2, 4, 5]
+        assert resumed_trainer.adaptive_prompt_history == {
+            "1": {"positive_count": 2, "total_count": 2},
+            "4": {"positive_count": 0, "total_count": 2},
+        }
+        assert len(resumed_trainer.train_dataset) == 4
+
+
+def test_save_checkpoints_post_step_state_snapshots_advanced_counters(dummy_config, dummy_generator):
+    dummy_config.trainer.algorithm.adaptive_prompt_filtering.enabled = True
+    dummy_config.generator.inference_engine.enable_http_endpoint = True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dummy_config.trainer.ckpt_path = tmpdir
+        dummy_config.trainer.export_path = tmpdir
+
+        trainer = RayPPOTrainer(
+            cfg=dummy_config,
+            tracker=None,
+            tokenizer=None,
+            train_dataset=MultiItemDummyDataset(size=6),
+            eval_dataset=None,
+            inference_engine_client=None,
+            generator=dummy_generator,
+        )
+        trainer.dispatch = MagicMock()
+        trainer._cleanup_old_checkpoints = MagicMock()
+        trainer.global_step = 3
+        trainer.current_epoch = 1
+        trainer.steps_completed_in_epoch = 1
+        trainer.completed_batches = 4
+
+        trainer.save_checkpoints(post_step_state=True)
+
+        checkpoint_dir = os.path.join(tmpdir, "global_step_3")
+        saved_state = torch.load(os.path.join(checkpoint_dir, "trainer_state.pt"), map_location="cpu", weights_only=False)
+        assert saved_state["steps_completed_in_epoch"] == 2
+        assert saved_state["completed_batches"] == 5

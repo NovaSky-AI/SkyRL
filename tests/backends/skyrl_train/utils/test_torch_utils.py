@@ -6,6 +6,7 @@ import torch
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_cross_entropy_from_log_probs,
     chunked_entropy_from_logits,
+    prepare_logits_for_loss,
 )
 
 
@@ -117,3 +118,22 @@ def test_chunked_entropy_from_logits_attention_mask_shape_validation():
     correct_mask = torch.ones(2, 3, dtype=torch.float32)
     result = chunked_entropy_from_logits(logits, attention_mask=correct_mask)
     assert result.shape == (2, 3)
+
+
+def test_prepare_logits_for_loss_upcasts_and_scales():
+    logits = torch.tensor([[[2.0, 4.0]]], dtype=torch.bfloat16)
+
+    prepared = prepare_logits_for_loss(logits, temperature=2.0, upcast_to_fp32=True)
+
+    assert prepared.dtype == torch.float32
+    expected = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32)
+    torch.testing.assert_close(prepared, expected)
+
+
+def test_prepare_logits_for_loss_leaves_dtype_when_disabled():
+    logits = torch.tensor([[[2.0, 4.0]]], dtype=torch.bfloat16)
+
+    prepared = prepare_logits_for_loss(logits, temperature=1.0, upcast_to_fp32=False)
+
+    assert prepared.dtype == torch.bfloat16
+    torch.testing.assert_close(prepared, logits)

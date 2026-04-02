@@ -3,7 +3,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 
 ## Algorithms
 
-- `algorithms/`: Examples for how to configure and run RL with various algorithms and policy-loss variants (e.g., DAPO, SAPO, GRPO, CISPO, GSPO, or your own custom advantage estimators and custom policy losses).
+- `algorithms/`: Examples for how to configure and run RL with various algorithms and policy-loss variants (e.g., DAPO, ScaleRL, SAPO, GRPO, CISPO, GSPO, or your own custom advantage estimators and custom policy losses).
 - `ppo/`: Vanilla PPO training (with a critic, ref, and policy model)
 - `on_policy_distillation/`: [On-policy distillation recipe](https://novasky-ai.notion.site/on-policy-distillation) that uses a teacher model to provide dense token-level rewards during training, reproducing results from the [Thinking Machines blog](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - `tis_correction/`: Applying [Flash-RL TIS](https://fengyao.notion.site/off-policy-rl) correction to improve off-policy stability.

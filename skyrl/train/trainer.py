@@ -43,7 +43,7 @@ from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.dataset import PromptDataset
+from skyrl.train.dataset import FilteredPromptDataset, PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
@@ -71,7 +71,9 @@ from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    filter_active_prompt_indices,
     run_on_each_node,
+    update_adaptive_prompt_history,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -95,12 +97,23 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
+        self.base_train_dataset = train_dataset
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
         self.train_dataloader = None
         self.total_training_steps = None
+        self.global_step = 0
+        self.current_epoch = 0
+        self.steps_completed_in_epoch = 0
+        self.completed_batches = 0
+        self.adaptive_prompt_history: Dict[str, Dict[str, int]] = {}
+        self.active_prompt_indices = (
+            list(range(len(self.base_train_dataset)))
+            if self._adaptive_prompt_filtering_enabled() and self.base_train_dataset is not None
+            else []
+        )
         self._build_train_dataloader_and_compute_training_steps()
 
         self.eval_dataloader = (
@@ -112,7 +125,6 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
-        self.global_step = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -132,6 +144,93 @@ class RayPPOTrainer:
         """Check if critic model is configured."""
         return bool(self.cfg.trainer.critic.model.path)
 
+    def _adaptive_prompt_filtering_enabled(self) -> bool:
+        return bool(self.cfg.trainer.algorithm.adaptive_prompt_filtering.enabled and self.base_train_dataset is not None)
+
+    def _get_current_train_dataset(self):
+        if not self._adaptive_prompt_filtering_enabled():
+            return self.base_train_dataset
+        if len(self.active_prompt_indices) == len(self.base_train_dataset):
+            return self.base_train_dataset
+        return FilteredPromptDataset(self.base_train_dataset, self.active_prompt_indices)
+
+    def _estimate_total_batches(self) -> Optional[int]:
+        if self.train_dataloader is None:
+            return None
+        remaining_batches_current_epoch = max(len(self.train_dataloader) - self.steps_completed_in_epoch, 0)
+        remaining_epochs_after_current = max(self.cfg.trainer.epochs - self.current_epoch - 1, 0)
+        return self.completed_batches + remaining_batches_current_epoch + remaining_epochs_after_current * len(
+            self.train_dataloader
+        )
+
+    def _update_progress_bar_total(self, pbar: tqdm) -> None:
+        estimated_total = self._estimate_total_batches()
+        if estimated_total is None:
+            return
+        pbar.total = max(estimated_total, pbar.n)
+        pbar.refresh()
+
+    def _record_adaptive_prompt_history(self, generator_output: GeneratorOutput, uids: List[str]) -> None:
+        if not self._adaptive_prompt_filtering_enabled():
+            return
+        self.adaptive_prompt_history = update_adaptive_prompt_history(
+            prompt_history=self.adaptive_prompt_history,
+            uids=uids,
+            rewards=generator_output["rewards"],
+        )
+        self.all_metrics.update(
+            {
+                "adaptive_prompt_filtering/active_prompt_count": len(self.active_prompt_indices),
+                "adaptive_prompt_filtering/history_size": len(self.adaptive_prompt_history),
+            }
+        )
+
+    def _apply_adaptive_prompt_filtering_for_next_epoch(self) -> None:
+        if not self._adaptive_prompt_filtering_enabled():
+            return
+
+        filter_cfg = self.cfg.trainer.algorithm.adaptive_prompt_filtering
+        if self.current_epoch < filter_cfg.warmup_epochs:
+            logger.info(
+                "Skipping adaptive prompt filtering after epoch "
+                f"{self.current_epoch}: waiting for warmup_epochs={filter_cfg.warmup_epochs}"
+            )
+            self.all_metrics.update(
+                {
+                    "adaptive_prompt_filtering/filtered_prompt_count": 0,
+                    "adaptive_prompt_filtering/easy_prompt_candidate_count": 0,
+                }
+            )
+            return
+
+        next_active_prompt_indices, filter_metrics = filter_active_prompt_indices(
+            num_total_prompts=len(self.base_train_dataset),
+            active_prompt_indices=self.active_prompt_indices,
+            prompt_history=self.adaptive_prompt_history,
+            threshold=filter_cfg.threshold,
+            min_history=filter_cfg.min_history,
+            min_active_prompts=max(filter_cfg.min_active_prompts, self.cfg.trainer.train_batch_size),
+            min_active_ratio=filter_cfg.min_active_ratio,
+        )
+        if not next_active_prompt_indices:
+            logger.warning("Adaptive prompt filtering would remove all prompts; keeping the current active set instead.")
+            filter_metrics["filtered_prompt_count"] = 0
+            filter_metrics["active_prompt_count"] = len(self.active_prompt_indices)
+        else:
+            self.active_prompt_indices = next_active_prompt_indices
+
+        self.all_metrics.update(
+            {
+                f"adaptive_prompt_filtering/{key}": value
+                for key, value in filter_metrics.items()
+            }
+        )
+        logger.info(
+            "Adaptive prompt filtering after epoch "
+            f"{self.current_epoch}: active_prompts={len(self.active_prompt_indices)}, "
+            f"filtered_prompts={filter_metrics['filtered_prompt_count']}"
+        )
+
     def _build_train_dataloader_and_compute_training_steps(self):
         """
         Hook for constructing the training dataloader. Subclasses can override
@@ -141,7 +240,8 @@ class RayPPOTrainer:
         When train_dataset is None (e.g. Tinker backend provides data externally),
         the dataloader is not built.
         """
-        if self.train_dataset is not None:
+        if self.base_train_dataset is not None:
+            self.train_dataset = self._get_current_train_dataset()
             self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
             self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
@@ -202,11 +302,18 @@ class RayPPOTrainer:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        start_epoch = self.global_step // len(self.train_dataloader)
-        self.global_step += 1  # start training at global_step 1
+        pbar = tqdm(
+            total=self._estimate_total_batches() or self.total_training_steps,
+            initial=self.completed_batches,
+            desc="Training Batches Processed",
+        )
+        start_epoch = self.current_epoch
+        if self.global_step == 0:
+            self.global_step = 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for iter, rand_prompts in enumerate(self.train_dataloader):
+            self.current_epoch = epoch
+            self._update_progress_bar_total(pbar)
+            for iter, rand_prompts in enumerate(self.train_dataloader, start=self.steps_completed_in_epoch):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -236,6 +343,8 @@ class RayPPOTrainer:
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
                         generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
                         if keep_sampling:  # continue sampling
+                            self.steps_completed_in_epoch += 1
+                            self.completed_batches += 1
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
@@ -247,6 +356,7 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
+                    self._record_adaptive_prompt_history(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -291,7 +401,7 @@ class RayPPOTrainer:
                     # 8. conditionally save checkpoints and hf model
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
-                            self.save_checkpoints()
+                            self.save_checkpoints(post_step_state=True)
                     if (
                         self.cfg.trainer.hf_save_interval > 0
                         and self.global_step % self.cfg.trainer.hf_save_interval == 0
@@ -319,7 +429,7 @@ class RayPPOTrainer:
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
+                    or (epoch == self.cfg.trainer.epochs - 1 and iter == len(self.train_dataloader) - 1)
                 ):
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
@@ -334,11 +444,20 @@ class RayPPOTrainer:
                 self.all_timings = {}
 
                 # update progress bar after logging
+                self.steps_completed_in_epoch += 1
+                self.completed_batches += 1
                 pbar.update(1)
 
                 self.global_step += 1
 
                 del training_input, generator_output
+
+            self.steps_completed_in_epoch = 0
+            self.current_epoch = epoch + 1
+            if epoch != self.cfg.trainer.epochs - 1 and self._adaptive_prompt_filtering_enabled():
+                self._apply_adaptive_prompt_filtering_for_next_epoch()
+                self._build_train_dataloader_and_compute_training_steps()
+                self._update_progress_bar_total(pbar)
 
         pbar.close()
         if self.colocate_all:
@@ -1080,6 +1199,7 @@ class RayPPOTrainer:
                 loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
                 micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
                 max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+                uids=data.metadata["uids"][start_idx:end_idx],
             )
 
         data["advantages"] = normalized_advantages
@@ -1234,12 +1354,21 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def save_checkpoints(self, post_step_state: bool = False):
         """
         Save the model, optimizer, and training states to disk.
 
         Dispatch handles offload/backload automatically for all colocation configurations.
+
+        Args:
+            post_step_state: When True, snapshot trainer counters as if the current
+                training batch bookkeeping increment has already happened. This is
+                used for in-loop checkpoint saves that occur after a batch is
+                consumed but before the outer loop updates its counters.
         """
+        saved_steps_completed_in_epoch = self.steps_completed_in_epoch + int(post_step_state)
+        saved_completed_batches = self.completed_batches + int(post_step_state)
+
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
@@ -1267,6 +1396,11 @@ class RayPPOTrainer:
         # Save additional trainer state
         trainer_state = {
             "global_step": self.global_step,
+            "current_epoch": self.current_epoch,
+            "steps_completed_in_epoch": saved_steps_completed_in_epoch,
+            "completed_batches": saved_completed_batches,
+            "adaptive_prompt_history": self.adaptive_prompt_history,
+            "active_prompt_indices": self.active_prompt_indices,
             "config": asdict(self.cfg),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
@@ -1369,6 +1503,15 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        self.current_epoch = trainer_state.get("current_epoch", 0)
+        self.steps_completed_in_epoch = trainer_state.get("steps_completed_in_epoch", 0)
+        self.completed_batches = trainer_state.get("completed_batches", saved_global_step)
+        if self._adaptive_prompt_filtering_enabled():
+            self.adaptive_prompt_history = trainer_state.get("adaptive_prompt_history", {})
+            self.active_prompt_indices = trainer_state.get(
+                "active_prompt_indices", list(range(len(self.base_train_dataset)))
+            )
+            self._build_train_dataloader_and_compute_training_steps()
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")

@@ -278,11 +278,47 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         "token_mean",
         "token_mean_legacy",
         "sequence_mean",
+        "prompt_mean",
         "seq_mean_token_sum_norm",
     ), (
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+        f"Must be one of `['token_mean', 'token_mean_legacy', 'sequence_mean', 'prompt_mean', 'seq_mean_token_sum_norm']`"
     )
+
+    if cfg.trainer.algorithm.loss_reduction == "prompt_mean":
+        assert not cfg.generator.step_wise_trajectories, "`prompt_mean` does not support step-wise trajectories yet"
+        assert cfg.trainer.algorithm.dynamic_sampling.type != "replace", (
+            "`prompt_mean` is incompatible with `dynamic_sampling.type='replace'` because replacement can change "
+            "prompt group semantics within a batch"
+        )
+
+    adaptive_prompt_filtering = cfg.trainer.algorithm.adaptive_prompt_filtering
+    if adaptive_prompt_filtering.enabled:
+        assert adaptive_prompt_filtering.metric == "pass_rate", (
+            "adaptive_prompt_filtering.metric must be 'pass_rate' in V1, "
+            f"got {adaptive_prompt_filtering.metric}"
+        )
+        assert adaptive_prompt_filtering.threshold >= 0.0, (
+            "adaptive_prompt_filtering.threshold must be greater than or equal to 0"
+        )
+        assert adaptive_prompt_filtering.threshold <= 1.0, (
+            "adaptive_prompt_filtering.threshold must be less than or equal to 1"
+        )
+        assert adaptive_prompt_filtering.min_history > 0, (
+            "adaptive_prompt_filtering.min_history must be greater than 0"
+        )
+        assert adaptive_prompt_filtering.warmup_epochs >= 0, (
+            "adaptive_prompt_filtering.warmup_epochs must be greater than or equal to 0"
+        )
+        assert adaptive_prompt_filtering.min_active_prompts >= 0, (
+            "adaptive_prompt_filtering.min_active_prompts must be greater than or equal to 0"
+        )
+        assert 0.0 <= adaptive_prompt_filtering.min_active_ratio <= 1.0, (
+            "adaptive_prompt_filtering.min_active_ratio must be between 0 and 1"
+        )
+        assert not cfg.generator.step_wise_trajectories, (
+            "adaptive prompt filtering does not support step-wise trajectories yet"
+        )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:

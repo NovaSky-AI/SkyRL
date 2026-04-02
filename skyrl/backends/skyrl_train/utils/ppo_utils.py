@@ -1002,15 +1002,18 @@ def apply_loss_reduction_to_advantages_minibatch(
     loss_reduction: str,
     micro_batch_size: int,
     max_seq_len: int,
+    uids: Optional[List[str]] = None,
 ) -> torch.Tensor:
     """Scale advantages so that summing produces the desired loss reduction.
 
     Args:
         advantages: Advantage tensor of shape (minibatch_size, seq_len).
         loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
-        loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "seq_mean_token_sum_norm".
+        loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "prompt_mean",
+            "seq_mean_token_sum_norm".
         micro_batch_size: Number of sequences per micro-batch
         max_seq_len: Maximum sequence length.
+        uids: Prompt ids aligned with the mini-batch rows. Required for ``prompt_mean``.
 
     Returns:
         Scaled advantages tensor.
@@ -1037,6 +1040,24 @@ def apply_loss_reduction_to_advantages_minibatch(
     # Option 2: sequence mean
     elif loss_reduction == "sequence_mean":
         normalized_advantages = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+
+    # Option 2b: prompt mean
+    elif loss_reduction == "prompt_mean":
+        if uids is None:
+            raise ValueError("uids must be provided for prompt_mean loss reduction")
+        if len(uids) != batch_size:
+            raise ValueError(f"uids length must match batch size, got {len(uids)} and {batch_size}")
+
+        uid_to_indices = defaultdict(list)
+        for idx, uid in enumerate(uids):
+            uid_to_indices[uid].append(idx)
+
+        num_prompts = len(uid_to_indices)
+        for idxs in uid_to_indices.values():
+            group_advantages = advantages[idxs]
+            group_loss_mask = loss_mask[idxs]
+            denom = group_loss_mask.sum().clamp(min=1)
+            normalized_advantages[idxs] = group_advantages / (num_prompts * denom)
 
     # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
     elif loss_reduction == "seq_mean_token_sum_norm":

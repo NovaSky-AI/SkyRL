@@ -642,6 +642,37 @@ class TestApplyLossReductionToAdvantagesMinibatch:
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(0.7))
 
+    def test_prompt_mean(self):
+        advantages = torch.tensor(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [10.0, 20.0],
+                [30.0, 40.0],
+            ]
+        )
+        loss_mask = torch.tensor(
+            [
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+            ]
+        )
+        # Prompt A token mean = (1 + 2 + 3) / 3 = 2.0
+        # Prompt B token mean = (10 + 20 + 30 + 40) / 4 = 25.0
+        # Prompt mean = (2.0 + 25.0) / 2 = 13.5
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="prompt_mean",
+            micro_batch_size=1,
+            max_seq_len=2,
+            uids=["a", "a", "b", "b"],
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(13.5))
+
     def test_token_mean_legacy(self):
         """Legacy token mean: per-microbatch token mean, then averaged across microbatches."""
         # 4 sequences, micro_batch_size=2 -> 2 microbatches
@@ -669,6 +700,18 @@ class TestApplyLossReductionToAdvantagesMinibatch:
                 advantages=advantages,
                 loss_mask=loss_mask,
                 loss_reduction="invalid",
+                micro_batch_size=1,
+                max_seq_len=1,
+            )
+
+    def test_prompt_mean_requires_uids(self):
+        advantages = torch.tensor([[1.0]])
+        loss_mask = torch.tensor([[1.0]])
+        with pytest.raises(ValueError, match="uids must be provided"):
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages=advantages,
+                loss_mask=loss_mask,
+                loss_reduction="prompt_mean",
                 micro_batch_size=1,
                 max_seq_len=1,
             )

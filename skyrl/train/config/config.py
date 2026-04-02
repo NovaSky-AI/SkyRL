@@ -65,6 +65,9 @@ class SkyRLLoraConfig(BaseConfig):
 @dataclass
 class ModelConfig(BaseConfig):
     path: Optional[str] = None
+    upcast_logits_to_fp32: bool = False
+    """Upcast logits to fp32 before temperature scaling, logprob computation, and entropy computation.
+    Primarily relevant for HF/FSDP policy and ref models."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
 
 
@@ -266,6 +269,24 @@ class DynamicSamplingConfig(BaseConfig):
 
 
 @dataclass
+class AdaptivePromptFilteringConfig(BaseConfig):
+    enabled: bool = False
+    """Remove prompts that have become consistently easy at epoch boundaries."""
+    metric: str = "pass_rate"
+    """Filtering metric. V1 supports ``"pass_rate"`` only."""
+    threshold: float = 0.9
+    """Filter prompts whose metric is at least this threshold."""
+    min_history: int = 1
+    """Minimum number of sampled responses required before a prompt can be filtered."""
+    warmup_epochs: int = 1
+    """Do not filter prompts until at least this many epochs have completed."""
+    min_active_prompts: int = 0
+    """Keep at least this many prompts active after filtering."""
+    min_active_ratio: float = 0.0
+    """Keep at least this fraction of the original prompt dataset active after filtering."""
+
+
+@dataclass
 class ClipCovConfig(BaseConfig):
 
     clip_ratio: float = 0.0002
@@ -348,7 +369,7 @@ class AlgorithmConfig(BaseConfig):
     policy_loss_type: str = "regular"
     """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, or custom via ``PolicyLossRegistry``."""
     loss_reduction: str = "token_mean"
-    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``."""
+    """``"token_mean"``, ``"token_mean_legacy"``, ``"sequence_mean"``, ``"prompt_mean"``, or ``"seq_mean_token_sum_norm"``."""
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
@@ -366,6 +387,7 @@ class AlgorithmConfig(BaseConfig):
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
+    adaptive_prompt_filtering: AdaptivePromptFilteringConfig = field(default_factory=AdaptivePromptFilteringConfig)
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)
     """Only used when ``policy_loss_type="clip_cov"``."""
     kl_cov: KLCovConfig = field(default_factory=KLCovConfig)

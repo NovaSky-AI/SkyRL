@@ -16,6 +16,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
 
 
 # Helper dataclasses for testing
@@ -212,3 +213,79 @@ class TestMaxSeqLenValidation:
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
 
         assert cfg.trainer.algorithm.max_seq_len == 32768
+
+
+def test_validate_cfg_allows_prompt_mean():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.loss_reduction=prompt_mean"])
+    validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_prompt_mean_with_step_wise_trajectories():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.loss_reduction=prompt_mean",
+            "generator.step_wise_trajectories=true",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="prompt_mean"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_prompt_mean_with_replace_sampling():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.loss_reduction=prompt_mean",
+            "trainer.algorithm.dynamic_sampling.type=replace",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="prompt_mean"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_allows_adaptive_prompt_filtering():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.adaptive_prompt_filtering.enabled=true",
+            "trainer.algorithm.adaptive_prompt_filtering.metric=pass_rate",
+            "trainer.algorithm.adaptive_prompt_filtering.threshold=0.9",
+        ]
+    )
+    validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_adaptive_prompt_filtering_invalid_metric():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.adaptive_prompt_filtering.enabled=true",
+            "trainer.algorithm.adaptive_prompt_filtering.metric=avg_reward",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="pass_rate"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_adaptive_prompt_filtering_threshold_above_one():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.adaptive_prompt_filtering.enabled=true",
+            "trainer.algorithm.adaptive_prompt_filtering.threshold=1.1",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="less than or equal to 1"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_adaptive_prompt_filtering_with_step_wise():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.adaptive_prompt_filtering.enabled=true",
+            "generator.step_wise_trajectories=true",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="adaptive prompt filtering"):
+        validate_cfg(cfg)

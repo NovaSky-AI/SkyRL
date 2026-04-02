@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import Any, List, Sequence
 
 import datasets
 from loguru import logger
@@ -101,3 +101,20 @@ class PromptDataset:
 
     def __len__(self):
         return len(self.dataframe)
+
+
+class FilteredPromptDataset:
+    """A lightweight view over a prompt dataset that preserves base-row UIDs."""
+
+    def __init__(self, base_dataset: Any, active_indices: Sequence[int]):
+        self.base_dataset = base_dataset
+        self.active_indices = list(active_indices)
+
+    def __getitem__(self, item):
+        return self.base_dataset[self.active_indices[item]]
+
+    def collate_fn(self, item_list):
+        return self.base_dataset.collate_fn(item_list)
+
+    def __len__(self):
+        return len(self.active_indices)

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from collections import defaultdict
 from enum import Enum
@@ -305,6 +306,80 @@ class DynamicSamplingState(TypedDict, total=False):
     collected_generator_output: Optional[GeneratorOutput]
     collected_uids: Optional[List[str]]
     num_prompts_in_batch: Optional[int]
+
+
+class AdaptivePromptStats(TypedDict):
+    positive_count: int
+    total_count: int
+
+
+def extract_sequence_scores(rewards: List[float] | List[List[float]]) -> List[float]:
+    """Convert response-level or token-level rewards into one scalar score per response."""
+    if not rewards:
+        return []
+    if isinstance(rewards[0], list):
+        return [float(sum(response_rewards)) for response_rewards in rewards]
+    return [float(reward) for reward in rewards]
+
+
+def update_adaptive_prompt_history(
+    prompt_history: Dict[str, AdaptivePromptStats],
+    uids: List[str],
+    rewards: List[float] | List[List[float]],
+) -> Dict[str, AdaptivePromptStats]:
+    """Update prompt success counts from a batch of sampled responses.
+
+    V1 uses pass-rate filtering, so a response is counted as positive when its
+    scalar sequence score is strictly greater than zero.
+    """
+    sequence_scores = extract_sequence_scores(rewards)
+    for uid, score in zip(uids, sequence_scores):
+        stats = prompt_history.setdefault(uid, {"positive_count": 0, "total_count": 0})
+        stats["total_count"] += 1
+        stats["positive_count"] += int(score > 0.0)
+    return prompt_history
+
+
+def filter_active_prompt_indices(
+    num_total_prompts: int,
+    active_prompt_indices: List[int],
+    prompt_history: Dict[str, AdaptivePromptStats],
+    threshold: float,
+    min_history: int,
+    min_active_prompts: int = 0,
+    min_active_ratio: float = 0.0,
+) -> Tuple[List[int], Dict[str, BasicType]]:
+    """Filter easy prompts while enforcing a minimum active-set floor."""
+    min_active_by_ratio = math.ceil(num_total_prompts * min_active_ratio)
+    min_active = max(min_active_prompts, min_active_by_ratio)
+    if num_total_prompts > 0:
+        min_active = min(max(min_active, 1), num_total_prompts)
+
+    easy_candidates = []
+    for prompt_idx in active_prompt_indices:
+        prompt_uid = str(prompt_idx)
+        stats = prompt_history.get(prompt_uid)
+        if stats is None or stats["total_count"] < min_history:
+            continue
+        pass_rate = stats["positive_count"] / stats["total_count"]
+        if pass_rate >= threshold:
+            easy_candidates.append((prompt_idx, pass_rate, stats["total_count"]))
+
+    max_filterable = max(0, len(active_prompt_indices) - min_active)
+    easy_candidates.sort(key=lambda item: (-item[1], -item[2], item[0]))
+    filtered_prompt_indices = [prompt_idx for prompt_idx, _, _ in easy_candidates[:max_filterable]]
+    filtered_prompt_indices_set = set(filtered_prompt_indices)
+    next_active_prompt_indices = [
+        prompt_idx for prompt_idx in active_prompt_indices if prompt_idx not in filtered_prompt_indices_set
+    ]
+
+    metrics: Dict[str, BasicType] = {
+        "active_prompt_count": len(next_active_prompt_indices),
+        "filtered_prompt_count": len(filtered_prompt_indices),
+        "easy_prompt_candidate_count": len(easy_candidates),
+        "min_active_prompt_floor": min_active,
+    }
+    return next_active_prompt_indices, metrics
 
 
 def handle_dynamic_sampling(

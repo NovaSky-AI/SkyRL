@@ -31,6 +31,25 @@ except ImportError:
 CHUNK_SIZE = 1024
 
 
+def prepare_logits_for_loss(
+    logits: Float[torch.Tensor, "batch_size seqlen vocab_size"],
+    temperature: float = 1.0,
+    upcast_to_fp32: bool = False,
+) -> Float[torch.Tensor, "batch_size seqlen vocab_size"]:
+    """Prepare logits for logprob / entropy computation.
+
+    Args:
+        logits: Raw model logits.
+        temperature: Temperature used during policy loss computation.
+        upcast_to_fp32: Whether to upcast logits to fp32 before scaling.
+    """
+    if upcast_to_fp32 and logits.dtype != torch.float32:
+        logits = logits.to(torch.float32)
+    if temperature != 1.0:
+        logits = logits / temperature
+    return logits
+
+
 def chunked_cross_entropy_from_log_probs(
     logprobs: Float[torch.Tensor, "batch_size seqlen vocab_size"], requires_grad: bool = False
 ) -> Float[torch.Tensor, "batch_size seqlen"]:

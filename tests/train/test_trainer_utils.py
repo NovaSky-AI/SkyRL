@@ -19,12 +19,15 @@ from skyrl.train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     cleanup_old_checkpoints,
     dump_per_dataset_eval_results,
+    extract_sequence_scores,
+    filter_active_prompt_indices,
     filter_generator_output,
     handle_dynamic_sampling,
     handle_filter_sampling,
     handle_replace_sampling,
     run_on_each_node,
     sanitize_data_source,
+    update_adaptive_prompt_history,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -226,6 +229,46 @@ def test_sanitize_data_source_normal_string():
     """Test sanitize_data_source with normal string."""
     result = sanitize_data_source("normal_dataset")
     assert result == "normal_dataset"
+
+
+def test_extract_sequence_scores_supports_token_level_rewards():
+    rewards = [[0.0, 1.0], [0.0, 0.0, 2.0]]
+    assert extract_sequence_scores(rewards) == [1.0, 2.0]
+
+
+def test_update_adaptive_prompt_history_counts_positive_responses():
+    history = {}
+    updated = update_adaptive_prompt_history(
+        prompt_history=history,
+        uids=["0", "0", "1"],
+        rewards=[1.0, 0.0, -1.0],
+    )
+    assert updated == {
+        "0": {"positive_count": 1, "total_count": 2},
+        "1": {"positive_count": 0, "total_count": 1},
+    }
+
+
+def test_filter_active_prompt_indices_applies_floor_and_filters_easiest_prompts():
+    prompt_history = {
+        "0": {"positive_count": 10, "total_count": 10},
+        "1": {"positive_count": 9, "total_count": 10},
+        "2": {"positive_count": 8, "total_count": 10},
+        "3": {"positive_count": 1, "total_count": 10},
+    }
+    next_active_indices, metrics = filter_active_prompt_indices(
+        num_total_prompts=4,
+        active_prompt_indices=[0, 1, 2, 3],
+        prompt_history=prompt_history,
+        threshold=0.8,
+        min_history=1,
+        min_active_prompts=2,
+        min_active_ratio=0.0,
+    )
+    assert next_active_indices == [2, 3]
+    assert metrics["filtered_prompt_count"] == 2
+    assert metrics["easy_prompt_candidate_count"] == 3
+    assert metrics["min_active_prompt_floor"] == 2
 
 
 def test_calculate_per_dataset_metrics_single_source():

@@ -1,0 +1,63 @@
+---
+title: "ScaleRL"
+---
+
+<Callout type="info">
+The current ScaleRL recipe is supported with the standard `fsdp` trainer path.
+</Callout>
+
+SkyRL now ships the core ingredients requested in Issue #495 as first-class config knobs:
+
+- `trainer.algorithm.policy_loss_type=cispo`
+- `trainer.algorithm.zero_variance_filter=true`
+- `trainer.algorithm.loss_reduction=prompt_mean`
+- `trainer.algorithm.adaptive_prompt_filtering.enabled=true`
+- `trainer.policy.model.upcast_logits_to_fp32=true`
+
+An example GSM8K launch script is available at `examples/train/algorithms/scalerl/run_scalerl_gsm8k.sh`.
+
+## Prompt-Level Aggregation
+
+Set `trainer.algorithm.loss_reduction=prompt_mean` to average token losses at prompt granularity instead of weighting prompts by total token count.
+
+In V1, `prompt_mean`:
+
+- computes a token-mean loss within each prompt group
+- averages those prompt losses across the mini-batch
+- does not support step-wise trajectories
+- is incompatible with `trainer.algorithm.dynamic_sampling.type=replace`
+
+## Adaptive Prompt Filtering
+
+Adaptive prompt filtering removes prompts that have become consistently easy across epochs.
+
+```yaml
+trainer:
+  algorithm:
+    adaptive_prompt_filtering:
+      enabled: true
+      metric: pass_rate
+      threshold: 0.9
+      min_history: 5
+      warmup_epochs: 1
+      min_active_ratio: 0.1
+```
+
+V1 behavior:
+
+- only `metric=pass_rate` is supported
+- a sampled response counts as positive when its scalar reward is greater than `0`
+- filtering happens only at epoch boundaries
+- a prompt floor is enforced through `min_active_prompts` and `min_active_ratio`
+- fully async training is not supported yet
+
+## Fp32 Logits
+
+Set `trainer.policy.model.upcast_logits_to_fp32=true` to upcast logits to fp32 before temperature scaling, logprob computation, and entropy computation in the HF/FSDP policy path. The same flag is also available on `trainer.ref.model`.
+
+## Example
+
+```bash
+export WANDB_API_KEY=your_wandb_api_key
+bash examples/train/algorithms/scalerl/run_scalerl_gsm8k.sh
+```

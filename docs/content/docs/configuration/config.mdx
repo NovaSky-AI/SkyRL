@@ -243,6 +243,7 @@ This section configures the policy model used for training, including optimizer,
 policy:
   model:
     path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
+    upcast_logits_to_fp32: false  # Upcast logits to fp32 before logprob / entropy computation
     lora:
       rank: 0                    # LoRA rank (0 = disabled)
       alpha: 16                  # LoRA scaling parameter
@@ -276,6 +277,7 @@ policy:
 ```
 
 - `policy.optimizer_config`: Optimizer configuration for the policy model
+- `policy.model.upcast_logits_to_fp32`: Whether to upcast logits to fp32 before temperature scaling, logprob computation, and entropy computation in the HF/FSDP path.
 - `policy.fsdp_config`: FSDP configuration, applicable if `trainer.strategy='fsdp'`.
 - `policy.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 - `policy.use_torch_compile`: Whether to enable torch compile for entropy calculation
@@ -327,6 +329,7 @@ critic:
 ref:
   model:
     path: null  # defaults to `trainer.policy.model.path`
+    upcast_logits_to_fp32: false
   fsdp_config:
     cpu_offload: false
     reshard_after_forward: true
@@ -337,6 +340,7 @@ ref:
 ```
 
 - `ref.model.path`: Path to the reference model. Defaults to the`trainer.policy.model.path`, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
+- `ref.model.upcast_logits_to_fp32`: Whether to upcast reference-model logits to fp32 before logprob computation in the HF/FSDP path.
 - `ref.fsdp_config`: FSDP configuration, applicable if `trainer.strategy='fsdp'`.
 - `ref.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 
@@ -374,7 +378,7 @@ algorithm:
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
   policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
-  loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+  loss_reduction: "token_mean" # "token_mean", "token_mean_legacy", "sequence_mean", "prompt_mean", "seq_mean_token_sum_norm"
   grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
   zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
 
@@ -412,6 +416,15 @@ algorithm:
     type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
     max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
     min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+
+  adaptive_prompt_filtering:
+    enabled: false
+    metric: "pass_rate"
+    threshold: 0.9
+    min_history: 1
+    warmup_epochs: 1
+    min_active_prompts: 0
+    min_active_ratio: 0.0
 
   # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
   # and "token_tis_ratio_clip_high"
@@ -493,7 +506,9 @@ algorithm:
 - `algorithm.loss_reduction`: Type of loss reduction to use. Options include:
 
   - `token_mean`: computes average loss over all valid tokens in the batch. Used in [DAPO](https://dapo-sia.github.io/).
+  - `token_mean_legacy`: computes token means per micro-batch and then averages them across micro-batches.
   - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch.
+  - `prompt_mean`: computes a token-mean loss within each prompt group and then averages those prompt losses across the mini-batch. This is intended for ScaleRL-style prompt-level aggregation.
   - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). If `algorithm.max_seq_len` is not explicitly set, it defaults to `generator.max_input_length + generator.sampling_params.max_generate_length`.
 
 - `algorithm.grpo_norm_by_std`: Whether to normalize advantages by the standard deviation in GRPO. This is set to `false` in [Dr. GRPO](https://arxiv.org/abs/2503.20783).
@@ -508,6 +523,14 @@ algorithm:
   - `algorithm.dynamic_sampling.type`: Type of dynamic sampling to use. Currently, we support `filter` ([DAPO](https://dapo-sia.github.io/)), `replace` ([POLARIS](https://hkunlp.github.io/blog/2025/Polaris/) / [WebSailor](https://arxiv.org/abs/2507.02592)), or `null` for no dynamic sampling.
   - `algorithm.dynamic_sampling.max_sample_batches`: Maximum number of batches to sample before stopping. Set to `-1` to sample forever.
   - `algorithm.dynamic_sampling.min_replace_ratio`: Minimum proportion of good samples with which to replace bad samples for `replace` strategy.
+- `algorithm.adaptive_prompt_filtering`: Epoch-level prompt filtering configuration.
+  - `algorithm.adaptive_prompt_filtering.enabled`: Whether to remove easy prompts across epochs.
+  - `algorithm.adaptive_prompt_filtering.metric`: Filtering metric. V1 currently supports `pass_rate` only.
+  - `algorithm.adaptive_prompt_filtering.threshold`: Filter prompts whose metric is at least this threshold.
+  - `algorithm.adaptive_prompt_filtering.min_history`: Minimum number of sampled responses required before a prompt can be filtered.
+  - `algorithm.adaptive_prompt_filtering.warmup_epochs`: Number of completed epochs to wait before filtering starts.
+  - `algorithm.adaptive_prompt_filtering.min_active_prompts`: Minimum number of prompts to keep active.
+  - `algorithm.adaptive_prompt_filtering.min_active_ratio`: Minimum fraction of the original prompt dataset to keep active.
 - `algorithm.use_tis`: Whether to use Truncated Importance Sampling (TIS) as proposed in [this blog](https://fengyao.notion.site/off-policy-rl). This flag is to be deprecated, use `off_policy_correction.tis_ratio_type = "token"` instead.
 - `max_seq_len`: Used for `seq_mean_token_sum_norm` `loss_reduction`. Users should set this value for multi-turn for that loss. If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length, which is incorrect for multi-turn.
 - `algorithm.tis_imp_ratio_cap`: Cap parameter for the importance ratio in TIS. This flag is to be deprecated, use `off_policy_correction.token_tis_ratio_clip_high` instead.

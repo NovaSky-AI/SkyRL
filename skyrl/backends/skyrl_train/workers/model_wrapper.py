@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
+    prepare_logits_for_loss,
 )
 
 
@@ -78,10 +79,12 @@ class HFModelWrapper(nn.Module):
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
         model_config_kwargs: dict = {},
+        upcast_logits_to_fp32: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
+        self.upcast_logits_to_fp32 = upcast_logits_to_fp32
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
@@ -367,8 +370,11 @@ class HFModelWrapper(nn.Module):
         else:
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
-        logits_BSV = output["logits"]
-        logits_BSV.div_(temperature)
+        logits_BSV = prepare_logits_for_loss(
+            output["logits"],
+            temperature=temperature,
+            upcast_to_fp32=self.upcast_logits_to_fp32,
+        )
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
         log_probs = logprobs_from_logits(

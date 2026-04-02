@@ -296,6 +296,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.cfg.trainer.algorithm.dynamic_sampling.type is None
         ), "dynamic sampling is not supported for fully async training yet."
         assert (
+            not self.cfg.trainer.algorithm.adaptive_prompt_filtering.enabled
+        ), "adaptive prompt filtering is not supported for fully async training yet."
+        assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
         assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."

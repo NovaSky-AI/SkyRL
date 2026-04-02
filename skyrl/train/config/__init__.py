@@ -1,4 +1,5 @@
 from skyrl.train.config.config import (
+    AdaptivePromptFilteringConfig,
     AlgorithmConfig,
     BaseConfig,
     ChatTemplateConfig,
@@ -45,6 +46,7 @@ __all__ = [
     "CriticConfig",
     "RefConfig",
     "AlgorithmConfig",
+    "AdaptivePromptFilteringConfig",
     "GeneratorConfig",
     "InferenceEngineConfig",
     "EnvironmentConfig",
