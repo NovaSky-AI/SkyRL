@@ -423,6 +423,13 @@ def test_policy_loss_registry_specific():
     PolicyLossRegistry.unregister("test_policy_decorator")
 
 
+def test_builtin_gmpo_policy_loss_registered():
+    """GMPO should be available as a built-in policy loss."""
+
+    assert "gmpo" in PolicyLossRegistry.list_available()
+    assert callable(PolicyLossRegistry.get("gmpo"))
+
+
 def test_registry_cross_ray_process():
     """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:

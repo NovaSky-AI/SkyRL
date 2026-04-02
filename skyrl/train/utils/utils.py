@@ -330,12 +330,31 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
         cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
 
+    if cfg.trainer.algorithm.policy_loss_type == "gmpo":
+        assert (
+            cfg.trainer.algorithm.loss_reduction == "sequence_mean"
+        ), "GMPO requires `trainer.algorithm.loss_reduction` to be `sequence_mean`."
+
     # off_policy_correction config validation
     off_policy_correction = cfg.trainer.algorithm.off_policy_correction
     tis_ratio_type = off_policy_correction.tis_ratio_type
     sequence_mask_metric = off_policy_correction.sequence_mask_metric
 
     uses_off_policy_correction = tis_ratio_type is not None or sequence_mask_metric is not None
+    gmpo_uses_off_policy_correction = uses_off_policy_correction or any(
+        threshold is not None
+        for threshold in (
+            off_policy_correction.outlier_token_is_threshold_low,
+            off_policy_correction.outlier_token_is_threshold_high,
+            off_policy_correction.token_mask_is_threshold_low,
+            off_policy_correction.token_mask_is_threshold_high,
+        )
+    )
+
+    if cfg.trainer.algorithm.policy_loss_type == "gmpo" and gmpo_uses_off_policy_correction:
+        raise NotImplementedError(
+            "GMPO does not support `trainer.algorithm.off_policy_correction`; use `sequence_mean` without rollout correction."
+        )
 
     if uses_off_policy_correction:
         # Validate tis_ratio_type

@@ -284,6 +284,138 @@ def test_gspo_importance_sampling_levels():
             ), f"GSPO should have uniform importance weights within sequence {seq_idx}"
 
 
+def test_gmpo_policy_loss_sequence_level_objective():
+    """GMPO should compute a sequence-level clipped geometric-mean objective."""
+
+    device = "cpu"
+
+    # These advantages are already scaled for sequence_mean reduction:
+    # raw sequence advantages would be [2.0, -4.0] with batch_size=2 and seq_len=2.
+    advantages = torch.tensor(
+        [
+            [0.5, 0.5, 0.0],
+            [-1.0, -1.0, 0.0],
+        ],
+        device=device,
+    )
+    old_log_probs = torch.full_like(advantages, -1.0)
+    log_probs = torch.tensor(
+        [
+            [-0.2, -1.4, 5.0],
+            [-1.6, -0.3, 5.0],
+        ],
+        device=device,
+    )
+    loss_mask = torch.tensor(
+        [
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        device=device,
+    )
+
+    config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="gmpo",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("gmpo")
+    actual_loss, loss_metrics = loss_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+
+    log_ratio = log_probs - old_log_probs
+    clipped_log_ratio = torch.clamp(log_ratio, -0.2, 0.2)
+    sign = torch.sign(advantages)
+    effective_log_ratio = sign * torch.minimum(sign * log_ratio, sign * clipped_log_ratio)
+    seq_len = loss_mask.sum(dim=-1).clamp(min=1.0)
+    expected_seq_ratio = torch.exp((effective_log_ratio * loss_mask).sum(dim=-1) / seq_len)
+    expected_seq_advantage = (advantages * loss_mask).sum(dim=-1)
+    expected_loss = (-expected_seq_advantage * expected_seq_ratio).sum()
+
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
+    assert loss_metrics["clip_ratio"] == pytest.approx(0.5, abs=1e-6)
+    assert loss_metrics["clip_ratio_lower"] == pytest.approx(0.5, abs=1e-6)
+    assert loss_metrics["seq_ratio_mean"] == pytest.approx(expected_seq_ratio.mean().item(), abs=1e-6)
+
+
+def test_gmpo_policy_loss_all_masked_sequence_is_finite():
+    """GMPO should handle sequences with zero valid tokens without NaNs."""
+
+    device = "cpu"
+    advantages = torch.tensor([[0.5, 0.5], [-1.0, -1.0]], device=device)
+    old_log_probs = torch.full_like(advantages, -1.0)
+    log_probs = torch.tensor([[-0.8, -1.2], [-0.4, -1.6]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]], device=device)
+
+    config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="gmpo",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("gmpo")
+    loss, loss_metrics = loss_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(torch.tensor(loss_metrics["seq_ratio_mean"]))
+
+
+def test_gmpo_policy_loss_differs_from_regular_ppo():
+    """GMPO should behave differently from tokenwise PPO on high-variance sequences."""
+
+    device = "cpu"
+    advantages = torch.tensor(
+        [
+            [0.5, 0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ],
+        device=device,
+    )
+    old_log_probs = torch.full_like(advantages, -1.0)
+    log_probs = torch.tensor(
+        [
+            [-0.2, -2.0, -1.0],
+            [-2.2, 0.4, -1.0],
+        ],
+        device=device,
+    )
+    loss_mask = torch.tensor(
+        [
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        device=device,
+    )
+
+    gmpo_config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="gmpo",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    regular_config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="regular",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    gmpo_loss, _ = PolicyLossRegistry.get("gmpo")(log_probs, old_log_probs, advantages, gmpo_config, loss_mask)
+    regular_loss, _ = PolicyLossRegistry.get("regular")(log_probs, old_log_probs, advantages, regular_config, loss_mask)
+
+    assert not torch.allclose(gmpo_loss, regular_loss, rtol=1e-3)
+
+
 def test_clip_cov_policy_loss():
     """Tests Clip-Cov policy loss function with covariance-based correction."""
 
