@@ -2,15 +2,23 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
-from loguru import logger
 from uuid import uuid4
-from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from skyrl.train.utils.rate_limiter import create_rate_limiter
+
+from loguru import logger
+from omegaconf import DictConfig
 from tqdm import tqdm
-from omegaconf import DictConfig, OmegaConf
+
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.train.generators.base import GeneratorInput, GeneratorInterface, GeneratorOutput, TrajectoryID
+from skyrl.train.generators.output_builders import (
+    RetokenizedTrajectory,
+    TokenizedTrajectory,
+    build_generator_output_from_messages,
+    build_generator_output_from_tokenized,
+)
+from skyrl.train.generators.utils import get_rollout_metrics
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
 
@@ -128,17 +136,19 @@ class HarborGenerator(GeneratorInterface):
             progress.close()
         all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
-        generator_output: GeneratorOutput = {
-            "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": [output.response_ids for output in all_outputs],
-            "rewards": [output.reward for output in all_outputs],
-            "loss_masks": [output.loss_mask for output in all_outputs],
-            "stop_reasons": [output.stop_reason for output in all_outputs],
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
-        }
-
-        return generator_output
+        return build_generator_output_from_tokenized(
+            [
+                TokenizedTrajectory(
+                    prompt_token_ids=output.prompt_ids,
+                    response_ids=output.response_ids,
+                    loss_mask=output.loss_mask,
+                    reward=output.reward,
+                    stop_reason=output.stop_reason,
+                )
+                for output in all_outputs
+            ],
+            rollout_metrics=rollout_metrics,
+        )
 
     @staticmethod
     def _mask_failed_instances_and_compute_metrics(
@@ -302,21 +312,28 @@ class HarborGenerator(GeneratorInterface):
         # Use the first message as the prompt. We assume to be no systems messages.
         assert chat_history[0]["role"] == "user", "The first message should be a user message"
         prompt = [chat_history[0]]
-        prompt_ids = self.tokenizer.apply_chat_template(
-            prompt,
-            add_generation_prompt=False,  # the message below will add it themselves
-            return_dict=False,
-            tokenize=True,
-            chat_template=self.custom_chat_template_content,
-        )
-        initial_prompt_length = len(prompt_ids)
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
         assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
-        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs, chat_template=self.custom_chat_template_content
+        generated_output = build_generator_output_from_messages(
+            [
+                RetokenizedTrajectory(
+                    prompt_messages=prompt,
+                    response_messages=response_messages,
+                    reward=reward,
+                    assistant_message_logprobs=assistant_logprobs,
+                )
+            ],
+            self.tokenizer,
+            chat_template=self.custom_chat_template_content,
+            rollout_metrics={},
+            validate=False,
         )
+        prompt_ids = generated_output["prompt_token_ids"][0]
+        response_ids = generated_output["response_ids"][0]
+        loss_mask = generated_output["loss_masks"][0]
+        initial_prompt_length = len(prompt_ids)
 
         # Determine stop reason
         max_response_tokens = max(0, self.max_seq_len - initial_prompt_length)

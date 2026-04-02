@@ -49,7 +49,9 @@ There are roughly three ways to integrate an agent, each with different trade-of
 
 ### 1. Re-Tokenization
 
-For each trajectory, record a `chat_history: List[Dict[str, str]]`, re-tokenize it with the chat template, and construct `loss_mask` based on roles. You can use the helper method [`get_response_ids_and_loss_mask_from_messages()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/utils.py) to construct `prompt_token_ids`, `response_ids`, and `loss_masks`.
+For each trajectory, record the prompt-side messages and the response-side chat history, then re-tokenize them with the chat template. The easiest way to do this in SkyRL is [`build_generator_output_from_messages()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/output_builders.py), which prepares a full `GeneratorOutput` for a batch of message-based trajectories.
+
+If you need lower-level control, you can still use [`get_response_ids_and_loss_mask_from_messages()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/utils.py) directly for response-side tokenization and masking.
 
 **Pros:**
 - Simplest approach — works almost out of the box for most agent harnesses. Despite re-tokenization drift, some successful open-source recipes were trained this way.
@@ -71,6 +73,8 @@ This likely involves rewriting your agent to use `/completions` (not `/chat/comp
 
 **Cons:**
 - More implementation work. But likely worth it since doing RL is a significant investment of time and effort.
+
+If your custom generator already has exact prompt and response token IDs, use [`build_generator_output_from_tokenized()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/output_builders.py) to assemble the final `GeneratorOutput`.
 
 ### 3. Step-Wise Training
 
