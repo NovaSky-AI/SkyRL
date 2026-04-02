@@ -29,7 +29,7 @@ INFERENCE_ENGINE_TP=8
 
 # flash attn is not supported for moonlight16b since it is a DeepSeekV3 like model, and uses Multi-Head Latent Attention (MLA)
 # https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
-FLASH_ATTN=false
+FLASH_ATTN=true
 
 # router replay (r3)
 ROUTER_REPLAY=false
