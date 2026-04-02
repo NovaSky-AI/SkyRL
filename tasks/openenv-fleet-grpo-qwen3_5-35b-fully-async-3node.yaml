@@ -25,7 +25,7 @@ num_nodes: 3
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL-Fleet.git
-  ref: xiaohan/fleet-grpo-qwen3_5-35b-fully-async
+  ref: xiaohan/fleet-grpo-qwen3_5-35b-fully-async-3nodes
 
 envs:
   WANDB_API_KEY: ""
