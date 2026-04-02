@@ -48,18 +48,16 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
     generates via /inference/v1/generate to avoid vllm-router's strict
     OpenAI API validation (which strips non-standard fields like prompt_token_ids).
     """
-    engines = None
-    try:
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
-        engines = InferenceEngineState.create(
-            cfg=cfg,
-            use_local=True,
-            backend="vllm",
-            model=MODEL_QWEN3,
-            sleep_level=1,
-            engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
-            use_new_inference_servers=True,
-        )
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3,
+        sleep_level=1,
+        engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
+        use_new_inference_servers=True,
+    ) as engines:
         client = engines.client
 
         # 1. Build chat messages with thinking tokens in assistant turn
@@ -106,7 +104,3 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
         else:
             # Default template strips thinking tokens
             assert "<think>" not in prompt_str and "</think>" not in prompt_str
-
-    finally:
-        if engines is not None:
-            await engines.aclose()
