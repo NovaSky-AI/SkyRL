@@ -30,7 +30,7 @@ TIS_IMP_RATIO_CAP=2.0
 RUN_NAME=gsm8k-fully-async-qwen3.5_35B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
 
 bash scripts/fleet-common-run.sh \
-  --use-python-direct \ 
+  --use-python-direct \
   --set-ulimit --no-pytorch-alloc-conf \
   --nccl-heartbeat 1800 \
   --entrypoint examples.train.fully_async.main_fully_async \
