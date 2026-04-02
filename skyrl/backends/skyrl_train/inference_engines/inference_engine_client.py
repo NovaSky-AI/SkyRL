@@ -343,8 +343,11 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def update_named_weights(self, request: WeightUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
-    async def reset_prefix_cache(self):
-        return await self._run_on_all_engines("reset_prefix_cache")
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
+        return await self._run_on_all_engines(
+            "reset_prefix_cache",
+            reset_running_requests=reset_running_requests,
+        )
 
     async def teardown(self):
         return await self._run_on_all_engines("teardown")

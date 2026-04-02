@@ -731,7 +731,10 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/reset_prefix_cache", {"reset_running_requests": reset_running_requests})
+        return await self._call_all_servers(
+            "/reset_prefix_cache",
+            params={"reset_running_requests": str(reset_running_requests).lower()},
+        )
 
     # ---------------------------
     # Weight Sync (control plane - fan-out)

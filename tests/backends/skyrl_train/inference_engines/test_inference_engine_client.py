@@ -431,3 +431,28 @@ def test_route_prompts_to_engines_validation_errors():
     route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=[1, 2])
     route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=None)
     route_prompts_to_engines(num_prompts=1, num_inference_engines=1, session_ids=None)
+
+
+@pytest.mark.asyncio
+async def test_reset_prefix_cache_forwards_reset_running_requests():
+    class MockEngine:
+        def dp_size(self):
+            return 1
+
+        async def reset_prefix_cache(self, reset_running_requests: bool = False):
+            return {"reset_running_requests": reset_running_requests}
+
+    cfg = _make_min_cfg()
+    client = InferenceEngineClient(
+        engines=[MockEngine(), MockEngine()],
+        tokenizer=object(),
+        model_path=cfg.trainer.policy.model.path,
+        lora_cfg=cfg.trainer.policy.model.lora,
+        inference_engine_cfg=cfg.generator.inference_engine,
+    )
+
+    result = await client.reset_prefix_cache(reset_running_requests=True)
+    assert result == [
+        {"reset_running_requests": True},
+        {"reset_running_requests": True},
+    ]

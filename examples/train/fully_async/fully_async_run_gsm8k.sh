@@ -26,6 +26,7 @@ set -x
 : "${MINI_BATCH_SIZE:=256}"
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
+: "${PRESERVE_INFLIGHT_KV_CACHE_ON_WEIGHT_UPDATE:=true}"
 
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
@@ -37,6 +38,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
+  trainer.fully_async.preserve_inflight_kv_cache_on_weight_update=${PRESERVE_INFLIGHT_KV_CACHE_ON_WEIGHT_UPDATE} \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \

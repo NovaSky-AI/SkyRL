@@ -104,6 +104,14 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+    assert cfg.trainer.fully_async.preserve_inflight_kv_cache_on_weight_update is True
+
+
+def test_fully_async_preserve_inflight_kv_cache_override():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        ["trainer.fully_async.preserve_inflight_kv_cache_on_weight_update=false"]
+    )
+    assert cfg.trainer.fully_async.preserve_inflight_kv_cache_on_weight_update is False
 
 
 def test_cli_overrides_plus_prefix_rejected():

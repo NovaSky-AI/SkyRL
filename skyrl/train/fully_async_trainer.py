@@ -418,11 +418,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             [g.uid for g in cur_generation_group_mini_batch]
                         )
 
-                    # 4. After training: pause generation, sync weights, resume.
+                    # 4. After training: pause generation, apply the configured
+                    # in-flight update policy, sync weights, and resume.
                     with Timer("sync_weights", self.all_timings):
-                        await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        await self.inference_engine_client.resume_generation()
+                        await self._sync_policy_weights_with_inflight_update_policy()
 
                 # 5. Set logs for this training step.
                 logger.info(status)
@@ -605,6 +604,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.inference_engine_client,
             self.cfg.generator.inference_engine,
         )
+
+    async def _sync_policy_weights_with_inflight_update_policy(self) -> None:
+        """Pause generation, apply the configured in-flight update policy, sync weights, then resume."""
+        await self.inference_engine_client.pause_generation()
+        try:
+            if not self.cfg.trainer.fully_async.preserve_inflight_kv_cache_on_weight_update:
+                await self.inference_engine_client.reset_prefix_cache(reset_running_requests=True)
+            await self.async_sync_policy_weights_to_inference_engines()
+        finally:
+            await self.inference_engine_client.resume_generation()
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]

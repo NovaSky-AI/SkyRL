@@ -212,9 +212,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             return list(output_processor.external_req_ids.keys())
         return list(output_processor.request_states.keys())
 
-    def reset_prefix_cache(self):
+    def reset_prefix_cache(self, reset_running_requests: bool = False):
         """Reset the prefix cache. Subclasses override for async version."""
-        return self.llm.llm_engine.reset_prefix_cache()
+        return self.llm.llm_engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
 
     async def pause_generation(self, clear_cache: bool = False) -> None:
         raise NotImplementedError("pause_generation is only supported for AsyncVLLMInferenceEngine.")
@@ -331,8 +331,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def teardown(self):
         await self._teardown_weight_receiver()
 
-    async def reset_prefix_cache(self):
-        return await asyncio.to_thread(self.llm.llm_engine.reset_prefix_cache)
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
+        return await asyncio.to_thread(
+            self.llm.llm_engine.reset_prefix_cache,
+            reset_running_requests=reset_running_requests,
+        )
 
     async def _teardown_weight_receiver(self):
         engine = self._get_engine()
@@ -550,9 +553,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def teardown(self):
         await self._teardown_weight_receiver()
 
-    async def reset_prefix_cache(self):
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
         engine = self._get_engine()
-        await engine.reset_prefix_cache()
+        await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
 
     async def _teardown_weight_receiver(self):
         engine = self._get_engine()

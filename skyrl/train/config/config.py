@@ -393,6 +393,14 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    preserve_inflight_kv_cache_on_weight_update: bool = True
+    """Whether to preserve in-flight KV cache entries during fully async weight updates.
+
+    If ``True`` (default), keep-mode pause/resume preserves in-flight request state, so requests
+    continue without a clean re-prefill after the policy weights are updated. This is faster.
+    If ``False``, SkyRL resets running requests' KV state while paused so they re-prefill on resume,
+    giving cleaner boundaries at the cost of extra latency.
+    """
 
 
 # ---------------------------------------------------------------------------

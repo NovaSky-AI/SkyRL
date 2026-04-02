@@ -214,6 +214,9 @@ trainer:
     # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
     # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
     num_parallel_generation_workers: 768
+    # If true, preserve in-flight KV cache entries across keep-mode pause/resume during weight sync.
+    # If false, reset running requests' KV state while paused so they re-prefill on resume.
+    preserve_inflight_kv_cache_on_weight_update: true
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

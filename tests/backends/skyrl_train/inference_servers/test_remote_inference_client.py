@@ -129,8 +129,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
-    async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id}
+    async def reset_prefix_cache(reset_running_requests: bool = False):
+        return {
+            "status": "cache_reset",
+            "server_id": server_id,
+            "reset_running_requests": reset_running_requests,
+        }
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
@@ -382,6 +386,16 @@ class TestControlPlane:
         """Test reset_prefix_cache fans out to all servers."""
         result = await client.reset_prefix_cache()
         assert len(result) == 2
+        for _, response in result.items():
+            assert response["body"]["reset_running_requests"] is False
+
+    @pytest.mark.asyncio
+    async def test_reset_prefix_cache_with_running_requests(self, client):
+        """Test reset_prefix_cache forwards reset_running_requests to all servers."""
+        result = await client.reset_prefix_cache(reset_running_requests=True)
+        assert len(result) == 2
+        for _, response in result.items():
+            assert response["body"]["reset_running_requests"] is True
 
 
 class TestWeightSync:

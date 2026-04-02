@@ -67,8 +67,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def teardown(self):
         return await self.inference_engine_actor.teardown.remote()
 
-    async def reset_prefix_cache(self):
-        return await self.inference_engine_actor.reset_prefix_cache.remote()
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
+        return await self.inference_engine_actor.reset_prefix_cache.remote(reset_running_requests)
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.chat_completion.remote(request_payload)

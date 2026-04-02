@@ -89,8 +89,8 @@ class VllmServer:
             return {"status": "ok"}
 
         @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            await engine.reset_prefix_cache()
+        async def _reset_prefix_cache(reset_running_requests: bool = False):
+            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
 
         # NOTE (sumanthrh): We use the _skyrl suffix to differentiate this from the native /update_weights endpoint

@@ -145,7 +145,8 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def reset_prefix_cache(self):
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
+        """Reset prefix/KV cache state on the inference engine."""
         raise NotImplementedError
 
     @abstractmethod

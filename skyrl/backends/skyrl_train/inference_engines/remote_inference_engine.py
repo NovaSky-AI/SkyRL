@@ -257,14 +257,17 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         return await self._weight_loader.load_weights(request)
 
     # TODO(tgriggs): Come up with a (more) elegant way to handle text or json responses, and test it and handle errors.
-    async def reset_prefix_cache(self):
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
         if self.engine_backend == "vllm":
             reset_prefix_cache_method = "reset_prefix_cache"
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
         async with aiohttp.ClientSession() as session:
-            resp = await session.post(f"{self.url}/{reset_prefix_cache_method}")
+            resp = await session.post(
+                f"{self.url}/{reset_prefix_cache_method}",
+                params={"reset_running_requests": str(reset_running_requests).lower()},
+            )
             text = await resp.text()
 
         # First try to parse it as JSON

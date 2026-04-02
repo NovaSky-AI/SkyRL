@@ -91,6 +91,7 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be `&gt;= trainer.policy_mini_batch_size` to avoid wasted throughput,
   and `&lt;= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- `trainer.fully_async.preserve_inflight_kv_cache_on_weight_update`: Whether to preserve in-flight KV cache entries across keep-mode pause/resume during weight sync. Keep this at `true` for the fastest PipelineRL-style behavior. Set it to `false` if you want in-flight requests to re-prefill after each weight update.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -158,7 +159,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the `AsyncDataloader`, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
-4. Make `AnyGenerator` (really the `InferenceEngineClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
+4. Make `AnyGenerator` (really the `InferenceEngineClient` in the back): pause generation, optionally reset in-flight KV state based on config, sync weights, then resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the `AsyncStalenessManager`, potentially unblocking
    generation workers stuck on step 1 -- as they can now generate new data that will not be as stale as before.
 6. Repeat from step 1 until the epoch is done.
@@ -271,14 +272,31 @@ underlyingly as the `/chat/completions` endpoint is simply blocked and not retur
 This design makes the implementation of fully async training agnostic to the generator / agent harness as
 the trajectory could be doing anything when weight update is happening -- in the middle of a output generation or in the middle of an interaction with the environment (where the next output generation will simply be blocked until the weight update is finished).
 
-We implement this semantics by implementing SkyRL's `InferenceEngineClient` to keep calling the underlying
-inference engine's `/chat/completions` endpoint in a while loop, until the finish reason is not an `abort`.
+SkyRL now relies on vLLM's keep-mode pause/resume semantics for this. Upon
+`InferenceEngineClient.pause_generation()`, in-flight requests are frozen inside the inference engine
+rather than aborted, so the generator / agent harness does not need retry logic.
 
-Upon `InferenceEngineClient.pause_generation()`, we abort all the in-flight `/chat/completions` requests,
-and save the partial results, waiting to be re-fed into the underlying inference engine as a new
-`/chat/completions` request when `InferenceEngineClient.resume_generation()` is called.
+The default fully async behavior is:
 
-See the following two PRs for more details:
+1. pause generation in keep mode
+2. sync the updated policy weights into the inference engines
+3. resume generation
+
+With this default, in-flight requests preserve their KV state and continue without a clean re-prefill.
+This is the fastest option and is the recommended setting for most async RL runs.
+
+If you set `trainer.fully_async.preserve_inflight_kv_cache_on_weight_update=false`, SkyRL will:
+
+1. pause generation in keep mode
+2. reset running requests' KV state while paused
+3. sync the updated policy weights
+4. resume generation
+
+This forces in-flight requests to re-prefill on resume, which gives cleaner boundaries at the cost of
+additional latency.
+
+See the following PRs for historical context:
+- https://github.com/NovaSky-AI/SkyRL/pull/1179
 - https://github.com/NovaSky-AI/SkyRL/pull/537
 - https://github.com/NovaSky-AI/SkyRL/pull/557
 

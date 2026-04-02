@@ -12,7 +12,6 @@ from typing import List, Optional, Tuple
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -335,9 +334,9 @@ class VLLMServerActor(ServerActorProtocol):
         # VLLM_SERVER_DEV_MODE=1.
 
         @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
+        async def _reset_prefix_cache(reset_running_requests: bool = False):
             """Reset the prefix cache."""
-            await engine.reset_prefix_cache()
+            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
 
     async def shutdown(self) -> None:
