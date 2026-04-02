@@ -327,7 +327,7 @@ class AlgorithmConfig(BaseConfig):
     kl_ctrl: KLCtrlConfig = field(default_factory=KLCtrlConfig)
     """Only used when ``use_kl_in_reward=True`` (not applied when ``use_kl_loss=True``).
     Uses ``kl_loss_coef`` as the initial KL coefficient."""
-    kl_estimator_type: str = "k3"
+    kl_estimator_type: str = "k2"
     """``"k1"``, ``"k2"``, ``"k3"``, ``"abs"``. See http://joschu.net/blog/kl-approx.html."""
     use_kl_in_reward: bool = False
     """Apply KL penalty to rewards. Mutually exclusive with ``use_kl_loss``."""

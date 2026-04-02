@@ -106,6 +106,13 @@ def test_cli_overrides_empty_args():
     assert cfg.trainer.seed == 42
 
 
+def test_default_kl_regularization_config():
+    cfg = SkyRLTrainConfig()
+    assert cfg.trainer.algorithm.use_kl_loss is True
+    assert cfg.trainer.algorithm.use_kl_in_reward is False
+    assert cfg.trainer.algorithm.kl_estimator_type == "k2"
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
