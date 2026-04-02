@@ -232,7 +232,7 @@ def test_old_vs_new_inference_generation(ray_init_fixture, model_name: str, tp_s
 @pytest.mark.parametrize(
     "model_name,tp_size",
     [
-        pytest.param(MOE_MODEL_NAME, 4, id="moonlight_tp8"),
+        pytest.param(MOE_MODEL_NAME, 4, id="moonlight_tp4"),
     ],
 )
 def test_old_vs_new_inference_r3(ray_init_fixture, model_name: str, tp_size: int):

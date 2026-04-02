@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request
+from fastapi import HTTPException, Request
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -21,7 +21,10 @@ from vllm.entrypoints.openai.api_server import (
     create_server_socket,
     init_app_state,
 )
+from vllm.inputs.data import TokensPrompt
+from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import random_uuid
 from vllm.utils.system_utils import set_ulimit
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
@@ -347,10 +350,6 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
-            from vllm.inputs.data import TokensPrompt
-            from vllm.sampling_params import SamplingParams as VLLMSamplingParams
-            from vllm.utils import random_uuid
-
             if getattr(cli_args, "enable_lora", False):
                 raise NotImplementedError("/skyrl/v1/generate does not support LoRA.")
 
@@ -367,8 +366,6 @@ class VLLMServerActor(ServerActorProtocol):
                 final_res = res
 
             if final_res is None:
-                from fastapi import HTTPException
-
                 raise HTTPException(status_code=500, detail="vLLM returned no output")
             resp = final_res.outputs[0]
 
