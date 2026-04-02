@@ -19,7 +19,6 @@ from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     _ensure_chat_template,
     are_responses_similar,
-    get_available_gpus,
     get_test_actor_config,
     get_test_prompts,
     init_worker_with_type,
@@ -28,15 +27,6 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 MODEL = "huihui-ai/Huihui-MoE-0.8B-2E"
 NUM_GPUS = 4  # Should be divisible by 2
-
-
-def _check_gpus(num_gpus: int):
-    available = get_available_gpus()
-    if len(available) < num_gpus:
-        pytest.skip(f"Expert parallel tests require >= {num_gpus} GPUs, found {len(available)}: {available}")
-
-
-_check_gpus(num_gpus=NUM_GPUS)
 
 
 @pytest.fixture(scope="module")
