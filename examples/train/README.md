@@ -35,7 +35,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 ## Large Scale Model Training
 - `megatron/`: Examples for running SkyRL with the Megatron Backend for 5D parallelism.
 - `moe/`: Work-in-progress MoE training example used for development and testing large-scale multi-node Mixture-of-Experts support.
-- `gptoss/`: Training example for the GPT-OSS-20B model using patched attention to support attention sinks.
+- `gptoss/`: Single-turn and multi-turn GPT-OSS-20B training examples using patched attention to support attention sinks.
 
 ## Features and More
 - `lora/`: LoRA RL fine-tuning recipes.

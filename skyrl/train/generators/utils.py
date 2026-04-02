@@ -147,19 +147,28 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemp
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) -> List[int]:
+def get_generation_prompt_ids(
+    tokenizer,
+    chat_template: Optional[str] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
 
     Args:
         tokenizer: HuggingFace tokenizer with chat_template support.
         chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+        chat_template_kwargs: Optional kwargs passed to ``tokenizer.apply_chat_template``.
 
     Returns:
         List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
     empty_user = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, chat_template=chat_template
+        [{"role": "user", "content": ""}],
+        tokenize=True,
+        return_dict=False,
+        chat_template=chat_template,
+        **(chat_template_kwargs or {}),
     )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": ""}],
@@ -167,6 +176,7 @@ def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) ->
         tokenize=True,
         return_dict=False,
         chat_template=chat_template,
+        **(chat_template_kwargs or {}),
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]

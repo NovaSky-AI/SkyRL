@@ -9,7 +9,11 @@ from skyrl.train.dataset import PromptDataset
 class SimpleTokenizer:
     name_or_path = "simple-tokenizer"
 
+    def __init__(self):
+        self.calls = []
+
     def apply_chat_template(self, x, add_generation_prompt=False, **kwargs):
+        self.calls.append({"input": x, "add_generation_prompt": add_generation_prompt, "kwargs": kwargs})
         return x
 
 
@@ -144,6 +148,25 @@ def test_prompt_dataset_hf_real_dataset(mock_tokenizer):
         env_class_key="env_class",
     )
     assert len(ds) > 0
+
+
+@patch("datasets.load_dataset")
+def test_prompt_dataset_filtering_passes_chat_template_kwargs(mock_load_dataset, sample_dataset):
+    tokenizer = SimpleTokenizer()
+    mock_load_dataset.return_value = {"train": sample_dataset}
+
+    PromptDataset(
+        datasets=["dummy1.parquet"],
+        tokenizer=tokenizer,
+        max_prompt_length=150,
+        num_workers=1,
+        prompt_key="prompt",
+        env_class_key="env_class",
+        chat_template_kwargs={"reasoning_effort": "low"},
+    )
+
+    assert tokenizer.calls, "Prompt filtering should invoke apply_chat_template"
+    assert all(call["kwargs"].get("reasoning_effort") == "low" for call in tokenizer.calls)
 
 
 @patch("datasets.load_dataset")

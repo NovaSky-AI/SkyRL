@@ -1,9 +1,12 @@
 set -exo pipefail
 
 # Colocated GRPO training+generation for GPT-OSS-20B on GSM8K.
+# This is the single-turn GPT-OSS example. For a minimal multi-turn recipe, see
+# `examples/train/gptoss/run_gsm8k_multi_turn_gptoss.sh`.
 # NOTE (sumanthrh): Currently, gpt-oss requires flash attention to be disabled since attention sinks are not supported: https://github.com/Dao-AILab/flash-attention/issues/1797
 # We thus disable flash attention as well as sample packing
-# We only support GPT-OSS training in BF16 precision and single-turn tasks at the moment, and are actively working on multi-turn support.
+# GPT-OSS support in SkyRL currently requires BF16 precision and a Transformers version
+# new enough to expose `GptOssConfig` in the runtime patch path (>= 4.56.2).
 
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>

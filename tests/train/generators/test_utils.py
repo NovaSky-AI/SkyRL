@@ -143,6 +143,39 @@ dummy_chat_template = (
 )
 
 
+class RecordingTokenizer:
+    def __init__(self):
+        self.calls = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        return_dict=False,
+        add_generation_prompt=False,
+        chat_template=None,
+        **kwargs,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tokenize": tokenize,
+                "return_dict": return_dict,
+                "add_generation_prompt": add_generation_prompt,
+                "chat_template": chat_template,
+                "kwargs": kwargs,
+            }
+        )
+        base = [10]
+        if chat_template is not None:
+            base.append(20)
+        if kwargs.get("reasoning_effort") == "low":
+            base.append(30)
+        if add_generation_prompt:
+            return base + [99]
+        return base
+
+
 @pytest.fixture
 def tokenizer_w_dummy_template():
     tokenizer = AutoTokenizer.from_pretrained("unsloth/llama-2-7b")
@@ -178,6 +211,21 @@ def test_encode_messages(messages, tokenizer_w_dummy_template):
     expected_str = tokenizer_w_dummy_template.decode(expected_token_ids)
     actual_str = tokenizer_w_dummy_template.decode(actual_token_ids)
     assert expected_str == actual_str
+
+
+def test_get_generation_prompt_ids_passes_chat_template_kwargs():
+    tokenizer = RecordingTokenizer()
+
+    generation_prompt_ids = get_generation_prompt_ids(
+        tokenizer,
+        chat_template="custom-template",
+        chat_template_kwargs={"reasoning_effort": "low"},
+    )
+
+    assert generation_prompt_ids == [99]
+    assert len(tokenizer.calls) == 2
+    assert all(call["chat_template"] == "custom-template" for call in tokenizer.calls)
+    assert all(call["kwargs"].get("reasoning_effort") == "low" for call in tokenizer.calls)
 
 
 @pytest.fixture
