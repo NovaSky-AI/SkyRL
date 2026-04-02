@@ -15,6 +15,7 @@ from skyrl.train.utils import initialize_ray, validate_cfg
 from skyrl.train.entrypoints.main_base import BasePPOExp
 
 from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.utils.reward_shaping import apply_dapo_soft_overlong_punishment
 
 
 @dataclass
@@ -56,33 +57,25 @@ class DAPOTrainer(RayPPOTrainer):
 
         assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
 
-        # get the prompt length
-        prompt_lengths = [len(prompt) for prompt in prompt_token_ids]
-
-        # get the response length
-        response_lengths = [len(response) for response in response_ids]
-
-        # get the max context length
-        max_context_length = (
-            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
-        )
-
-        # apply soft overlong punishment
-        for i, (prompt_length, response_length) in enumerate(zip(prompt_lengths, response_lengths)):
-            # max_exceed_length is the beginning of the overlong buffer
-            max_exceed_length = max_context_length - overlong_buffer_len - prompt_length
-            # if the response is within the overlong buffer, apply the penalty
-            if response_length > max_exceed_length and response_length <= max_context_length - prompt_length:
-                exceed_length = response_length - max_exceed_length
-                penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
-
-                rewards[i] -= penalty
-            # if the response is outside the overlong buffer, set the reward to 0
-            elif response_length > max_context_length - prompt_length:
-                # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
-                rewards[i] = 0.0
-
-        generator_output["rewards"] = rewards
+        max_response_length = self.cfg.trainer.algorithm.max_response_length
+        if max_response_length is not None:
+            generator_output["rewards"] = apply_dapo_soft_overlong_punishment(
+                response_ids=response_ids,
+                rewards=rewards,
+                overlong_buffer_len=overlong_buffer_len,
+                overlong_buffer_penalty_factor=overlong_buffer_penalty_factor,
+                max_response_length=max_response_length,
+            )
+        else:
+            max_context_length = self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+            max_response_lengths = [max_context_length - len(prompt) for prompt in prompt_token_ids]
+            generator_output["rewards"] = apply_dapo_soft_overlong_punishment(
+                response_ids=response_ids,
+                rewards=rewards,
+                overlong_buffer_len=overlong_buffer_len,
+                overlong_buffer_penalty_factor=overlong_buffer_penalty_factor,
+                max_response_lengths=max_response_lengths,
+            )
 
         # use base class impl for metrics and per-token reward conversion
         return super().postprocess_generator_output(generator_output, uids)

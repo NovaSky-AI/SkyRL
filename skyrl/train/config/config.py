@@ -378,9 +378,19 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
+    max_response_length: Optional[int] = None
+    """Preferred response-length constant for algorithmic corrections.
+
+    Used by ``seq_mean_token_sum_norm`` loss reduction when set, and can also be reused by
+    example-specific reward shaping such as DAPO overlong penalties.
+    """
     max_seq_len: Optional[int] = None
-    """Used for ``seq_mean_token_sum_norm`` loss reduction.
-    Must be set explicitly for that reduction mode; otherwise can remain ``None``."""
+    """Maximum total sequence length (prompt + response).
+
+    Used for batching-related expectations and as a legacy fallback normalizer for
+    ``seq_mean_token_sum_norm`` when ``max_response_length`` is unset. Set it explicitly if you rely
+    on that fallback.
+    """
 
 
 # ---------------------------------------------------------------------------

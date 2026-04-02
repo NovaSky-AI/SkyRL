@@ -13,6 +13,7 @@ from skyrl.train.utils import initialize_ray, validate_cfg
 from skyrl.train.entrypoints.main_base import BasePPOExp
 
 from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.utils.reward_shaping import apply_dapo_soft_overlong_punishment
 
 from examples.train.algorithms.dapo.main_dapo import DAPOConfig
 
@@ -34,33 +35,17 @@ class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
-        response_lengths = [len(response) for response in response_ids]
-        max_response_length = self.cfg.generator.sampling_params.max_generate_length
+        max_response_length = self.cfg.trainer.algorithm.max_response_length
+        if max_response_length is None:
+            max_response_length = self.cfg.generator.sampling_params.max_generate_length
 
-        # Determine if rewards are per-token (List[List[float]]) or sequence-level (List[float])
-        is_per_token = rewards and isinstance(rewards[0], list)
-
-        # apply soft overlong punishment
-        for i, response_length in enumerate(response_lengths):
-            # max_exceed_length is the beginning of the overlong buffer
-            max_exceed_length = max_response_length - overlong_buffer_len
-            # if the response is within the overlong buffer, apply the penalty
-            if response_length > max_exceed_length and response_length <= max_response_length:
-                exceed_length = response_length - max_exceed_length
-                penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
-
-                if is_per_token:
-                    # Subtract penalty from the last token's reward
-                    rewards[i][-1] -= penalty
-                else:
-                    rewards[i] -= penalty
-            elif response_length > max_response_length:
-                if is_per_token:
-                    rewards[i] = [0.0] * len(rewards[i])
-                else:
-                    rewards[i] = 0.0
-
-        generator_output["rewards"] = rewards
+        generator_output["rewards"] = apply_dapo_soft_overlong_punishment(
+            response_ids=response_ids,
+            rewards=rewards,
+            overlong_buffer_len=overlong_buffer_len,
+            overlong_buffer_penalty_factor=overlong_buffer_penalty_factor,
+            max_response_length=max_response_length,
+        )
 
         # use base class impl for metrics and per-token reward conversion
         return super().postprocess_generator_output(generator_output, uids)

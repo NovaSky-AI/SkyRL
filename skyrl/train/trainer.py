@@ -1093,6 +1093,9 @@ class RayPPOTrainer:
 
         # Step 2: Loss reduction normalization per mini-batch
         normalized_advantages = torch.zeros_like(advantages)
+        normalizer_length = None
+        if self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
+            normalizer_length = ppo_utils.resolve_seq_loss_normalizer(self.cfg.trainer.algorithm)
         for start_idx, end_idx in mini_batch_boundaries:
             mini_batch = data[start_idx:end_idx]
             normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
@@ -1100,7 +1103,7 @@ class RayPPOTrainer:
                 loss_mask=mini_batch["loss_mask"],
                 loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
                 micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
-                max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+                normalizer_length=normalizer_length,
             )
 
         data["advantages"] = normalized_advantages

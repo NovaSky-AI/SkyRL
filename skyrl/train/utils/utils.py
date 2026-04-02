@@ -312,13 +312,48 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
+    max_response_length = cfg.trainer.algorithm.max_response_length
+    max_seq_len = cfg.trainer.algorithm.max_seq_len
+    if max_response_length is not None and max_response_length <= 0:
+        raise ValueError(
+            f"`trainer.algorithm.max_response_length` must be > 0 when set, got {max_response_length}"
+        )
+
     if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
-        if cfg.trainer.algorithm.max_seq_len is None:
+        if max_response_length is None and max_seq_len is None:
             raise ValueError(
-                "`trainer.algorithm.max_seq_len` must be set explicitly when "
+                "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'` requires "
+                "`trainer.algorithm.max_response_length` or `trainer.algorithm.max_seq_len` to be set explicitly. "
+                "Choose the response-length or total sequence-length normalization constant for your setup."
+            )
+        if max_response_length is None:
+            logger.warning(
+                "`trainer.algorithm.max_response_length` is unset while using "
                 "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
-                "Choose the total sequence-length normalization constant for your setup; "
-                "this often matches the model context window / vLLM `max_model_len` when appropriate."
+                "Falling back to `trainer.algorithm.max_seq_len` for backward compatibility."
+            )
+        if cfg.generator.step_wise_trajectories:
+            logger.warning(
+                "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'` with "
+                "`generator.step_wise_trajectories=true` normalizes each turn as its own sequence. "
+                "This changes multi-turn loss semantics."
+            )
+
+    overlong_buffer_len = getattr(cfg.trainer.algorithm, "overlong_buffer_len", None)
+    if overlong_buffer_len is not None:
+        if overlong_buffer_len <= 0:
+            raise ValueError(f"`trainer.algorithm.overlong_buffer_len` must be > 0, got {overlong_buffer_len}")
+        overlong_buffer_penalty_factor = getattr(cfg.trainer.algorithm, "overlong_buffer_penalty_factor", None)
+        if overlong_buffer_penalty_factor is not None and overlong_buffer_penalty_factor < 0:
+            raise ValueError(
+                "`trainer.algorithm.overlong_buffer_penalty_factor` must be >= 0, "
+                f"got {overlong_buffer_penalty_factor}"
+            )
+        if max_response_length is not None and overlong_buffer_len > max_response_length:
+            raise ValueError(
+                "`trainer.algorithm.overlong_buffer_len` must be <= "
+                "`trainer.algorithm.max_response_length` when both are set, got "
+                f"{overlong_buffer_len} > {max_response_length}"
             )
 
     # TODO (erictang000): remove this after deprecation period
