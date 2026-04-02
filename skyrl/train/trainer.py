@@ -24,9 +24,6 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import (
-    get_sampling_params_for_backend,
-)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
@@ -47,7 +44,7 @@ from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.evaluator import EvaluationHooks
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -55,7 +52,6 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
-    prepare_generator_input,
 )
 from skyrl.train.utils import (
     Timer,
@@ -73,13 +69,12 @@ from skyrl.train.utils.trainer_utils import (
     extract_step_from_path,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
-    validate_generator_output,
     zero_variance_filter,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 
 
-class RayPPOTrainer:
+class RayPPOTrainer(EvaluationHooks):
     def __init__(
         self,
         cfg: SkyRLTrainConfig,
@@ -157,20 +152,14 @@ class RayPPOTrainer:
             A dictionary of evaluation metrics.
         """
         if self.cfg.generator.step_wise_trajectories:
-            eval_metrics = await evaluate_step_wise(
+            eval_metrics = await self.evaluate_step_wise(
                 eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
                 global_step=self.global_step,
-                tokenizer=self.tokenizer,
             )
         else:
-            eval_metrics = await evaluate(
+            eval_metrics = await self.evaluate(
                 eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
                 global_step=self.global_step,
-                tokenizer=self.tokenizer,
             )
         return eval_metrics
 
@@ -212,16 +201,7 @@ class RayPPOTrainer:
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
-                    generator_input, uids = prepare_generator_input(
-                        rand_prompts,
-                        self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(
-                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
-                        ),
-                        self.cfg.environment.env_class,
-                        "train",
-                        self.global_step,
-                    )
+                    generator_input, uids = self.prepare_generator_input(rand_prompts, "train", self.global_step)
 
                     # 1.1. generation phase
                     with Timer("generate", self.all_timings):
@@ -703,11 +683,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(
-            len(input_batch["prompts"]),
-            generator_output,
-            step_wise=self.cfg.generator.step_wise_trajectories,
-        )
+        self.validate_generator_output(input_batch, generator_output)
 
         return generator_output
 

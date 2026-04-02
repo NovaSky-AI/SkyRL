@@ -367,7 +367,7 @@ def prepare_generator_input(
     sampling_params: Dict[str, Any],
     default_env_class: str,
     training_phase: TrainingPhase,
-    global_step: int,
+    global_step: int | None,
 ) -> Tuple[GeneratorInput, List[str]]:
     """Prepares the generator input for training and eval
 
@@ -377,7 +377,7 @@ def prepare_generator_input(
         sampling_params (Dict[str, Any]): sampling parameters
         default_env_class (str): env class to use if env class missing from prompts
         training_phase (TrainingPhase): training or eval
-        global_step (int): current global step
+        global_step (int | None): current global step, or `None` for eval-only contexts
 
     Returns:
         Tuple[GeneratorInput, List[str]]: generator input and list of uuids

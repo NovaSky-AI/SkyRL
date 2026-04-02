@@ -24,15 +24,11 @@ from loguru import logger
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
-    get_sampling_params_for_backend,
-)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
-    prepare_generator_input,
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
@@ -543,16 +539,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # 1. Prepare generator input
                 assert len(rand_prompts) == 1
-                generator_input, uids = prepare_generator_input(
-                    rand_prompts,
-                    self.cfg.generator.n_samples_per_prompt,
-                    get_sampling_params_for_backend(
-                        self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
-                    ),
-                    self.cfg.environment.env_class,
-                    "train",
-                    self.global_step,
-                )
+                generator_input, uids = self.prepare_generator_input(rand_prompts, "train", self.global_step)
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
                 # 2. Acquire capacity slot.

@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_ar
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
+from skyrl.train.evaluator import StandaloneEvaluator
 from skyrl.train.generators.base import GeneratorInterface
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import validate_cfg
@@ -258,6 +259,10 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=colocate_pg,
         )
+
+    def get_evaluator(self, cfg, tokenizer, generator):
+        """Initializes the standalone evaluator used by eval-only entrypoints."""
+        return StandaloneEvaluator(cfg=cfg, generator=generator, tokenizer=tokenizer)
 
     def get_tracker(self):
         """Initializes the tracker for experiment tracking.
