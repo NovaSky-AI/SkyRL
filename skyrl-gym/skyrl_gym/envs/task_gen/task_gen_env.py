@@ -2,7 +2,7 @@
 Task Generation Environment for SkyRL.
 
 Multi-turn BaseTextEnv where the LLM can explore the seed database via
-``describe_db`` / ``query_db`` meta-tools before generating a task.
+``query_db`` meta-tool before generating a task.
 
 When ``max_turns > 1`` (the default), the model explores the DB first
 and then produces a ``<task>`` block.  When ``max_turns == 1`` it
@@ -44,8 +44,28 @@ from skyrl_gym.envs.task_gen.verifier_sandbox import (
 
 logger = logging.getLogger(__name__)
 
+def _format_compact_schema(describe_result: Any) -> str:
+    """Convert a DescribeResponse dict to compact 'table: col (type), ...' format."""
+    if not isinstance(describe_result, dict):
+        return str(describe_result) if describe_result else ""
+    tables = describe_result.get("tables")
+    if not tables or not isinstance(tables, list):
+        return ""
+    lines = []
+    for t in tables:
+        name = t.get("name", "")
+        cols = t.get("columns", [])
+        col_parts = []
+        for c in cols:
+            col_name = c.get("name", "")
+            col_type = c.get("type", "").lower()
+            col_parts.append(f"{col_name} ({col_type})" if col_type else col_name)
+        lines.append(f"{name}: {', '.join(col_parts)}")
+    return "\n".join(lines)
+
+
 # Meta-tools the model can call to explore the seed database.
-_META_TOOLS = {"describe_db", "query_db"}
+_META_TOOLS = {"query_db"}
 
 # All callable tools = meta-tools + any MCP env tools discovered at init time.
 # Populated per-instance in init_async().
@@ -55,8 +75,8 @@ class TaskGenEnv(BaseTextEnv):
     """Environment for RL-based task generation.
 
     The LLM generates (prompt, verifier) pairs for Fleet environments.
-    Supports multi-turn: the model can explore the seed DB via ``describe_db``
-    and ``query_db`` meta-tools before outputting a ``<task>`` block.
+    Supports multi-turn: the model can explore the seed DB via ``query_db``
+    meta-tool before outputting a ``<task>`` block. Schema is in the prompt.
 
     Reward = llm_validity * (alpha * var(raw_scores) + (p_hint - p_raw))
 
@@ -94,7 +114,6 @@ class TaskGenEnv(BaseTextEnv):
         # Set of all callable tool names (meta-tools + MCP tools)
         self.callable_tools = set(_META_TOOLS)
         # Exploration sequence tracking (reset in init_async)
-        self.called_describe_db = False
         self.called_query_db = False
 
         # Environment context from dataset (extras)
@@ -191,7 +210,7 @@ class TaskGenEnv(BaseTextEnv):
         # Provides GRPO gradient signal even when all harness evals return 0.
         self.base_quality_reward = float(env_config.get("base_quality_reward", 0.1)) if env_config else 0.1
 
-        # Small per-tool-call reward to incentivize DB exploration (describe_db, query_db).
+        # Small per-tool-call reward to incentivize DB exploration (query_db).
         # Default 0.0 = off (no behavior change for existing runs).
         self.tool_call_reward_per_call = float(env_config.get("tool_call_reward_per_call", 0.0)) if env_config else 0.0
 
@@ -457,7 +476,7 @@ BAD prompt:  "Find a designer in Mexico" (3 designers exist, verifier checks for
 FIX option 1: Make the prompt specific: "Find the designer in Mexico City who joined after 2023"
 FIX option 2: Make the verifier accept all valid answers: check that ANY designer in Mexico is returned
 
-Use `describe_db`/`query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess. You MUST call all three of `describe_db`, `query_db`, and at least one environment API tool before writing the task — your task will be rejected otherwise.
+Use `query_db` to check the actual data before writing the prompt. If a query returns multiple rows, either narrow the prompt or widen the verifier. Always verify your assumptions by querying — don't guess.
 
 ### Avoiding Overspecification
 A prompt is overspecified when it dictates HOW to accomplish the task rather than WHAT outcome is needed. This makes the task trivially easy (no learning signal) and doesn't test real problem-solving.
@@ -491,34 +510,26 @@ The verifier must check exactly what the prompt asks — no more, no less. Befor
                 """
 ## Exploration Tools
 
-Before generating a task, explore the environment to understand the actual data and API behavior.
+The database schema is provided above. Use `query_db` to inspect actual data and environment tools to understand API behavior.
 
 ### Database Tools
-<tool_call>{"name": "describe_db", "arguments": {}}</tool_call>
-Returns the full schema: table names, columns, types.
-
 <tool_call>{"name": "query_db", "arguments": {"sql": "SELECT * FROM table_name LIMIT 5"}}</tool_call>
 Runs a read-only SQL query against the seed database.
 
 ### Environment Tools
-You MUST call at least one of the environment's API tools listed above to understand their input/output formats.
-
-**REQUIRED before generating a task:** You must call ALL THREE of: (1) `describe_db`, (2) `query_db`, and (3) at least one environment API tool. Your task will be rejected if any are missing.
-
 <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 Calls the tool and returns its result. Use this to understand input/output formats.
 
 ### Workflow
-1. **Explore**: Call `describe_db` to see all tables and columns.
-2. **Inspect data**: Call `query_db` with SELECT queries to inspect real data (values, ranges, row counts, patterns).
-3. **Try tools**: Call at least one environment API tool to understand its behavior, input/output formats, and edge cases.
-4. **Draft a task idea**: Think about what prompt + verifier you could write based on the data you've seen.
-5. **Validate your draft**: Before outputting the task, run `query_db` to verify your assumptions:
+1. **Inspect data**: Call `query_db` with SELECT queries to inspect real data (values, ranges, row counts, patterns). The schema above shows table and column names.
+2. **Try tools**: Call environment API tools to understand their behavior, input/output formats, and edge cases.
+3. **Draft a task idea**: Think about what prompt + verifier you could write based on the data you've seen.
+4. **Validate your draft**: Before outputting the task, run `query_db` to verify your assumptions:
    - Does the data your prompt references actually exist? (e.g., "Update Jamie's email" — is there a Jamie?)
    - Will the verifier return 0.0 on a fresh DB? (Check seed state)
    - Are there edge cases? (e.g., multiple matches, null values, empty tables)
-6. **Iterate**: If your queries reveal problems (wrong assumptions, ambiguous data, too many/few matches), revise your task idea and verify again. Do NOT output the task until you've confirmed the data supports it.
-7. **Output**: Only when confident, output the final task in the format below."""
+5. **Iterate**: If your queries reveal problems (wrong assumptions, ambiguous data, too many/few matches), revise your task idea and verify again. Do NOT output the task until you've confirmed the data supports it.
+6. **Output**: Only when confident, output the final task in the format below."""
             )
 
         # --- D. Few-shot examples removed ---
@@ -1080,7 +1091,7 @@ Generate exactly ONE task. Output it in this format:
 
         # 5. R = base_quality + tool_call_reward + eval_signal
         # base_quality: small reward for passing sandbox+judge (structural validity)
-        # tool_call_reward: incentivize DB exploration (describe_db, query_db)
+        # tool_call_reward: incentivize DB exploration (query_db)
         # eval_signal: judge_gate * compute_task_reward (harness-based quality)
         # This prevents GRPO zero-signal deadlock when all harness evals fail.
         base_quality = self.base_quality_reward
@@ -1110,7 +1121,7 @@ Generate exactly ONE task. Output it in this format:
 
         Multi-turn flow:
             1. <task> block detected  → evaluation pipeline (done=True)
-            2. <tool_call> detected   → execute describe_db/query_db (done=False)
+            2. <tool_call> detected   → execute query_db/MCP tools (done=False)
             3. Neither                → nudge observation (done=False)
             4. max_turns reached      → done=True, reward=0
         """
@@ -1119,29 +1130,6 @@ Generate exactly ONE task. Output it in this format:
 
         # 1. Check for <task> block → evaluation pipeline
         if "<task>" in action:
-            # Gate: model must call describe_db before submitting a task.
-            # This forces at least 2 turns (describe_db → submit) and ensures
-            # the model has seen the actual schema before generating a verifier.
-            if not self.called_describe_db and self.max_turns > 1:
-                remaining = self.max_turns - self.turns
-                nudge = (
-                    "You must call `describe_db` to see the database schema before submitting a task. "
-                    "Use `describe_db` first, then explore with `query_db`, and finally submit your `<task>` block."
-                )
-                if remaining <= 1:
-                    # Last turn and never explored — game over
-                    return BaseTextEnvStepOutput(
-                        observations=[],
-                        reward=0.0,
-                        done=True,
-                        metadata={"env_key": self.env_key, "turn": self.turns, "done_reason": "no_exploration"},
-                    )
-                return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": nudge}],
-                    reward=0.0,
-                    done=False,
-                    metadata={"env_key": self.env_key, "turn": self.turns, "rejected": "no_describe_db"},
-                )
             return await self._handle_task_generation(action)
 
         # 2. Check for tool calls → execute all via Fleet orchestrator or MCP
@@ -1152,9 +1140,7 @@ Generate exactly ONE task. Output it in this format:
             for tc in tool_calls:
                 if tc["name"] in _META_TOOLS:
                     self.meta_tool_calls += 1
-                    if tc["name"] == "describe_db":
-                        self.called_describe_db = True
-                    elif tc["name"] == "query_db":
+                    if tc["name"] == "query_db":
                         self.called_query_db = True
                     result = await self._execute_meta_tool(tc)
                 else:
@@ -1211,26 +1197,24 @@ Generate exactly ONE task. Output it in this format:
         )
 
     async def _execute_meta_tool(self, tool_call: Dict[str, Any]) -> str:
-        """Execute a describe_db or query_db meta-tool call via the Fleet orchestrator."""
+        """Execute a query_db meta-tool call via the Fleet orchestrator."""
         name = tool_call["name"]
         args = tool_call.get("arguments", {})
 
         if self.orch is None:
             return "Error: Fleet environment not provisioned. Generate a <task> directly."
 
+        if name != "query_db":
+            return f"Error: Unknown meta-tool '{name}'."
+
+        sql = args.get("sql", "")
+        if not sql:
+            return "Error: query_db requires a 'sql' argument."
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                if name == "describe_db":
-                    result = await self.orch.describe_db_async(db_name=args.get("db_name", "seed"))
-                elif name == "query_db":
-                    sql = args.get("sql", "")
-                    if not sql:
-                        return "Error: query_db requires a 'sql' argument."
-                    result = await self.orch.query_db_async(sql=sql, db_name=args.get("db_name", "seed"))
-                else:
-                    return f"Error: Unknown meta-tool '{name}'."
-
+                result = await self.orch.query_db_async(sql=sql, db_name=args.get("db_name", "seed"))
                 if isinstance(result, dict):
                     return f"Tool result:\n{json.dumps(result, indent=2, default=str)}"
                 return f"Tool result:\n{result}"
@@ -1246,7 +1230,7 @@ Generate exactly ONE task. Output it in this format:
         args = tool_call.get("arguments", {})
 
         if self.mcp_tools is None:
-            return "Error: MCP tools not available. Use describe_db/query_db or generate a <task>."
+            return "Error: MCP tools not available. Use query_db or generate a <task>."
 
         try:
             result = await self.mcp_tools.call_tool(name, args)
@@ -1261,13 +1245,12 @@ Generate exactly ONE task. Output it in this format:
 
         When ``max_turns > 1``, provisions a Fleet environment via
         ``FleetEnvClient.from_fleet_async`` so the model can call
-        ``describe_db`` / ``query_db`` during exploration turns.
+        ``query_db`` during exploration turns.
         Falls back to single-turn if provisioning fails.
         """
         self.turns = 0
         self.meta_tool_calls = 0
         self.mcp_tool_calls = 0
-        self.called_describe_db = False
         self.called_query_db = False
         self.orch = None
         self.mcp_tools = None
@@ -1292,24 +1275,13 @@ Generate exactly ONE task. Output it in this format:
                 logger.info(f"TaskGenEnv [{self.env_key}]: Fleet env provisioned for DB + tool exploration")
 
                 # Auto-populate env_schema from describe_db if not provided in dataset.
-                # This ensures the judge prompt and system prompt always have the real schema.
+                # Compact format: "table: col1 (type), col2 (type), ..." — one line per table.
                 if not self.env_schema:
                     try:
                         schema_result = await self.orch.describe_db_async(db_name="seed")
-                        if isinstance(schema_result, dict):
-                            # Format as compact "table: col1, col2, ..." lines
-                            lines = []
-                            for table_name, columns in schema_result.items():
-                                if isinstance(columns, list):
-                                    col_names = ", ".join(str(c) for c in columns)
-                                else:
-                                    col_names = str(columns)
-                                lines.append(f"{table_name}: {col_names}")
-                            self.env_schema = "\n".join(lines)
-                        elif isinstance(schema_result, str):
-                            self.env_schema = schema_result
+                        self.env_schema = _format_compact_schema(schema_result)
                         if self.env_schema:
-                            logger.info(f"TaskGenEnv [{self.env_key}]: Auto-populated env_schema from describe_db")
+                            logger.info(f"TaskGenEnv [{self.env_key}]: Auto-populated env_schema ({len(self.env_schema)} chars)")
                     except Exception as e:
                         logger.warning(f"TaskGenEnv [{self.env_key}]: Failed to auto-populate env_schema: {e}")
 
