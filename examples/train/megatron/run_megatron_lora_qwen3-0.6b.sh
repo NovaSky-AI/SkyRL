@@ -17,7 +17,8 @@ MEGATRON_TP=1
 MEGATRON_PP=1
 MEGATRON_CP=1
 
-# LoRA configuration
+# LoRA / DoRA configuration
+LORA_TYPE="lora" # set to "dora" to use DoRA instead of LoRA
 LORA_RANK=32
 LORA_ALPHA=64
 LORA_A_INIT_METHOD="kaiming"
@@ -43,6 +44,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.model.lora.init_method=$LORA_A_INIT_METHOD \
+  trainer.policy.megatron_config.lora_config.lora_type=$LORA_TYPE \
   trainer.gradient_checkpointing=true \
   trainer.policy.model.lora.target_modules="all-linear" \
   trainer.use_sample_packing=true \
@@ -70,7 +72,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}_lora_r${LORA_RANK}_a${LORA_ALPHA}" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}_${LORA_TYPE}_r${LORA_RANK}_a${LORA_ALPHA}" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

@@ -221,6 +221,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
 def validate_cfg(cfg: SkyRLTrainConfig):
+    if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.model.lora.rank > 0:
+        lora_type = cfg.trainer.policy.megatron_config.lora_config.lora_type
+        supported_megatron_lora_types = ("lora", "canonical_lora", "dora")
+        if lora_type not in supported_megatron_lora_types:
+            raise ValueError(
+                f"Unsupported Megatron lora_type: {lora_type}. "
+                "Supported values are 'lora', 'canonical_lora', and 'dora'."
+            )
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from skyrl.backends.skyrl_train.utils.ppo_utils import (

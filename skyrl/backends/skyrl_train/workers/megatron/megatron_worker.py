@@ -11,6 +11,7 @@ import torch.nn as nn
 from huggingface_hub import snapshot_download
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+from megatron.bridge.peft.dora import DoRA
 from megatron.bridge.peft.lora import LoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -323,43 +324,62 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        target_modules = self._resolve_lora_target_modules(lora_config.target_modules, lora_type)
+        exclude_modules = [] if lora_config.exclude_modules is None else lora_config.exclude_modules
         if lora_type == "lora":
             self.lora_cls = LoRA(
-                target_modules=(
-                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
-                exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+                exclude_modules=exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
             )
         elif lora_type == "canonical_lora":
             self.lora_cls = CanonicalLoRA(
-                target_modules=(
-                    [
-                        "linear_q",
-                        "linear_k",
-                        "linear_v",
-                        "linear_proj",
-                        "linear_fc1_up",
-                        "linear_fc1_gate",
-                        "linear_fc2",
-                    ]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
-                exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+                exclude_modules=exclude_modules,
             )
+        elif lora_type == "dora":
+            self.lora_cls = DoRA(
+                target_modules=target_modules,
+                dim=lora_config.rank,
+                alpha=lora_config.alpha,
+                dropout=lora_config.dropout,
+                lora_A_init_method=lora_config.init_method,
+                lora_B_init_method="zero",
+                exclude_modules=exclude_modules,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported megatron lora_type: {lora_type}. "
+                "Supported values are 'lora', 'canonical_lora', and 'dora'."
+            )
+
+    @staticmethod
+    def _resolve_lora_target_modules(target_modules, lora_type: Optional[str]):
+        if target_modules != "all-linear":
+            return target_modules
+
+        if lora_type == "canonical_lora":
+            return [
+                "linear_q",
+                "linear_k",
+                "linear_v",
+                "linear_proj",
+                "linear_fc1_up",
+                "linear_fc1_gate",
+                "linear_fc2",
+            ]
+
+        return ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
 
     def make_megatron_module(
         self,

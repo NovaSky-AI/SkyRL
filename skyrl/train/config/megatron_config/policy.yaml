@@ -34,7 +34,7 @@ torch_profiler_config:
   save_path: null
 
 lora_config:
-  # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+  # supported values: "lora", "canonical_lora", and "dora"
   lora_type: "lora"
 
 # pass-through kwargs to Megatron's `OptimizerConfig` object

@@ -10,6 +10,7 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train
 """
 
 import json
+import glob
 import os
 import shutil
 import uuid
@@ -19,7 +20,7 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     get_model_logits_from_actor,
@@ -62,18 +63,24 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
     return cfg
 
 
+def enable_megatron_adapter(cfg: SkyRLTrainConfig, adapter_type: str, rank: int = 32, alpha: int = 32) -> None:
+    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=rank, alpha=alpha)
+    cfg.trainer.policy.megatron_config.lora_config.lora_type = adapter_type
+
+
 @pytest.mark.parametrize(
-    ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload"),
+    ("strategy", "adapter_type", "fully_reshardable", "optimizer_cpu_offload"),
     [
-        ("fsdp", False, False, False),
-        ("fsdp2", False, False, False),
-        pytest.param("megatron", False, False, False, marks=pytest.mark.megatron),
-        pytest.param("megatron", False, False, True, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
-        pytest.param("megatron", False, True, False, marks=pytest.mark.megatron),
+        ("fsdp", None, False, False),
+        ("fsdp2", None, False, False),
+        pytest.param("megatron", None, False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", None, False, True, marks=pytest.mark.megatron),
+        pytest.param("megatron", "lora", False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", "dora", False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", None, True, False, marks=pytest.mark.megatron),
         pytest.param(
             "megatron",
-            False,
+            None,
             True,
             True,
             marks=[
@@ -92,11 +99,12 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
         "megatron",
         "megatron_optimizer_cpu_offload",
         "megatron_lora",
+        "megatron_dora",
         "megatron_fully_reshardable",
         "megatron_fully_reshardable_optimizer_cpu_offload",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable, optimizer_cpu_offload):
+def test_save_load_checkpoint(ray_init_fixture, strategy, adapter_type, fully_reshardable, optimizer_cpu_offload):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -106,10 +114,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
     5. Repeating second training step and comparing logits
     """
     cfg = get_test_actor_config(strategy)
-    if lora:
-        from skyrl.train.config import SkyRLLoraConfig
-
-        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
+    if strategy == "megatron" and adapter_type is not None:
+        enable_megatron_adapter(cfg, adapter_type=adapter_type)
     if fully_reshardable:
         cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
     if optimizer_cpu_offload:
@@ -186,6 +192,16 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
             assert os.path.exists(
                 os.path.join(huggingface_dir, file)
             ), f"File {file} not found in huggingface directory"
+        if strategy == "megatron" and adapter_type == "dora":
+            adapter_paths = glob.glob(os.path.join(checkpoint_path, "adapter_tp*_pp*_cp*_dp*_ep*_etp*.pt"))
+            assert adapter_paths, f"No adapter checkpoints found in {checkpoint_path}"
+            found_weight_magnitude = False
+            for adapter_path in adapter_paths:
+                adapter_state = torch.load(adapter_path, map_location="cpu")
+                if any("weight_magnitude" in key for key in adapter_state["model_state_dict"]):
+                    found_weight_magnitude = True
+                    break
+            assert found_weight_magnitude, "DoRA adapter checkpoint is missing weight_magnitude parameters"
         if "fsdp" in strategy:
             fsdp_config_path = os.path.join(checkpoint_path, "fsdp_config.json")
             with open(fsdp_config_path, "r") as f:

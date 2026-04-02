@@ -63,6 +63,11 @@ def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
     return cfg
 
 
+def enable_megatron_adapter(cfg: SkyRLTrainConfig, adapter_type: str, rank: int = 16, alpha: int = 16) -> None:
+    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=rank, alpha=alpha)
+    cfg.trainer.policy.megatron_config.lora_config.lora_type = adapter_type
+
+
 def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     Returns a test training batch with padded seqs and attention masks
@@ -121,24 +126,25 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "adapter_type"),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
-        pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(True, 4, 2, 2, 1, None, None, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(False, 2, 2, 1, 1, None, None, id="non_colocated"),
+        pytest.param(True, 4, 2, 2, 1, None, "lora", marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(True, 4, 2, 2, 1, None, "dora", marks=_skip_new_inference, id="colocate_all_dora"),
     ],
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, adapter_type
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
-        if lora:
-            cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
+        if adapter_type is not None:
+            enable_megatron_adapter(cfg, adapter_type=adapter_type)
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
@@ -205,17 +211,18 @@ def test_megatron_policy_weight_sync(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "lora"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "adapter_type"),
     [
-        ("policy", 2, 1, 1, 1, None, 2, False, False),
+        ("policy", 2, 1, 1, 1, None, 2, False, None),
         # ref has same forward pass as policy - just duplicate one test to test setup
-        ("ref", 2, 1, 1, 1, None, 2, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, True),
-        ("policy", 1, 1, 2, 1, None, 2, True, False),
-        ("policy", 2, 1, 2, 1, None, 4, True, False),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False),
+        ("ref", 2, 1, 1, 1, None, 2, False, None),
+        ("policy", 2, 2, 1, 1, None, 4, False, None),
+        ("policy", 2, 2, 1, 1, None, 4, True, None),
+        ("policy", 2, 2, 1, 1, None, 4, True, "lora"),
+        ("policy", 2, 2, 1, 1, None, 4, True, "dora"),
+        ("policy", 1, 1, 2, 1, None, 2, True, None),
+        ("policy", 2, 1, 2, 1, None, 4, True, None),
+        ("policy", 4, 1, 1, 4, 1, 4, True, None),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -223,6 +230,7 @@ def test_megatron_policy_weight_sync(
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_lora",
+        "tp2_pp2_dora",
         "cp_2_policy_seq_packing",
         "tp_2_cp_2_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
@@ -230,7 +238,7 @@ def test_megatron_policy_weight_sync(
 )
 @pytest.mark.megatron
 async def test_megatron_forward(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, lora
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, adapter_type
 ):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
@@ -252,8 +260,8 @@ async def test_megatron_forward(
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
-    if lora:
-        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
+    if adapter_type is not None:
+        enable_megatron_adapter(cfg, adapter_type=adapter_type)
 
     actor_group = init_worker_with_type(
         worker_type,
@@ -342,20 +350,24 @@ async def test_megatron_forward(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tp", "pp", "cp", "ep", "etp", "gpus_per_node"),
+    ("adapter_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node"),
     [
-        (2, 2, 1, 1, None, 4),
-        (4, 1, 1, 4, 1, 4),
+        ("lora", 2, 2, 1, 1, None, 4),
+        ("dora", 2, 2, 1, 1, None, 4),
+        ("lora", 4, 1, 1, 4, 1, 4),
+        ("dora", 4, 1, 1, 4, 1, 4),
     ],
     ids=[
-        "tp2_pp2_policy",
-        "tp4_pp1_cp1_ep4_etp1_policy",
+        "lora_tp2_pp2_policy",
+        "dora_tp2_pp2_policy",
+        "lora_tp4_pp1_cp1_ep4_etp1_policy",
+        "dora_tp4_pp1_cp1_ep4_etp1_policy",
     ],
 )
 @pytest.mark.megatron
-async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus_per_node):
+async def test_megatron_adapter_forward(ray_init_fixture, adapter_type, tp, pp, cp, ep, etp, gpus_per_node):
     """
-    Test that the Megatron + lora forward pass is numerically equivalent to just running a megatron model forward.
+    Test that a freshly initialized Megatron adapter produces the same outputs as the base Megatron model.
     """
     cfg = get_test_actor_config(model_name=MOE_MODEL_NAME if ep > 1 else MODEL_NAME)
     #### Megatron forward pass ####
@@ -402,8 +414,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     cfg.trainer.use_sample_packing = True
     batch = get_test_training_batch(max(4, gpus_per_node))
 
-    # set lora this time
-    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
+    enable_megatron_adapter(cfg, adapter_type=adapter_type)
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -420,7 +431,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_lora = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
+    action_log_probs_adapter = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
         "output"
     ]
 
@@ -428,13 +439,13 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     # compare just non-padding tokens
     print(f"Comparing {action_log_probs_full.numel()} valid response tokens")
     print(f"Full sample: {action_log_probs_full[:5]}")
-    print(f"Lora sample: {action_log_probs_lora[:5]}")
+    print(f"{adapter_type} sample: {action_log_probs_adapter[:5]}")
 
     # max diff
-    max_diff = torch.max(torch.abs(action_log_probs_full - action_log_probs_lora))
+    max_diff = torch.max(torch.abs(action_log_probs_full - action_log_probs_adapter))
     print(f"Max diff: {max_diff}")
 
-    assert max_diff == 0, "Numerical difference between LoRA and full fine tuning at init should be 0"
+    assert max_diff == 0, f"Numerical difference between {adapter_type} and full fine tuning at init should be 0"
 
 
 @pytest.mark.asyncio

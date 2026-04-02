@@ -16,6 +16,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
 
 
 # Helper dataclasses for testing
@@ -192,6 +193,37 @@ def test_cross_field_defaults():
     )  # same as `generator.sampling_params.max_generate_length`
     assert cfg.generator.rope_scaling == cfg.trainer.rope_scaling
     assert cfg.generator.rope_theta == cfg.trainer.rope_theta
+
+
+def test_validate_megatron_dora_lora_type():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.logger=console",
+            "trainer.flash_attn=false",
+            "trainer.policy.model.lora.rank=8",
+            "trainer.policy.megatron_config.lora_config.lora_type=dora",
+            "generator.inference_engine.backend=vllm",
+        ]
+    )
+
+    validate_cfg(cfg)
+
+
+def test_validate_megatron_invalid_lora_type():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.logger=console",
+            "trainer.flash_attn=false",
+            "trainer.policy.model.lora.rank=8",
+            "trainer.policy.megatron_config.lora_config.lora_type=invalid",
+            "generator.inference_engine.backend=vllm",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Megatron lora_type"):
+        validate_cfg(cfg)
 
 
 class TestMaxSeqLenValidation:
