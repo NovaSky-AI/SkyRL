@@ -1,7 +1,7 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on the original DAPO dataset with Int8 rollouts.
-# The configuration is tested on 2 H100 GPUs.
+# Colocated DAPO training+generation for Qwen2.5-0.5B-Instruct on the original DAPO dataset with Int8 rollouts.
+# The configuration is tested on 4 H100 GPUs.
 
 # DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # export WANDB_API_KEY=<your_key_here>
@@ -10,6 +10,9 @@ set -x
 DATA_DIR="$HOME/data/dapo"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
+# Override these env vars to test a newer FlashRL wheel without editing the script.
+FLASHRL_VLLM_WHEEL_URL="${FLASHRL_VLLM_WHEEL_URL:-https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl}"
+FLASHRL_TRANSFORMERS_VERSION="${FLASHRL_TRANSFORMERS_VERSION:-4.53.3}"
 
 # main DAPO parameters
 EPS_CLIP_LOW=0.2
@@ -19,7 +22,7 @@ DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
 LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
-# apply soft overlong punishment with custom trainer impl in main_dapo.py
+# apply soft overlong punishment with custom trainer impl in main_dapo_flashrl.py
 OVERLONG_BUFFER_LEN=512
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
 
@@ -33,7 +36,9 @@ MAX_RESPONSE_LENGTH=4096
 
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
-uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.0.5b_int8 --with vllm@https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl --with transformers==4.53.3 -- python -m examples.train.flash_rl.main_dapo_flashrl \
+CKPT_PATH="$HOME/ckpts/dapo_0.5B_ckpt"
+
+uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.0.5b_int8 --with "vllm@${FLASHRL_VLLM_WHEEL_URL}" --with "transformers==${FLASHRL_TRANSFORMERS_VERSION}" -- python -m examples.train.flash_rl.main_dapo_flashrl \
   data.train_data="['$DATA_DIR/dapo-math-17k-cleaned.parquet']" \
   data.val_data="['$DATA_DIR/aime-2024-cleaned.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

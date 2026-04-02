@@ -1,22 +1,21 @@
 from typing import List
+
 import ray
 import vllm
-from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
 from skyrl.train.utils.utils import ResolvedPlacementGroup
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
-)
+from .runtime import load_flashrl_patch_fn
 
 
 class FlashRLVLLMInferenceEngine(VLLMInferenceEngine):
-
     def _create_engine(self, *args, **kwargs):
         # apply flashrl's patch just before init
-        from vllm.model_executor.layers.patch import apply_patch as apply_flashrl_patch
-
+        apply_flashrl_patch = load_flashrl_patch_fn()
         apply_flashrl_patch()
 
         llm = vllm.LLM(*args, **kwargs)

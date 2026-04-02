@@ -20,6 +20,8 @@ from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInt
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.train.generators.base import GeneratorOutput
 
+from .runtime import validate_flashrl_environment
+
 
 @dataclass
 class DAPOAlgorithmConfig(AlgorithmConfig):
@@ -148,10 +150,23 @@ def main() -> None:
     validate_cfg(cfg)
 
     if not cfg.generator.inference_engine.run_engines_locally:
-        raise ValueError("FlashRL only supports colocated training.")
+        raise ValueError("FlashRL only supports local colocated inference engines.")
+
+    if cfg.generator.inference_engine.backend != "vllm":
+        raise ValueError(f"FlashRL only supports the vLLM backend, got: {cfg.generator.inference_engine.backend}")
+
+    if cfg.generator.inference_engine.async_engine:
+        raise ValueError("FlashRL does not support `async_engine`.")
 
     if cfg.trainer.strategy not in ("fsdp", "fsdp2"):
         raise ValueError(f"FlashRL only supports fsdp/fsdp2 strategy, got: {cfg.trainer.strategy}")
+
+    if cfg.generator.max_turns != 1:
+        raise ValueError(
+            f"FlashRL examples only support single-turn generation (`generator.max_turns=1`), got: {cfg.generator.max_turns}"
+        )
+
+    validate_flashrl_environment()
 
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))

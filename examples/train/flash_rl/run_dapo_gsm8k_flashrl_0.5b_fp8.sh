@@ -10,6 +10,9 @@ set -x
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
+# Override these env vars to test a newer FlashRL wheel without editing the script.
+FLASHRL_VLLM_WHEEL_URL="${FLASHRL_VLLM_WHEEL_URL:-https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl}"
+FLASHRL_TRANSFORMERS_VERSION="${FLASHRL_TRANSFORMERS_VERSION:-4.53.3}"
 
 # main DAPO parameters
 EPS_CLIP_LOW=0.2
@@ -36,7 +39,7 @@ CKPT_PATH="$HOME/ckpts/gsm8k_0.5B_ckpt"
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
-uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.fp8 --with vllm@https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl --with transformers==4.53.3 -- python -m examples.train.flash_rl.main_dapo_flashrl \
+uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.fp8 --with "vllm@${FLASHRL_VLLM_WHEEL_URL}" --with "transformers==${FLASHRL_TRANSFORMERS_VERSION}" -- python -m examples.train.flash_rl.main_dapo_flashrl \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
