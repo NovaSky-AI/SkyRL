@@ -116,6 +116,11 @@ def test_cli_overrides_empty_args():
     assert cfg.trainer.seed == 42
 
 
+def test_grpo_norm_by_std_default_is_false():
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    assert cfg.trainer.algorithm.grpo_norm_by_std is False
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
@@ -149,6 +154,7 @@ def test_legacy_config_translation():
 
     # Value should be translated to the new nested location
     assert cfg.generator.inference_engine.backend == "vllm"
+    assert cfg.trainer.algorithm.grpo_norm_by_std is False
 
     # test with full YAML
     full_legacy_cfg = get_legacy_config()
@@ -170,6 +176,7 @@ def test_legacy_config_translation():
     # should pass without error
     translated_cfg = SkyRLTrainConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
     assert translated_cfg.generator.inference_engine.backend == "vllm"
+    assert translated_cfg.trainer.algorithm.grpo_norm_by_std is False
 
 
 def test_legacy_config_field_rename():

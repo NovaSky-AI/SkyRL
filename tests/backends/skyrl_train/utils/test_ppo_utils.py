@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
 )
+from skyrl.train.config import AlgorithmConfig
 
 
 @pytest.fixture
@@ -43,6 +44,21 @@ def advantage_test_data():
     response_mask = torch.tensor([[1.0, 1.0, 1.0]])
     index = np.array(["0", "0", "0"])
     return rewards, values, response_mask, index
+
+
+@pytest.fixture
+def grouped_grpo_test_data():
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
+            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
+            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1])
+    return token_level_rewards, response_mask, index
 
 
 def test_compute_approx_kl(dummy_data):
@@ -133,33 +149,26 @@ def test_compute_rloo_outcome_advantage_basic():
     assert torch.allclose(adv, expected, atol=1e-5)
 
 
-def test_compute_grpo_outcome_advantage(advantage_test_data):
-    rewards, _, response_mask, index = advantage_test_data
+def test_compute_grpo_outcome_advantage_defaults_to_norm_std_false(grouped_grpo_test_data):
+    token_level_rewards, response_mask, index = grouped_grpo_test_data
 
     adv, ret = compute_grpo_outcome_advantage(
-        token_level_rewards=rewards,
+        token_level_rewards=token_level_rewards,
         response_mask=response_mask,
         index=index,
     )
 
-    assert adv.shape == rewards.shape
-    assert ret.shape == rewards.shape
+    expected = torch.tensor([1.5, -1.5, -1.5, 1.5]).unsqueeze(-1) * response_mask
+
+    assert adv.shape == token_level_rewards.shape
+    assert ret.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
 
 
-def test_compute_grpo_outcome_advantage_norm_std_false():
+def test_compute_grpo_outcome_advantage_norm_std_false(grouped_grpo_test_data):
     """Test GRPO advantage computation with grpo_norm_by_std=False."""
-    # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
-    token_level_rewards = torch.tensor(
-        [
-            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
-            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
-            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
-            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
-        ]
-    )
-    response_mask = torch.ones_like(token_level_rewards)
-    index = np.array([0, 0, 1, 1])
+    token_level_rewards, response_mask, index = grouped_grpo_test_data
 
     adv, ret = compute_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
@@ -174,6 +183,48 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_grpo_outcome_advantage_norm_std_true(grouped_grpo_test_data):
+    token_level_rewards, response_mask, index = grouped_grpo_test_data
+
+    adv, ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=True,
+    )
+
+    std = torch.tensor([6.0, 3.0]).std()
+    expected = torch.tensor([1.5 / std, -1.5 / std, -1.5 / std, 1.5 / std]).unsqueeze(-1) * response_mask
+
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_advantages_and_returns_grpo_defaults_to_norm_std_false(grouped_grpo_test_data):
+    token_level_rewards, response_mask, index = grouped_grpo_test_data
+    config = AlgorithmConfig(advantage_estimator="grpo")
+
+    default_adv, default_ret = compute_advantages_and_returns(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        adv_estimator="grpo",
+        config=config,
+    )
+    explicit_false_adv, explicit_false_ret = compute_advantages_and_returns(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        adv_estimator="grpo",
+        config=config,
+        grpo_norm_by_std=False,
+    )
+
+    assert torch.allclose(default_adv, explicit_false_adv)
+    assert torch.allclose(default_ret, explicit_false_ret)
 
 
 def test_compute_maxrl_advantage():
