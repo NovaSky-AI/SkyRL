@@ -474,15 +474,16 @@ class MegatronWorker:
             num_actions = micro.metadata["response_length"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
             micro_dicts.append(
                 {
                     "sequences": sequences,
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                     "num_actions": num_actions,
-                    "rollout_expert_indices": (
-                        micro.get("rollout_expert_indices") if self.enable_router_replay else None
-                    ),
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                 }
             )
 
@@ -683,6 +684,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             micro_buffer.append(
                 {
@@ -696,7 +700,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
-                    "rollout_expert_indices": experience.rollout_expert_indices if self.enable_router_replay else None,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                 }
             )
 

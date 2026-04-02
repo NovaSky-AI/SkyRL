@@ -14,12 +14,19 @@ from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    BitsAndBytesConfig,
+)
 
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
+from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
@@ -78,6 +85,7 @@ class HFModelWrapper(nn.Module):
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
+        self.is_vlm = False
         # packing samples using Flash Attention 2
         if use_sample_packing:
             assert (
@@ -104,6 +112,15 @@ class HFModelWrapper(nn.Module):
                 model_class = AutoModelForCausalLM
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+
+            self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+            if self.is_vlm:
+                logger.info(
+                    f"[VLM] Config {type(model_config).__name__} has a vision config, "
+                    "using AutoModelForImageTextToText"
+                )
+                # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
+                model_class = AutoModelForImageTextToText
 
             rope_scaling_kwargs = {}
             if rope_scaling:
@@ -284,8 +301,23 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        pixel_values: Optional[TensorList] = None,
+        image_grid_thw: Optional[TensorList] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if self.is_vlm:
+            # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
+            # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
+            # model specific logic to compute.
+            assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
+            assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
+
+            # Convert TensorList -> concatenated tensors for the HF model
+            if isinstance(pixel_values, TensorList):
+                pixel_values = torch.cat(pixel_values.tensors, dim=0)
+            if isinstance(image_grid_thw, TensorList):
+                image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -319,8 +351,16 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
+        if self.is_vlm:
+            output = self.model(
+                sequences_fwd,
+                attention_mask=attention_mask_fwd,
+                position_ids=None,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)

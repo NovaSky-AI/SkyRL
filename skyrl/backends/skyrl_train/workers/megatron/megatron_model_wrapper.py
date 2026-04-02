@@ -114,7 +114,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]
@@ -297,8 +300,12 @@ class MegatronModelWrapper:
 
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                            "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                            "logprobs": (
+                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
+                            "elementwise_loss": (
+                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
                         }
                     )
 
@@ -351,7 +358,7 @@ class MegatronModelWrapper:
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
@@ -376,7 +383,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]

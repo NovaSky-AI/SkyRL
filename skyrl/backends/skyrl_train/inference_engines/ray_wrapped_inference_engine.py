@@ -142,9 +142,8 @@ def create_ray_wrapped_inference_engines(
             VLLMRayActor,
         )
 
-        # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
-            assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
+            assert version.parse(vllm.__version__) >= version.parse("0.18.0"), "SkyRL-Train requires vLLM >= 0.18.0"
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 

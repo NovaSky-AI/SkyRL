@@ -17,7 +17,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
         weights = [1] * len(tokens)
         samples.append(
             types.Datum(
-                model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=tokens)]),
                 loss_fn_inputs=types.LossFnInputs(
                     target_tokens=types.TensorData(data=targets),
                     weights=types.TensorData(data=weights),
@@ -32,7 +32,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
 def make_sample_input(prompt_tokens: list[int], max_tokens: int, checkpoint_id: str) -> types.SampleInput:
     return types.SampleInput(
         base_model=None,
-        prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=prompt_tokens)]),
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=prompt_tokens)]),
         sampling_params=types.SamplingParams(temperature=1.0, max_tokens=max_tokens, seed=42),
         num_samples=1,
         checkpoint_id=checkpoint_id,

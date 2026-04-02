@@ -560,6 +560,7 @@ def test_client_generate(vllm_server: InferenceEngineState):
     prompt_token_ids = tokenizer.apply_chat_template(
         [conv],
         add_generation_prompt=True,
+        return_dict=False,
         tokenize=True,
     )
     engine_input = InferenceEngineInput(

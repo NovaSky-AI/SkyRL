@@ -119,7 +119,7 @@ class DistributedTorchRayActor:
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         # setup device mesh
@@ -722,35 +722,6 @@ class PolicyWorkerBase(Worker):
 
         return result
 
-    def forward_backward_from_staged(
-        self,
-        data: TrainingInputBatch,
-        start_idx: int,
-        end_idx: int,
-        loss_fn: Optional[str] = None,
-        loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
-
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-            loss_fn: Optional loss function name to use instead of config default
-            loss_fn_config: Optional config overrides for the loss function
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-
     def _forward_backward_micro(
         self,
         experience: Experience,
@@ -817,6 +788,8 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
+                pixel_values=experience.pixel_values,
+                image_grid_thw=experience.image_grid_thw,
             )
             # loss function
             # TODO: recompute advantages
@@ -856,8 +829,10 @@ class PolicyWorkerBase(Worker):
 
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                        "elementwise_loss": (
+                            elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                        ),
                     }
                 )
 
@@ -913,7 +888,7 @@ class PolicyWorkerBase(Worker):
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
@@ -1025,6 +1000,8 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        pixel_values = micro_batch.get("pixel_values", None)
+        image_grid_thw = micro_batch.get("image_grid_thw", None)
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1033,6 +1010,8 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.algorithm.temperature,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1080,26 +1059,6 @@ class CriticWorkerBase(Worker):
                 all_metrics[k].append(v)
 
         return reduce_metrics(dict(all_metrics))
-
-    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
-
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data)
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1267,8 +1226,17 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        pixel_values = micro_batch["pixel_values"]
+        image_grid_thw = micro_batch["image_grid_thw"]
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            log_probs = self.model(sequences, response_length, attention_mask, return_output=False)
+            log_probs = self.model(
+                sequences,
+                response_length,
+                attention_mask,
+                return_output=False,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(
             {"output": log_probs},

@@ -1,10 +1,10 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen3-30B-A3B on SearchR1 data.
-# follow the instructions in examples/search/README.md for setting up the dataset
+# follow the instructions in examples/train/search/README.md for setting up the dataset
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/megatron/run_search_megatron.sh
+# bash examples/train/megatron/run_search_megatron.sh
 # Runs on 4 nodes of 8xH100s
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question

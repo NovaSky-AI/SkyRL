@@ -404,6 +404,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             prompts,
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
@@ -419,11 +420,22 @@ class InferenceEngineState:
     server_group: Optional[ServerGroup]
 
     def close(self):
-        """Shutdown router and server_group if they exist."""
+        """Shutdown all engine resources: router, server_group, and Ray actors.
+
+        For local engines (InferenceEngineClient wrapping RayWrappedInferenceEngines),
+        kills the underlying Ray actors so their torch.distributed TCPStore sockets
+        are released promptly, preventing port conflicts between tests.
+        """
         if self.router is not None:
             self.router.shutdown()
         if self.server_group is not None:
             self.server_group.shutdown()
+
+        if isinstance(self.client, InferenceEngineClient):
+            for engine in self.client.engines:
+                if hasattr(engine, "inference_engine_actor"):
+                    ray.kill(engine.inference_engine_actor)
+            self.client.engines.clear()
 
     def __enter__(self):
         return self
@@ -527,7 +539,11 @@ class InferenceEngineState:
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            router = InferenceRouter(server_urls=server_urls)
+            from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+                VLLMRouter,
+            )
+
+            router = VLLMRouter(server_urls=server_urls)
             proxy_url = router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -538,6 +554,7 @@ class InferenceEngineState:
                 server_urls=server_urls,
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 active_lora_name=active_lora_name,
+                tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:
             eps = create_ray_wrapped_inference_engines(
