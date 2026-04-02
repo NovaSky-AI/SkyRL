@@ -414,6 +414,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and update consumed UIDs.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
+                        self._update_response_length_adaptive_lr(training_input.metadata["avg_response_length"])
                         await self.async_train_dataloader.mark_consumed_uids(
                             [g.uid for g in cur_generation_group_mini_batch]
                         )

@@ -219,6 +219,40 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+def validate_response_length_adaptive_lr_cfg(cfg: SkyRLTrainConfig):
+    policy_adaptive_cfg = cfg.trainer.policy.optimizer_config.response_length_adaptive_lr
+    critic_adaptive_cfg = cfg.trainer.critic.optimizer_config.response_length_adaptive_lr
+
+    assert not critic_adaptive_cfg.enabled, (
+        "Configure response-length adaptive LR on trainer.policy.optimizer_config.response_length_adaptive_lr. "
+        "Use apply_to_critic=true there if you also want to scale the critic LR."
+    )
+
+    if not policy_adaptive_cfg.enabled:
+        return
+
+    assert cfg.trainer.policy.optimizer_config.scheduler == "constant_with_warmup", (
+        "response_length_adaptive_lr currently only supports policy scheduler='constant_with_warmup'"
+    )
+    assert 0 < policy_adaptive_cfg.ema_alpha <= 1, "response_length_adaptive_lr.ema_alpha must be in (0, 1]"
+    assert policy_adaptive_cfg.trigger_ratio > 1, "response_length_adaptive_lr.trigger_ratio must be > 1"
+    assert 0 < policy_adaptive_cfg.decay_factor < 1, "response_length_adaptive_lr.decay_factor must be in (0, 1)"
+    assert policy_adaptive_cfg.cooldown_steps >= 0, "response_length_adaptive_lr.cooldown_steps must be >= 0"
+    assert (
+        policy_adaptive_cfg.min_monitor_steps >= 0
+    ), "response_length_adaptive_lr.min_monitor_steps must be >= 0"
+    assert 0 < policy_adaptive_cfg.min_scale <= 1, "response_length_adaptive_lr.min_scale must be in (0, 1]"
+    assert policy_adaptive_cfg.max_decays >= 1, "response_length_adaptive_lr.max_decays must be >= 1"
+
+    if policy_adaptive_cfg.apply_to_critic:
+        assert cfg.trainer.critic.model.path, (
+            "response_length_adaptive_lr.apply_to_critic=true requires trainer.critic.model.path to be set"
+        )
+        assert cfg.trainer.critic.optimizer_config.scheduler == "constant_with_warmup", (
+            "response_length_adaptive_lr.apply_to_critic=true currently only supports critic scheduler='constant_with_warmup'"
+        )
+
+
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
 def validate_cfg(cfg: SkyRLTrainConfig):
     # Validate generation config separately
@@ -252,6 +286,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
     validate_batch_sizes(cfg)
+    validate_response_length_adaptive_lr_cfg(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
         raise ValueError(

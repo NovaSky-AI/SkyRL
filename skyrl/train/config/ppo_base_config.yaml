@@ -44,7 +44,17 @@ trainer:
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
       num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
-      scheduler: "constant_with_warmup"   
+      scheduler: "constant_with_warmup"
+      response_length_adaptive_lr:
+        enabled: false
+        ema_alpha: 0.05
+        trigger_ratio: 1.2
+        decay_factor: 0.5
+        cooldown_steps: 100
+        min_monitor_steps: 0
+        min_scale: 0.125
+        max_decays: 3
+        apply_to_critic: false
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
@@ -85,6 +95,16 @@ trainer:
       offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
       num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
       scheduler: "constant_with_warmup"
+      response_length_adaptive_lr:
+        enabled: false
+        ema_alpha: 0.05
+        trigger_ratio: 1.2
+        decay_factor: 0.5
+        cooldown_steps: 100
+        min_monitor_steps: 0
+        min_scale: 0.125
+        max_decays: 3
+        apply_to_critic: false
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true

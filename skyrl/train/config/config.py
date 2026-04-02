@@ -74,6 +74,19 @@ class ModelConfig(BaseConfig):
 
 
 @dataclass
+class ResponseLengthAdaptiveLRConfig(BaseConfig):
+    enabled: bool = False
+    ema_alpha: float = 0.05
+    trigger_ratio: float = 1.2
+    decay_factor: float = 0.5
+    cooldown_steps: int = 100
+    min_monitor_steps: int = 0
+    min_scale: float = 0.125
+    max_decays: int = 3
+    apply_to_critic: bool = False
+
+
+@dataclass
 class OptimizerConfig(BaseConfig):
     lr: float = 1e-6
     adam_betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
@@ -84,6 +97,9 @@ class OptimizerConfig(BaseConfig):
     num_warmup_steps: int = 0
     """Number of mini-batch steps to warmup the optimizer."""
     scheduler: str = "constant_with_warmup"
+    response_length_adaptive_lr: ResponseLengthAdaptiveLRConfig = field(
+        default_factory=ResponseLengthAdaptiveLRConfig
+    )
 
 
 @dataclass

@@ -285,6 +285,11 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
 
+    def set_lr_scale(self, model: str, scale: float) -> None:
+        """Set a persistent LR scale for model's scheduler on all workers."""
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr_scale", scale=scale))
+
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
         ray.get(

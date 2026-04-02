@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -202,42 +203,43 @@ def test_micro_batches_accumulated_initialized():
     assert critic_worker._micro_batches_accumulated == 0
 
 
+def create_test_config(
+    train_batch_size=128,
+    policy_mini_batch_size=16,
+    critic_mini_batch_size=8,
+    micro_train_batch_size_per_gpu=2,
+    micro_forward_batch_size_per_gpu=4,
+    n_samples_per_prompt=2,
+    policy_num_nodes=1,
+    policy_num_gpus_per_node=4,
+    critic_num_nodes=1,
+    critic_num_gpus_per_node=4,
+    policy_sequence_parallel_size=1,
+    critic_sequence_parallel_size=1,
+    critic_model_path=None,
+):
+    """Helper to create config for validation testing."""
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.train_batch_size = train_batch_size
+    cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+    cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+    cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
+    cfg.trainer.placement.policy_num_nodes = policy_num_nodes
+    cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
+    cfg.trainer.placement.critic_num_nodes = critic_num_nodes
+    cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
+    cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
+    cfg.trainer.critic.model.path = critic_model_path
+    cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.generator.n_samples_per_prompt = n_samples_per_prompt
+    return cfg
+
+
 def test_validate_batch_sizes():
     """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
-
-    def create_test_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        critic_mini_batch_size=8,
-        micro_train_batch_size_per_gpu=2,
-        micro_forward_batch_size_per_gpu=4,
-        n_samples_per_prompt=2,
-        policy_num_nodes=1,
-        policy_num_gpus_per_node=4,
-        critic_num_nodes=1,
-        critic_num_gpus_per_node=4,
-        policy_sequence_parallel_size=1,
-        critic_sequence_parallel_size=1,
-        critic_model_path=None,
-    ):
-        """Helper to create config for validation testing."""
-        cfg = SkyRLTrainConfig()
-        cfg.trainer.train_batch_size = train_batch_size
-        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
-        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
-        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
-        cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
-        cfg.trainer.placement.policy_num_nodes = policy_num_nodes
-        cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
-        cfg.trainer.placement.critic_num_nodes = critic_num_nodes
-        cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
-        cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
-        cfg.trainer.critic.model.path = critic_model_path
-        cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
-        cfg.trainer.algorithm.use_kl_loss = False
-        cfg.trainer.algorithm.use_kl_in_reward = False
-        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
-        return cfg
 
     # Test Case 1: Valid configuration
     cfg = create_test_config()
@@ -258,6 +260,88 @@ def test_validate_batch_sizes():
     with pytest.raises(AssertionError, match="policy_mini_batch_size must be greater than 0"):
         validate_batch_sizes(cfg)
 
+
+def test_response_length_adaptive_lr_triggers_dispatch_update(dummy_config, dummy_generator):
+    adaptive_cfg = dummy_config.trainer.policy.optimizer_config.response_length_adaptive_lr
+    adaptive_cfg.enabled = True
+    adaptive_cfg.trigger_ratio = 1.1
+    adaptive_cfg.decay_factor = 0.5
+    adaptive_cfg.cooldown_steps = 0
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+
+    trainer.global_step = 1
+    trainer._update_response_length_adaptive_lr(10.0)
+    trainer.global_step = 2
+    trainer._update_response_length_adaptive_lr(20.0)
+
+    trainer.dispatch.set_lr_scale.assert_called_once_with("policy", 0.5)
+    assert trainer.all_metrics["adaptive_lr/lr_scale"] == 0.5
+    assert trainer.all_metrics["adaptive_lr/triggered"] == 1.0
+
+
+def test_response_length_adaptive_lr_state_saved_and_restored(tmp_path, dummy_config, dummy_generator):
+    adaptive_cfg = dummy_config.trainer.policy.optimizer_config.response_length_adaptive_lr
+    adaptive_cfg.enabled = True
+    adaptive_cfg.trigger_ratio = 1.1
+    adaptive_cfg.decay_factor = 0.5
+    adaptive_cfg.cooldown_steps = 0
+    dummy_config.trainer.ckpt_path = str(tmp_path)
+    dummy_config.trainer.resume_mode = "from_path"
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.train_dataloader = MagicMock()
+    trainer.train_dataloader.state_dict.return_value = {"cursor": 1}
+    trainer._cleanup_old_checkpoints = MagicMock()
+
+    trainer.global_step = 1
+    trainer._update_response_length_adaptive_lr(10.0)
+    trainer.global_step = 2
+    trainer._update_response_length_adaptive_lr(20.0)
+    trainer.save_checkpoints()
+
+    resume_path = Path(tmp_path) / "global_step_2"
+    dummy_config.trainer.resume_path = str(resume_path)
+
+    resumed_trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    resumed_trainer.dispatch = MagicMock()
+    resumed_trainer.train_dataloader = MagicMock()
+
+    global_step, loaded_checkpoint_path = resumed_trainer.load_checkpoints()
+
+    assert global_step == 2
+    assert loaded_checkpoint_path == str(resume_path)
+    assert resumed_trainer.response_length_adaptive_lr_controller.current_scale == pytest.approx(0.5)
+    resumed_trainer.dispatch.set_lr_scale.assert_called_once_with("policy", 0.5)
+
+
+def test_validate_batch_sizes_remaining_cases():
     # Test Case 5: Error case - critic_mini_batch_size = 0
     cfg = create_test_config(critic_mini_batch_size=0, critic_model_path="test")
     with pytest.raises(AssertionError, match="critic_mini_batch_size must be greater than 0"):

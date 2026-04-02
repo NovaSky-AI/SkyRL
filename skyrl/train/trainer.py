@@ -57,6 +57,7 @@ from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
+from skyrl.train.utils.adaptive_lr import ResponseLengthAdaptiveLRController
 from skyrl.train.utils import (
     Timer,
     get_ray_pg_ready_with_timeout,
@@ -124,6 +125,9 @@ class RayPPOTrainer:
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
+        self.response_length_adaptive_lr_controller: Optional[ResponseLengthAdaptiveLRController] = (
+            self._build_response_length_adaptive_lr_controller()
+        )
         self.dispatch: WorkerDispatch = None
         configure_ray_worker_logging()
 
@@ -131,6 +135,34 @@ class RayPPOTrainer:
     def has_critic(self) -> bool:
         """Check if critic model is configured."""
         return bool(self.cfg.trainer.critic.model.path)
+
+    def _build_response_length_adaptive_lr_controller(self) -> Optional[ResponseLengthAdaptiveLRController]:
+        adaptive_cfg = self.cfg.trainer.policy.optimizer_config.response_length_adaptive_lr
+        if not adaptive_cfg.enabled:
+            return None
+        return ResponseLengthAdaptiveLRController(
+            adaptive_cfg,
+            warmup_steps=self.cfg.trainer.policy.optimizer_config.num_warmup_steps,
+        )
+
+    def _apply_response_length_adaptive_lr_scale(self, scale: float) -> None:
+        self.dispatch.set_lr_scale("policy", scale)
+        adaptive_cfg = self.cfg.trainer.policy.optimizer_config.response_length_adaptive_lr
+        if adaptive_cfg.apply_to_critic and self.has_critic:
+            self.dispatch.set_lr_scale("critic", scale)
+
+    def _update_response_length_adaptive_lr(self, avg_response_length: float) -> None:
+        if self.response_length_adaptive_lr_controller is None:
+            return
+
+        update = self.response_length_adaptive_lr_controller.update(
+            step=self.global_step,
+            avg_response_length=avg_response_length,
+        )
+        self.all_metrics.update({f"adaptive_lr/{k}": v for k, v in update.metrics.items()})
+
+        if update.triggered:
+            self._apply_response_length_adaptive_lr_scale(update.scale)
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -287,6 +319,7 @@ class RayPPOTrainer:
                     # Policy model is backloaded to GPU during training
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
+                        self._update_response_length_adaptive_lr(training_input.metadata["avg_response_length"])
 
                     # 8. conditionally save checkpoints and hf model
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
@@ -1268,6 +1301,11 @@ class RayPPOTrainer:
         trainer_state = {
             "global_step": self.global_step,
             "config": asdict(self.cfg),
+            "response_length_adaptive_lr": (
+                self.response_length_adaptive_lr_controller.state_dict()
+                if self.response_length_adaptive_lr_controller is not None
+                else None
+            ),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
@@ -1407,6 +1445,11 @@ class RayPPOTrainer:
                 load_lr_scheduler_states=True,
             )
             logger.info("Successfully loaded critic checkpoint")
+
+        adaptive_lr_state = trainer_state.get("response_length_adaptive_lr")
+        if self.response_length_adaptive_lr_controller is not None and adaptive_lr_state is not None:
+            self.response_length_adaptive_lr_controller.load_state_dict(adaptive_lr_state)
+            self._apply_response_length_adaptive_lr_scale(self.response_length_adaptive_lr_controller.current_scale)
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
         return global_step, str(checkpoint_path)

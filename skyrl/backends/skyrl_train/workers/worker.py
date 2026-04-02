@@ -77,6 +77,15 @@ if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
 
+def _get_scheduler_base_lr(scheduler) -> Optional[float]:
+    if scheduler is None or not hasattr(scheduler, "get_base_lr"):
+        return None
+    base_lrs = scheduler.get_base_lr()
+    if not base_lrs:
+        return None
+    return float(base_lrs[0])
+
+
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
@@ -675,6 +684,7 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
+        self._micro_batches_accumulated = 0
 
     def forward_backward(
         self,
@@ -853,6 +863,9 @@ class PolicyWorkerBase(Worker):
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
+            base_lr = _get_scheduler_base_lr(self.scheduler)
+            if base_lr is not None:
+                status["base_lr"] = base_lr
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss
@@ -919,6 +932,9 @@ class PolicyWorkerBase(Worker):
                 "policy_lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
+            base_lr = _get_scheduler_base_lr(self.scheduler)
+            if base_lr is not None:
+                status["base_lr"] = base_lr
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
             if self.cfg.algorithm.use_kl_loss:
@@ -953,8 +969,16 @@ class PolicyWorkerBase(Worker):
         This directly updates the optimizer's param_groups, bypassing the scheduler.
         Useful for external learning rate schedules (e.g., from Tinker).
         """
+        if self.scheduler is not None and hasattr(self.scheduler, "set_absolute_lr"):
+            self.scheduler.set_absolute_lr(learning_rate)
+            return
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
+
+    def set_lr_scale(self, scale: float) -> None:
+        if self.scheduler is None or not hasattr(self.scheduler, "set_scale"):
+            raise RuntimeError("LR scale control is not available because the scheduler is not scale-aware.")
+        self.scheduler.set_scale(scale)
 
     def barrier(self) -> None:
         """
@@ -1114,6 +1138,9 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
+        base_lr = _get_scheduler_base_lr(self.scheduler)
+        if base_lr is not None:
+            status["base_lr"] = base_lr
 
         return status
 
@@ -1154,8 +1181,16 @@ class CriticWorkerBase(Worker):
         This directly updates the optimizer's param_groups, bypassing the scheduler.
         Useful for external learning rate schedules (e.g., from Tinker).
         """
+        if self.scheduler is not None and hasattr(self.scheduler, "set_absolute_lr"):
+            self.scheduler.set_absolute_lr(learning_rate)
+            return
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
+
+    def set_lr_scale(self, scale: float) -> None:
+        if self.scheduler is None or not hasattr(self.scheduler, "set_scale"):
+            raise RuntimeError("LR scale control is not available because the scheduler is not scale-aware.")
+        self.scheduler.set_scale(scale)
 
     def barrier(self) -> None:
         """

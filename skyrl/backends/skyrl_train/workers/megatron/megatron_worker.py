@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils.lr_scheduler import ScaleAwareLRScheduler
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import WeightChunk, WeightExtractor
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
@@ -61,6 +62,10 @@ if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
+
+
+def _should_wrap_policy_scheduler(cfg) -> bool:
+    return cfg.policy.optimizer_config.response_length_adaptive_lr.enabled
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -577,6 +582,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             config=self.cfg.policy.optimizer_config,
             num_training_steps=num_training_steps,
         )
+        if _should_wrap_policy_scheduler(self.cfg):
+            self.scheduler = ScaleAwareLRScheduler(self.scheduler, self.optimizer)
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -688,7 +695,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
-        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+        status["policy_lr"] = self.get_lr()
+        if hasattr(self.scheduler, "get_base_lr"):
+            status["base_lr"] = self.scheduler.get_base_lr()[0]
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
@@ -741,6 +750,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         will override this value unless the scheduler is configured for
         constant LR.
         """
+        if self.scheduler is not None and hasattr(self.scheduler, "set_absolute_lr"):
+            self.scheduler.set_absolute_lr(learning_rate)
+            return
+
         if isinstance(self.optimizer, ChainedOptimizer):
             # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:

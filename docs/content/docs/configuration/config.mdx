@@ -224,6 +224,16 @@ optimizer_config:
    offload_after_step: true
    num_warmup_steps: 0
    scheduler: "constant_with_warmup"
+   response_length_adaptive_lr:
+     enabled: false
+     ema_alpha: 0.05
+     trigger_ratio: 1.2
+     decay_factor: 0.5
+     cooldown_steps: 100
+     min_monitor_steps: 0
+     min_scale: 0.125
+     max_decays: 3
+     apply_to_critic: false
 
 ```
 
@@ -234,6 +244,7 @@ optimizer_config:
 - `optimizer_config.offload_after_step`: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of `true`. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
 - `optimizer_config.num_warmup_steps`: Number of mini-batch steps to warmup the optimizer for.
 - `optimizer_config.scheduler`: Which learning rate scheduler to use. Intended to align with `transformers.SchedulerType` from [Huggingface](https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType).
+- `optimizer_config.response_length_adaptive_lr`: Optional response-length-triggered LR decay layered on top of the base scheduler. In v1 this is intended for `constant_with_warmup` and is primarily used from the policy optimizer config.
 
 ## Policy Configuration
 

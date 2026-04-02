@@ -16,6 +16,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
 
 
 # Helper dataclasses for testing
@@ -212,3 +213,27 @@ class TestMaxSeqLenValidation:
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
 
         assert cfg.trainer.algorithm.max_seq_len == 32768
+
+
+def test_response_length_adaptive_lr_default_disabled():
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    assert cfg.trainer.policy.optimizer_config.response_length_adaptive_lr.enabled is False
+
+
+def test_response_length_adaptive_lr_validation_rejects_unsupported_scheduler():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.logger = "console"
+    cfg.trainer.policy.optimizer_config.scheduler = "linear"
+    cfg.trainer.policy.optimizer_config.response_length_adaptive_lr.enabled = True
+
+    with pytest.raises(AssertionError, match="response_length_adaptive_lr"):
+        validate_cfg(cfg)
+
+
+def test_response_length_adaptive_lr_validation_rejects_critic_side_enable():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.logger = "console"
+    cfg.trainer.critic.optimizer_config.response_length_adaptive_lr.enabled = True
+
+    with pytest.raises(AssertionError, match="Configure response-length adaptive LR"):
+        validate_cfg(cfg)

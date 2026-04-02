@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils.lr_scheduler import ScaleAwareLRScheduler
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -51,6 +52,15 @@ from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
+
+
+def _should_wrap_policy_scheduler(cfg) -> bool:
+    return cfg.policy.optimizer_config.response_length_adaptive_lr.enabled
+
+
+def _should_wrap_critic_scheduler(cfg) -> bool:
+    adaptive_cfg = cfg.policy.optimizer_config.response_length_adaptive_lr
+    return adaptive_cfg.enabled and adaptive_cfg.apply_to_critic
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -203,6 +213,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         assert (
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
+        if _should_wrap_policy_scheduler(self.cfg):
+            self.scheduler = ScaleAwareLRScheduler(self.scheduler, self.optimizer)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
@@ -376,6 +388,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             (critic, None, None),
         )
         assert self.optimizer is not None
+        if self.scheduler is not None and _should_wrap_critic_scheduler(self.cfg):
+            self.scheduler = ScaleAwareLRScheduler(self.scheduler, self.optimizer)
 
     def forward(
         self,
