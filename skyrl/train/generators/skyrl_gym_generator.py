@@ -8,7 +8,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 import asyncio
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -22,6 +22,9 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
 )
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl.train.generators.base import (
@@ -218,6 +221,36 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    def _get_turn_sampling_params(
+        self,
+        sampling_params: Optional[Dict[str, Any]],
+        current_input_length: int,
+        max_input_length: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build the effective sampling params for the current turn.
+
+        For training/eval, ``sampling_params`` is typically already a backend-normalized dict
+        (e.g. vLLM-style with ``max_tokens``). For direct callers/tests that omit it, fall back
+        to the generator config and normalize it for the configured backend.
+        """
+        if sampling_params is None:
+            turn_sampling_params = get_sampling_params_for_backend(
+                self.generator_cfg.inference_engine.backend, self.generator_cfg.sampling_params
+            )
+        else:
+            turn_sampling_params = copy.deepcopy(sampling_params)
+
+        remaining_budget = max_input_length - current_input_length
+        if "max_tokens" in turn_sampling_params:
+            turn_sampling_params["max_tokens"] = min(turn_sampling_params["max_tokens"], remaining_budget)
+        elif "max_generate_length" in turn_sampling_params:
+            turn_sampling_params["max_generate_length"] = min(
+                turn_sampling_params["max_generate_length"], remaining_budget
+            )
+
+        return turn_sampling_params
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -289,14 +322,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
 
-        # `sampling_params` if provided is a dict in the format expected by the inference engine backend
-        # we cast default config to a dict for consistency
-        current_sampling_params: dict = (
-            sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
-        )
-
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        new_obs: ConversationType = []
 
         is_step_wise = self.generator_cfg.step_wise_trajectories
 
@@ -314,10 +342,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not agent_loop_state.done:
 
-            if len(agent_loop_state.input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
@@ -332,8 +356,20 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
+            current_input_length = len(agent_loop_state.input_ids)
+            if current_input_length >= max_input_length:
+                stop_reason = "length"
+                break
+
+            current_sampling_params = self._get_turn_sampling_params(
+                sampling_params=sampling_params,
+                current_input_length=current_input_length,
+                max_input_length=max_input_length,
+            )
             engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                prompt_token_ids=[agent_loop_state.input_ids],
+                session_ids=[session_id],
+                sampling_params=current_sampling_params,
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -453,38 +489,50 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Note that during the agent loop, we still add the final observation messages/ tokens because we terminate the agent loop if the input length
         # exceeds the maximum
         if retokenize_chat_history:
-            response_encodings = self.tokenizer.apply_chat_template(
-                agent_loop_state.chat_history[
-                    initial_chat_history_length : len(agent_loop_state.chat_history) - len(new_obs)
-                ],
-                chat_template=self.custom_chat_template,
-                add_generation_prompt=False,
-                return_dict=True,
-                return_assistant_tokens_mask=True,
-                tokenize=True,
-                **self.generator_cfg.chat_template_kwargs,
-            )
-            loss_mask = response_encodings["assistant_masks"]
-            response_ids = response_encodings["input_ids"]
+            if agent_loop_state.response_end_idx is None:
+                loss_mask = []
+                response_ids = []
+            else:
+                response_encodings = self.tokenizer.apply_chat_template(
+                    agent_loop_state.chat_history[
+                        initial_chat_history_length : len(agent_loop_state.chat_history) - len(new_obs)
+                    ],
+                    chat_template=self.custom_chat_template,
+                    add_generation_prompt=False,
+                    return_dict=True,
+                    return_assistant_tokens_mask=True,
+                    tokenize=True,
+                    **self.generator_cfg.chat_template_kwargs,
+                )
+                loss_mask = response_encodings["assistant_masks"]
+                response_ids = response_encodings["input_ids"]
         elif not self.generator_cfg.step_wise_trajectories:
-            assert not any(
-                agent_loop_state.loss_mask[agent_loop_state.response_end_idx - initial_prompt_length + 1 :]
-            ), "loss_mask at index after response end should be all 0"
-            loss_mask = agent_loop_state.loss_mask[: agent_loop_state.response_end_idx - initial_prompt_length + 1]
-            response_ids = agent_loop_state.input_ids[initial_prompt_length : agent_loop_state.response_end_idx + 1]
-            if agent_loop_state.rollout_logprobs is not None:
-                rollout_logprobs = agent_loop_state.rollout_logprobs[
-                    : agent_loop_state.response_end_idx - initial_prompt_length + 1
-                ]
-            if agent_loop_state.rollout_expert_indices is not None:
-                rollout_expert_indices_out = agent_loop_state.rollout_expert_indices[
-                    : agent_loop_state.response_end_idx + 1
-                ]
-            # fix index for per_step_rewards
-            per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
-            assert len(loss_mask) == len(
-                response_ids
-            ), f"loss_mask and response_ids should have the same length, got {len(loss_mask)} and {len(response_ids)}"
+            if agent_loop_state.response_end_idx is None:
+                loss_mask = []
+                response_ids = []
+                if agent_loop_state.rollout_logprobs is not None:
+                    rollout_logprobs = []
+                if agent_loop_state.rollout_expert_indices is not None:
+                    rollout_expert_indices_out = []
+            else:
+                assert not any(
+                    agent_loop_state.loss_mask[agent_loop_state.response_end_idx - initial_prompt_length + 1 :]
+                ), "loss_mask at index after response end should be all 0"
+                loss_mask = agent_loop_state.loss_mask[: agent_loop_state.response_end_idx - initial_prompt_length + 1]
+                response_ids = agent_loop_state.input_ids[initial_prompt_length : agent_loop_state.response_end_idx + 1]
+                if agent_loop_state.rollout_logprobs is not None:
+                    rollout_logprobs = agent_loop_state.rollout_logprobs[
+                        : agent_loop_state.response_end_idx - initial_prompt_length + 1
+                    ]
+                if agent_loop_state.rollout_expert_indices is not None:
+                    rollout_expert_indices_out = agent_loop_state.rollout_expert_indices[
+                        : agent_loop_state.response_end_idx + 1
+                    ]
+                # fix index for per_step_rewards
+                per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
+                assert len(loss_mask) == len(
+                    response_ids
+                ), f"loss_mask and response_ids should have the same length, got {len(loss_mask)} and {len(response_ids)}"
 
         appended_eos_token = False
         if not self.use_conversation_multi_turn:
@@ -539,6 +587,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             Union[float, List[float]]: If custom_chat_template is used, returns the last step's reward (float).
                 Otherwise, returns a list of token-level rewards (List[float]).
         """
+        if not per_step_rewards:
+            return []
+
         if self.custom_chat_template:
             # TODO(Charlie): Currently, the possible response truncation will not affect the reward
             # in the if branch, but some final rewards may be lost in the else branch. Fix this

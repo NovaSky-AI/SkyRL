@@ -203,9 +203,8 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
         # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
         for i, cur_trajectory_rewards in enumerate(rewards):
-            if len(cur_trajectory_rewards) == 0:
-                raise ValueError("Token-level rewards must be a non-empty list.")
-            uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
+            trajectory_reward = cur_trajectory_rewards[-1] if len(cur_trajectory_rewards) > 0 else 0.0
+            uid_to_trajectory_rewards[uids[i]].append(trajectory_reward)
     else:
         mean_raw_reward = float(np.mean(rewards))
         mean_positive_reward = float(np.mean(np.maximum(rewards, 0.0)))
