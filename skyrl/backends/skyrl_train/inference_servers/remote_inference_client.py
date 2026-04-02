@@ -50,7 +50,18 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Required,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import aiohttp
 
@@ -116,6 +127,33 @@ class PauseMode(Enum):
     ABORT = "abort"
     KEEP = "keep"
     WAIT = "wait"
+
+
+class SampleRequestBody(TypedDict, total=False):
+    """Tinker-style sample request body, mirroring tinker SamplingClient.sample"""
+
+    prompt: Required[Dict[str, Any]]
+    num_samples: int
+    sampling_params: Dict[str, Any]
+    session_id: str
+    include_prompt_logprobs: bool
+    prompt_logprobs: bool
+    topk_prompt_logprobs: int
+
+
+class SampleRequestPayload(TypedDict):
+    """Wrapper for sample request (matches the {"json": ...} convention)."""
+
+    json: SampleRequestBody
+
+
+class SampleResponse(TypedDict):
+    """Return value of RemoteInferenceClient.sample(), mirrors tinker SampleResponse"""
+
+    type: Literal["sample"]
+    sequences: List[Dict[str, Any]]
+    prompt_logprobs: Optional[List[Optional[float]]]
+    topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]]
 
 
 @dataclass
@@ -382,7 +420,7 @@ class RemoteInferenceClient:
             "response_logprobs": response_logprobs,
         }
 
-    async def sample(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def sample(self, request_payload: SampleRequestPayload) -> SampleResponse:
         """
         Sample completions via /inference/v1/generate (Tinker API).
 
@@ -390,12 +428,12 @@ class RemoteInferenceClient:
         Uses self._post() for automatic retry + backoff on transient errors.
 
         Args:
-            request_payload: Dict with {"json": <request-body>}.
+            request_payload: SampleRequestPayload with {"json": <request-body>}.
                 Expected keys in json: prompt, num_samples, sampling_params, session_id,
                 include_prompt_logprobs (bool), topk_prompt_logprobs (int).
 
         Returns:
-            Dict with type="sample", sequences list, prompt_logprobs, and topk_prompt_logprobs.
+            SampleResponse with type="sample", sequences list, prompt_logprobs, and topk_prompt_logprobs.
         """
         session_id, body = _extract_session_id_and_body(request_payload)
 
