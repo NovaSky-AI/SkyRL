@@ -46,6 +46,7 @@ envs:
 
 setup: |
   bash scripts/fleet-gsm8k-setup.sh
+  source .venv/bin/activate
   bash scripts/fleet-qwen35-extra-setup.sh
 
 run: |
