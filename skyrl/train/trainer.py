@@ -33,9 +33,9 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     FixedKLController,
+    apply_loss_reduction_to_advantages_minibatch,
     compute_approx_kl,
     get_kl_controller,
-    normalize_advantages_dict,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
@@ -277,9 +277,6 @@ class RayPPOTrainer:
                         for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
@@ -1057,6 +1054,37 @@ class RayPPOTrainer:
 
         return data
 
+    @torch.no_grad()
+    def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
+        advantages = data["advantages"]
+        response_mask = data["response_mask"]
+
+        # Step 1: Z-score normalization (if enabled)
+        if self.cfg.trainer.algorithm.advantage_batch_normalize:
+            num_actions = response_mask.sum()
+            mean = advantages.mean()
+            std = ((advantages - mean).pow(2) * response_mask).sum()
+            rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
+            data["advantages"] = (advantages - mean) * rstd
+
+        # Step 2: Loss reduction normalization per mini-batch
+        num_mini_batches = len(data) // mini_batch_size
+        normalized_advantages = torch.zeros_like(advantages)
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
+            mini_batch = data[start_idx:end_idx]
+            normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
+                advantages=mini_batch["advantages"],
+                loss_mask=mini_batch["loss_mask"],
+                loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
+                micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+            )
+
+        data["advantages"] = normalized_advantages
+        return data
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step using forward_backward + optim_step.
@@ -1078,6 +1106,8 @@ class RayPPOTrainer:
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
             mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
+            # Normalize advantages for policy training; critic training does not need this
+            data = self._normalize_advantages(data, mini_batch_size)
         else:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
@@ -1102,7 +1132,7 @@ class RayPPOTrainer:
         # Reduce metrics across all mini-batches and epochs
         # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
         all_metrics.pop("loss_fn_outputs", None)
-        reduced_metrics = reduce_metrics(all_metrics)
+        reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

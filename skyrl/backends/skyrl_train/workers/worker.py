@@ -675,7 +675,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
-        self._micro_batches_accumulated = 0
 
     def forward_backward(
         self,
@@ -704,8 +703,10 @@ class PolicyWorkerBase(Worker):
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            metrics = self._forward_backward_micro(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-            self._micro_batches_accumulated += 1
+            microbatch_weight = micro_batch_size / len(data)
+            metrics = self._forward_backward_micro(
+                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+            )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
@@ -714,7 +715,16 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        result = reduce_metrics(dict(all_metrics))
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
+        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        dp_group = self.device_mesh.get_group("dp")
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
@@ -725,21 +735,21 @@ class PolicyWorkerBase(Worker):
     def _forward_backward_micro(
         self,
         experience: Experience,
+        microbatch_weight: float,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
 
-        Loss is not scaled here - gradient scaling happens at optim_step time.
-
         Args:
             experience: Experience object for one micro batch
+            microbatch_weight: Weight of the micro batch in the overall batch
             loss_fn: Optional loss function name to use instead of config default
             loss_fn_config: Optional config overrides for the loss function
 
         Returns:
-            All-reduced metrics dict for this micro batch
+            Metrics dict for the worker's local micro batch
         """
         self.model.train()
 
@@ -804,7 +814,8 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            loss = policy_loss
+            unscaled_loss = policy_loss
+            loss = unscaled_loss * microbatch_weight
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -869,7 +880,15 @@ class PolicyWorkerBase(Worker):
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+            # dp_size to recover the correct sum reduction across workers.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * microbatch_weight
+            unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -893,7 +912,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "final_loss": loss.item(),
+                "final_loss": unscaled_loss.item(),
                 "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
@@ -905,36 +924,17 @@ class PolicyWorkerBase(Worker):
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        loss_fn_outputs = status.pop("loss_fn_outputs", None)
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
-
-        # Add back loss_fn_outputs after all_reduce
-        if loss_fn_outputs is not None:
-            status["loss_fn_outputs"] = loss_fn_outputs
-
         return status
 
     def optim_step(self) -> float:
         """
-        Scale gradients by 1/micro_batches_accumulated, perform optimizer step, and reset counter.
+        Perform optimizer step.
 
         Returns:
             The gradient norm (before scaling, after clipping)
         """
-        # Scale accumulated gradients by 1/N to get correct average
-        if self._micro_batches_accumulated > 0:
-            scale = 1.0 / self._micro_batches_accumulated
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    param.grad.mul_(scale)
-
         # Perform optimizer step (includes gradient clipping)
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-
-        # Reset counter for next accumulation cycle
-        self._micro_batches_accumulated = 0
 
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
@@ -1058,7 +1058,13 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        # reduce metrics across micro batches
+        result = reduce_metrics(all_metrics)
+
+        # all reduce metrics across DP workers
+        result = all_reduce_metrics(result, self.strategy)
+
+        return result
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1108,9 +1114,6 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1226,8 +1229,8 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
-        pixel_values = micro_batch["pixel_values"]
-        image_grid_thw = micro_batch["image_grid_thw"]
+        pixel_values = micro_batch.get("pixel_values", None)
+        image_grid_thw = micro_batch.get("image_grid_thw", None)
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             log_probs = self.model(
                 sequences,
