@@ -16,8 +16,10 @@ import inspect
 import os
 import sys
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, List, Set, Tuple
+from numbers import Number
+from typing import Dict, Iterable, List, Set, Tuple
 
 import torch
 from loguru import logger
@@ -29,6 +31,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
@@ -104,9 +107,9 @@ class _AsyncStalenessManager:
     - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
     """
 
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: int):
+    def __init__(self, max_concurrent_generation_groups: int, groups_per_step: int, max_staleness_steps: int):
         self.max_concurrent_generation_groups = max_concurrent_generation_groups
-        self.mini_batch_size = mini_batch_size
+        self.groups_per_step = groups_per_step
         self.max_staleness_steps = max_staleness_steps
 
         # Control logics.
@@ -123,7 +126,7 @@ class _AsyncStalenessManager:
         """
         self._current_global_step = global_step
         # trainer has already consumed (and hence submitted) this many trajectories.
-        self._stat.accepted = (global_step - 1) * self.mini_batch_size
+        self._stat.accepted = (global_step - 1) * self.groups_per_step
         self._stat.submitted = self._stat.accepted
 
     async def validate_state_at_epoch_end(self, global_step: int) -> None:
@@ -138,7 +141,7 @@ class _AsyncStalenessManager:
             assert (
                 self._stat.submitted == self._stat.accepted
             ), "We expect all submitted rollouts to be accepted at end of an epoch."
-            consumed = (global_step - 1) * self.mini_batch_size
+            consumed = (global_step - 1) * self.groups_per_step
             assert (
                 self._stat.accepted == consumed
             ), f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
@@ -153,7 +156,7 @@ class _AsyncStalenessManager:
     def _compute_capacity_unlocked(self) -> int:
         # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
         # `_current_global_step` is "the version being worked on", not already finished steps.
-        consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
+        consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.groups_per_step
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
         producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
         return min(producer_concurrency_capacity, producer_staleness_capacity)
@@ -200,14 +203,14 @@ class _AsyncDataloader:
     A train dataloader wrapper that accommodates the need of fully async training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
     - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
-    - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
-      because the batch size is 1 in fully async training.
+    - Set the effective dataloader length to be divisible by the number of prompt groups consumed per logical
+      training step, since we cannot rely on `drop_last` because the batch size is 1 in fully async training.
     """
 
-    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):
+    def __init__(self, train_dataloader: StatefulDataLoader, groups_per_step: int):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
-        self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
+        self._effective_dataloader_length = len(self._train_dataloader) // groups_per_step * groups_per_step
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
         self._consumed_data_uids: Set[str] = set()
@@ -270,7 +273,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
+        self.groups_per_sync = cfg.trainer.train_batch_size
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
+        assert self.groups_per_sync % self.mini_batch_size == 0, (
+            "train_batch_size must be divisible by policy_mini_batch_size for fully async training. "
+            f"Got {self.groups_per_sync=} and {self.mini_batch_size=}."
+        )
+        self.mini_steps_per_sync = self.groups_per_sync // self.mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
 
         assert (
@@ -278,20 +287,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.mini_batch_size <= self.num_parallel_generation_workers
             and
             # otherwise would never use all workers due to capacity constraint
-            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
+            self.num_parallel_generation_workers <= self.groups_per_sync * (self.max_staleness_steps + 1)
         ), (
             "Invalid num_parallel_generation_workers, the following must hold: "
-            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
+            "policy_mini_batch_size <= num_parallel_generation_workers <= "
+            "train_batch_size * (max_staleness_steps + 1). Got: "
+            f"{self.mini_batch_size=}, {self.groups_per_sync=}, {self.num_parallel_generation_workers=}, "
+            f"{self.max_staleness_steps=}"
         )
 
         # Initialize base trainer
         super().__init__(*args, **kwargs)
 
         # Some async-specific validations
-        assert (
-            self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
-        ), "train_batch_size must equal policy_mini_batch_size for fully async training"
         assert (
             self.cfg.trainer.algorithm.dynamic_sampling.type is None
         ), "dynamic sampling is not supported for fully async training yet."
@@ -301,14 +309,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
+        if self.mini_steps_per_sync > 1:
+            assert self.max_staleness_steps == 0, (
+                "Streaming mini-batch fully async training currently requires "
+                "trainer.fully_async.max_staleness_steps == 0."
+            )
+            assert self.cfg.trainer.update_epochs_per_batch == 1, (
+                "Streaming mini-batch fully async training currently requires "
+                "trainer.update_epochs_per_batch == 1."
+            )
+            assert not self.cfg.trainer.algorithm.advantage_batch_normalize, (
+                "Streaming mini-batch fully async training currently requires "
+                "trainer.algorithm.advantage_batch_normalize == false."
+            )
+            if self.has_critic:
+                assert self.cfg.trainer.critic_mini_batch_size == self.cfg.trainer.policy_mini_batch_size, (
+                    "Streaming mini-batch fully async training currently requires "
+                    "trainer.critic_mini_batch_size == trainer.policy_mini_batch_size when a critic is enabled."
+                )
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
-        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
+        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.groups_per_sync)
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
-            mini_batch_size=self.mini_batch_size,
+            groups_per_step=self.groups_per_sync,
             max_staleness_steps=self.max_staleness_steps,
         )
 
@@ -317,7 +343,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
-        self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
+        self.num_steps_per_epoch = len(self.train_dataloader) // self.groups_per_sync
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
@@ -344,7 +370,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if steps_completed_in_epoch == 0 and len(loaded_consumed_data_uids_set) > 0:
                         # When resuming mid-epoch at the boundary, treat modulo 0 as a full epoch.
                         steps_completed_in_epoch = self.num_steps_per_epoch
-                    expected_consumed_in_epoch = self.mini_batch_size * steps_completed_in_epoch
+                    expected_consumed_in_epoch = self.groups_per_sync * steps_completed_in_epoch
                     assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
                         "Unexpected number of consumed data UIDs. Got: "
                         f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
@@ -371,9 +397,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
+            # Buffer of completed generation, size bounded by capacity - consumed.
             generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
+                maxsize=self.groups_per_sync * (self.max_staleness_steps + 1)
             )
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers
@@ -384,39 +410,56 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have enough groups buffered.
-                    cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    with Timer("wait_for_generation_buffer", self.all_timings):
-                        buffer_pbar = tqdm(
-                            total=self.mini_batch_size,
-                            initial=0,
-                            desc="Generation Buffer Progress",
-                            position=1,
-                        )
-                        # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
-                        # self.mini_batch_size, and assume that all trajectories succeed (just like sync training),
-                        # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
-                        # should handle the case where the dataloader is exhausted and the buffer is empty, or
-                        # else this loop will never exit.
-                        while len(cur_generation_group_mini_batch) < self.mini_batch_size:
-                            # We do finish-time FIFO here (not schedule-time FIFO)
-                            cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
-                            buffer_pbar.update(1)
-                            buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                        buffer_pbar.close()
+                    step_metrics: Dict[str, List[float]] = defaultdict(list)
+                    step_status: Dict[str, List[float]] = defaultdict(list)
+                    for mini_step_idx in range(self.mini_steps_per_sync):
+                        # 1. Wait until we have enough groups buffered for the next optimizer mini-batch.
+                        cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
+                        with Timer("wait_for_generation_buffer", self.all_timings):
+                            desc = "Generation Buffer Progress"
+                            if self.mini_steps_per_sync > 1:
+                                desc = (
+                                    f"Generation Buffer Progress "
+                                    f"({mini_step_idx + 1}/{self.mini_steps_per_sync})"
+                                )
+                            buffer_pbar = tqdm(
+                                total=self.mini_batch_size,
+                                initial=0,
+                                desc=desc,
+                                position=1,
+                            )
+                            # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
+                            # self.groups_per_sync, and assume that all trajectories succeed (just like sync training),
+                            # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
+                            # should handle the case where the dataloader is exhausted and the buffer is empty, or
+                            # else this loop will never exit.
+                            while len(cur_generation_group_mini_batch) < self.mini_batch_size:
+                                # We do finish-time FIFO here (not schedule-time FIFO)
+                                cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                                buffer_pbar.update(1)
+                                buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
+                            buffer_pbar.close()
 
-                    # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
-                        )
+                        # 2. Post-process the generated groups, aggregating to a single GeneratorOutput,
+                        # and convert to training format.
+                        with Timer("convert_to_training_input", self.all_timings):
+                            training_input = await asyncio.to_thread(
+                                self.convert_generation_group_mini_batch_to_training_input,
+                                cur_generation_group_mini_batch,
+                            )
 
-                    # 3. Run training and update consumed UIDs.
-                    with Timer("run_training", self.all_timings):
-                        status = await self._run_training(training_input)
-                        await self.async_train_dataloader.mark_consumed_uids(
-                            [g.uid for g in cur_generation_group_mini_batch]
-                        )
+                        # 3. Run training and update consumed UIDs.
+                        with Timer("run_training", self.all_timings):
+                            status = await self._run_training(training_input, mini_step_idx=mini_step_idx)
+                            await self.async_train_dataloader.mark_consumed_uids(
+                                [g.uid for g in cur_generation_group_mini_batch]
+                            )
+                        self._append_scalar_metrics(step_metrics, self.all_metrics)
+                        self.all_metrics = {}
+                        self._append_scalar_metrics(step_status, status)
+
+                    self.all_metrics = self._reduce_step_metrics(step_metrics)
+                    status = self._reduce_step_metrics(step_status)
 
                     # 4. After training: pause generation, sync weights, resume.
                     with Timer("sync_weights", self.all_timings):
@@ -456,7 +499,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if steps_completed_in_epoch == 0:
                     # At the end of an epoch, modulo becomes 0 but we've consumed a full epoch.
                     steps_completed_in_epoch = self.num_steps_per_epoch
-                expected_consumed_in_epoch = self.mini_batch_size * steps_completed_in_epoch
+                expected_consumed_in_epoch = self.groups_per_sync * steps_completed_in_epoch
                 actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
                 assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
                     "Unexpected number of consumed data UIDs. Got: "
@@ -499,7 +542,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.tracker.finish()
         logger.info("Training done!")
 
-    async def _run_training(self, training_input: TrainingInputBatch):
+    async def _run_training(self, training_input: TrainingInputBatch, mini_step_idx: int | None = None):
         # TODO(Charlie): share this code with the one-step-off async trainer.
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -521,7 +564,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.dump_data_batch:
             # dump data to file
             with Timer("dump_data_batch"):
-                self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+                file_name = f"global_step_{self.global_step}_training_input"
+                if mini_step_idx is not None:
+                    file_name = f"global_step_{self.global_step}_mini_step_{mini_step_idx + 1}_training_input"
+                self.dump_data(training_input, file_name=file_name)
 
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings):
@@ -541,7 +587,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if rand_prompts is None:
                     return
 
-                # 1. Prepare generator input
+                # 1. Acquire capacity slot.
+                slot_acquired = False
+                await self._staleness_manager.acquire_submission_slot()
+                slot_acquired = True
+
+                # 2. Prepare generator input using the current logical step after capacity is granted.
+                global_step_at_start = self.global_step  # for staleness control
                 assert len(rand_prompts) == 1
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
@@ -551,17 +603,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     ),
                     self.cfg.environment.env_class,
                     "train",
-                    self.global_step,
+                    global_step_at_start,
                 )
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
-                # 2. Acquire capacity slot.
-                slot_acquired = False
-                await self._staleness_manager.acquire_submission_slot()
-                slot_acquired = True
-
                 # 3. Generate one rollout group
-                global_step_at_start = self.global_step  # for staleness control
 
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
@@ -656,6 +702,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Example generated: {vis}")
 
         return self.convert_to_training_input(generator_output, uids)
+
+    @staticmethod
+    def _append_scalar_metrics(aggregate_metrics: Dict[str, List[float]], metrics: Dict[str, Number]) -> None:
+        for key, value in metrics.items():
+            if isinstance(value, Number):
+                aggregate_metrics[key].append(value)
+
+    @staticmethod
+    def _reduce_step_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
+        if not metrics:
+            return {}
+        reduced_metrics = reduce_metrics(metrics, sum_loss_metrics=False)
+        for key, values in metrics.items():
+            if key.endswith("_count"):
+                reduced_metrics[key] = sum(values)
+        return reduced_metrics
 
     def save_checkpoints(self):
         """

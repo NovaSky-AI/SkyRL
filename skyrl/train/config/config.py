@@ -392,7 +392,7 @@ class FullyAsyncConfig(BaseConfig):
     then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
-    <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    <= ``train_batch_size * (max_staleness_steps + 1)``."""
 
 
 # ---------------------------------------------------------------------------

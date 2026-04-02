@@ -209,7 +209,7 @@ trainer:
 
     # The number of generation workers to spawn, where each worker works on a group of trajcetories,
     # being the same prompt repeated `generator.n_samples_per_prompt` times.
-    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= policy_mini_batch_size * (max_staleness_steps + 1)
+    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= train_batch_size * (max_staleness_steps + 1)
     # since it would be wasted due to capacity control.
     # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
     # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
