@@ -16,7 +16,9 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 4}'
 ```
 
-Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml) for all available keys and defaults). The most commonly used options are listed below.
+The Tinker `fsdp` and `megatron` backends validate this dictionary at startup. Only the subset of SkyRL-Train config that is meaningful for Tinker's request-driven execution model is supported here. Keys that are request-owned, server-forced, or irrelevant to Tinker's lifecycle now fail fast instead of being accepted as silent no-ops.
+
+The most commonly used supported options are listed below.
 
 ### GPU and Parallelism
 
@@ -42,9 +44,27 @@ For large models that don't fit on a single GPU for inference, increase `generat
 --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 2, "generator.inference_engine.tensor_parallel_size": 2}'
 ```
 
+## Rejected Keys
+
+The following categories are rejected from `--backend-config` for Tinker's `fsdp` and `megatron` backends:
+
+- Request-owned values such as `trainer.policy.optimizer_config.lr` and `trainer.algorithm.policy_loss_type`
+- Server-forced values such as `trainer.policy.model.path`, `trainer.strategy`, `trainer.policy.optimizer_config.scheduler`, and `trainer.policy.optimizer_config.num_warmup_steps`
+- Tinker-irrelevant trainer-loop settings such as `data.*`, `trainer.ref.*`, `trainer.critic.*`, `trainer.eval_interval`, and `trainer.ckpt_interval`
+
+Examples:
+
+```bash
+# Rejected: learning rate is supplied per optim_step request
+--backend-config '{"trainer.policy.optimizer_config.lr": 1e-5}'
+
+# Rejected: loss type is supplied per forward_backward request
+--backend-config '{"trainer.algorithm.policy_loss_type": "ppo"}'
+```
+
 ## LoRA
 
-LoRA is configured from the **client side**, not the server. When creating a model via the Tinker SDK, pass a `lora_config` with the desired rank. For example, in tinker-cookbook recipes:
+LoRA rank and alpha are configured from the **client side**, not the server. When creating a model via the Tinker SDK, pass a `lora_config` with the desired rank. For example, in tinker-cookbook recipes:
 
 ```bash
 # LoRA training (default in most recipes)
@@ -54,8 +74,8 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=32
 python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 ```
 
-No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning.
+No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning. Server-side LoRA options such as dropout or target modules may still be configured through `--backend-config`, but `trainer.policy.model.lora.rank` and `trainer.policy.model.lora.alpha` are rejected because those values come from `create_model(..., lora_config=...)`.
 
 ## Full Config Reference
 
-For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml).
+For field semantics on the supported subset, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml). Not every SkyRL-Train field is valid in Tinker's `--backend-config`.

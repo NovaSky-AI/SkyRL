@@ -12,6 +12,23 @@ from skyrl.tinker.engine import TinkerEngine, prepare_model_pass_batch
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
+def test_tinker_engine_rejects_invalid_skyrl_train_backend_config_before_backend_import(monkeypatch):
+    config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend="fsdp",
+        backend_config={"trainer.policy.optimizer_config.lr": 1e-5},
+        database_url="sqlite:///:memory:",
+    )
+
+    def fail_if_called(_backend_name: str):
+        raise AssertionError("get_backend_classes should not be called for invalid backend config")
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", fail_if_called)
+
+    with pytest.raises(ValueError, match="trainer.policy.optimizer_config.lr"):
+        TinkerEngine(config)
+
+
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(

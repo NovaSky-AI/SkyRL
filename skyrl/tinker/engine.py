@@ -13,6 +13,7 @@ from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
 from skyrl.tinker import types
+from skyrl.tinker.skyrl_train_backend_config import validate_and_build_tinker_skyrl_train_config
 from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
@@ -234,6 +235,10 @@ class TinkerEngine:
         self.config = config
         self.db_engine = create_engine(config.database_url, echo=False)
         enable_sqlite_wal(self.db_engine)
+
+        # Validate Tinker's skyrl-train backends before importing heavy backend dependencies.
+        if config.backend in {"fsdp", "megatron"}:
+            validate_and_build_tinker_skyrl_train_config(config.base_model, config.backend, config.backend_config)
 
         # Initialize the backend (handles model state, computation, and adapter management)
         backend_class, backend_config_class = get_backend_classes(config.backend)

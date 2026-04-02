@@ -28,6 +28,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
+from skyrl.tinker.skyrl_train_backend_config import build_tinker_skyrl_train_config
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -68,31 +69,17 @@ def _build_skyrl_train_config(
         lora_config: LoRA configuration if using LoRA
     """
 
-    # Apply user overrides from backend_config
-    user_overrides = dict(overrides.model_extra)
-    # override base model path
-    # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
-    # that will resolve other attributes such as the reference model path based on the policy model path.
-    user_overrides["trainer.policy.model.path"] = base_model
-    cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
+    if isinstance(overrides, FSDPBackendOverrides) and overrides.strategy != "fsdp2":
+        raise ValueError("`strategy` is fixed by `--backend fsdp` and cannot be overridden.")
+    if isinstance(overrides, MegatronBackendOverrides) and overrides.strategy != "megatron":
+        raise ValueError("`strategy` is fixed by `--backend megatron` and cannot be overridden.")
 
-    # Disable scheduler - Tinker manages learning rate externally via set_lr()
-    cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
-    cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
-
-    # TODO(tyler): Support KL Loss
-    cfg.trainer.algorithm.use_kl_loss = False
-
-    assert overrides.strategy in (
-        "fsdp2",
-        "megatron",
-    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = overrides.strategy
-
-    # Apply LoRA configuration
-    if lora_config is not None and lora_config.rank > 0:
-        cfg.trainer.policy.model.lora.rank = lora_config.rank
-        cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
+    cfg = build_tinker_skyrl_train_config(
+        base_model=base_model,
+        backend=overrides.strategy,
+        overrides=dict(overrides.model_extra),
+        lora_config=lora_config,
+    )
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
