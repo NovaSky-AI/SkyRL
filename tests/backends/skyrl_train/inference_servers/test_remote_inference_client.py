@@ -70,6 +70,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
         # Mock prompt_logprobs when requested via sampling_params
         pl = sp.get("prompt_logprobs")
+        # vLLM returns k or k+1 logprobs per position (extra entry when
+        # the prompt token falls outside the top-k).
         if pl is not None and input_token_ids:
             prompt_logprobs = [None]  # position 0: no prior context
             for idx in range(1, len(input_token_ids)):
@@ -533,7 +535,6 @@ class TestSample:
         }
         result = await client.sample(request_payload)
 
-        # prompt_logprobs populated even without explicit include_prompt_logprobs
         pl = result["prompt_logprobs"]
         assert pl is not None
         assert len(pl) == 3

@@ -145,6 +145,7 @@ class SampleRequestPayload(TypedDict):
     """Wrapper for sample request (matches the {"json": ...} convention)."""
 
     json: SampleRequestBody
+    session_id: Optional[str]
 
 
 class SampleResponse(TypedDict):
@@ -495,6 +496,9 @@ class RemoteInferenceClient:
                 for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
             ]
             if topk_prompt_logprobs_k > 0:
+                # vLLM returns k or k+1 logprobs per position (the extra entry is the
+                # prompt token when it falls outside the top-k). Tinker always returns
+                # exactly top-k, so we sort and truncate below.
                 result_topk_prompt_logprobs = [
                     (
                         sorted(
