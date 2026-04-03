@@ -664,8 +664,13 @@ def init_remote_inference_servers(
 
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
+    try:
+        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=200)
+    except TimeoutError as e:
+        print(f"Received timeout error while waiting for server: {e}")
+        server_process.terminate()
+        server_process.wait()
 
-    wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=120)
     print(f"Server at localhost:{engine_port} is online")
 
     engines = create_remote_inference_engines(
