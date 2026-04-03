@@ -291,13 +291,14 @@ async def test_megatron_forward(
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
-        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1).to("cuda")
-
-        sequences_fwd, attention_mask, position_ids = (
+        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        sequences_fwd, attention_mask, position_ids, sequences_rolled = (
             sequences_fwd.to("cuda"),
             attention_mask.to("cuda"),
             position_ids.to("cuda"),
+            sequences_rolled.to("cuda"),
         )
+
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             output = model(sequences_fwd, attention_mask=attention_mask, position_ids=position_ids)
             log_probs = logprobs_from_logits(output["logits"], sequences_rolled)
