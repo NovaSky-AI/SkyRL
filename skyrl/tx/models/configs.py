@@ -19,22 +19,34 @@ class ModelConfig(PretrainedConfig):
         mhc_expansion_rate: mHC expansion rate. Connectors are trainable when this is > 1.
     """
 
+    # Type hints for config attributes
+    max_lora_adapters: int
+    max_lora_rank: int
+    shard_attention_heads: bool
+    loss_chunk_size: int
+    gradient_checkpointing: bool
+    mhc_expansion_rate: int
+
     def __init__(
         self,
-        config: PretrainedConfig | dict | None = None,
+        config: PretrainedConfig | dict,
         *,
-        max_lora_adapters: int = 0,
-        max_lora_rank: int = 0,
-        shard_attention_heads: bool = True,
+        max_lora_adapters: int,
+        max_lora_rank: int,
+        shard_attention_heads: bool,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
-        **kwargs,
     ):
-        if config is not None:
-            super().__init__(**(config if isinstance(config, dict) else config.__dict__))
-        else:
-            super().__init__(**kwargs)
+        super().__init__(**(config if isinstance(config, dict) else config.__dict__))
+
+        # Ensure rope_parameters is populated so model code can always use
+        # config.rope_parameters["rope_theta"].  Older transformers versions
+        # store rope_theta as a top-level attribute with rope_parameters=None.
+        if getattr(self, "rope_parameters", None) is None:
+            rope_theta = getattr(self, "rope_theta", None)
+            if rope_theta is not None:
+                self.rope_parameters = {"rope_theta": rope_theta}
 
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
