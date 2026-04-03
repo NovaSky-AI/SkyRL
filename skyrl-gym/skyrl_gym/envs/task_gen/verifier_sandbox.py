@@ -126,7 +126,10 @@ class VerifierSandbox:
         # 6. Check for hardcoded return values
         self._check_hardcoded_returns(tree, result)
 
-        # 7. Check prompt length bounds (if prompt provided)
+        # 7. Check for unfiltered .all() calls
+        self._check_unfiltered_all(tree, result)
+
+        # 8. Check prompt length bounds (if prompt provided)
         if prompt is not None:
             self._check_prompt_bounds(prompt, result)
 
@@ -261,6 +264,48 @@ class VerifierSandbox:
             result.error = "Verifier always returns a constant value"
         else:
             result.checks_passed.append("return_logic")
+
+    def _check_unfiltered_all(self, tree: ast.AST, result: ValidationResult):
+        """Reject verifiers that call .table("X").all() without a filter.
+
+        Unfiltered .all() fetches every row from a table, causing warm-pool
+        saturation with large tables (6.5k zombie verifiers in production).
+
+        Allowed patterns (filter present in chain):
+            .table("X").eq("col", val).all()
+            .table("X").neq("col", val).all()
+            .table("X").select("col1").all()    # ID-only in find_new_entries
+
+        Rejected pattern:
+            .table("X").all()                   # no filter before .all()
+        """
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Match .all() call
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "all"):
+                continue
+            # Walk up the chain: .all() is called on some object
+            receiver = node.func.value
+            # Check if the receiver is a .table() call (direct: .table("X").all())
+            if self._is_table_call(receiver):
+                result.checks_failed.append("unfiltered_all")
+                result.error = (
+                    'Unfiltered .all() on table — use .eq()/.neq()/.select() '
+                    'before .all() (e.g., table("X").eq("col", val).all())'
+                )
+                return
+
+        result.checks_passed.append("filtered_all")
+
+    @staticmethod
+    def _is_table_call(node: ast.AST) -> bool:
+        """Check if an AST node is a .table("...") call."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "table"
+        )
 
     def _check_prompt_bounds(self, prompt: str, result: ValidationResult):
         """Check that prompt is within reasonable length bounds."""

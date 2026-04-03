@@ -410,6 +410,17 @@ def validate_task(env: Environment, final_answer: str | None = None) -> int:
     current = env.db("current")
 
     def find_new_entries(table_name, id_field="id", filter_conditions=None):
+        \"\"\"Compare seed vs current to find rows added by the agent.
+
+        Args:
+            table_name: Table to compare.
+            id_field: Primary key column (default "id").
+            filter_conditions: Optional dict of {{column: value}} filters
+                applied to BOTH seed and current before comparison.
+
+        Returns:
+            List[dict] — rows present in current but not in seed.
+        \"\"\"
         before_query = seed.table(table_name)
         after_query = current.table(table_name)
         if filter_conditions:
@@ -418,6 +429,15 @@ def validate_task(env: Environment, final_answer: str | None = None) -> int:
                 after_query = after_query.eq(key, value)
         before_ids = set(entry[id_field] for entry in before_query.select(id_field).all())
         return [e for e in after_query.all() if e[id_field] not in before_ids]
+
+    # --- Validation: use SET-BASED comparison, never row-index ---
+    # GOOD: compare by content/ID sets, order-independent
+    #   expected_ids = {{"id_1", "id_2"}}
+    #   actual_ids = {{row["id"] for row in new_entries}}
+    #   if not expected_ids.issubset(actual_ids): ...
+    #
+    # BAD: comparing by row index (fragile, order-dependent)
+    #   if new_entries[0]["id"] == "id_1": ...
 
     # Check conditions...
     # On early failure:
@@ -454,6 +474,9 @@ def validate_task(env: Environment, final_answer: str | None = None) -> int:
 - Look up the logged-in user by name/email from the users table, don't assume an ID
 - Compare `seed` (before) vs `current` (after) to detect what the agent did
 - Must return `TASK_FAILED_SCORE` on a fresh environment (before agent acts)
+- **NEVER call `.table("X").all()` without a preceding `.eq()` or `.neq()` filter** — unfiltered `.all()` fetches every row, which is wasteful and causes warm-pool saturation with large tables. Always filter first: `current.table("orders").eq("user_id", uid).all()`. The only exception is inside `find_new_entries` where `.select(id_field).all()` fetches just IDs for comparison
+- **Use order-independent (set-based) comparison** — never compare results by row index or list position. Rows may be returned in any order. Use sets: `actual_ids = {{r["id"] for r in rows}}; assert expected_ids.issubset(actual_ids)`. NEVER do `rows[0]["id"] == expected` — it breaks when row order changes
+- **Verifier MUST return 0 on unmodified DB** — the verifier must fail when the agent has not acted. Always compare `seed` vs `current` state. A verifier that only checks `current` without comparing to `seed` is permissive — it may return 1 even when the agent did nothing. Pattern: `new_entries = find_new_entries("table"); if not new_entries: return TASK_FAILED_SCORE`
 - Use `final_answer` for tasks that require the agent to report a value
 - Reference actual tool names from this environment
 
@@ -1130,6 +1153,24 @@ Generate exactly ONE task. Output it in this format:
 
         # 1. Check for <task> block → evaluation pipeline
         if "<task>" in action:
+            # Exploration gate: in multi-turn mode, bounce back if model hasn't
+            # called query_db yet and still has turns remaining. Prevents
+            # single-turn collapse where model skips DB exploration entirely.
+            if self.max_turns > 1 and not self.called_query_db and not max_turns_reached:
+                remaining = self.max_turns - self.turns
+                nudge = (
+                    "You must explore the database with `query_db` before submitting a task. "
+                    "Use SELECT queries to inspect actual data — table contents, value ranges, "
+                    f"row counts — so your task and verifier are grounded in real data. "
+                    f"You have {remaining} turn(s) remaining."
+                )
+                observation = {"role": "user", "content": nudge}
+                return BaseTextEnvStepOutput(
+                    observations=[observation],
+                    reward=0.0,
+                    done=False,
+                    metadata={"env_key": self.env_key, "turn": self.turns, "exploration_gate": True},
+                )
             return await self._handle_task_generation(action)
 
         # 2. Check for tool calls → execute all via Fleet orchestrator or MCP
