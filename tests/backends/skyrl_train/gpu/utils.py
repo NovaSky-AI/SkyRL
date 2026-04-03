@@ -670,6 +670,7 @@ def init_remote_inference_servers(
         print(f"Received timeout error while waiting for server: {e}")
         server_process.terminate()
         server_process.wait()
+        raise
 
     print(f"Server at localhost:{engine_port} is online")
 
