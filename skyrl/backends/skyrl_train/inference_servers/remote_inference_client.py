@@ -145,7 +145,6 @@ class SampleRequestPayload(TypedDict):
     """Wrapper for sample request (matches the {"json": ...} convention)."""
 
     json: SampleRequestBody
-    session_id: Optional[str]
 
 
 class SampleResponse(TypedDict):
