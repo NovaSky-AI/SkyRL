@@ -720,8 +720,27 @@ class SkyRLTrainBackend(AbstractBackend):
             return await asyncio.gather(*tasks, return_exceptions=True)
 
         sample_outputs = asyncio.run(sample_all())
+        return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
-        # Aggregate results by request
+    def _aggregate_sample_results(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+        sample_outputs: list,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Convert sample outputs to Tinker format. Handles both legacy and remote client outputs."""
+
+        def _extract_sequences(output):
+            """Yield (tokens, logprobs, stop_reason) from a single sample output."""
+            if _SKYRL_USE_NEW_INFERENCE:
+                for seq in output["sequences"]:
+                    yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
+            else:
+                yield (
+                    output["response_ids"][0],
+                    (output.get("response_logprobs") or [[]])[0],
+                    output["stop_reasons"][0],
+                )
+
         results = {}
         for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
             sequences = []
@@ -742,13 +761,9 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                for seq in output["sequences"]:
-                    stop_reason = seq.get("stop_reason")
-                    if stop_reason not in ("stop", "length"):
-                        stop_reason = "length"
-
-                    logprobs = seq.get("logprobs") or []
-                    tokens = seq["tokens"]
+                for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
+                    stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
+                    logprobs = logprobs_raw or []
 
                     if not logprobs and tokens:
                         logger.warning("No logprobs returned - filling with zeros")
@@ -770,72 +785,6 @@ class SkyRLTrainBackend(AbstractBackend):
             else:
                 if needs_prompt_logprobs:
                     logger.warning("Prompt logprobs requested but not yet supported")
-                results[request_id] = types.SampleOutput(
-                    sequences=sequences,
-                    prompt_logprobs=None,
-                )
-
-        return results
-
-    def _aggregate_sample_results(
-        self,
-        prepared_batch: types.PreparedSampleBatch,
-        sample_outputs: list,
-    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Convert InferenceEngineClient outputs to Tinker format."""
-        results = {}
-
-        for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
-            sequences = []
-            has_error = False
-            error_msg = None
-
-            for i in range(start_idx, end_idx):
-                output = sample_outputs[i]
-
-                # Check if sampling failed (Exception or None)
-                if isinstance(output, Exception):
-                    has_error = True
-                    error_msg = f"Sampling failed for sample {i}: {type(output).__name__}: {str(output)}"
-                    logger.error(error_msg)
-                    break
-                elif output is None:
-                    has_error = True
-                    error_msg = f"Sampling failed for sample {i}: Unknown error (output is None)"
-                    logger.error(error_msg)
-                    break
-
-                # Extract tokens and logprobs
-                response_tokens = output["response_ids"][0]
-                response_logprobs = (output.get("response_logprobs") or [[]])[0]
-                stop_reason_raw = output["stop_reasons"][0]
-
-                # Map vLLM stop reason to Tinker format
-                stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
-
-                # Ensure logprobs exist (critical for RL)
-                if response_logprobs is None or len(response_logprobs) == 0:
-                    logger.warning("No logprobs returned - filling with zeros")
-                    response_logprobs = [0.0] * len(response_tokens)
-
-                sequences.append(
-                    types.GeneratedSequence(
-                        tokens=response_tokens,
-                        logprobs=response_logprobs,
-                        stop_reason=stop_reason,
-                    )
-                )
-
-            if has_error:
-                results[request_id] = types.ErrorResponse(
-                    error=error_msg or "Unknown sampling error",
-                    status="error",
-                )
-            else:
-                # Note: prompt_logprobs not supported initially
-                if needs_prompt_logprobs:
-                    logger.warning("Prompt logprobs requested but not yet supported")
-
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
                     prompt_logprobs=None,
