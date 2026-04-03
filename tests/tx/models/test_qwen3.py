@@ -56,10 +56,13 @@ def test_qwen3(tp: int):
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
     jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight.detach().float().numpy().T
-    for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().float().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().float().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().float().numpy().T
+    gate_up = hf_moe_layer.experts.gate_up_proj.detach().float().numpy()
+    intermediate = gate_up.shape[1] // 2
+    jax_moe_layer.experts.gate_proj.weight[:] = gate_up[:, :intermediate, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.up_proj.weight[:] = gate_up[:, intermediate:, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.down_proj.weight[:] = (
+        hf_moe_layer.experts.down_proj.detach().float().numpy().transpose(0, 2, 1)
+    )
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
@@ -74,7 +77,8 @@ def test_qwen3_moe_layer(ep: int, tp: int):
     hf_moe_layer = hf_model.model.layers[0].mlp
     x = torch.randn(4, 2, config.hidden_size)
     with torch.no_grad():
-        hf_final_hidden_states, hf_router_logits = hf_moe_layer.forward(x)
+        hf_final_hidden_states = hf_moe_layer.forward(x)
+        hf_router_logits = torch.nn.functional.linear(x.view(-1, config.hidden_size), hf_moe_layer.gate.weight)
 
     mesh = jax.make_mesh((1, ep, tp), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):

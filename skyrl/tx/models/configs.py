@@ -40,13 +40,24 @@ class ModelConfig(PretrainedConfig):
     ):
         super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 
-        # Ensure rope_parameters is populated so model code can always use
-        # config.rope_parameters["rope_theta"].  Older transformers versions
-        # store rope_theta as a top-level attribute with rope_parameters=None.
-        if getattr(self, "rope_parameters", None) is None:
+        # Normalize rope_parameters so model code can always use
+        # config.rope_parameters["rope_theta"].  Older transformers stores
+        # rope_theta / rope_scaling as top-level attrs with rope_parameters=None;
+        # DeepSeek v3 in v5 has rope_parameters but without rope_theta inside it.
+        rope_params = getattr(self, "rope_parameters", None)
+        if rope_params is None:
             rope_theta = getattr(self, "rope_theta", None)
             if rope_theta is not None:
                 self.rope_parameters = {"rope_theta": rope_theta}
+        elif isinstance(rope_params, dict):
+            if "rope_theta" not in rope_params:
+                rope_theta = getattr(self, "rope_theta", None)
+                if rope_theta is not None:
+                    rope_params["rope_theta"] = rope_theta
+            if "rope_scaling" not in rope_params:
+                rope_scaling = getattr(self, "rope_scaling", None)
+                if rope_scaling is not None:
+                    rope_params["rope_scaling"] = rope_scaling
 
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
