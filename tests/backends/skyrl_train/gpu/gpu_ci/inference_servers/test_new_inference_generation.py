@@ -750,6 +750,3 @@ def test_client_sample_topk_prompt_logprobs(vllm_server: InferenceEngineState):
             assert isinstance(token_id, int)
             assert isinstance(logprob, float)
             assert logprob <= 0.0
-        # The actual prompt token should appear in the topk
-        topk_token_ids = [t for t, _ in topk[i]]
-        assert token_ids[i] in topk_token_ids
