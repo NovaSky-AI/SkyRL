@@ -516,6 +516,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optimizer_config=self.cfg.policy.optimizer_config,
             seed=self.cfg.seed,
             is_lora=self._is_lora,
+            node_local_rank=self._local_rank,
         )
         self.strategy.setup_distributed()
 
@@ -830,6 +831,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             megatron_config=self.cfg.ref.megatron_config,
             optimizer_config=None,
             seed=self.cfg.seed,
+            node_local_rank=self._local_rank,
         )
         self.strategy.setup_distributed()
 
