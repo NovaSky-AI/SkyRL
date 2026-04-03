@@ -527,6 +527,7 @@ class TestSample:
                 "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
                 "topk_prompt_logprobs": 2,
             }
         }
@@ -552,6 +553,22 @@ class TestSample:
         assert topk1[20] == pytest.approx(-0.5)
         assert topk1[9010] == pytest.approx(-1.0)
         assert topk1[9011] == pytest.approx(-1.1)
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_without_include_returns_none(self, client):
+        """topk_prompt_logprobs alone does not return prompt logprobs when include_prompt_logprobs is False."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
 
 
 class TestRenderChatCompletion:
