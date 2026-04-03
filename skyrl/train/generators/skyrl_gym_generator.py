@@ -7,6 +7,11 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
+import hashlib
+import json
+import os
+import re
+import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -131,6 +136,72 @@ class TurnOutput:
         if not self.output_logprobs:
             return None
         return self.output_logprobs + [0.0] * len(self.obs_ids)
+
+
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+
+
+def _render_conversation(chat_history: List[Dict[str, str]]) -> str:
+    """Render a chat_history list as a human-readable string."""
+    parts = []
+    for msg in chat_history:
+        role = msg.get("role", "?").upper()
+        content = msg.get("content", "")
+        # Collapse thinking blocks to a short marker so they don't drown the output
+        content_no_think = _THINK_RE.sub("<think>...</think>", content)
+        parts.append(f"[{role}]\n{content_no_think}")
+    return "\n\n" + ("=" * 80 + "\n\n").join(parts)
+
+
+def _write_rlm_rollout(
+    rollout_output_dir: str,
+    env_extras: Dict[str, Any],
+    env_metrics: Dict[str, Any],
+    child_histories: List,
+) -> None:
+    """Write per-example rollout files into rollout_output_dir/<question_hash>/."""
+    # Derive a stable folder name from the first user message in chat_history (the question).
+    parent_history = env_metrics.get("chat_history") or []
+    question_text = next(
+        (m.get("content", "") for m in parent_history if m.get("role") == "user"),
+        str(env_extras.get("reward_spec", {}).get("evidence", "")),
+    )
+    q_hash = hashlib.sha256(question_text.encode()).hexdigest()[:12]
+    folder = os.path.join(rollout_output_dir, q_hash)
+    os.makedirs(folder, exist_ok=True)
+
+    reward = env_metrics.get("reward", 0.0)
+    turns = env_metrics.get("turns_used", 0)
+
+    # --- parent.txt ---
+    parent_history = env_metrics.get("chat_history") or []
+    header = textwrap.dedent(f"""\
+        REWARD: {reward:.4f}  TURNS: {turns}  CHILDREN: {len(child_histories)}
+        {"=" * 80}
+    """)
+    with open(os.path.join(folder, "parent.txt"), "w") as f:
+        f.write(header)
+        f.write(_render_conversation(parent_history))
+
+    # --- child-N.txt ---
+    for i, child_history in enumerate(child_histories):
+        if child_history is None:
+            continue
+        with open(os.path.join(folder, f"child-{i}.txt"), "w") as f:
+            f.write(f"CHILD {i}\n{'=' * 80}\n")
+            f.write(_render_conversation(child_history))
+
+    # --- meta.json ---
+    reward_spec = env_extras.get("reward_spec", {})
+    meta = {
+        "reward": reward,
+        "turns_used": turns,
+        "n_children": len(child_histories),
+        "final_value_set": env_metrics.get("final_value_set", False),
+        "evidence": reward_spec.get("evidence"),
+    }
+    with open(os.path.join(folder, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -259,18 +330,45 @@ class SkyRLGymGenerator(GeneratorInterface):
         sampling_params: Optional[Dict[str, Any]],
         max_tokens: int,
         max_input_length: int,
+        child_histories: Optional[List] = None,
     ) -> Callable[[str], str]:
         """Build a sync subcall_fn that runs a full child agent_loop (child RLMEnv).
 
         The child env gets the same lm_callback as the parent so it can make LLM
         calls, but does NOT get a subcall_fn — preventing unbounded recursion.
+
+        child_histories: if provided, each child's chat_history is appended to this
+        list after the child completes (used for rollout logging).
         """
-        async def _run_child(prompt: str) -> str:
+        async def _run_child(prompt: str, context=None) -> str:
             child_prompt = [{"role": "user", "content": prompt}]
             # Strip lm_callback/subcall_fn so the child cannot recurse further
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
             # Re-inject lm_callback so the child can still call llm_query
             child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            # If a child-specific system prompt is configured, use it as the child's custom_system_prompt
+            child_system_prompt = child_extras.pop("child_system_prompt", None)
+            if child_system_prompt:
+                child_extras["custom_system_prompt"] = child_system_prompt
+            # Children don't write their own rollout files; parent handles everything
+            child_extras.pop("rollout_output_dir", None)
+            # If the parent passed a per-child context, override the child's context_text
+            # so the child REPL sees this value as its `context` variable instead of
+            # inheriting the parent's full context.
+            if context is not None:
+                child_extra_info = dict(child_extras.get("extra_info", {}) or {})
+                if isinstance(context, str):
+                    child_extra_info["context_text"] = context
+                else:
+                    import json as _json
+                    child_extra_info["context_text"] = _json.dumps(context)
+                child_extras["extra_info"] = child_extra_info
+                # Clear parent's evidence-based reward_spec for children — the child
+                # is not scored independently; the parent aggregates results.
+                child_extras["reward_spec"] = {"ground_truth": None}
+                # Drop parent's custom_tools so env.init() builds fresh ones
+                # that close over the child's own context instead.
+                child_extras.pop("custom_tools", None)
             result = await self.agent_loop(
                 prompt=child_prompt,
                 env_class="rlm",
@@ -279,10 +377,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
             )
+            if child_histories is not None:
+                child_chat_history = result.env_metrics.get("chat_history") if isinstance(result.env_metrics, dict) else None
+                child_histories.append(child_chat_history)
             return self.tokenizer.decode(result.response_ids, skip_special_tokens=True)
 
-        def subcall_fn(prompt: str) -> str:
-            future = asyncio.run_coroutine_threadsafe(_run_child(prompt), loop)
+        def subcall_fn(prompt: str, context=None) -> str:
+            future = asyncio.run_coroutine_threadsafe(_run_child(prompt, context=context), loop)
             return future.result(timeout=600)
 
         return subcall_fn
@@ -332,12 +433,15 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # For RLM envs, inject lm_callback and subcall_fn so REPL code can call llm_query /
         # rlm_query. We only inject if not already present (allows caller to override).
+        child_histories: Optional[List] = None
         if env_class == "rlm" and "lm_callback" not in env_extras:
             loop = asyncio.get_running_loop()
             env_extras = dict(env_extras)  # don't mutate caller's dict
             env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            child_histories = []
             env_extras["subcall_fn"] = self._make_subcall_fn(
-                loop, env_extras, sampling_params, max_tokens, max_input_length
+                loop, env_extras, sampling_params, max_tokens, max_input_length,
+                child_histories=child_histories,
             )
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
@@ -536,8 +640,24 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
-        # Get environment-specific metrics after the episode is done
+        # Get environment-specific metrics after the episode is done.
+        # For RLM envs, store the full chat_history on the env before calling get_metrics()
+        # so it's available in env_metrics for rollout logging.
+        if env_class == "rlm" and hasattr(env, "set_chat_history"):
+            env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
         env_metrics = env.get_metrics()
+
+        # Write per-example rollout files for RLM envs when rollout_output_dir is configured.
+        rollout_output_dir = env_extras.get("rollout_output_dir")
+        if env_class == "rlm" and rollout_output_dir:
+            await self._run_in_executor_if_available(
+                _write_rlm_rollout,
+                rollout_output_dir,
+                env_extras,
+                env_metrics,
+                child_histories or [],
+            )
+
         # Close the environment
         await self._run_in_executor_if_available(env.close)
 
@@ -854,6 +974,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     custom_prompt = cfg.get("custom_system_prompt")
                     if custom_prompt:
                         env_extras[i]["custom_system_prompt"] = custom_prompt
+                    child_prompt = cfg.get("child_system_prompt")
+                    if child_prompt:
+                        env_extras[i]["child_system_prompt"] = child_prompt
+                    rollout_output_dir = cfg.get("rollout_output_dir")
+                    if rollout_output_dir:
+                        env_extras[i]["rollout_output_dir"] = rollout_output_dir
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []

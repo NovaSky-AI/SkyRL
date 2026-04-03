@@ -241,6 +241,7 @@ class RLMEnv(BaseTextEnv):
         self._final_answer: Optional[str] = None
         self._turn_index = 0  # iteration counter for build_user_prompt
         self._last_repl_exec_s: float = 0.0
+        self._chat_history: Optional[List[Dict[str, str]]] = None
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
@@ -251,17 +252,40 @@ class RLMEnv(BaseTextEnv):
         # context_text: data payload loaded into the REPL `context` variable
         root_prompt = self._extract_prompt_text(prompt)
         context_payload = extra_info.get("context_text") or root_prompt
+        if isinstance(context_payload, str):
+            try:
+                decoded = json.loads(context_payload)
+                if isinstance(decoded, dict):
+                    context_payload = decoded
+            except (json.JSONDecodeError, ValueError):
+                pass
         self._root_prompt = root_prompt
 
-        # If reward_spec carries evidence spans but no reward_fn, build both the reward_fn
-        # and per-example custom tools (search/extract_section) from the serializable data.
-        # This keeps the dataset Parquet-serializable while still supporting callable-based reward.
+        # Build per-context REPL tools (search, extract_lines, etc.) and optionally
+        # an evidence-based reward function from the serializable reward_spec data.
         reward_spec = self.extras.get("reward_spec", {})
         if self.reward_fn is None and reward_spec.get("evidence") is not None:
-            from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn, make_tools
             evidence = reward_spec["evidence"]
-            self.reward_fn = make_reward_fn(context_payload, evidence)
-            tools = make_tools(context_payload)
+            if isinstance(context_payload, dict):
+                from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn_multipaper, make_tools_multipaper
+                self.reward_fn = make_reward_fn_multipaper(context_payload, evidence)
+                tools = make_tools_multipaper(context_payload)
+            else:
+                from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn, make_tools
+                self.reward_fn = make_reward_fn(context_payload, evidence)
+                tools = make_tools(context_payload)
+            merged = dict(self.rlm_config.custom_tools or {})
+            merged.update(tools)
+            self.rlm_config.custom_tools = merged
+        elif not self.rlm_config.custom_tools or "search" not in self.rlm_config.custom_tools:
+            # No evidence reward, but still build context-aware tools (e.g. for
+            # child agents that receive a single-paper context from the parent).
+            if isinstance(context_payload, dict):
+                from skyrl_gym.envs.rlm.evidence_tools import make_tools_multipaper
+                tools = make_tools_multipaper(context_payload)
+            else:
+                from skyrl_gym.envs.rlm.evidence_tools import make_tools
+                tools = make_tools(context_payload)
             merged = dict(self.rlm_config.custom_tools or {})
             merged.update(tools)
             self.rlm_config.custom_tools = merged
@@ -313,7 +337,7 @@ class RLMEnv(BaseTextEnv):
                 section_num = 5 if self.lm_callback is not None else 4
                 custom_tools_section += f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"
 
-        return template.format(custom_tools_section=custom_tools_section)
+        return template.replace("{custom_tools_section}", custom_tools_section)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
@@ -400,11 +424,15 @@ class RLMEnv(BaseTextEnv):
     def _build_metadata(self) -> Dict[str, Any]:
         return {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
 
+    def set_chat_history(self, chat_history: List[Dict[str, str]]) -> None:
+        self._chat_history = chat_history
+
     def get_metrics(self) -> Dict[str, Any]:
         return {
             "turns_used": self.turns,
             "final_value_set": self._final_answer is not None,
             "reward": self._get_reward(True, self._final_answer),
+            "chat_history": self._chat_history,
         }
 
     def close(self):

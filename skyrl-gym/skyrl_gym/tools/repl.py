@@ -227,35 +227,45 @@ class PersistentREPL:
         except Exception as e:
             return [f"Error: LM query failed - {e}"] * len(prompts)
 
-    def _rlm_query(self, prompt: str, model: Optional[str] = None) -> str:
+    def _rlm_query(self, prompt: str, model: Optional[str] = None, context: Any = None) -> str:
         """Spawn a child RLM agent with its own REPL for deeper reasoning on a subtask.
 
         Falls back to a plain llm_query if no subcall_fn is configured.
+
+        Args:
+            context: If provided, overrides the child's REPL ``context`` variable
+                (e.g. a single paper string instead of the parent's full dict).
         """
         if self.subcall_fn is not None:
             try:
-                return self.subcall_fn(prompt)
+                return self.subcall_fn(prompt, context=context)
             except Exception as e:
                 return f"Error: RLM query failed - {e}"
         return self._llm_query(prompt, model)
 
-    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None) -> List[str]:
+    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None, context_list: Optional[List[Any]] = None) -> List[str]:
         """Spawn child RLM agents for multiple prompts in parallel.
 
         Results are returned in the same order as input prompts.
         Falls back to llm_query_batched if no subcall_fn is configured.
+
+        Args:
+            context_list: If provided, must be the same length as *prompts*.
+                Each element overrides the child's REPL ``context`` variable
+                (e.g. a single paper string instead of the parent's full dict).
         """
         if self.subcall_fn is not None:
+            contexts = context_list or [None] * len(prompts)
             if len(prompts) <= 1:
-                return [self._rlm_query(p, model) for p in prompts]
+                return [self._rlm_query(p, model, context=c) for p, c in zip(prompts, contexts)]
 
             results: List[str] = [""] * len(prompts)
             lock = threading.Lock()
             completions: List[tuple] = []
 
-            def _run(index: int, prompt: str) -> None:
+            def _run(index: int, prompt: str, context: Any) -> None:
                 try:
-                    result = self.subcall_fn(prompt)
+                    result = self.subcall_fn(prompt, context=context)
                     with lock:
                         completions.append((index, result))
                     results[index] = result
@@ -263,7 +273,7 @@ class PersistentREPL:
                     results[index] = f"Error: RLM query failed - {e}"
 
             with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as executor:
-                futures = [executor.submit(_run, i, p) for i, p in enumerate(prompts)]
+                futures = [executor.submit(_run, i, p, c) for i, (p, c) in enumerate(zip(prompts, contexts))]
                 for f in as_completed(futures):
                     f.result()
 

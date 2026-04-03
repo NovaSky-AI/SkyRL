@@ -48,9 +48,24 @@ Tables and figures are not in the text, so return text that references the corre
 To expand a snippet, call search() on the snippet itself with a larger window and bidirectional=False.
 Remember that snippets are stored in intermediate variables, so you don't have to manually write them out.}"
 
+# Child RLM system prompt (used by rlm_query() sub-agents).
+# Export CHILD_SYSTEM_PROMPT before running to override entirely.
+: "${CHILD_SYSTEM_PROMPT:=You are a sub-agent helping answer a sub-question. You have access to a REPL environment with a \`context\` variable containing relevant information.
+
+When you want to execute Python code in the REPL environment, wrap it in triple backticks with 'repl' language identifier:
+\`\`\`repl
+# your code here
+\`\`\`
+
+IMPORTANT: When you are done, you MUST provide a final answer using FINAL(your answer here) or FINAL_VAR(variable_name).
+Be concise and focused — answer only the specific sub-question asked.}"
+
 _sq="'"
 _YAML_PROMPT="${CUSTOM_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
 _YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
+
+_YAML_CHILD_PROMPT="${CHILD_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
+_YAML_CHILD_PROMPT="${_sq}${_YAML_CHILD_PROMPT}${_sq}"
 
 uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -82,4 +97,5 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   trainer.project_name="rlm" \
   trainer.run_name="rlm_eval" \
   environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
+  environment.skyrl_gym.rlm.child_system_prompt="$_YAML_CHILD_PROMPT" \
   "$@"

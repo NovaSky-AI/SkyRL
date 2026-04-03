@@ -566,6 +566,10 @@ class RLMEnvConfig(BaseConfig):
     """Timeout in seconds for each REPL code execution."""
     custom_system_prompt: Optional[str] = None
     """Custom system prompt that fully replaces the default RLM system prompt."""
+    child_system_prompt: Optional[str] = None
+    """Custom system prompt for child RLM agents spawned via rlm_query(). Defaults to None (inherits parent prompt)."""
+    rollout_output_dir: Optional[str] = None
+    """Directory to write per-example rollout files (parent.txt, child-N.txt, meta.json). None disables logging."""
 
 
 @dataclass
