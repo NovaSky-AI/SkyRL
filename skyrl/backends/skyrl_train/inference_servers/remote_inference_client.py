@@ -496,7 +496,15 @@ class RemoteInferenceClient:
             ]
             if topk_prompt_logprobs_k > 0:
                 result_topk_prompt_logprobs = [
-                    [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()] if pos_dict is not None else None
+                    (
+                        sorted(
+                            [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()],
+                            key=lambda x: x[1],
+                            reverse=True,
+                        )[:topk_prompt_logprobs_k]
+                        if pos_dict is not None
+                        else None
+                    )
                     for _, pos_dict in zip(token_ids, raw_prompt_logprobs)
                 ]
 

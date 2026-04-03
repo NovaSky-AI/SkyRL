@@ -545,14 +545,13 @@ class TestSample:
         assert topk is not None
         assert len(topk) == 3
         assert topk[0] is None
-        # Each non-None position has 1 actual token + 2 topk extras = 3 entries
-        assert len(topk[1]) == 3
-        assert len(topk[2]) == 3
-        # Position 1: actual token 20 at -0.5, extras 9010 at -1.0, 9011 at -1.1
+        # Exactly top-k (2) entries per position, sorted by logprob descending
+        assert len(topk[1]) == 2
+        assert len(topk[2]) == 2
+        # Position 1: top-2 are token 20 at -0.5 and 9010 at -1.0 (9011 at -1.1 is dropped)
         topk1 = dict(topk[1])
         assert topk1[20] == pytest.approx(-0.5)
         assert topk1[9010] == pytest.approx(-1.0)
-        assert topk1[9011] == pytest.approx(-1.1)
 
     @pytest.mark.asyncio
     async def test_sample_topk_without_include_returns_none(self, client):
