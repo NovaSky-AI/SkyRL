@@ -41,14 +41,13 @@ class ModelConfig(PretrainedConfig):
         super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 
         # In transformers v5, rope_parameters may not contain rope_theta
-        # or rope_scaling even when they exist as top-level config attributes.
-        # Inject them so model code can always use config.rope_parameters["rope_theta"].
+        # even when it exists as a top-level config attribute (e.g. DeepSeek v3).
+        # Inject it so model code can always use config.rope_parameters["rope_theta"].
         rope_params = getattr(self, "rope_parameters", None) or {}
-        for key in ("rope_theta", "rope_scaling"):
-            if key not in rope_params:
-                val = getattr(self, key, None)
-                if val is not None:
-                    rope_params[key] = val
+        if "rope_theta" not in rope_params:
+            rope_theta = getattr(self, "rope_theta", None)
+            if rope_theta is not None:
+                rope_params["rope_theta"] = rope_theta
         if rope_params:
             self.rope_parameters = rope_params
 
