@@ -266,9 +266,7 @@ class TestMaxSeqLenValidation:
 
 
 def test_validate_cfg_rejects_non_positive_max_response_length():
-    cfg = SkyRLTrainConfig.from_cli_overrides(
-        ["trainer.logger=console", "trainer.algorithm.max_response_length=0"]
-    )
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.logger=console", "trainer.algorithm.max_response_length=0"])
 
     with pytest.raises(ValueError, match="max_response_length"):
         validate_cfg(cfg)

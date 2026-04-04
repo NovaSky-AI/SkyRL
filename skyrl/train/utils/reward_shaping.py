@@ -1,6 +1,5 @@
 from typing import List, Optional, Sequence, Union
 
-
 Reward = Union[float, List[float]]
 
 
@@ -24,16 +23,12 @@ def apply_dapo_soft_overlong_punishment(
     if overlong_buffer_len <= 0:
         raise ValueError(f"`overlong_buffer_len` must be > 0, got {overlong_buffer_len}")
     if overlong_buffer_penalty_factor < 0:
-        raise ValueError(
-            "`overlong_buffer_penalty_factor` must be >= 0, "
-            f"got {overlong_buffer_penalty_factor}"
-        )
+        raise ValueError("`overlong_buffer_penalty_factor` must be >= 0, " f"got {overlong_buffer_penalty_factor}")
     if max_response_length is not None and max_response_length <= 0:
         raise ValueError(f"`max_response_length` must be > 0, got {max_response_length}")
     if len(response_ids) != len(rewards):
         raise ValueError(
-            "`response_ids` and `rewards` must have the same length, "
-            f"got {len(response_ids)} and {len(rewards)}"
+            "`response_ids` and `rewards` must have the same length, " f"got {len(response_ids)} and {len(rewards)}"
         )
 
     if max_response_lengths is None:

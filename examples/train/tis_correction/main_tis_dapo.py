@@ -3,18 +3,17 @@ uv run --isolated --extra fsdp -m examples.train.tis_correction.main_tis_dapo
 """
 
 import sys
-
-import ray
-import torch
 from dataclasses import dataclass
 from typing import List
 
+import ray
+import torch
+
 from skyrl.train.config import AlgorithmConfig, make_config
+from skyrl.train.entrypoints.main_base import BasePPOExp
+from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
-from skyrl.train.entrypoints.main_base import BasePPOExp
-
-from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.utils.reward_shaping import apply_dapo_soft_overlong_punishment
 
 
@@ -67,7 +66,9 @@ class DAPOTrainer(RayPPOTrainer):
                 max_response_length=max_response_length,
             )
         else:
-            max_context_length = self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+            max_context_length = (
+                self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+            )
             max_response_lengths = [max_context_length - len(prompt) for prompt in prompt_token_ids]
             generator_output["rewards"] = apply_dapo_soft_overlong_punishment(
                 response_ids=response_ids,

@@ -315,9 +315,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     max_response_length = cfg.trainer.algorithm.max_response_length
     max_seq_len = cfg.trainer.algorithm.max_seq_len
     if max_response_length is not None and max_response_length <= 0:
-        raise ValueError(
-            f"`trainer.algorithm.max_response_length` must be > 0 when set, got {max_response_length}"
-        )
+        raise ValueError(f"`trainer.algorithm.max_response_length` must be > 0 when set, got {max_response_length}")
 
     if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
         if max_response_length is None and max_seq_len is None:
