@@ -1,5 +1,5 @@
 # Fleet Task GRPO Training via SkyPilot - Qwen3.5-35B-A3B (MoE, Multi-Node)
-# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key> --env ANTHROPIC_API_KEY=<key>
 #
 # MoE: 35B total, 3B active (256 experts, 9 active/token). GatedDeltaNet architecture.
 # 262K native context. All 35B params in memory (~70GB fp16), optimizer ~140GB, gradients ~70GB.
@@ -38,6 +38,7 @@ workdir:
 envs:
   WANDB_API_KEY: ""
   FLEET_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
   DATA_VERSION: "v55"

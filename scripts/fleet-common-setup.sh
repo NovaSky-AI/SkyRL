@@ -92,7 +92,7 @@ source .venv/bin/activate
 uv sync --extra fsdp
 uv pip install wandb boto3 awscli
 # Pin fleet-python<=0.2.119: 0.2.120+ has async BaseWrapper bug (missing jwt/team_id params)
-uv pip install "litellm>=1.75.5" "fleet-python<=0.2.119" logfire "mcp>=1.0.0"
+uv pip install "litellm>=1.75.5" "fleet-python<=0.2.119" logfire "mcp>=1.0.0" anthropic
 
 # --- Extra pip packages (installed before extra-setup to avoid dependency downgrades) ---
 if [ -n "$EXTRA_PIP" ]; then

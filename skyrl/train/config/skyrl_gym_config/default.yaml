@@ -24,6 +24,9 @@ fleet_task:
   hint_reward_threshold: 0.0
   n_hint_samples: 2
   enable_context_tools: false
+  use_llm_hints: false
+  hint_model: "claude-sonnet-4-20250514"
+  hint_llm_timeout: 30.0
 
 task_gen:
   max_turns: 10

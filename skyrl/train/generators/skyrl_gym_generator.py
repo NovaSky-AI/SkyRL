@@ -791,6 +791,20 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_history += new_obs
         return chat_history
 
+    @staticmethod
+    def _extract_task_prompt(prompt: ConversationType) -> str:
+        """Extract the user's task prompt text from a conversation."""
+        for msg in prompt:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    return " ".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                return str(content)
+        return ""
+
     async def _run_hint_augmentation(
         self,
         all_outputs: List[TrajectoryOutput],
@@ -806,7 +820,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Run hinted rollouts for prompts where all raw samples failed.
 
         Groups raw outputs by instance_id, identifies groups where max_reward < threshold,
-        builds hint text from verifier feedback, and launches additional hinted rollouts.
+        synthesizes hints (LLM or static), and launches additional hinted rollouts.
 
         Uses RLTF-SD: hinted rollout prompt_ids are replaced with the original unhinted
         prompt_ids so the model learns to produce hint-quality outputs conditioned on the
@@ -817,18 +831,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         from skyrl_gym.envs.fleet_task.env import FleetTaskEnv
 
+        use_llm_hints = hint_cfg.get("use_llm_hints", False) if hasattr(hint_cfg, "get") else False
+        hint_model = hint_cfg.get("hint_model", "claude-sonnet-4-20250514") if hasattr(hint_cfg, "get") else "claude-sonnet-4-20250514"
+        hint_timeout = hint_cfg.get("hint_llm_timeout", 30.0) if hasattr(hint_cfg, "get") else 30.0
+
         # 1. Group outputs by instance_id
         groups: Dict[str, List[Tuple[int, TrajectoryOutput]]] = defaultdict(list)
         for i, output in enumerate(all_outputs):
             iid = trajectory_ids[i].instance_id
             groups[iid].append((i, output))
 
-        # 2. Identify prompts needing hints
-        hint_tasks = []
-        hint_tids = []
-        hint_envs = []
-        orig_prompt_ids = []  # unhinted prompt_ids for RLTF-SD
-        prompts_hinted = 0
+        # 2. Identify prompts needing hints and collect data for LLM synthesis
+        failed_groups = []  # (iid, best_orig_idx, best_output, best_reward)
         hint_reward_threshold = hint_cfg.get("hint_reward_threshold", 0.0) if hasattr(hint_cfg, "get") else 0.0
 
         for iid, items in groups.items():
@@ -841,34 +855,73 @@ class SkyRLGymGenerator(GeneratorInterface):
             if max_reward > hint_reward_threshold:
                 continue  # at least one raw sample has signal
 
-            # Find best raw rollout (highest partial reward) for feedback
             best_idx = max(range(len(items)), key=lambda j: rewards[j])
             best_orig_idx, best_output = items[best_idx]
-            metrics = best_output.env_metrics
+            failed_groups.append((iid, best_orig_idx, best_output, rewards[best_idx]))
 
-            # Build hint from verifier feedback
-            hint_text = FleetTaskEnv.build_hint_text(
-                verifier_stdout=metrics.get("verifier_stdout"),
-                verifier_error=metrics.get("verifier_error"),
-                tool_error_messages=metrics.get("tool_error_messages"),
+        if not failed_groups:
+            return [], [], []
+
+        # 3. Build hints — LLM-synthesized or static
+        if use_llm_hints:
+            from skyrl_gym.envs.fleet_task.hint_synthesizer import synthesize_hints_batch
+
+            hint_requests = []
+            for iid, best_orig_idx, best_output, _ in failed_groups:
+                metrics = best_output.env_metrics
+                hint_requests.append({
+                    "task_prompt": self._extract_task_prompt(prompts[best_orig_idx]),
+                    "chat_history": metrics.get("chat_history", []),
+                    "verifier_stdout": metrics.get("verifier_stdout"),
+                    "verifier_error": metrics.get("verifier_error"),
+                    "tool_error_messages": metrics.get("tool_error_messages"),
+                    "instance_id": iid,
+                })
+
+            hint_results = await synthesize_hints_batch(
+                hint_requests=hint_requests,
+                model=hint_model,
+                timeout=hint_timeout,
+                static_fallback_fn=FleetTaskEnv.build_hint_text,
             )
+        else:
+            hint_results = []
+            for iid, best_orig_idx, best_output, _ in failed_groups:
+                metrics = best_output.env_metrics
+                hint_text = FleetTaskEnv.build_hint_text(
+                    verifier_stdout=metrics.get("verifier_stdout"),
+                    verifier_error=metrics.get("verifier_error"),
+                    tool_error_messages=metrics.get("tool_error_messages"),
+                )
+                hint_results.append((hint_text, "static_fallback"))
+
+        # 4. Create hinted agent_loop tasks
+        hint_tasks = []
+        hint_tids = []
+        hint_envs = []
+        orig_prompt_ids = []
+        hint_categories = []
+        prompts_hinted = 0
+
+        for group_idx, (iid, best_orig_idx, best_output, best_reward) in enumerate(failed_groups):
+            hint_text, hint_category = hint_results[group_idx]
             if not hint_text:
                 continue
 
             logger.info(
-                f"Hint for instance {iid} (best_reward={rewards[best_idx]:.3f}, "
-                f"verifier_stdout={bool(metrics.get('verifier_stdout'))}, "
-                f"verifier_error={bool(metrics.get('verifier_error'))}):\n{hint_text}"
+                f"Hint [{hint_category}] for instance {iid} "
+                f"(best_reward={best_reward:.3f}):\n{hint_text[:500]}"
             )
             prompts_hinted += 1
 
-            # Create hinted agent_loop tasks (new env instances)
+            items = groups[iid]
             base_rep_id = max(item[0] for item in items) + 1
             n_hint = hint_cfg.get("n_hint_samples", 2) if hasattr(hint_cfg, "get") else 2
             for h in range(n_hint):
                 hinted_extras = dict(env_extras[best_orig_idx])
                 hinted_extras["hint"] = hint_text
                 hinted_extras["is_hinted"] = True
+                hinted_extras["hint_category"] = hint_category
                 tid = TrajectoryID(instance_id=iid, repetition_id=base_rep_id + h)
                 hint_tasks.append(
                     self.agent_loop(
@@ -884,8 +937,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 hint_tids.append(tid)
                 hint_envs.append(env_classes[best_orig_idx])
                 orig_prompt_ids.append(best_output.prompt_ids)
+                hint_categories.append(hint_category)
 
-        # 3. Run all hinted rollouts in parallel
+        # 5. Clean up chat_history from env_metrics to free memory
+        for _, _, best_output, _ in failed_groups:
+            best_output.env_metrics.pop("chat_history", None)
+
+        # 6. Run all hinted rollouts in parallel
         if hint_tasks:
             logger.info(
                 f"Hint augmentation: {prompts_hinted} prompts need hints, "
@@ -904,6 +962,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             for i, output in enumerate(hint_outputs):
                 hinted_len = len(output.prompt_ids)
                 output.prompt_ids = orig_prompt_ids[i]
+                # Propagate hint_category into env_metrics for tracking
+                if isinstance(output.env_metrics, dict):
+                    output.env_metrics["hint_category"] = hint_categories[i]
                 logger.debug(
                     f"RLTF-SD: replaced hinted prompt ({hinted_len} tokens) "
                     f"with original prompt ({len(output.prompt_ids)} tokens)"
@@ -1200,6 +1261,28 @@ class SkyRLGymGenerator(GeneratorInterface):
                                 rescued += 1
                                 break
             rollout_metrics["hint/signal_rescued"] = rescued / len(hinted_iids) if hinted_iids else 0.0
+
+            # Category-level metrics (LLM-synthesized vs static)
+            from skyrl_gym.envs.fleet_task.hint_synthesizer import CATEGORY_LLM
+            llm_metrics = [m for m in hinted_metrics if m.get("hint_category") == CATEGORY_LLM]
+            n_llm = len(llm_metrics)
+            if n_llm > 0:
+                llm_rewards = [m.get("final_reward", 0.0) or 0.0 for m in llm_metrics]
+                llm_success = sum(1 for r in llm_rewards if r > 0)
+                rollout_metrics["hint/category_llm_synthesized_count"] = n_llm
+                rollout_metrics["hint/category_llm_synthesized_success_rate"] = llm_success / n_llm
+            static_metrics = [m for m in hinted_metrics if m.get("hint_category", "").endswith("fallback")]
+            n_static = len(static_metrics)
+            if n_static > 0:
+                static_rewards = [m.get("final_reward", 0.0) or 0.0 for m in static_metrics]
+                static_success = sum(1 for r in static_rewards if r > 0)
+                rollout_metrics["hint/category_static_fallback_count"] = n_static
+                rollout_metrics["hint/category_static_fallback_success_rate"] = static_success / n_static
+
+        # Clean up chat_history from env_metrics to prevent it from being serialized downstream
+        for m in env_metrics:
+            if isinstance(m, dict):
+                m.pop("chat_history", None)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"

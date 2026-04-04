@@ -829,6 +829,9 @@ class FleetTaskEnv(BaseTextEnv):
             metrics["verifier_error"] = self._verifier_error
         if self._tool_error_messages:
             metrics["tool_error_messages"] = self._tool_error_messages
+        # Include chat_history for LLM hint synthesis (consumed then deleted by generator)
+        if self.chat_history:
+            metrics["chat_history"] = self.chat_history
         return metrics
 
     @staticmethod

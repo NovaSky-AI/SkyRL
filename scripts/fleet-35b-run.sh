@@ -2,7 +2,7 @@
 # Single source of truth for Qwen3.5-35B-A3B GRPO training config.
 # Called by the SkyPilot YAML and by fleet-research run.sh.
 #
-# Required env vars: FLEET_API_KEY, WANDB_API_KEY
+# Required env vars: FLEET_API_KEY, WANDB_API_KEY, ANTHROPIC_API_KEY
 # Optional: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (for S3 checkpoints)
 set -euo pipefail
 cd "$(dirname "$0")/.."  # cd to SkyRL root (scripts/ is directly under repo root)
@@ -29,6 +29,8 @@ export S3_TRAJECTORY_BUCKET="${S3_TRAJECTORY_BUCKET:-skyrl-trajectories}"
 
 : "${FLEET_API_KEY:?Set FLEET_API_KEY before running}"
 : "${WANDB_API_KEY:?Set WANDB_API_KEY before running}"
+: "${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY before running (needed for LLM hint synthesis)}"
+export ANTHROPIC_API_KEY
 
 bash scripts/fleet-common-run.sh \
   --use-python-direct --cuda-env "$HOME/.cuda_env" \
@@ -38,6 +40,7 @@ bash scripts/fleet-common-run.sh \
   environment.skyrl_gym.fleet_task.partial_reward=true \
   environment.skyrl_gym.fleet_task.enable_hints=true \
   environment.skyrl_gym.fleet_task.n_hint_samples=2 \
+  environment.skyrl_gym.fleet_task.use_llm_hints=true \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
   trainer.flash_attn=false \
