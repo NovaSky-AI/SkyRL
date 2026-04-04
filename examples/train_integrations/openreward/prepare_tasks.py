@@ -19,6 +19,7 @@ Usage:
         --split train \
         --output tasks.parquet
 """
+
 import argparse
 import asyncio
 import json
@@ -37,18 +38,20 @@ SYSTEM_PROMPT_TEMPLATE = (
     "You are provided with function signatures within <tools></tools> XML tags:\n"
     "<tools>\n{tools}\n</tools>\n\n"
     "For each function call, return a json object with function name and arguments "
-    'within <tool_call></tool_call> XML tags:\n<tool_call>\n'
+    "within <tool_call></tool_call> XML tags:\n<tool_call>\n"
     '{{"name": <function-name>, "arguments": <args-json-object>}}\n</tool_call>'
 )
 
 
 def format_tool_spec(spec: Any) -> str:
     """Format a single ToolSpec as JSON for embedding in the system prompt."""
-    return json.dumps({
-        "name": spec.name,
-        "arguments_schema": spec.input_schema,
-        "description": spec.description,
-    })
+    return json.dumps(
+        {
+            "name": spec.name,
+            "arguments_schema": spec.input_schema,
+            "description": spec.description,
+        }
+    )
 
 
 async def fetch_tasks_for_env(
@@ -78,10 +81,12 @@ async def fetch_tasks_for_env(
             system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools=tools_str)
 
             row = {
-                "prompt": json.dumps([
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ]),
+                "prompt": json.dumps(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ]
+                ),
                 "env_class": "openreward",
                 "env_name": env_name,
                 "split": split,
@@ -124,13 +129,15 @@ async def main_async(args: argparse.Namespace) -> None:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        table = pa.table({
-            "prompt": [r["prompt"] for r in all_rows],
-            "env_class": [r["env_class"] for r in all_rows],
-            "env_name": [r["env_name"] for r in all_rows],
-            "split": [r["split"] for r in all_rows],
-            "task_index": [r["task_index"] for r in all_rows],
-        })
+        table = pa.table(
+            {
+                "prompt": [r["prompt"] for r in all_rows],
+                "env_class": [r["env_class"] for r in all_rows],
+                "env_name": [r["env_name"] for r in all_rows],
+                "split": [r["split"] for r in all_rows],
+                "task_index": [r["task_index"] for r in all_rows],
+            }
+        )
         pq.write_table(table, output)
     else:
         # JSONL fallback

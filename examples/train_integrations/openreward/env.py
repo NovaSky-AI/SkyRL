@@ -8,6 +8,7 @@ Expected env_extras (from the dataset prepared by prepare_tasks.py):
     - split: str          — task split, e.g. "train"
     - task_index: int     — task index within the split
 """
+
 import json
 import logging
 import sys
@@ -27,12 +28,15 @@ def _retry_on_server_error(fn, *args, **kwargs):
             return fn(*args, **kwargs)
         except Exception as e:
             err_str = str(e)
-            is_retryable = any(code in err_str for code in ("503", "502", "429", "Connection refused", "connection timeout"))
+            is_retryable = any(
+                code in err_str for code in ("503", "502", "429", "Connection refused", "connection timeout")
+            )
             if not is_retryable or attempt == MAX_RETRIES - 1:
                 raise
-            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            delay = RETRY_BASE_DELAY * (2**attempt)
             logger.warning(f"OpenReward API error (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {delay}s: {e}")
             time.sleep(delay)
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,7 @@ def _get_openreward_client_class():
 
     try:
         from openreward import OpenReward
+
         _OpenReward = OpenReward
         return _OpenReward
     except ImportError:
@@ -56,6 +61,7 @@ def _get_openreward_client_class():
     # openreward was pip-installed into system Python by run_openreward.sh
     # but Ray workers may not see it. Add system site-packages to sys.path.
     import glob
+
     for pattern in [
         "/home/ray/anaconda3/lib/python3.*/site-packages",
         "/usr/lib/python3/dist-packages",
@@ -66,6 +72,7 @@ def _get_openreward_client_class():
                 sys.path.insert(0, sp)
 
     from openreward import OpenReward
+
     _OpenReward = OpenReward
     return _OpenReward
 
@@ -197,7 +204,7 @@ def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
         return None
 
     ei = text.find(end_tag, si)
-    json_str = text[si + len(start_tag):ei].strip() if ei != -1 else text[si + len(start_tag):].strip()
+    json_str = text[si + len(start_tag) : ei].strip() if ei != -1 else text[si + len(start_tag) :].strip()
 
     try:
         data = json.loads(json_str)

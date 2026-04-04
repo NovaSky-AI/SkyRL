@@ -1,4 +1,5 @@
 """SkyRL entrypoint for OpenReward environment training."""
+
 import os
 import sys
 
