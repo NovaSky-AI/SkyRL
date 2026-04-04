@@ -6,3 +6,5 @@ ray_version: "2.51.1"
 compute_config: l4_ci
 working_dir: .
 max_retries: 0
+env_vars:
+  RAY_METRICS_ENABLED: "0"

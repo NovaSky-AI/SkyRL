@@ -180,6 +180,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds for server readiness")
     args = parser.parse_args()
 
+    # Disable Ray metrics to avoid connection errors in logs
+    os.environ["RAY_METRICS_ENABLED"] = "0"
+
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.weight_sync_backend = "nccl"

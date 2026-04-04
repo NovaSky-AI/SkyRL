@@ -8,4 +8,5 @@ working_dir: . # (Optional) Use current working directory "." as the working_dir
 env_vars:
   RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
   WANDB_API_KEY: $WANDB_API_KEY
+  RAY_METRICS_ENABLED: "0"
 max_retries: 1 # (Optional) Maximum number of times the job will be retried before being marked failed. Defaults to `1`.
