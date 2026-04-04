@@ -545,6 +545,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # re-apply whole chat template so length check is correct.
                 # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
                 _chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
+                logger.info(f"RETOKENIZE CHAT HISTORY: {_chat_for_inference}")
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
                     _chat_for_inference,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
@@ -1383,3 +1384,232 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
 
         return agent_loop_state
+
+
+if __name__ == "__main__":
+    """
+    Standalone entrypoint: generate one trajectory for a single dataset row.
+
+    Two modes:
+      1. Cold start  – spins up a fresh vLLM engine via Ray (slower first run).
+      2. Hot connect  – pass --vllm_url <host:port> to reuse a running vLLM
+         server, skipping model load entirely.  Start the server once with:
+
+           vllm serve alphaXiv/rlm-sft-Qwen3.5-9B-v1 \
+               --host 0.0.0.0 --port 8000 \
+               --dtype bfloat16 \
+               --max-model-len 32768 --gpu-memory-utilization 0.95 \
+               --language-model-only --enable-prefix-caching \
+               --cudagraph-capture-sizes 1
+
+         Then iterate instantly:
+
+           python -m skyrl.train.generators.skyrl_gym_generator \
+               --vllm_url localhost:8000 --row_idx 0 \
+               "data.val_data=['$HOME/data/rlm/validation.parquet']" \
+               environment.env_class=rlm \
+               generator.max_turns=10 \
+               trainer.policy.model.path=alphaXiv/rlm-sft-Qwen3.5-9B-v1 \
+               trainer.max_prompt_length=32768 \
+               generator.max_input_length=32768 \
+               generator.eval_sampling_params.max_generate_length=1024 \
+               generator.eval_sampling_params.temperature=1.0 \
+               generator.chat_template_kwargs.enable_thinking=false
+    """
+    import json
+    import sys
+    import time as _time
+
+    import asyncio
+
+    from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+    from skyrl.train.config import SkyRLTrainConfig
+    from skyrl.train.generators.base import BatchMetadata, GeneratorInput, TrajectoryID
+    from skyrl.train.utils.utils import validate_generator_cfg
+    from skyrl.utils.tok import get_tokenizer  # noqa: E402
+
+    _t0 = _time.perf_counter()
+
+    # ---- Strip custom flags from argv before handing rest to config ----
+    argv = sys.argv[1:]
+
+    row_idx = 0
+    if "--row_idx" in argv:
+        pos = argv.index("--row_idx")
+        row_idx = int(argv[pos + 1])
+        argv = argv[:pos] + argv[pos + 2:]
+
+    vllm_url: str | None = None
+    if "--vllm_url" in argv:
+        pos = argv.index("--vllm_url")
+        vllm_url = argv[pos + 1]
+        argv = argv[:pos] + argv[pos + 2:]
+
+    cfg = SkyRLTrainConfig.from_cli_overrides(argv)
+
+    # ---- Fast defaults for 1-GPU dev loop ----
+    ie = cfg.generator.inference_engine
+    ie.enforce_eager = False
+    ie.num_engines = 1
+    ie.tensor_parallel_size = 1
+    ie.pipeline_parallel_size = 1
+    ie.data_parallel_size = 1
+    ie.max_num_seqs = 8
+    ie.gpu_memory_utilization = 0.95
+    ie.ray_actor_max_concurrency = 1
+    ie.engine_init_kwargs.setdefault("language_model_only", True)
+    ie.engine_init_kwargs.setdefault("async_scheduling", True)
+    ie.engine_init_kwargs["compilation_config"] = {"cudagraph_capture_sizes": [1]}
+    cfg.generator.batched = False
+    cfg.generator.step_wise_trajectories = True
+    cfg.trainer.placement.colocate_all = False
+
+    validate_generator_cfg(cfg)
+
+    # ---- Tokenizer (needed for chat template / decoding) ----
+    tokenizer = get_tokenizer(
+        cfg.trainer.policy.model.path,
+        trust_remote_code=True,
+        use_fast=not cfg.trainer.disable_fast_tokenizer,
+        padding_side="left",
+    )
+
+    # ---- Load single row directly from parquet (no PromptDataset overhead) ----
+    import os
+    import pyarrow.parquet as pq
+
+    _parquet_path = os.path.expanduser(cfg.data.val_data[0])
+    _table = pq.read_table(_parquet_path)
+    assert row_idx < len(_table), (
+        f"--row_idx {row_idx} out of range (parquet has {len(_table)} rows)"
+    )
+    _row = {col: _table.column(col)[row_idx].as_py() for col in _table.column_names}
+    messages = _row.pop("prompt")
+    env_class = _row.pop("env_class", None) or cfg.environment.env_class
+    env_extras = _row
+    uid = str(row_idx)
+    logger.info(f"Config + row load: {_time.perf_counter() - _t0:.1f}s")
+
+    async def _run() -> None:
+
+        _t1 = _time.perf_counter()
+
+        if vllm_url is not None:
+            # ---- Hot path: connect to an already-running vLLM server ----
+            from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+                InferenceEngineClient,
+            )
+            from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
+                RemoteInferenceEngine,
+            )
+
+            engine = RemoteInferenceEngine(
+                url=vllm_url,
+                model_name=cfg.trainer.policy.model.path,
+                engine_backend="vllm",
+                tokenizer=tokenizer,
+                tp_size=1, pp_size=1, dp_size=1, ep_size=1,
+            )
+            inference_engine_client = InferenceEngineClient(
+                engines=[engine],
+                tokenizer=tokenizer,
+                model_path=cfg.trainer.policy.model.path,
+                lora_cfg=cfg.trainer.policy.model.lora,
+                inference_engine_cfg=ie,
+            )
+            logger.info(f"Connected to vLLM at {vllm_url}: {_time.perf_counter() - _t1:.1f}s")
+        else:
+            # ---- Cold path: spin up vLLM via Ray ----
+            from skyrl.train.entrypoints.main_base import BasePPOExp
+            from skyrl.train.utils.utils import initialize_ray
+
+            initialize_ray(cfg)
+
+            class _Exp(BasePPOExp):
+                def get_train_dataset(self):
+                    return None
+                def get_eval_dataset(self):
+                    return None
+
+            exp = _Exp(cfg)
+            inference_engine_client = exp.get_inference_client()
+            await inference_engine_client.wake_up()
+            logger.info(f"vLLM engine cold-started: {_time.perf_counter() - _t1:.1f}s")
+
+        generator = SkyRLGymGenerator(
+            generator_cfg=cfg.generator,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+        )
+
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend,
+            cfg.generator.eval_sampling_params,
+        )
+
+        generator_input: GeneratorInput = {
+            "prompts": [messages],
+            "env_classes": [env_class],
+            "env_extras": [env_extras],
+            "sampling_params": sampling_params,
+            "trajectory_ids": [TrajectoryID(instance_id=uid, repetition_id=0)],
+            "batch_metadata": BatchMetadata(global_step=0, training_phase="eval"),
+        }
+
+        logger.info(f"Row {row_idx} | uid={uid} | env_class={env_class}")
+        # logger.info(f"Prompt: {json.dumps(messages, indent=2)[:1000]}")
+
+        _t2 = _time.perf_counter()
+        output = await generator.generate(generator_input)
+        logger.info(f"generate() took {_time.perf_counter() - _t2:.1f}s")
+
+        import pathlib
+        traj_root = pathlib.Path("trajectories")
+        existing = sorted(traj_root.glob("trajectory_*")) if traj_root.exists() else []
+        next_id = len(existing) + 1
+        traj_dir = traj_root / f"trajectory_{next_id}"
+        traj_dir.mkdir(parents=True, exist_ok=True)
+
+        num_steps = len(output["response_ids"])
+        for step_idx in range(num_steps):
+            is_last = output["is_last_step"][step_idx] if output.get("is_last_step") else (step_idx == num_steps - 1)
+            prompt_ids = output["prompt_token_ids"][step_idx]
+            response_ids = output["response_ids"][step_idx]
+            prompt_text = tokenizer.decode(prompt_ids)
+            response_text = tokenizer.decode(response_ids)
+            stop_reason = output["stop_reasons"][step_idx]
+            latency = output["env_metrics"][step_idx].get("latency", {})
+
+            step_data = {
+                "step": step_idx + 1,
+                "is_last": is_last,
+                "stop_reason": stop_reason,
+                "prompt_text": prompt_text,
+                "response_text": response_text,
+                "prompt_token_ids": prompt_ids,
+                "response_token_ids": response_ids,
+                "latency": latency,
+            }
+            step_path = traj_dir / f"step_{step_idx + 1}.json"
+            step_path.write_text(json.dumps(step_data, indent=2, ensure_ascii=False))
+
+            inf_s = latency.get("inference_s")
+            env_s = latency.get("env_step_s")
+            timing = ""
+            if inf_s is not None:
+                timing = f"  inference={inf_s:.1f}s  env_step={env_s:.1f}s"
+            # logger.info(
+            #     f"STEP {step_idx + 1}/{num_steps} (last={is_last})  "
+            #     f"prompt_tokens={len(prompt_ids)}  response_tokens={len(response_ids)}  "
+            #     f"stop={stop_reason}{timing}"
+            # )
+
+        if output.get("rollout_metrics"):
+            meta_path = traj_dir / "metadata.json"
+            meta_path.write_text(json.dumps(output["rollout_metrics"], indent=2))
+            logger.info(f"Rollout metrics:\n{json.dumps(output['rollout_metrics'], indent=2)}")
+        logger.info(f"Wrote {num_steps} steps to {traj_dir}")
+        logger.info(f"Total wall time: {_time.perf_counter() - _t0:.1f}s")
+
+    asyncio.run(_run())
