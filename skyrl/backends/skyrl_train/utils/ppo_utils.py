@@ -725,7 +725,7 @@ def gmpo_policy_loss(
     """
     if config.loss_reduction != "sequence_mean":
         raise ValueError(
-            "GMPO requires `trainer.algorithm.loss_reduction=\"sequence_mean\"` because it is a sequence-level objective."
+            'GMPO requires `trainer.algorithm.loss_reduction="sequence_mean"` because it is a sequence-level objective.'
         )
 
     off_policy_correction = config.off_policy_correction
