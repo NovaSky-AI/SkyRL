@@ -11,9 +11,28 @@ Expected env_extras (from the dataset prepared by prepare_tasks.py):
 import json
 import logging
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+
+MAX_RETRIES = 5
+RETRY_BASE_DELAY = 3  # seconds, exponential backoff: 3, 6, 12, 24, 48
+
+
+def _retry_on_server_error(fn, *args, **kwargs):
+    """Retry a callable with exponential backoff on 5xx / connection errors."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e)
+            is_retryable = any(code in err_str for code in ("503", "502", "429", "Connection refused", "connection timeout"))
+            if not is_retryable or attempt == MAX_RETRIES - 1:
+                raise
+            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(f"OpenReward API error (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {delay}s: {e}")
+            time.sleep(delay)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +100,7 @@ class OpenRewardEnv(BaseTextEnv):
         self._client = OpenReward()
         self._env = self._client.environments.get(name=self.env_name)
         self._session_ctx = self._env.session(split=self.split, index=self.task_index)
-        self._session = self._session_ctx.__enter__()
+        self._session = _retry_on_server_error(self._session_ctx.__enter__)
         return prompt, {}
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -116,7 +135,7 @@ class OpenRewardEnv(BaseTextEnv):
         tool_args = tool_call["arguments"]
 
         try:
-            tool_output = self._session.call_tool(tool_name=tool_name, input=tool_args)
+            tool_output = _retry_on_server_error(self._session.call_tool, tool_name=tool_name, input=tool_args)
             output_text = "".join(b.text for b in tool_output.blocks if b.type == "text")
             finished = tool_output.finished
             reward = tool_output.reward or 0.0
