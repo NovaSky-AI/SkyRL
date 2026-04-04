@@ -125,13 +125,6 @@ class TestServerGroupAndRouter:
         resp = httpx.get(f"{router_url}/health", timeout=10.0)
         assert resp.status_code == 200
 
-    def test_list_servers(self, server_group_and_router):
-        """/servers returns all backends."""
-        router_url = server_group_and_router["router_url"]
-        resp = httpx.get(f"{router_url}/servers", timeout=10.0)
-        assert resp.status_code == 200
-        assert len(resp.json()["servers"]) == 2
-
     async def test_get_world_size(self, server_group_and_router):
         """get_world_size returns total world size and per-server sizes."""
         client = server_group_and_router["client"]

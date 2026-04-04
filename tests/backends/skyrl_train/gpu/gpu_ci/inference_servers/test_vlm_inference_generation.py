@@ -8,7 +8,6 @@ inputs are correctly tokenized and multimodal features are returned.
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_vlm_inference_generation.py -m vllm -v
 """
 
-import asyncio
 import base64
 import io
 
@@ -49,24 +48,23 @@ def _make_tiny_base64_image() -> str:
 
 
 @pytest.mark.vllm
-def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture):
+@pytest.mark.asyncio
+async def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture):
     """Test /v1/chat/completions/render with a multimodal (image) input on a VLM."""
-    engines = None
-    try:
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
-        cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
-        engines = InferenceEngineState.create(
-            cfg=cfg,
-            use_local=True,
-            backend="vllm",
-            model=MODEL_QWEN3_VL,
-            sleep_level=1,
-            engine_init_kwargs={
-                "max_model_len": 4096,
-                "limit_mm_per_prompt": {"image": 1, "video": 0},
-            },
-            use_new_inference_servers=True,
-        )
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
+    cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3_VL,
+        sleep_level=1,
+        engine_init_kwargs={
+            "max_model_len": 4096,
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
+        },
+        use_new_inference_servers=True,
+    ) as engines:
         client = engines.client
 
         data_uri = _make_tiny_base64_image()
@@ -80,7 +78,7 @@ def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture):
             }
         ]
 
-        result = asyncio.run(client.render_chat_completion({"json": {"model": MODEL_QWEN3_VL, "messages": messages}}))
+        result = await client.render_chat_completion({"json": {"model": MODEL_QWEN3_VL, "messages": messages}})
 
         assert isinstance(result, dict)
 
@@ -123,7 +121,3 @@ def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture):
         assert isinstance(placeholder["length"], int)
         assert placeholder["length"] > 0
         assert placeholder["offset"] + placeholder["length"] <= len(token_ids)
-
-    finally:
-        if engines is not None:
-            engines.close()

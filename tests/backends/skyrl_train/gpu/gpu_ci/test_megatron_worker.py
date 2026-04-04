@@ -3,8 +3,6 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 """
 
-import asyncio
-
 import pytest
 import ray
 import torch
@@ -128,8 +126,9 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
         pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
     ],
 )
+@pytest.mark.asyncio
 @pytest.mark.megatron
-def test_megatron_policy_weight_sync(
+async def test_megatron_policy_weight_sync(
     ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
@@ -152,7 +151,7 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        with InferenceEngineState.create(
+        async with InferenceEngineState.create(
             cfg=cfg,
             model=MODEL_NAME,
             use_local=True,
@@ -160,7 +159,7 @@ def test_megatron_policy_weight_sync(
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
             client, pg = engines.client, engines.pg
-            asyncio.run(client.sleep())
+            await client.sleep()
 
             policy = init_worker_with_type(
                 "policy",
@@ -174,7 +173,7 @@ def test_megatron_policy_weight_sync(
                     "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
-            asyncio.run(client.wake_up(tags=["weights"]))
+            await client.wake_up(tags=["weights"])
             # TODO (erictang000): improve this timing
             # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
             # or ~20 seconds on 8xH100
@@ -187,16 +186,14 @@ def test_megatron_policy_weight_sync(
                 )
 
             policy.offload_to_cpu()
-            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            await client.wake_up(tags=["kv_cache"])
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
             tokenizer = (
                 AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
             )
-            outputs = asyncio.run(
-                run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
-            )
+            outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

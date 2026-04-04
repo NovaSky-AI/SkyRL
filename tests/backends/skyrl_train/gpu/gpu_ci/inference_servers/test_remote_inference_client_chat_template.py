@@ -7,13 +7,13 @@ NOTE: This test is separate from `test_new_inference_generation.py` because we u
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from transformers import AutoTokenizer
 
 import skyrl
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -39,25 +39,28 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
 
 
 @pytest.mark.vllm
+@pytest.mark.asyncio
 @pytest.mark.parametrize("use_custom_template", [False, True])
-def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
-    """Test custom chat template via RemoteInferenceClient."""
-    engines = None
-    try:
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
-        engines = InferenceEngineState.create(
-            cfg=cfg,
-            use_local=True,
-            backend="vllm",
-            model=MODEL_QWEN3,
-            sleep_level=1,
-            engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
-            use_new_inference_servers=True,
-        )
+async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
+    """Test custom chat template via RemoteInferenceClient.
+
+    Uses render_chat_completion to get server-side tokenized prompt, then
+    generates via /inference/v1/generate to avoid vllm-router's strict
+    OpenAI API validation (which strips non-standard fields like prompt_token_ids).
+    """
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3,
+        sleep_level=1,
+        engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
+        use_new_inference_servers=True,
+    ) as engines:
         client = engines.client
 
-        # 2. Send request
-        # Test that the custom template will not strip thinking tokens, unlike the default template.
+        # 1. Build chat messages with thinking tokens in assistant turn
         messages = [
             {
                 "role": "user",
@@ -72,29 +75,26 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
                 "content": "Hello",
             },
         ]
-        chat_payload = {
+
+        # 2. Render the chat template server-side to get prompt token IDs
+        render_payload = {
             "model": MODEL_QWEN3,
             "messages": messages,
             "max_tokens": 10,
         }
+        render_result = await client.render_chat_completion({"json": render_payload})
+        prompt_token_ids = render_result["token_ids"]
 
-        async def _run():
-            chat_data = await client.chat_completion({"json": chat_payload})
-            render_data = await client.render_chat_completion({"json": chat_payload})
-            return chat_data, render_data
-
-        data, render_data = asyncio.run(_run())
-
-        # 3. Check output
-        assert "choices" in data and len(data["choices"]) > 0
-        content = data["choices"][0]["message"]["content"]
-        assert isinstance(content, str)
-
-        # 4. Check thinking tokens stripped or not via the render endpoint
-        prompt_token_ids = (
-            render_data.get("prompt_token_ids") or render_data.get("token_ids") or render_data.get("input_ids")
+        # 3. Generate using the rendered token IDs via /inference/v1/generate
+        engine_input = InferenceEngineInput(
+            prompt_token_ids=[prompt_token_ids],
+            sampling_params={"max_tokens": 10},
         )
-        assert prompt_token_ids is not None, f"No prompt token ids in render response. Keys: {render_data.keys()}"
+        output = await client.generate(engine_input)
+        assert len(output["responses"]) == 1
+        assert isinstance(output["responses"][0], str)
+
+        # 4. Check thinking tokens stripped or not in the rendered prompt
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN3)
         prompt_str = tokenizer.decode(prompt_token_ids)
 
@@ -102,7 +102,3 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
             assert "<think>" in prompt_str and "</think>" in prompt_str
         else:
             assert "<think>" not in prompt_str and "</think>" not in prompt_str
-
-    finally:
-        if engines is not None:
-            engines.close()

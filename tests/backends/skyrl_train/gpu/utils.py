@@ -422,8 +422,13 @@ class InferenceEngineState:
     router: Optional[VLLMRouter]
     server_group: Optional[ServerGroup]
 
-    def close(self):
-        """Shutdown all engine resources: router, server_group, and Ray actors.
+    def __post_init__(self):
+        # internal attribute to track if the inference engines need a wake_up()
+        # call before generation
+        self._needs_wake_up = False
+
+    def _close_common(self):
+        """Shutdown router, server_group, and Ray actors (sync resources).
 
         For local engines (InferenceEngineClient wrapping RayWrappedInferenceEngines),
         kills the underlying Ray actors so their torch.distributed TCPStore sockets
@@ -440,11 +445,33 @@ class InferenceEngineState:
                     ray.kill(engine.inference_engine_actor)
             self.client.engines.clear()
 
+    def close(self):
+        """Sync close. Use from sync tests, fixtures, and finally blocks."""
+        self._close_common()
+        if isinstance(self.client, RemoteInferenceClient):
+            asyncio.run(self.client.aclose())
+
+    async def aclose(self):
+        """Async close. Use from async tests and finally blocks."""
+        self._close_common()
+        if isinstance(self.client, RemoteInferenceClient):
+            await self.client.aclose()
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+        return False
+
+    async def __aenter__(self):
+        if self._needs_wake_up:
+            await self.client.wake_up()
+            self._needs_wake_up = False
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()
         return False
 
     @classmethod
@@ -529,6 +556,7 @@ class InferenceEngineState:
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
+        needs_wake_up = False
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
@@ -591,8 +619,20 @@ class InferenceEngineState:
                 eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
             )
             if sleep:
-                asyncio.run(client.wake_up())
-        return cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+                # NOTE: this is a hacky fix to allow creation from both sync and async contexts
+                # TODO: simplify this when old inference path is removed and unify on async context
+                try:
+                    asyncio.get_running_loop()
+                    # Inside an async context (e.g. pytest-asyncio) - defer wake_up to __aenter__
+                    needs_wake_up = True
+                except RuntimeError:
+                    asyncio.run(client.wake_up())
+                    needs_wake_up = False
+            else:
+                needs_wake_up = False
+        state = cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+        state._needs_wake_up = needs_wake_up
+        return state
 
 
 def init_remote_inference_servers(
@@ -664,8 +704,14 @@ def init_remote_inference_servers(
 
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
+    try:
+        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=200)
+    except TimeoutError as e:
+        print(f"Received timeout error while waiting for server: {e}")
+        server_process.terminate()
+        server_process.wait()
+        raise
 
-    wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=120)
     print(f"Server at localhost:{engine_port} is online")
 
     engines = create_remote_inference_engines(
