@@ -3,25 +3,30 @@ ThunderAgent Router - SkyRL integration layer.
 
 Composes ThunderAgent's standard routes (via register_routes) with
 SkyRL-specific endpoints:
-  - POST /inference/v1/generate
-  - POST /tokenize
-  - POST /detokenize
+  - POST /inference/v1/generate  (token-based generation with scheduling)
+  - GET  /servers                (list backend URLs)
+  - /{path:path}                 (catch-all proxy, round-robin / session-aware)
 
 Same interface as InferenceRouter: start() -> url, shutdown().
 """
 
 import asyncio
+import hashlib
+import itertools
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List, Optional
 
+import httpcore
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
+from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 try:
@@ -33,16 +38,68 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_THUNDERAGENT_LOGGER_NAMES = (
+    "ThunderAgent",
+    "examples.train.thunder_agent",
+    "thunderagent.access",
+)
+_THUNDERAGENT_LOG_HANDLERS: dict[str, logging.Handler] = {}
+
+
+def _default_router_port() -> int:
+    raw_port = os.environ.get("SKYRL_INFERENCE_ROUTER_PORT", "8080")
+    try:
+        return int(raw_port)
+    except ValueError:
+        logger.warning("Invalid SKYRL_INFERENCE_ROUTER_PORT=%r; falling back to 8080", raw_port)
+        return 8080
+
+
+def _ensure_thunderagent_file_logging(log_file: Optional[str]) -> None:
+    if not log_file:
+        return
+
+    log_path = Path(log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_log_path = str(log_path.resolve())
+    if resolved_log_path in _THUNDERAGENT_LOG_HANDLERS:
+        return
+
+    handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"))
+
+    for logger_name in _THUNDERAGENT_LOGGER_NAMES:
+        target_logger = logging.getLogger(logger_name)
+        target_logger.setLevel(logging.INFO)
+        target_logger.addHandler(handler)
+        if logger_name == "thunderagent.access":
+            target_logger.propagate = False
+
+    _THUNDERAGENT_LOG_HANDLERS[resolved_log_path] = handler
+    logger.info(f"ThunderAgent file logging enabled at {resolved_log_path}")
+
 
 class ThunderAgentRouter:
-    """SkyRL integration layer for ThunderAgent."""
+    """SkyRL integration layer for ThunderAgent.
+
+    Standard ThunderAgent endpoints (registered via register_routes):
+    - POST /v1/chat/completions, GET /health, GET /programs, etc.
+
+    SkyRL-specific endpoints:
+    - POST /inference/v1/generate  -> ThunderAgent-scheduled token generation
+    - GET  /servers                -> list of backend URLs
+    - /{path:path}                 -> catch-all proxy (round-robin / session-aware)
+
+    Same interface as InferenceRouter: start() -> url, shutdown().
+    """
 
     def __init__(
         self,
         server_urls: List[str],
         *,
         host: str = "0.0.0.0",
-        port: int = 8080,
+        port: Optional[int] = None,
         log_file: Optional[str] = None,
         router_mode: str = "tr",
         backend_type: str = "vllm",
@@ -58,8 +115,9 @@ class ThunderAgentRouter:
 
         self._server_urls = server_urls
         self._host = host
-        self._port = port
+        self._port = _default_router_port() if port is None else port
         self._log_file = log_file
+        _ensure_thunderagent_file_logging(log_file)
         self._access_logger = logging.getLogger("thunderagent.access")
 
         self._ta_config = Config(
@@ -74,44 +132,49 @@ class ThunderAgentRouter:
             use_acting_token_decay=use_acting_token_decay,
         )
 
+        # Round-robin state for catch-all proxy
+        self._server_cycle = itertools.cycle(server_urls)
+
+        # Created lazily in start()
         self._ta_router: Optional[MultiBackendRouter] = None
         self._proxy_client: Optional[httpx.AsyncClient] = None
         self._app: Optional[FastAPI] = None
         self._server: Optional[uvicorn.Server] = None
         self._server_thread: Optional[threading.Thread] = None
 
+        logger.info(
+            "ThunderAgentRouter configured with "
+            f"{len(server_urls)} servers, port={port}, mode={router_mode}, "
+            f"log_file={self._log_file}"
+        )
+
+    # ------------------------------------------------------------------
+    # Session-aware routing for catch-all proxy
+    # ------------------------------------------------------------------
+
+    def _hash_session_id(self, session_id: str) -> int:
+        hash_bytes = hashlib.sha256(session_id.encode()).digest()
+        return int.from_bytes(hash_bytes[:8], "big")
+
+    def _get_server_for_request(self, request: Request) -> str:
+        session_id = request.headers.get("X-Session-ID")
+        if session_id:
+            idx = self._hash_session_id(session_id) % len(self._server_urls)
+            return self._server_urls[idx]
+        return next(self._server_cycle)
+
     def _forward_headers(self, request: Request) -> dict:
         return {
             k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")
         }
 
-    def _get_first_healthy_backend_url(self) -> str:
-        if self._ta_router is not None:
-            for url, backend in self._ta_router.backends.items():
-                if backend.healthy:
-                    return url
-        if not self._server_urls:
-            raise HTTPException(status_code=503, detail="No backend servers configured")
-        return self._server_urls[0]
-
-    async def _proxy_request_to_backend(self, request: Request, *, backend_url: str, path: str) -> Response:
-        if self._proxy_client is None:
-            raise HTTPException(status_code=503, detail="Router proxy client is not initialized")
-
-        response = await self._proxy_client.request(
-            method=request.method,
-            url=f"{backend_url}{path}",
-            headers=self._forward_headers(request),
-            content=await request.body(),
-        )
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-        )
+    # ------------------------------------------------------------------
+    # FastAPI app
+    # ------------------------------------------------------------------
 
     def _build_app(self) -> FastAPI:
         ta_router = self._ta_router
+        proxy_client = self._proxy_client
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
@@ -127,10 +190,18 @@ class ThunderAgentRouter:
             lifespan=lifespan,
         )
 
+        # Register all standard ThunderAgent routes
         register_routes(app, ta_router, config=self._ta_config)
 
+        # -- SkyRL-specific: /inference/v1/generate -> ThunderAgent-scheduled generation --
         @app.post("/inference/v1/generate")
         async def inference_generate(request: Request):
+            """Route SkyRL's primary generation endpoint through ThunderAgent.
+
+            SkyRL's RemoteInferenceClient.generate() sends requests here with
+            {token_ids, sampling_params, model, program_id}. This is the main
+            rollout traffic during training.
+            """
             start_time = time.perf_counter()
             try:
                 payload = await request.json()
@@ -149,19 +220,31 @@ class ThunderAgentRouter:
                 program_state.profile.on_request_start()
 
             backend = ta_router.get_backend_for_program(program_id)
+
+            # Strip program_id before forwarding to vLLM
             forward_payload = {k: v for k, v in payload.items() if k != "program_id"}
+
+            url = f"{backend.url}/inference/v1/generate"
             headers = self._forward_headers(request)
-
-            if self._proxy_client is None:
-                raise HTTPException(status_code=503, detail="Router proxy client is not initialized")
-
             try:
-                response = await self._proxy_client.request(
-                    method="POST",
-                    url=f"{backend.url}/inference/v1/generate",
-                    headers=headers,
-                    json=forward_payload,
-                )
+                # Retry on ReadError (stale keepalive connections closed by vLLM/uvicorn)
+                for _attempt in range(2):
+                    try:
+                        response = await proxy_client.request(
+                            method="POST",
+                            url=url,
+                            headers=headers,
+                            json=forward_payload,
+                        )
+                        break
+                    except (httpcore.ReadError, httpx.ReadError) as exc:
+                        if _attempt == 0:
+                            logger.warning(
+                                "/inference/v1/generate ReadError on %s (retry 1/1): %s",
+                                backend.url, exc,
+                            )
+                            continue
+                        raise
             except Exception:
                 ta_router.update_program_after_request(program_id, program_state, 0, 0)
                 self._access_logger.exception(
@@ -172,6 +255,7 @@ class ThunderAgentRouter:
                 )
                 raise
 
+            # Estimate token count from the response for program state tracking
             total_tokens = 0
             prompt_tokens = 0
             try:
@@ -204,117 +288,55 @@ class ThunderAgentRouter:
                 headers=dict(response.headers),
             )
 
-        @app.post("/v1/completions")
-        async def completions(request: Request):
-            start_time = time.perf_counter()
-            try:
-                payload = await request.json()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+        # -- SkyRL-specific: /servers --
+        @app.get("/servers")
+        async def list_servers():
+            return {"servers": self._server_urls}
 
-            program_id = get_program_id(payload)
-            program_state = ta_router.get_or_create_program(program_id)
-
-            if program_state.profile:
-                program_state.profile.on_request_arrive()
-
-            await ta_router.update_program_before_request(program_id, program_state, payload)
-
-            if program_state.profile:
-                program_state.profile.on_request_start()
-
-            backend = ta_router.get_backend_for_program(program_id)
+        # -- Catch-all proxy for all other endpoints --
+        @app.api_route(
+            "/{path:path}",
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+        )
+        async def proxy(request: Request, path: str):
+            server_url = self._get_server_for_request(request)
+            url = f"{server_url}/{path}"
             headers = self._forward_headers(request)
-            forward_payload = {k: v for k, v in payload.items() if k != "program_id"}
-
-            if self._proxy_client is None:
-                raise HTTPException(status_code=503, detail="Router proxy client is not initialized")
-
-            usage_received = False
-
-            try:
-                response = await self._proxy_client.request(
-                    method="POST",
-                    url=f"{backend.url}/v1/completions",
-                    headers=headers,
-                    json=forward_payload,
-                )
+            body = await request.body()
+            for _attempt in range(2):
                 try:
-                    response_payload = response.json()
-                except Exception:
-                    response_payload = None
-
-                usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
-                if isinstance(usage, dict):
-                    total_tokens = usage.get("total_tokens")
-                    prompt_tokens = usage.get("prompt_tokens")
-                    if isinstance(total_tokens, int) and isinstance(prompt_tokens, int):
-                        usage_received = True
-                        ta_router.update_program_after_request(program_id, program_state, total_tokens, prompt_tokens)
-                        if program_state.profile:
-                            try:
-                                cached_tokens = 0
-                                prompt_details = usage.get("prompt_tokens_details")
-                                if isinstance(prompt_details, dict):
-                                    cached = prompt_details.get("cached_tokens")
-                                    if isinstance(cached, int):
-                                        cached_tokens = cached
-                                program_state.profile.on_request_end(prompt_tokens, cached_tokens)
-                            except Exception:
-                                logger.exception(
-                                    "ThunderAgent profiling failed at completion request end for program_id=%s",
-                                    program_id,
-                                )
-            except Exception:
-                if not usage_received:
-                    ta_router.update_program_after_request(program_id, program_state, 0, 0)
-                self._access_logger.exception(
-                    "/v1/completions program_id=%s backend=%s failed after %.1fms",
-                    program_id,
-                    backend.url,
-                    (time.perf_counter() - start_time) * 1000.0,
-                )
-                raise
-
-            if not usage_received:
-                ta_router.update_program_after_request(program_id, program_state, 0, 0)
-
-            self._access_logger.info(
-                "/v1/completions program_id=%s backend=%s status=%s latency_ms=%.1f",
-                program_id,
-                backend.url,
-                response.status_code,
-                (time.perf_counter() - start_time) * 1000.0,
-            )
+                    response = await proxy_client.request(
+                        method=request.method,
+                        url=url,
+                        headers=headers,
+                        content=body,
+                    )
+                    break
+                except (httpcore.ReadError, httpx.ReadError) as exc:
+                    if _attempt == 0:
+                        logger.warning("Catch-all proxy ReadError on %s (retry 1/1): %s", url, exc)
+                        continue
+                    raise
             return Response(
                 content=response.content,
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
 
-        @app.post("/tokenize")
-        async def tokenize(request: Request):
-            return await self._proxy_request_to_backend(
-                request,
-                backend_url=self._get_first_healthy_backend_url(),
-                path="/tokenize",
-            )
-
-        @app.post("/detokenize")
-        async def detokenize(request: Request):
-            return await self._proxy_request_to_backend(
-                request,
-                backend_url=self._get_first_healthy_backend_url(),
-                path="/detokenize",
-            )
-
         return app
+
+    # ------------------------------------------------------------------
+    # Lifecycle (same interface as InferenceRouter)
+    # ------------------------------------------------------------------
 
     def start(self) -> str:
         if not self._server_urls:
             raise ValueError("No servers available")
 
+        # Set ThunderAgent global config before creating the router
         set_config(self._ta_config)
+
+        # Create ThunderAgent router
         self._ta_router = MultiBackendRouter(
             self._ta_config.backends,
             profile_enabled=self._ta_config.profile_enabled,
@@ -324,10 +346,24 @@ class ThunderAgentRouter:
             acting_token_weight=self._ta_config.acting_token_weight,
             use_acting_token_decay=self._ta_config.use_acting_token_decay,
         )
-        self._proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(None))
 
+        # Create HTTP client for catch-all proxy
+        proxy_limits = httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=None,
+            keepalive_expiry=3.0,  # Must be < uvicorn's timeout-keep-alive (5s default)
+        )
+        self._proxy_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(None),
+            limits=proxy_limits,
+            transport=httpx.AsyncHTTPTransport(
+                limits=proxy_limits,
+                retries=1,  # Retry on ConnectError (stale pool connections)
+            ),
+        )
+
+        # Build FastAPI app and uvicorn server
         self._app = self._build_app()
-        self._port = get_open_port(self._port)
         config = uvicorn.Config(
             app=self._app,
             host=self._host,
@@ -336,12 +372,16 @@ class ThunderAgentRouter:
             access_log=False,
         )
         self._server = uvicorn.Server(config)
+
+        # Start server in background thread
         self._server_thread = threading.Thread(target=asyncio.run, args=(self._server.serve(),), daemon=True)
         self._server_thread.start()
 
-        router_url = f"http://{get_node_ip()}:{self._port}"
+        ip = get_node_ip()
+        router_url = f"http://{ip}:{self._port}"
         self._wait_until_healthy(router_url)
-        logger.info("ThunderAgentRouter started at %s", router_url)
+
+        logger.info(f"ThunderAgentRouter started at {router_url}")
         return router_url
 
     def _wait_until_healthy(
