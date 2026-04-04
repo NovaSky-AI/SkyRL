@@ -314,9 +314,8 @@ class RLMEnv(BaseTextEnv):
         init_messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": metadata_text},
-            turn0_prompt,
         ]
-        return init_messages, {}
+        return init_messages, {"next_user_message": turn0_prompt}
 
     def _build_system_prompt(self) -> str:
         template = self.rlm_config.custom_system_prompt or DEFAULT_RLM_SYSTEM_PROMPT
@@ -350,14 +349,15 @@ class RLMEnv(BaseTextEnv):
             obs_text = "[No ```repl``` code block found. Wrap your code in ```repl\\n...\\n``` blocks.]"
             if not done:
                 next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-                obs = [
-                    {"role": "user", "content": obs_text},
-                    next_prompt,
-                ]
-            else:
-                obs = []
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": obs_text}],
+                    next_user_message=next_prompt,
+                    reward=self._get_reward(done, None),
+                    done=done,
+                    metadata={},
+                )
             return BaseTextEnvStepOutput(
-                observations=obs, reward=self._get_reward(done, None), done=done, metadata={}
+                observations=[], next_user_message=None, reward=self._get_reward(done, None), done=done, metadata={}
             )
 
         _t_repl = time.perf_counter()
@@ -376,7 +376,7 @@ class RLMEnv(BaseTextEnv):
 
         if done:
             return BaseTextEnvStepOutput(
-                observations=[], reward=reward, done=True, metadata=self._build_metadata()
+                observations=[], next_user_message=None, reward=reward, done=True, metadata=self._build_metadata()
             )
 
         # Format REPL output observation
@@ -386,12 +386,12 @@ class RLMEnv(BaseTextEnv):
         repl_obs_text = f"Code executed:\n```repl\n{code}\n```\n\nREPL output:\n{result_str}"
 
         next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-        obs = [
-            {"role": "user", "content": repl_obs_text},
-            next_prompt,
-        ]
         return BaseTextEnvStepOutput(
-            observations=obs, reward=reward, done=False, metadata=self._build_metadata()
+            observations=[{"role": "user", "content": repl_obs_text}],
+            next_user_message=next_prompt,
+            reward=reward,
+            done=False,
+            metadata=self._build_metadata(),
         )
 
     def _extract_prompt_text(self, prompt: ConversationType) -> str:

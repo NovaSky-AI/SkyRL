@@ -381,6 +381,7 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  train_child_trajectories: false
 
 environment:
   env_class: "gsm8k"

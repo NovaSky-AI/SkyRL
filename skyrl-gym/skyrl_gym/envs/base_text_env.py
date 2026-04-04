@@ -11,7 +11,8 @@ class BaseTextEnvStepOutput(TypedDict):
     reward: float
     done: bool
     metadata: Dict[str, Any]
-    postprocessed_action: Optional[str] = None
+    postprocessed_action: Optional[str]
+    next_user_message: Optional[MessageType]  # ephemeral user prompt appended before inference, not stored in chat history
 
 
 class BaseTextEnv(Env[ConversationType, str]):

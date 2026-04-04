@@ -537,6 +537,8 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    train_child_trajectories: bool = False
+    """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
 
     def __post_init__(self):
 

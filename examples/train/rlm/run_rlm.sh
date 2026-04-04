@@ -60,7 +60,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
-  generator.step_wise_trajectories=false \
+  generator.step_wise_trajectories=true \
+  generator.train_child_trajectories=true \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \

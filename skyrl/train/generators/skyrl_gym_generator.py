@@ -14,7 +14,7 @@ import re
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -64,6 +64,7 @@ class StepWiseOutput:
     """Output from a single agent_loop execution for step-wise training."""
 
     step_outputs: List[TrajectoryOutput]
+    child_outputs: List["StepWiseOutput"] = field(default_factory=list)
 
 
 @dataclass
@@ -138,18 +139,13 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
-_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
-
-
 def _render_conversation(chat_history: List[Dict[str, str]]) -> str:
     """Render a chat_history list as a human-readable string."""
     parts = []
     for msg in chat_history:
         role = msg.get("role", "?").upper()
         content = msg.get("content", "")
-        # Collapse thinking blocks to a short marker so they don't drown the output
-        content_no_think = _THINK_RE.sub("<think>...</think>", content)
-        parts.append(f"[{role}]\n{content_no_think}")
+        parts.append(f"[{role}]\n{content}")
     return "\n\n" + ("=" * 80 + "\n\n").join(parts)
 
 
@@ -331,6 +327,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens: int,
         max_input_length: int,
         child_histories: Optional[List] = None,
+        child_results: Optional[List] = None,
     ) -> Callable[[str], str]:
         """Build a sync subcall_fn that runs a full child agent_loop (child RLMEnv).
 
@@ -380,6 +377,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             if child_histories is not None:
                 child_chat_history = result.env_metrics.get("chat_history") if isinstance(result.env_metrics, dict) else None
                 child_histories.append(child_chat_history)
+            if child_results is not None and isinstance(result, StepWiseOutput):
+                child_results.append(result)
             return self.tokenizer.decode(result.response_ids, skip_special_tokens=True)
 
         def subcall_fn(prompt: str, context=None) -> str:
@@ -434,14 +433,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         # For RLM envs, inject lm_callback and subcall_fn so REPL code can call llm_query /
         # rlm_query. We only inject if not already present (allows caller to override).
         child_histories: Optional[List] = None
+        child_results: List[StepWiseOutput] = []
         if env_class == "rlm" and "lm_callback" not in env_extras:
             loop = asyncio.get_running_loop()
             env_extras = dict(env_extras)  # don't mutate caller's dict
             env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
             child_histories = []
+            child_results = []
             env_extras["subcall_fn"] = self._make_subcall_fn(
                 loop, env_extras, sampling_params, max_tokens, max_input_length,
                 child_histories=child_histories,
+                child_results=child_results,
             )
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
@@ -456,10 +458,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        chat_history, init_info = await self._run_in_executor_if_available(env.init, chat_history)
+        # next_user_message is the ephemeral per-turn user prompt: appended before inference but
+        # never stored in chat_history so it doesn't pollute the training context.
+        next_user_message = init_info.get("next_user_message") if init_info else None
         initial_chat_history_length = len(chat_history)
+        _init_chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
         initial_input_ids = self.tokenizer.apply_chat_template(
-            chat_history,
+            _init_chat_for_inference,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
@@ -507,9 +513,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 1. Generate output
             _t_tokenize = time.perf_counter()
             if is_step_wise or retokenize_chat_history:
-                # re-apply whole chat template so length check is correct
+                # re-apply whole chat template so length check is correct.
+                # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
+                _chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
-                    chat_history,
+                    _chat_for_inference,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     add_generation_prompt=True,
                     tokenize=True,
@@ -562,6 +570,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             _env_step_s = time.perf_counter() - _t_env
             new_obs = env_step_output["observations"]
+            next_user_message = env_step_output.get("next_user_message")
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
 
@@ -719,6 +728,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
                     rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                 appended_eos_token = True
+
+        if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
+            agent_loop_output.child_outputs = child_results
 
         if self.generator_cfg.step_wise_trajectories:
             for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
@@ -1015,6 +1027,22 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = []
             out_env_classes = []
             for i, output in enumerate(all_outputs):
+                # Propagate parent's scalar reward to each child's last step
+                if self.generator_cfg.train_child_trajectories and output.child_outputs:
+                    parent_scalar_reward = sum(output.step_outputs[-1].reward)
+                    for child_output in output.child_outputs:
+                        if child_output.step_outputs:
+                            last_child_step = child_output.step_outputs[-1]
+                            last_model_token_idx = next(
+                                (k for k in range(len(last_child_step.loss_mask) - 1, -1, -1)
+                                 if last_child_step.loss_mask[k] == 1),
+                                None,
+                            )
+                            if last_model_token_idx is not None:
+                                new_reward = [0.0] * len(last_child_step.reward)
+                                new_reward[last_model_token_idx] = parent_scalar_reward
+                                last_child_step.reward = new_reward
+
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
                     rewards.append(step_output.reward)
@@ -1025,6 +1053,21 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
+
+                if not self.generator_cfg.train_child_trajectories:
+                    continue
+
+                for child_output in output.child_outputs:
+                    for j, step_output in enumerate(child_output.step_outputs):
+                        responses.append(step_output.response_ids)
+                        rewards.append(step_output.reward)
+                        stop_reasons.append(step_output.stop_reason)
+                        loss_masks.append(step_output.loss_mask)
+                        prompt_token_ids.append(step_output.prompt_ids)
+                        env_metrics.append(step_output.env_metrics)
+                        is_last_step.append(j == len(child_output.step_outputs) - 1)
+                        out_trajectory_ids.append(trajectory_ids[i])
+                        out_env_classes.append(env_classes[i])
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
