@@ -40,24 +40,17 @@ class ModelConfig(PretrainedConfig):
     ):
         super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 
-        # Normalize rope_parameters so model code can always use
-        # config.rope_parameters["rope_theta"].  Older transformers stores
-        # rope_theta / rope_scaling as top-level attrs with rope_parameters=None;
-        # DeepSeek v3 in v5 has rope_parameters but without rope_theta inside it.
-        rope_params = getattr(self, "rope_parameters", None)
-        if rope_params is None:
-            rope_theta = getattr(self, "rope_theta", None)
-            if rope_theta is not None:
-                self.rope_parameters = {"rope_theta": rope_theta}
-        elif isinstance(rope_params, dict):
-            if "rope_theta" not in rope_params:
-                rope_theta = getattr(self, "rope_theta", None)
-                if rope_theta is not None:
-                    rope_params["rope_theta"] = rope_theta
-            if "rope_scaling" not in rope_params:
-                rope_scaling = getattr(self, "rope_scaling", None)
-                if rope_scaling is not None:
-                    rope_params["rope_scaling"] = rope_scaling
+        # In transformers v5, rope_parameters may not contain rope_theta
+        # or rope_scaling even when they exist as top-level config attributes.
+        # Inject them so model code can always use config.rope_parameters["rope_theta"].
+        rope_params = getattr(self, "rope_parameters", None) or {}
+        for key in ("rope_theta", "rope_scaling"):
+            if key not in rope_params:
+                val = getattr(self, key, None)
+                if val is not None:
+                    rope_params[key] = val
+        if rope_params:
+            self.rope_parameters = rope_params
 
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
