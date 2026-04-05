@@ -155,7 +155,7 @@ def main():
     sample_interval = int(os.environ.get("SAMPLE_INTERVAL", "50"))
     checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "10"))
     max_checkpoints = int(os.environ.get("MAX_CHECKPOINTS", "2"))
-    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / "temp-dir-rip" / "artifacts")))
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / ".neer" / "artifacts")))
 
     logger.info(f"Loading tokenizer from {MODEL_PATH}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
