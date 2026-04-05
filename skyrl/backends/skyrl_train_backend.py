@@ -80,8 +80,14 @@ def _build_skyrl_train_config(
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
-    # TODO(tyler): Support KL Loss
-    cfg.trainer.algorithm.use_kl_loss = False
+    # use_kl_in_reward is not supported: Tinker clients send pre-computed advantages,
+    # so the server cannot apply a KL reward penalty before advantage computation.
+    cfg.trainer.algorithm.use_kl_in_reward = False
+
+    # Default use_kl_loss to False unless explicitly set via backend_config overrides.
+    # AlgorithmConfig defaults it to True, which would be a breaking change for existing sessions.
+    if "trainer.algorithm.use_kl_loss" not in user_overrides:
+        cfg.trainer.algorithm.use_kl_loss = False
 
     assert overrides.strategy in (
         "fsdp2",
@@ -125,8 +131,9 @@ class SkyRLTrainBackend(AbstractBackend):
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
 
-    def build_models(self, PolicyWorker):
+    def build_models(self, PolicyWorker, RefWorker=None):
         cfg = self._cfg
+        use_kl_loss = cfg.trainer.algorithm.use_kl_loss
         colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
 
@@ -155,24 +162,45 @@ class SkyRLTrainBackend(AbstractBackend):
             record_memory=cfg.trainer.policy.record_memory,
         )
 
+        ref_model = None
+        if use_kl_loss:
+            assert RefWorker is not None
+            ref_model = PPORayActorGroup(
+                cfg.trainer,
+                cfg.trainer.placement.ref_num_nodes,
+                cfg.trainer.placement.ref_num_gpus_per_node,
+                RefWorker,
+                pg=pg,
+                num_gpus_per_actor=0.2 if colocate_all else 1,
+                colocate_all=colocate_all,
+                sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+            )
+
         # set to a large number for megatron scheduler init
         # lr will be managed externally via set_lr()
         policy_num_training_steps = 1e9
-        ray.get(
+        refs = list(
             policy_model.async_init_model(
                 cfg.trainer.policy.model.path,
                 num_training_steps=policy_num_training_steps,
             )
         )
+        if ref_model is not None:
+            refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
+        ray.get(refs)
+
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
         if colocate_all:
             policy_model.offload_to_cpu()
+            if ref_model is not None:
+                ref_model.offload_to_cpu()
 
         # Create unified dispatch that manages all actor groups
         self._dispatch = WorkerDispatch(
             cfg=cfg,
             policy_actor_group=policy_model,
+            ref_actor_group=ref_model,
             inference_engine_client=self._inference_engine_client,
         )
 
@@ -225,16 +253,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Get worker types based on strategy
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker
         elif self._cfg.trainer.strategy == "megatron":
-            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                PolicyWorker,
-            )
+            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
         logger.info("Building models.")
-        self.build_models(PolicyWorker)
+        self.build_models(PolicyWorker, RefWorker)
 
         self._model_id = model_id
         self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
@@ -390,6 +416,8 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["pg_loss:sum"] = float(data["policy_loss"])
         if "policy_entropy" in data:
             metrics["entropy_loss:sum"] = float(data["policy_entropy"])
+        if "policy_kl" in data:
+            metrics["policy_kl:mean"] = float(data["policy_kl"])
         if "response_length" in data:
             metrics["num_tokens:sum"] = float(data["response_length"])
 
@@ -413,6 +441,10 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
+
+        if self._cfg.trainer.algorithm.use_kl_loss:
+            ref_output = self._dispatch.forward("ref", batch)
+            batch["base_action_log_probs"] = ref_output["output"]
 
         loss_fn = prepared_batch.all_loss_fns[0]
         if len(set(prepared_batch.all_loss_fns)) > 1:
