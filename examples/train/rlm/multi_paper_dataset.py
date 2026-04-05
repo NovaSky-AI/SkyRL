@@ -68,16 +68,25 @@ def main():
     parser.add_argument("--n_val",   type=int, default=10)
     parser.add_argument("--n_test",  type=int, default=None)
     parser.add_argument("--max_turns", type=int, default=10)
+    parser.add_argument("--load_only_train", action="store_true",
+                        help="Load only the train split and derive val/test from it")
     args = parser.parse_args()
     args.output_dir = os.path.expanduser(args.output_dir)
 
     hf_ds = datasets.load_dataset("alphaXiv/multi-paper-v1")
 
-    split_map = {
-        "train": ("train", args.n_train),
-        "validation": ("validation" if "validation" in hf_ds else "train", args.n_val),
-        "test": ("test" if "test" in hf_ds else "train", args.n_test),
-    }
+    if args.load_only_train:
+        split_map = {
+            "train": ("train", args.n_train),
+            "validation": ("train", args.n_val),
+            "test": ("train", args.n_test),
+        }
+    else:
+        split_map = {
+            "train": ("train", args.n_train),
+            "validation": ("validation" if "validation" in hf_ds else "train", args.n_val),
+            "test": ("test" if "test" in hf_ds else "train", args.n_test),
+        }
 
     splits = {}
     for out_name, (hf_split, cap) in split_map.items():
