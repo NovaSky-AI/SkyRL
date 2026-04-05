@@ -42,7 +42,7 @@ from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 
 MODEL_PATH = "Qwen/Qwen3.5-9B"
-DATASET_NAME = "alphaXiv/rlm-stf-v1"
+DATASET_NAME = "alphaXiv/multi-paper-selection"
 WORKSPACE_ROOT = Path(__file__).parents[3]
 EVAL_MD_PATH = WORKSPACE_ROOT / "EVAL.md"
 
@@ -58,7 +58,9 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.trainer.placement.colocate_policy_ref = False
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_kl_in_reward = False
-    cfg.trainer.policy.sequence_parallel_size = num_gpus
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.policy.sequence_parallel_size = 1
+    cfg.trainer.policy.fsdp_config.cpu_offload = False
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
     cfg.trainer.micro_train_batch_size_per_gpu = int(os.environ.get("MICRO_BATCH_SIZE", "2"))
 
@@ -153,7 +155,7 @@ def main():
     sample_interval = int(os.environ.get("SAMPLE_INTERVAL", "50"))
     checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "10"))
     max_checkpoints = int(os.environ.get("MAX_CHECKPOINTS", "2"))
-    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / "exports" / "checkpoints")))
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / "temp-dir-rip" / "artifacts")))
 
     logger.info(f"Loading tokenizer from {MODEL_PATH}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
