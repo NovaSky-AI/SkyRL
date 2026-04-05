@@ -3,7 +3,7 @@ Create multi-paper RLM dataset parquets from alphaXiv/multi-paper-v1.
 
 Produces three files:
   train.parquet      - training split (cap with --n_train)
-  validation.parquet - validation split (cap with --n_val, default 10)
+  validation.parquet - validation split (cap with --n_val; omitted if no val split and --n_val not set)
   test.parquet       - test split (cap with --n_test)
 
 Each HF row has one source paper + N questions; we flatten to one row per question.
@@ -65,7 +65,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/multi-paper")
     parser.add_argument("--n_train", type=int, default=None)
-    parser.add_argument("--n_val",   type=int, default=10)
+    parser.add_argument("--n_val",   type=int, default=None)
     parser.add_argument("--n_test",  type=int, default=None)
     parser.add_argument("--max_turns", type=int, default=10)
     parser.add_argument("--load_only_train", action="store_true",
@@ -75,18 +75,17 @@ def main():
 
     hf_ds = datasets.load_dataset("alphaXiv/multi-paper-v1")
 
+    has_val_split = not args.load_only_train and "validation" in hf_ds
+    include_val = has_val_split or args.n_val is not None
+
+    split_map = {"train": ("train", args.n_train)}
+    if include_val:
+        val_src = "validation" if has_val_split else "train"
+        split_map["validation"] = (val_src, args.n_val)
     if args.load_only_train:
-        split_map = {
-            "train": ("train", args.n_train),
-            "validation": ("train", args.n_val),
-            "test": ("train", args.n_test),
-        }
+        split_map["test"] = ("train", args.n_test)
     else:
-        split_map = {
-            "train": ("train", args.n_train),
-            "validation": ("validation" if "validation" in hf_ds else "train", args.n_val),
-            "test": ("test" if "test" in hf_ds else "train", args.n_test),
-        }
+        split_map["test"] = ("test" if "test" in hf_ds else "train", args.n_test)
 
     splits = {}
     for out_name, (hf_split, cap) in split_map.items():
