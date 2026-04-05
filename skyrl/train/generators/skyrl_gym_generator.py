@@ -66,6 +66,21 @@ class StepWiseOutput:
     step_outputs: List[TrajectoryOutput]
     child_outputs: List["StepWiseOutput"] = field(default_factory=list)
 
+    @property
+    def response_ids(self) -> List[int]:
+        """Concatenated response_ids across all steps (used by _run_child to decode child output)."""
+        ids: List[int] = []
+        for step in self.step_outputs:
+            ids.extend(step.response_ids)
+        return ids
+
+    @property
+    def env_metrics(self) -> Dict[str, Any]:
+        """Env metrics from the last step (used by _run_child for child chat history)."""
+        if self.step_outputs:
+            return self.step_outputs[-1].env_metrics
+        return {}
+
 
 @dataclass
 class AgentLoopState:
@@ -139,61 +154,74 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
-def _render_conversation(chat_history: List[Dict[str, str]]) -> str:
-    """Render a chat_history list as a human-readable string."""
-    parts = []
-    for msg in chat_history:
-        role = msg.get("role", "?").upper()
-        content = msg.get("content", "")
-        parts.append(f"[{role}]\n{content}")
-    return "\n\n" + ("=" * 80 + "\n\n").join(parts)
+def _write_step_files(
+    folder: str,
+    prefix: str,
+    step_outputs: List["TrajectoryOutput"],
+    tokenizer,
+) -> None:
+    """Write per-turn input/output files decoded from token IDs.
+
+    Creates ``<prefix>-turn-<N>-input.txt`` and ``<prefix>-turn-<N>-output.txt``
+    for each turn so you can see exactly what the LLM received and produced.
+    """
+    for i, step in enumerate(step_outputs):
+        input_text = tokenizer.decode(step.prompt_ids, skip_special_tokens=False)
+        with open(os.path.join(folder, f"{prefix}-turn-{i}-input.txt"), "w") as f:
+            f.write(input_text)
+
+        output_text = tokenizer.decode(step.response_ids, skip_special_tokens=False)
+        with open(os.path.join(folder, f"{prefix}-turn-{i}-output.txt"), "w") as f:
+            f.write(output_text)
 
 
 def _write_rlm_rollout(
     rollout_output_dir: str,
+    prompt: ConversationType,
     env_extras: Dict[str, Any],
     env_metrics: Dict[str, Any],
-    child_histories: List,
+    parent_step_outputs: List["TrajectoryOutput"],
+    child_step_outputs: List[List["TrajectoryOutput"]],
+    tokenizer,
 ) -> None:
-    """Write per-example rollout files into rollout_output_dir/<question_hash>/."""
-    # Derive a stable folder name from the first user message in chat_history (the question).
-    parent_history = env_metrics.get("chat_history") or []
-    question_text = next(
-        (m.get("content", "") for m in parent_history if m.get("role") == "user"),
-        str(env_extras.get("reward_spec", {}).get("evidence", "")),
-    )
-    q_hash = hashlib.sha256(question_text.encode()).hexdigest()[:12]
+    """Write per-example rollout files into rollout_output_dir/<question_hash>/.
+
+    For each agent (parent + children) we write one file per turn per direction:
+      parent-turn-0-input.txt   — exact string fed to the LLM on turn 0
+      parent-turn-0-output.txt  — exact string the LLM produced on turn 0
+      child-0-turn-0-input.txt  — same for child 0, turn 0
+      ...
+    Plus a meta.json with scalar metrics.
+    """
+    # Build a unique folder name from the prompt text + current timestamp so that
+    # different questions never collide and re-runs of the same data don't overwrite.
+    question_text = "\n".join(m.get("content", "") for m in prompt if m.get("content"))
+    hash_input = question_text + "\n" + str(time.time())
+    q_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
     folder = os.path.join(rollout_output_dir, q_hash)
     os.makedirs(folder, exist_ok=True)
 
     reward = env_metrics.get("reward", 0.0)
     turns = env_metrics.get("turns_used", 0)
 
-    # --- parent.txt ---
-    parent_history = env_metrics.get("chat_history") or []
-    header = textwrap.dedent(f"""\
-        REWARD: {reward:.4f}  TURNS: {turns}  CHILDREN: {len(child_histories)}
-        {"=" * 80}
-    """)
-    with open(os.path.join(folder, "parent.txt"), "w") as f:
-        f.write(header)
-        f.write(_render_conversation(parent_history))
+    # --- per-turn files for parent ---
+    _write_step_files(folder, "parent", parent_step_outputs, tokenizer)
 
-    # --- child-N.txt ---
-    for i, child_history in enumerate(child_histories):
-        if child_history is None:
+    # --- per-turn files for each child ---
+    for i, child_steps in enumerate(child_step_outputs):
+        if not child_steps:
             continue
-        with open(os.path.join(folder, f"child-{i}.txt"), "w") as f:
-            f.write(f"CHILD {i}\n{'=' * 80}\n")
-            f.write(_render_conversation(child_history))
+        _write_step_files(folder, f"child-{i}", child_steps, tokenizer)
 
     # --- meta.json ---
     reward_spec = env_extras.get("reward_spec", {})
     meta = {
+        "prompt": prompt,
         "reward": reward,
         "turns_used": turns,
-        "n_children": len(child_histories),
+        "n_children": len(child_step_outputs),
         "final_value_set": env_metrics.get("final_value_set", False),
+        "final_answer": env_metrics.get("final_answer"),
         "evidence": reward_spec.get("evidence"),
     }
     with open(os.path.join(folder, "meta.json"), "w") as f:
@@ -379,7 +407,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 child_histories.append(child_chat_history)
             if child_results is not None and isinstance(result, StepWiseOutput):
                 child_results.append(result)
-            return self.tokenizer.decode(result.response_ids, skip_special_tokens=True)
+            env_metrics = result.env_metrics if isinstance(result.env_metrics, dict) else {}
+            return env_metrics.get("final_answer", "")
 
         def subcall_fn(prompt: str, context=None) -> str:
             future = asyncio.run_coroutine_threadsafe(_run_child(prompt, context=context), loop)
@@ -656,15 +685,26 @@ class SkyRLGymGenerator(GeneratorInterface):
             env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
         env_metrics = env.get_metrics()
 
+        # Attach child results to the output before writing rollout files.
+        if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
+            agent_loop_output.child_outputs = child_results
+
         # Write per-example rollout files for RLM envs when rollout_output_dir is configured.
         rollout_output_dir = env_extras.get("rollout_output_dir")
-        if env_class == "rlm" and rollout_output_dir:
+        if env_class == "rlm" and rollout_output_dir and isinstance(agent_loop_output, StepWiseOutput):
+            parent_steps = agent_loop_output.step_outputs
+            child_steps = [
+                co.step_outputs for co in (agent_loop_output.child_outputs or [])
+            ]
             await self._run_in_executor_if_available(
                 _write_rlm_rollout,
                 rollout_output_dir,
+                prompt,
                 env_extras,
                 env_metrics,
-                child_histories or [],
+                parent_steps,
+                child_steps,
+                self.tokenizer,
             )
 
         # Close the environment
@@ -728,9 +768,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
                     rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                 appended_eos_token = True
-
-        if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
-            agent_loop_output.child_outputs = child_results
 
         if self.generator_cfg.step_wise_trajectories:
             for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):

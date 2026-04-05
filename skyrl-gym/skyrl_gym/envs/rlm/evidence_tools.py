@@ -101,90 +101,6 @@ def make_reward_fn(ctx: str, evidence: List[str]):
 
 
 # ---------------------------------------------------------------------------
-# REPL tool factory (search + extract_section, ported from rlm/examples/eval.py)
-# ---------------------------------------------------------------------------
-
-def make_tools(ctx: str) -> Dict[str, Any]:
-    """Build search/extract_section closures that capture a per-example context."""
-
-    def _merge(items: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
-        if not items:
-            return []
-        intervals = sorted([(s, s + len(t)) for s, t in items])
-        merged = [intervals[0]]
-        for s, e in intervals[1:]:
-            if s <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-            else:
-                merged.append((s, e))
-        return [(s, ctx[s:e]) for s, e in merged]
-
-    def search(
-        keyword: str,
-        window: int = 300,
-        max_snippets: int = 10,
-        bidirectional: bool = True,
-    ) -> List[str]:
-        results = []
-        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-        for m in pattern.finditer(ctx):
-            if bidirectional:
-                left = max(0, m.start() - window // 2)
-                right = min(len(ctx), m.end() + window // 2)
-            else:
-                left = m.start()
-                right = min(len(ctx), m.start() + window)
-            while left > 0 and ctx[left - 1] not in ".!?\n":
-                left -= 1
-                if m.start() - left > (window if bidirectional else 100):
-                    break
-            while right < len(ctx) and ctx[right] not in ".!?\n":
-                right += 1
-                if right - m.end() > window:
-                    break
-            if right < len(ctx) and ctx[right] in ".!?\n":
-                right += 1
-            results.append((left, ctx[left:right]))
-        merged = _merge(results)
-        shown = merged[:max_snippets]
-        remaining = len(merged) - len(shown)
-        snippets = []
-        for _, snippet in shown:
-            idx = len(snippets)
-            print(f"--- snippet {idx} ---")
-            print(snippet)
-            snippets.append(snippet)
-        if not shown:
-            print(f"(no hits for {keyword!r})")
-        if remaining > 0:
-            print(f"(+{remaining} more)")
-        return snippets
-
-    def extract_section(snippet: str, start_phrase: str, end_phrase: str) -> str:
-        si = snippet.lower().find(start_phrase.lower())
-        if si == -1:
-            si = 0
-        ei = snippet.lower().find(end_phrase.lower(), si)
-        if ei == -1:
-            result = snippet[si:]
-        else:
-            result = snippet[si: ei + len(end_phrase)]
-        print(result)
-        return result
-
-    return {
-        "search": {
-            "tool": search,
-            "description": "search(keyword, window=300, max_snippets=10, bidirectional=True) -> list[str]: search context for keyword, returns surrounding snippets",
-        },
-        "extract_section": {
-            "tool": extract_section,
-            "description": "extract_section(snippet, start_phrase, end_phrase) -> str: extract substring from snippet between two phrases",
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Multi-paper reward function factory
 # ---------------------------------------------------------------------------
 
@@ -256,16 +172,17 @@ def compute_metrics_multipaper(
 
 
 # ---------------------------------------------------------------------------
-# Multi-paper REPL tool factory
+# REPL tool factory
 # ---------------------------------------------------------------------------
 
-def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
-    """Build tools for a dict-based multi-paper context."""
+def make_tools() -> Dict[str, Any]:
+    """Build search/extract tools for dictionary-based paper context."""
 
-    def list_papers(context: dict) -> List[str]:
-        print(f"Found {len(context)} papers:")
+    def list_papers(ctx: dict) -> list:
+        """List all paper IDs with title and abstract."""
+        print(f"Found {len(ctx)} papers:")
         titles = []
-        for paper_id, content in context.items():
+        for paper_id, content in ctx.items():
             lines = content.split("\n")
             title = lines[0].replace("### PAPER: ", "") if lines else "Unknown Title"
             abstract_match = re.search(r"<abstract>\n(.*?)\n</abstract>", content, re.DOTALL)
@@ -273,13 +190,12 @@ def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
             print(f"\nPaper ID: {paper_id}")
             print(f"Title: {title}")
             if abstract:
-                preview = abstract[:300] + ("..." if len(abstract) > 300 else "")
-                print(f"Abstract: {preview}")
+                print(f"Abstract: {abstract}")
             print("-" * 80)
             titles.append(title)
         return titles
 
-    def _search_single(text: str, keyword: str, window: int) -> List[str]:
+    def _search_text(text: str, keyword: str, window: int) -> list:
         results = []
         pattern = re.compile(re.escape(keyword), re.IGNORECASE)
         for m in pattern.finditer(text):
@@ -298,20 +214,20 @@ def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
             snippet = text[left:right]
             start_line = text[:left].count("\n") + 1
             snippet_lines = snippet.split("\n")
-            numbered = [f"L{start_line + i}: {line}" for i, line in enumerate(snippet_lines)]
+            numbered_lines = [f"L{start_line + i}: {line}" for i, line in enumerate(snippet_lines)]
             idx = len(results)
             print(f"--- snippet {idx} (L{start_line}) ---")
-            print("\n".join(numbered))
+            print("\n".join(numbered_lines))
             results.append(snippet)
         return results
 
-    def search(text, keyword: str, window: int = 300) -> List[str]:
-        """Keyword search within a paper string or across all papers in a dict."""
+    def search(text, keyword: str, window: int = 300) -> list:
+        """Keyword search within a text string or across all papers in a dict."""
         if isinstance(text, dict):
             results = []
             for paper_id, paper_text in text.items():
                 title_line = paper_text.split("\n")[0].replace("### PAPER: ", "")
-                paper_results = _search_single(paper_text, keyword, window)
+                paper_results = _search_text(paper_text, keyword, window)
                 if paper_results:
                     print(f"\n=== Paper: {paper_id} — {title_line} ===")
                     results.extend(paper_results)
@@ -319,13 +235,13 @@ def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
                 print(f"(no hits for {keyword!r} in any paper)")
             return results
         else:
-            results = _search_single(text, keyword, window)
+            results = _search_text(text, keyword, window)
             if not results:
                 print(f"(no hits for {keyword!r})")
             return results
 
     def extract_lines(text: str, start_line: int, end_line: int) -> str:
-        """Extract lines from start_line to end_line (inclusive, 1-indexed)."""
+        """Extract lines from start_line to end_line (inclusive, 1-indexed) from a text string."""
         all_lines = text.split("\n")
         s = max(0, start_line - 1)
         e = min(len(all_lines), end_line)
@@ -340,9 +256,9 @@ def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
         print(result)
         return result
 
-    def get_paper_abstract(context: dict, paper_id: str) -> str:
-        """Return paper ID, title, and abstract as a formatted string."""
-        paper_text = context.get(paper_id, "")
+    def get_paper_abstract(ctx: dict, paper_id: str) -> str:
+        """Return a formatted string with the paper ID, title, and abstract."""
+        paper_text = ctx.get(paper_id, "")
         lines = paper_text.split("\n")
         title = lines[0].replace("### PAPER: ", "") if lines else "Unknown Title"
         abstract_match = re.search(r"<abstract>\n(.*?)\n</abstract>", paper_text, re.DOTALL)
@@ -350,25 +266,8 @@ def make_tools_multipaper(ctx: Dict[str, str]) -> Dict[str, Any]:
         return f"Paper ID: {paper_id}\nTitle: {title}\nAbstract: {abstract}"
 
     return {
-        "list_papers": {
-            "tool": list_papers,
-            "description": "list_papers(context) -> list[str]: list all paper IDs with title and abstract preview",
-        },
-        "search": {
-            "tool": search,
-            "description": (
-                "search(text, keyword, window=300) -> list[str]: keyword search. "
-                "Pass context dict to search ALL papers (results grouped by paper), "
-                "or pass context[paper_id] to search a single paper. "
-                "Each line in snippets is prefixed with its line number (e.g. L42: ...)."
-            ),
-        },
-        "extract_lines": {
-            "tool": extract_lines,
-            "description": "extract_lines(text, start_line, end_line) -> str: extract lines start_line..end_line (1-indexed) from a paper string; pass context[paper_id] as text",
-        },
-        "get_paper_abstract": {
-            "tool": get_paper_abstract,
-            "description": "get_paper_abstract(context, paper_id) -> str: return paper ID, title, and abstract",
-        },
+        "list_papers": list_papers,
+        "search": search,
+        "extract_lines": extract_lines,
+        "get_paper_abstract": get_paper_abstract,
     }

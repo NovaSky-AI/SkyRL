@@ -564,8 +564,10 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 class RLMEnvConfig(BaseConfig):
     """Configuration for the Recursive Language Model environment."""
 
-    repl_timeout: float = 15.0
-    """Timeout in seconds for each REPL code execution."""
+    repl_timeout: float = 60.0
+    """Timeout in seconds for each REPL code execution (used for child agents)."""
+    parent_repl_timeout: float = 180.0
+    """Timeout in seconds for parent REPL execution (needs to be longer to accommodate child RLM calls)."""
     custom_system_prompt: Optional[str] = None
     """Custom system prompt that fully replaces the default RLM system prompt."""
     child_system_prompt: Optional[str] = None

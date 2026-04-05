@@ -227,7 +227,21 @@ class PersistentREPL:
         except Exception as e:
             return [f"Error: LM query failed - {e}"] * len(prompts)
 
-    def _rlm_query(self, prompt: str, model: Optional[str] = None, context: Any = None) -> str:
+    @staticmethod
+    def _parse_child_result(result: str) -> Any:
+        """Try to parse a child's string result back into a Python object.
+
+        Child agents return their final answer as a string (via tokenizer.decode).
+        If the string is a valid Python literal (e.g. a list), parse it so the
+        parent can work with it as a native object.
+        """
+        import ast
+        try:
+            return ast.literal_eval(result)
+        except (ValueError, SyntaxError):
+            return result
+
+    def _rlm_query(self, prompt: str, model: Optional[str] = None, context: Any = None) -> Any:
         """Spawn a child RLM agent with its own REPL for deeper reasoning on a subtask.
 
         Falls back to a plain llm_query if no subcall_fn is configured.
@@ -238,12 +252,13 @@ class PersistentREPL:
         """
         if self.subcall_fn is not None:
             try:
-                return self.subcall_fn(prompt, context=context)
+                result = self.subcall_fn(prompt, context=context)
+                return self._parse_child_result(result)
             except Exception as e:
                 return f"Error: RLM query failed - {e}"
         return self._llm_query(prompt, model)
 
-    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None, context_list: Optional[List[Any]] = None) -> List[str]:
+    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None, context_list: Optional[List[Any]] = None) -> List[Any]:
         """Spawn child RLM agents for multiple prompts in parallel.
 
         Results are returned in the same order as input prompts.
@@ -259,16 +274,17 @@ class PersistentREPL:
             if len(prompts) <= 1:
                 return [self._rlm_query(p, model, context=c) for p, c in zip(prompts, contexts)]
 
-            results: List[str] = [""] * len(prompts)
+            results: List[Any] = [""] * len(prompts)
             lock = threading.Lock()
             completions: List[tuple] = []
 
             def _run(index: int, prompt: str, context: Any) -> None:
                 try:
                     result = self.subcall_fn(prompt, context=context)
+                    parsed = self._parse_child_result(result)
                     with lock:
-                        completions.append((index, result))
-                    results[index] = result
+                        completions.append((index, parsed))
+                    results[index] = parsed
                 except Exception as e:
                     results[index] = f"Error: RLM query failed - {e}"
 

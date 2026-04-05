@@ -9,13 +9,13 @@ set -x
 : "${LOGGER:=wandb}"
 : "${NUM_GPUS:=4}"
 : "${BATCH_SIZE:=4}"
-: "${NUM_EPOCHS:=1}"
+: "${NUM_EPOCHS:=4}"
 : "${MAX_LENGTH:=16384}"
 : "${MICRO_BATCH_SIZE:=1}"
 : "${LEARNING_RATE:=1e-5}"
-: "${LOG_INTERVAL:=10}"
+: "${LOG_INTERVAL:=250}"
 : "${WANDB_PROJECT:=alphaxiv-rlm-sft}"
-: "${WANDB_RUN_NAME:=sft-qwen3.5-9b-VLM}"
+: "${WANDB_RUN_NAME:=sft-qwen3.5-9b-multi-paper}"
 
 export LOGGER NUM_GPUS BATCH_SIZE NUM_EPOCHS MAX_LENGTH MICRO_BATCH_SIZE LEARNING_RATE LOG_INTERVAL WANDB_PROJECT WANDB_RUN_NAME
 
