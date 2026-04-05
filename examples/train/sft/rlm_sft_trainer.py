@@ -153,7 +153,7 @@ def main():
     learning_rate = float(os.environ.get("LEARNING_RATE", "1e-5"))
     log_interval = int(os.environ.get("LOG_INTERVAL", "10"))
     sample_interval = int(os.environ.get("SAMPLE_INTERVAL", "50"))
-    checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "10"))
+    checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "250"))
     max_checkpoints = int(os.environ.get("MAX_CHECKPOINTS", "2"))
     checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / ".neer" / "artifacts")))
 
