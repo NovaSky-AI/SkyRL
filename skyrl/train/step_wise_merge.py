@@ -5,6 +5,11 @@ When step_wise_trajectories=True, each turn is initially a separate sample.
 We merge consecutive turns into fewer samples only when the next turn's prompt
 token IDs have the previous full sequence (prompt + response) as an exact prefix.
 Otherwise we keep them as separate samples (token-id prefix match only).
+
+Merged samples avoid prompt/response overlap: ``prompt_token_ids`` is always the
+first turn's observation in the merge group. Everything after that observation
+(including later-turn observation *deltas* and all action tokens) lives in
+``response_ids``, with delta tokens masked out of the loss (see loss_masks).
 """
 
 from dataclasses import dataclass
@@ -105,7 +110,7 @@ def merge_step_wise_turns_for_trajectory(
         ac_tokens = response_ids[i]
         ac_rewards = rewards[i]
         ac_masks = loss_masks[i]
-        ac_logprobs_i = rollout_logprobs[i] if rollout_logprobs is not None else [0.0] * len(ac_tokens)
+        ac_logprobs_i = rollout_logprobs[i] if rollout_logprobs is not None else None
 
         if len(full_sequence) == 0:
             delta_ob = ob_tokens
@@ -116,7 +121,8 @@ def merge_step_wise_turns_for_trajectory(
             acc_response_ids.extend(delta_ob)
             acc_rewards.extend([0.0] * len(delta_ob))
             acc_loss_masks.extend([0] * len(delta_ob))
-            acc_logprobs.extend([0.0] * len(delta_ob))
+            if ac_logprobs_i is not None:
+                acc_logprobs.extend([0.0] * len(delta_ob))
         else:
             prefix_mismatch_count += 1
             flush()
@@ -128,8 +134,10 @@ def merge_step_wise_turns_for_trajectory(
         acc_response_ids.extend(ac_tokens)
         acc_rewards.extend(ac_rewards)
         acc_loss_masks.extend(ac_masks)
-        acc_logprobs.extend(ac_logprobs_i)
-        acc_is_last_step = acc_is_last_step or is_last_step[i]
+        if ac_logprobs_i is not None:
+            acc_logprobs.extend(ac_logprobs_i)
+        # Last turn included in this merge group determines the flag (not OR: avoids stale True).
+        acc_is_last_step = is_last_step[i]
 
     flush()
     return merged, prefix_mismatch_count
