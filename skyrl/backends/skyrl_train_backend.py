@@ -23,6 +23,12 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
+from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -216,19 +222,6 @@ class SkyRLTrainBackend(AbstractBackend):
         - external_server_urls only → create internal router over them
         - Neither → build servers and router internally
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-            RemoteInferenceClient,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.server_group import (
-            ServerGroup,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.utils import (
-            build_vllm_cli_args,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-            VLLMRouter,
-        )
-
         ie_cfg = self._cfg.generator.inference_engine
         is_colocated = self._cfg.trainer.placement.colocate_all
         external_proxy_url = ie_cfg.external_proxy_url
@@ -300,13 +293,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
-
-        # Sleep engines after init for colocated mode (new inference only;
-        # legacy path sleeps via _sleep_inference_engines before forward/backward)
-        # if _SKYRL_USE_NEW_INFERENCE and self._cfg.trainer.placement.colocate_all:
-        #     asyncio.run(self._inference_engine_client.sleep())
-        #     logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
-
         self._inference_engines_initialized = True
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -693,6 +679,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
             return await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Backend runs in engine subprocess with no event loop
         sample_outputs = asyncio.run(sample_all())
         return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
@@ -752,6 +739,7 @@ class SkyRLTrainBackend(AbstractBackend):
             for i in range(start_idx, end_idx):
                 output = sample_outputs[i]
 
+                # Check if sampling failed (Exception or None)
                 if isinstance(output, Exception):
                     has_error = True
                     error_msg = f"Sampling failed for sample {i}: {type(output).__name__}: {str(output)}"
@@ -764,9 +752,11 @@ class SkyRLTrainBackend(AbstractBackend):
                     break
 
                 for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
+                    # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
                     logprobs = logprobs_raw or []
 
+                    # Ensure logprobs exist (critical for RL)
                     if not logprobs and tokens:
                         logger.warning("No logprobs returned - filling with zeros")
                         logprobs = [0.0] * len(tokens)
@@ -784,16 +774,16 @@ class SkyRLTrainBackend(AbstractBackend):
                     error=error_msg or "Unknown sampling error",
                     status="error",
                 )
-                logger.info(f"Sample output for request {request_id} has error: {error_msg}")
             else:
+                # Note: prompt_logprobs not supported initially
                 if needs_prompt_logprobs:
                     logger.warning("Prompt logprobs requested but not yet supported")
+
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
                     prompt_logprobs=None,
                 )
 
-        logger.info(f"Aggregated sample results for {len(results)} requests")
         return results
 
     def _validate_model_state(self, model_id: str) -> None:

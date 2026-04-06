@@ -205,13 +205,6 @@ class RemoteInferenceClient:
                 keepalive_timeout=2,
             )
             self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
-            # self._session = aiohttp.ClientSession(
-            #     connector=connector,
-            #     timeout=aiohttp.ClientTimeout(
-            #         total=None,
-            #         sock_connect=30,
-            #         sock_read=120,
-            # ),
         return self._session
 
     async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
@@ -249,7 +242,6 @@ class RemoteInferenceClient:
                     raise_for_status(resp, body)
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
-                # except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, asyncio.TimeoutError) as e:
                 last_exc = e
                 logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                 await asyncio.sleep(1)
