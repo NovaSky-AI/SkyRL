@@ -487,7 +487,15 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
-            asyncio.run(self._inference_engine_client.sleep())
+            lora_cfg = self._cfg.trainer.policy.model.lora
+            # TODO(team): remove once vllm fixes this
+            # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
+            sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
+            if _SKYRL_USE_NEW_INFERENCE:
+                asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
+            else:
+                # Legacy client has a preset sleep level passed during create_ray_wrapped_inference_engines_from_config
+                asyncio.run(self._inference_engine_client.sleep())
 
     def forward_backward(
         self,
