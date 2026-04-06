@@ -124,8 +124,10 @@ megatron = [
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
+    # megatron-bridge requires Python 3.12+; pin megatron-core to the same
+    # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
-    "megatron-core; sys_platform == 'linux'",
+    "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
     "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
