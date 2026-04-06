@@ -3,8 +3,6 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Set
 
-from transformers import AutoTokenizer
-
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -15,38 +13,34 @@ from skyrl.train.generators.atropos_shm_utils import ZeroCopySHMBuffer
 
 logger = logging.getLogger(__name__)
 
-
 class AtroposSHMGenerator(GeneratorInterface):
     """
     SkyRL Generator that pulls rollouts from Atropos via Zero-Copy Shared Memory.
-    Bypasses HTTP/vLLM for ultra-low latency training.
     """
 
     def __init__(
         self,
-        shm_name: str = "atropos_shm",
-        shm_size: int = 1000,
-        tokenizer_name: str = "NousResearch/DeepHermes-3-Llama-3-3B-Preview",
-        poll_interval: float = 0.05,
+        shm_name: str,
+        batch_size: int,
+        entry_size: int = 4096,
+        poll_interval: float = 0.001,
         timeout: float = 300.0,
+        **kwargs
     ):
-        self.shm_name = shm_name
-        self.shm_size = shm_size
+        try:
+            self.shm = ZeroCopySHMBuffer(name=shm_name, size=batch_size * 10, entry_size=entry_size, create=False)
+            logger.info(f"AtroposSHMGenerator attached to SHM: {shm_name}")
+        except Exception as e:
+            logger.error(f"Failed to attach to SHM: {e}")
+            raise
+
+        self.batch_size = batch_size
         self.poll_interval = poll_interval
         self.timeout = timeout
         
-        # Attach to existing SHM (created by Atropos Env)
-        try:
-            self.shm = ZeroCopySHMBuffer(name=shm_name, size=shm_size, create=False)
-            logger.info(f"AtroposSHMGenerator attached to SHM: {shm_name}")
-        except Exception as e:
-            logger.error(f"Failed to attach to Atropos SHM: {e}")
-            raise
-
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        
-        # Local stash for out-of-order arrivals
+        # Stash for trajectories that arrive before they are requested (Key: ID_String)
         self.stash: Dict[str, Dict[str, Any]] = {}
+        self.running = True
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -54,7 +48,6 @@ class AtroposSHMGenerator(GeneratorInterface):
         """
         target_ids: List[TrajectoryID] = input_batch.get("trajectory_ids", [])
         if not target_ids:
-            logger.warning("AtroposSHMGenerator received empty trajectory_ids. Falling back to streaming.")
             return self._empty_output()
 
         results: Dict[str, Dict[str, Any]] = {}
@@ -64,31 +57,27 @@ class AtroposSHMGenerator(GeneratorInterface):
         
         while len(results) < len(target_keys):
             if time.time() - start_time > self.timeout:
-                logger.error(f"Timeout waiting for SHM results. Found {len(results)}/{len(target_keys)}")
+                logger.error(f"Timeout waiting for SHM results ({len(results)}/{len(target_keys)})")
                 break
 
-            # 1. Check stash first
+            # 1. Drain the SHM buffer and stash everything
+            while self.running:
+                item = self.shm.read_next()
+                if not item:
+                    break
+                
+                key = f"{item['instance_id']}_{item['repetition_id']}"
+                self.stash[key] = item
+
+            # 2. Extract matches from stash
             for key in list(self.stash.keys()):
                 if key in target_keys and key not in results:
                     results[key] = self.stash.pop(key)
-
-            if len(results) == len(target_keys):
-                break
-
-            # 2. Poll SHM for next available
-            item = self.shm.read_next()
-            if item:
-                # Key is instance_id_repetition_id
-                key = f"{item['instance_id']}_{item['repetition_id']}"
-                if key in target_keys:
-                    results[key] = item
-                else:
-                    # Not for this batch, stash it for later
-                    self.stash[key] = item
-            else:
+            
+            if len(results) < len(target_keys):
                 await asyncio.sleep(self.poll_interval)
 
-        # Format output in the same order as input_batch
+        # 3. Format output in requested order
         output = self._empty_output_from_batch(len(target_ids))
         for i, tid in enumerate(target_ids):
             key = tid.to_string()
@@ -96,10 +85,10 @@ class AtroposSHMGenerator(GeneratorInterface):
                 res = results[key]
                 output["response_ids"][i] = res["tokens"]
                 output["rewards"][i] = res["score"]
-                output["loss_masks"][i] = [1] * len(res["tokens"]) # Simplified mask
+                output["loss_masks"][i] = [1] * len(res["tokens"])
                 output["trajectory_ids"][i] = tid
             else:
-                # Missing result: mask it out
+                # Mask out missing results to avoid breaking trainer
                 output["loss_masks"][i] = [0]
                 output["trajectory_ids"][i] = tid
 
@@ -114,11 +103,15 @@ class AtroposSHMGenerator(GeneratorInterface):
             "trajectory_ids": []
         }
 
-    def _empty_output_from_batch(self, batch_size: int) -> GeneratorOutput:
+    def _empty_output_from_batch(self, size: int) -> GeneratorOutput:
         return {
-            "prompt_token_ids": [[] for _ in range(batch_size)],
-            "response_ids": [[] for _ in range(batch_size)],
-            "rewards": [0.0 for _ in range(batch_size)],
-            "loss_masks": [[0] for _ in range(batch_size)],
-            "trajectory_ids": [None for _ in range(batch_size)]
+            "prompt_token_ids": [[] for _ in range(size)],
+            "response_ids": [[] for _ in range(size)],
+            "rewards": [0.0 for _ in range(size)],
+            "loss_masks": [[0] for _ in range(size)],
+            "trajectory_ids": [None for _ in range(size)]
         }
+
+    def close(self):
+        self.running = False
+        self.shm.close()
