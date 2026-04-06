@@ -26,6 +26,7 @@ MODAL_GPU=L4:1 modal run examples/train_integrations/modal/main.py \
 MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
   --command "pip install openreward && \
     OPENREWARD_API_KEY=<your-key> WANDB_API_KEY=<your-key> \
+    OPENREWARD_UPLOAD_ROLLOUT=true \
     bash examples/train_integrations/openreward/run_openreward.sh"
 ```
 
@@ -35,10 +36,19 @@ MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
 MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
   --command "pip install openreward && \
     OPENREWARD_API_KEY=<your-key> \
+    OPENREWARD_UPLOAD_ROLLOUT=true \
     LOGGER=console \
     bash examples/train_integrations/openreward/run_openreward.sh \
     trainer.epochs=2 generator.max_turns=8"
 ```
+
+### Environment Variables
+
+| Variable                    | Default            | Description                                                   |
+| --------------------------- | ------------------ | ------------------------------------------------------------- |
+| `OPENREWARD_API_KEY`        | (required)         | API key from [openreward.ai/keys](https://openreward.ai/keys) |
+| `OPENREWARD_UPLOAD_ROLLOUT` | `true`             | Whether to upload rollouts to OpenReward for visualization    |
+| `OPENREWARD_RUN_NAME`       | `skyrl-openreward` | Run name used for rollout uploads                             |
 
 ## Training Config Summary
 
