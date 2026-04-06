@@ -23,7 +23,6 @@ NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=4
 
 # Qwen3.5 flags
-# make sure to add `transformers>=5.3.0` to the `override-dependencies` section in `pyproject.toml` for Qwen3.5 support
 USE_SAMPLE_PACKING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
