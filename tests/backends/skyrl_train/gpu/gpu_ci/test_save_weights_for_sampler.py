@@ -103,10 +103,6 @@ async def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocat
         # Initialize weight sync state
         dispatch.init_weight_sync_state(client)
 
-        # Mark engines as offloaded so save_weights_for_sampler knows to wake them
-        if colocate_all:
-            dispatch.mark_all_offloaded()
-
         # === Step 1: Do a training step ===
         dp_size = policy_group.actor_infos[0].rank.dp_size
         dummy_batch = make_dummy_training_batch(batch_size=dp_size)
