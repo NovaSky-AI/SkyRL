@@ -130,7 +130,7 @@ class MultiModalPlaceholder(BaseModel):
 
 class RenderedModelInput(BaseModel):
     prompt_ids: list[int]
-    multi_modal_kwargs: dict[str, bytes] | None = None
+    multi_modal_kwargs: dict[str, list[str]] | None = None
     multi_modal_placeholders: list[MultiModalPlaceholder] | None = None
 
 

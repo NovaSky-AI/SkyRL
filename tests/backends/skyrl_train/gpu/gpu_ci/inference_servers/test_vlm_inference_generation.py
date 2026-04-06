@@ -4,18 +4,26 @@ Multimodal render tests for the new inference path.
 Tests /v1/chat/completions/render with a VLM to verify multimodal
 inputs are correctly tokenized and multimodal features are returned.
 
+Requires a local vLLM install with /v1/chat/completions/render support.
+
 # Run with:
-uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_vlm_inference_generation.py -m vllm -v
+SKYRL_LOCAL_VLLM=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_vlm_inference_generation.py -m vllm -v
 """
 
 import base64
 import io
+import os
 
 import pytest
 from PIL import Image
 
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
+
+requires_local_vllm = pytest.mark.skipif(
+    os.environ.get("SKYRL_LOCAL_VLLM") != "1",
+    reason="Requires local vLLM with /v1/chat/completions/render support",
+)
 
 MODEL_QWEN3_VL = "Qwen/Qwen3-VL-2B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
@@ -47,6 +55,7 @@ def _make_tiny_base64_image() -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
+@requires_local_vllm
 @pytest.mark.vllm
 @pytest.mark.asyncio
 async def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture):

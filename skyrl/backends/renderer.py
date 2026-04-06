@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Tuple, Union
 
 import torch
 
@@ -63,6 +63,13 @@ def decode_mm_kwargs(rendered: RenderedModelInput) -> Tuple[torch.Tensor, torch.
     return pixel_values, image_grid_thw
 
 
+class RenderedImage(NamedTuple):
+    """Per-image result from _render_images."""
+
+    placeholder_tokens: list[int]
+    kwargs_data: str | None
+
+
 class VLLMRenderer:
     """Renders ModelInputs by calling vLLM's /v1/chat/completions/render for image placeholders.
 
@@ -76,29 +83,19 @@ class VLLMRenderer:
         self._model_name = model_name
 
     def __call__(self, model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
-        async def _render_all():
-            return await asyncio.gather(*[self._render_single(mi) for mi in model_inputs])
+        async def _render_all() -> list[RenderedModelInput]:
+            return list(await asyncio.gather(*[self._render_single(mi) for mi in model_inputs]))
 
         return asyncio.run(_render_all())
-
-    async def render_async(self, model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
-        """Async variant of __call__ for use within a running event loop."""
-        return await asyncio.gather(*[self._render_single(mi) for mi in model_inputs])
 
     # -- internal -------------------------------------------------------------
 
     async def _render_single(self, model_input: ModelInput) -> RenderedModelInput:
         image_chunks = [c for c in model_input.chunks if isinstance(c, (ImageChunk, ImageAssetPointerChunk))]
 
-        # Fast path: text only — no HTTP call needed
         if not image_chunks:
-            prompt_ids: list[int] = []
-            for chunk in model_input.chunks:
-                if isinstance(chunk, EncodedTextChunk):
-                    prompt_ids.extend(chunk.tokens)
-            return RenderedModelInput(prompt_ids=prompt_ids)
+            return render_model_input([model_input])[0]
 
-        # Render images via vLLM
         rendered_images = await self._render_images(image_chunks)
 
         # Assemble final token stream: walk chunks in order, splice placeholder tokens
@@ -111,12 +108,11 @@ class VLLMRenderer:
             elif isinstance(chunk, (ImageChunk, ImageAssetPointerChunk)):
                 ri = rendered_images[image_idx]
                 offset = len(token_ids)
-                token_ids.extend(ri["placeholder_tokens"])
-                placeholders.append(MultiModalPlaceholder(offset=offset, length=len(ri["placeholder_tokens"])))
+                token_ids.extend(ri.placeholder_tokens)
+                placeholders.append(MultiModalPlaceholder(offset=offset, length=len(ri.placeholder_tokens)))
                 image_idx += 1
 
-        # Collect kwargs_data per image
-        kwargs_data_items = [ri["kwargs_data"] for ri in rendered_images if ri.get("kwargs_data") is not None]
+        kwargs_data_items = [ri.kwargs_data for ri in rendered_images if ri.kwargs_data is not None]
         mm_kwargs = {"image": kwargs_data_items} if kwargs_data_items else None
 
         return RenderedModelInput(
@@ -128,13 +124,10 @@ class VLLMRenderer:
     async def _render_images(
         self,
         image_chunks: list[Union[ImageChunk, ImageAssetPointerChunk]],
-    ) -> list[dict]:
-        """Render all images in a single /v1/chat/completions/render call.
-
-        Returns a list of dicts per image with keys:
-            placeholder_tokens: list[int]
-            kwargs_data: str | None  (base64-encoded msgpack)
-        """
+    ) -> list[RenderedImage]:
+        # Converts image chunks to OpenAI chat-completions content format (image_url parts),
+        # sends them to vLLM's /v1/chat/completions/render endpoint, and extracts per-image
+        # placeholder tokens and serialized multimodal kwargs from vLLM's response.
         content_parts = []
         for chunk in image_chunks:
             if isinstance(chunk, ImageChunk):
@@ -161,7 +154,7 @@ class VLLMRenderer:
         if len(image_placeholders) != len(image_chunks):
             raise RuntimeError(f"Expected {len(image_chunks)} image placeholders, got {len(image_placeholders)}")
 
-        rendered: list[dict] = []
+        rendered: list[RenderedImage] = []
         for i, placeholder in enumerate(image_placeholders):
             offset = placeholder["offset"]
             length = placeholder["length"]
@@ -174,10 +167,10 @@ class VLLMRenderer:
                 )
 
             rendered.append(
-                {
-                    "placeholder_tokens": tokens,
-                    "kwargs_data": image_kwargs[i] if i < len(image_kwargs) else None,
-                }
+                RenderedImage(
+                    placeholder_tokens=tokens,
+                    kwargs_data=image_kwargs[i] if i < len(image_kwargs) else None,
+                )
             )
 
         return rendered
