@@ -13,7 +13,7 @@ on:
       - '!docs/**'
       - '!examples/**'
       - '.github/workflows/**'
-  pull_request:
+  pull_request_target:
     types: [labeled]
   workflow_dispatch:
 
@@ -21,7 +21,6 @@ on:
 permissions:
   checks: write   # for status checks to appear
   contents: read
-  pull-requests: read
 
 jobs:
   
@@ -30,7 +29,7 @@ jobs:
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
-        github.event_name == 'pull_request' &&
+        github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'run_train_gpu_ci') &&
         (
@@ -47,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
