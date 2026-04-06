@@ -1083,6 +1083,14 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
+        # With step-wise trajectories the data length is the total number of steps
+        # (not rollouts), which varies each batch and may not divide evenly.
+        # Truncate to the nearest multiple so stage_data's divisibility check passes.
+        if self.cfg.generator.step_wise_trajectories:
+            remainder = len(data) % mini_batch_size
+            if remainder != 0:
+                data = data[: len(data) - remainder]
+
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
         all_chunk_refs = self.dispatch.stage_data(model, data, mini_batch_size)

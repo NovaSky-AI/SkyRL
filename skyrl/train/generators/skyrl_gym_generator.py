@@ -545,7 +545,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # re-apply whole chat template so length check is correct.
                 # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
                 _chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
-                logger.info(f"RETOKENIZE CHAT HISTORY: {_chat_for_inference}")
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
                     _chat_for_inference,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,

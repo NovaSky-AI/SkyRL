@@ -5,12 +5,16 @@ set -x
 # 1. Create data: uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/run_multi_paper_eval.sh
 
+: "${UV_CACHE_DIR:=/workspace/.uv-cache}"
+: "${UV_PROJECT_ENVIRONMENT:=/workspace/SkyRL/.venv}"
+export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
+
 : "${DATA_DIR:=$HOME/data/multi-paper}"
-: "${NUM_ENGINES:=1}"
+: "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
 : "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-v1}"
+: "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-v1-epoch-4}"
 : "${ROLLOUT_OUTPUT_DIR:=$(pwd)/tmp/multi-paper-eval/rollouts}"
 
 uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
@@ -21,8 +25,8 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   generator.batched=false \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=false \
-  trainer.max_prompt_length=65536 \
-  generator.max_input_length=65536 \
+  trainer.max_prompt_length=32768 \
+  generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.chat_template_kwargs.enable_thinking=false \
   generator.eval_sampling_params.max_generate_length=4096 \
@@ -37,6 +41,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   generator.inference_engine.num_engines=$NUM_ENGINES \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   generator.inference_engine.gpu_memory_utilization=0.85 \
+  trainer.eval_batch_size=8 \
   trainer.dump_eval_results=true \
   trainer.export_path="$(pwd)/tmp/multi-paper-eval" \
   trainer.logger="$LOGGER" \
