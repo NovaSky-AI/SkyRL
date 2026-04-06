@@ -15,16 +15,32 @@ on:
       - '!docs/**'
       - '!examples/**'
       - '.github/workflows/**'
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 
 permissions:
   checks: write   # for status checks to appear
   contents: read
+  pull-requests: read
 
 jobs:
   
   skyrl_train_tests_megatron:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci') &&
+        (
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR'
+        )
+      )
     runs-on: ubuntu-latest
     defaults:
       run:
