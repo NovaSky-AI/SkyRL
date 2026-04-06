@@ -617,6 +617,7 @@ def _get_test_token_ids(model: str) -> List[int]:
     token_ids = tokenizer.apply_chat_template(
         conv,
         add_generation_prompt=True,
+        return_dict=False,
         tokenize=True,
     )
     return token_ids
