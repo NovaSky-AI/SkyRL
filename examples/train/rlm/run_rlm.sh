@@ -6,8 +6,10 @@ set -x
 # 1. Create data: uv run -- python examples/train/rlm/rlm_dataset.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/run_rlm.sh
 
-: "${UV_CACHE_DIR:=/workspace/.uv-cache}"
-: "${UV_PROJECT_ENVIRONMENT:=/workspace/SkyRL/.venv}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+: "${UV_CACHE_DIR:=$PROJECT_ROOT/.uv-cache}"
+: "${UV_PROJECT_ENVIRONMENT:=$PROJECT_ROOT/.venv}"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/multi-paper}"
