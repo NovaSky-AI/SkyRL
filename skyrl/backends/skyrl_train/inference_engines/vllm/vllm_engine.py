@@ -152,6 +152,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        prompt_logprobs_list: List[Optional[List[float]]] = []
         rollout_expert_indices: Optional[List[List[List[List[int]]]]] = []
 
         for output in outputs:
@@ -174,6 +175,25 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     del token_logprobs
             response_logprobs.append(_logprobs)
 
+            # Extract per-prompt-token logprobs (from RequestOutput, not CompletionOutput).
+            # Returns logprob of each prompt token given prior context, skipping position 0
+            # (which has no prior context). This matches the JAX backend which computes
+            # logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:]) → length prompt_len - 1.
+            _prompt_logprobs = None
+            if output.prompt_logprobs is not None:
+                _prompt_logprobs = []
+                for i, pos_logprobs in enumerate(output.prompt_logprobs):
+                    if pos_logprobs is None:
+                        # First position has no prior context; skip it (matching JAX backend).
+                        continue
+                    else:
+                        token_id = output.prompt_token_ids[i]
+                        if token_id in pos_logprobs:
+                            _prompt_logprobs.append(pos_logprobs[token_id].logprob)
+                        else:
+                            _prompt_logprobs.append(0.0)
+            prompt_logprobs_list.append(_prompt_logprobs)
+
             _routed_experts = None
             if resp.routed_experts is not None:
                 if hasattr(resp.routed_experts, "tolist"):
@@ -185,6 +205,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
+        if len(prompt_logprobs_list) and prompt_logprobs_list[0] is None:
+            prompt_logprobs_out = None  # hack: assume uniform sampling params
+        else:
+            prompt_logprobs_out = prompt_logprobs_list
+
         if len(rollout_expert_indices) > 0 and rollout_expert_indices[0] is None:
             rollout_expert_indices = None  # hack: assume uniform sampling params
 
@@ -193,6 +218,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            prompt_logprobs=prompt_logprobs_out,
             rollout_expert_indices=rollout_expert_indices,
         )
 

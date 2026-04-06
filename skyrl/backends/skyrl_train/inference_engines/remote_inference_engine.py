@@ -201,7 +201,11 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
         return InferenceEngineOutput(
-            responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None
+            responses=outputs,
+            stop_reasons=finish_reasons,
+            response_ids=output_ids,
+            response_logprobs=None,
+            prompt_logprobs=None,
         )
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:

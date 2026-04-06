@@ -550,6 +550,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # 3. Sample all prompts in parallel
         all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
+        needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
+
         async def sample_all():
             tasks = []
             for i in range(len(all_input_ids)):
@@ -576,6 +578,7 @@ class SkyRLTrainBackend(AbstractBackend):
                         prompt_token_ids=prompt_token_ids,
                         num_samples=1,  # Tinker batches multiple samples separately
                         sampling_params=params_dict,
+                        prompt_logprobs=needs_prompt_logprobs,
                     )
                 )
 
@@ -598,7 +601,7 @@ class SkyRLTrainBackend(AbstractBackend):
         """Convert InferenceEngineClient outputs to Tinker format."""
         results = {}
 
-        for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
+        for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
             error_msg = None
@@ -645,13 +648,18 @@ class SkyRLTrainBackend(AbstractBackend):
                     status="error",
                 )
             else:
-                # Note: prompt_logprobs not supported initially
-                if needs_prompt_logprobs:
-                    logger.warning("Prompt logprobs requested but not yet supported")
+                # All samples for a request share the same prompt, so use the first sample's
+                # prompt logprobs (parity with JAX backend).
+                first_output = sample_outputs[start_idx]
+                prompt_logprobs = (
+                    (first_output.get("prompt_logprobs") or [None])[0]
+                    if prompt_logprobs_requested
+                    else None
+                )
 
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
-                    prompt_logprobs=None,
+                    prompt_logprobs=prompt_logprobs,
                 )
 
         return results

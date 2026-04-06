@@ -154,11 +154,14 @@ class InferenceEngineClient(InferenceEngineInterface):
                     add_rollout_expert_indices = True
                     rollout_expert_indices[original_idx] = result["rollout_expert_indices"][local_idx]
 
+        # TODO: Should we support prompt_logprobs in the training/rollout generate() path?
+        # Currently only the sample() path supports prompt_logprobs.
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+            prompt_logprobs=None,
             rollout_expert_indices=rollout_expert_indices if add_rollout_expert_indices else None,
         )
 
@@ -183,6 +186,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         num_samples: int,
         sampling_params: Dict[str, Any],
         session_id: Optional[Union[str, int]] = None,
+        prompt_logprobs: bool = False,
     ) -> InferenceEngineOutput:
         """Generate multiple independent samples from a single prompt.
 
@@ -196,6 +200,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             session_id: Optional session ID for consistent engine routing (e.g., conversation ID).
                        If None, uses random load-balancing. Tinker API should pass None since
                        each sample() call is independent.
+            prompt_logprobs: If True, return per-token logprobs over the prompt.
 
         Returns:
             InferenceEngineOutput containing num_samples results.
@@ -208,6 +213,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_token_ids=prompt_token_ids,
             num_samples=num_samples,
             sampling_params=sampling_params,
+            prompt_logprobs=prompt_logprobs,
         )
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
