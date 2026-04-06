@@ -1,7 +1,7 @@
 import asyncio
 import pytest
-from skyrl.train.generators.atropos_shm_generator import AtroposSHMGenerator
-from skyrl.train.generators.atropos_shm_utils import ZeroCopySHMBuffer
+from skyrl.train.integrations.atropos.generator import AtroposSHMGenerator
+from skyrl.train.integrations.atropos.utils import ZeroCopySHMBuffer
 
 @pytest.mark.asyncasync
 async def test_generator_stashing():
@@ -23,7 +23,13 @@ async def test_generator_stashing():
     shm.write_trajectory(tokens=[3, 4], score=0.5, instance_id="i1", rep_id=0) # Rep 0 second
     
     # 2. Consume
-    batch = await gen.generate({})
+    class FakeTid:
+        def __init__(self, s): self.s = s
+        def to_string(self): return self.s
+
+    input_batch = {"trajectory_ids": [FakeTid("i1_0"), FakeTid("i1_1")]}
+    
+    batch = await gen.generate(input_batch)
     
     # 3. Verify Correct Ordering [0, 1]
     assert batch["response_ids"][0] == [3, 4]

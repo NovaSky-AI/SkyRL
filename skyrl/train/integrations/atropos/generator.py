@@ -9,7 +9,7 @@ from skyrl.train.generators.base import (
     GeneratorOutput,
     TrajectoryID,
 )
-from skyrl.train.generators.atropos_shm_utils import ZeroCopySHMBuffer
+from .utils import ZeroCopySHMBuffer
 
 logger = logging.getLogger(__name__)
 
