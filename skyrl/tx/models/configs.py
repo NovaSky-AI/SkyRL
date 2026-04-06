@@ -31,13 +31,12 @@ class ModelConfig(PretrainedConfig):
         self,
         config: PretrainedConfig | dict,
         *,
-        max_lora_adapters: int = 0,
-        max_lora_rank: int = 0,
-        shard_attention_heads: bool = True,
+        max_lora_adapters: int,
+        max_lora_rank: int,
+        shard_attention_heads: bool,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
-        **kwargs,
     ):
         super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 

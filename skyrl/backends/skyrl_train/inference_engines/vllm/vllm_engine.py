@@ -15,7 +15,6 @@ from uuid import uuid4
 import ray
 import vllm
 from loguru import logger
-
 from vllm import SamplingParams
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
