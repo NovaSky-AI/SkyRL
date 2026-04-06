@@ -125,7 +125,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
 
-        # New inference infrastructure (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
+        # New inference infrastructure
         self._server_group = None
         self._inference_router = None
 
@@ -198,7 +198,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _create_legacy_inference_client(self):
         """Create legacy inference client using Ray-wrapped engines."""
-        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines (legacy)")
+        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} Ray-wrapped inference engines")
         self._inference_engine_client = InferenceEngineClient(
             create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
             self._tokenizer,
@@ -210,7 +210,7 @@ class SkyRLTrainBackend(AbstractBackend):
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client.
 
-        Config combinations (matching main_base.py):
+        Possible config combinations:
         - Both external_proxy_url and external_server_urls → fully external setup
         - external_proxy_url only → proxy for both data + control plane
         - external_server_urls only → create internal router over them
@@ -303,9 +303,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Sleep engines after init for colocated mode (new inference only;
         # legacy path sleeps via _sleep_inference_engines before forward/backward)
-        if _SKYRL_USE_NEW_INFERENCE and self._cfg.trainer.placement.colocate_all:
-            asyncio.run(self._inference_engine_client.sleep())
-            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+        # if _SKYRL_USE_NEW_INFERENCE and self._cfg.trainer.placement.colocate_all:
+        #     asyncio.run(self._inference_engine_client.sleep())
+        #     logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         self._inference_engines_initialized = True
 
@@ -720,6 +720,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return await asyncio.gather(*tasks, return_exceptions=True)
 
         sample_outputs = asyncio.run(sample_all())
+        logger.info(f"Collected {len(sample_outputs)} sample outputs")
         return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
     def _aggregate_sample_results(
@@ -728,6 +729,7 @@ class SkyRLTrainBackend(AbstractBackend):
         sample_outputs: list,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Convert sample outputs to Tinker format. Handles both legacy and remote client outputs."""
+        logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
             """Yield (tokens, logprobs, stop_reason) from a single sample output."""
@@ -782,6 +784,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     error=error_msg or "Unknown sampling error",
                     status="error",
                 )
+                logger.info(f"Sample output for request {request_id} has error: {error_msg}")
             else:
                 if needs_prompt_logprobs:
                     logger.warning("Prompt logprobs requested but not yet supported")
@@ -790,6 +793,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     prompt_logprobs=None,
                 )
 
+        logger.info(f"Aggregated sample results for {len(results)} requests")
         return results
 
     def _validate_model_state(self, model_id: str) -> None:
