@@ -136,7 +136,7 @@ class OpenRewardEnv(BaseTextEnv):
         )
 
     def close(self):
-        """Close the OpenReward session."""
+        """Close the OpenReward session and client to avoid async cleanup issues."""
         if self._session_ctx is not None:
             try:
                 self._session_ctx.__exit__(None, None, None)
@@ -144,6 +144,15 @@ class OpenRewardEnv(BaseTextEnv):
                 pass
             self._session_ctx = None
             self._session = None
+
+        # Explicitly close the client to prevent async cleanup in GC
+        if self._client is not None:
+            try:
+                if hasattr(self._client, "close"):
+                    self._client.close()
+            except Exception:
+                pass
+            self._client = None
 
     def get_metrics(self) -> Dict[str, Any]:
         return {
