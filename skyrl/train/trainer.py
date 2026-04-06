@@ -635,7 +635,7 @@ class RayPPOTrainer:
             merged_response_ids: List[List[int]] = []
             merged_rewards: List[List[float]] = []
             merged_loss_masks: List[List[int]] = []
-            merged_logprobs: Optional[List[List[float]]] = [] if logprobs else None
+            merged_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
             merged_is_last_step: List[bool] = []
             merged_trajectory_ids: List[TrajectoryID] = []
             total_prefix_mismatch = 0
@@ -646,7 +646,7 @@ class RayPPOTrainer:
                 turn_rewards = [rewards[j] for j in indices]
                 turn_masks = [loss_masks[j] for j in indices]
                 turn_is_last = [is_last_step_list[j] for j in indices]
-                turn_logprobs = [logprobs[j] for j in indices] if logprobs else None
+                turn_logprobs = [logprobs[j] for j in indices] if logprobs is not None else None
 
                 samples, mismatch_count = merge_step_wise_turns_for_trajectory(
                     prompt_token_ids=turn_prompts,
