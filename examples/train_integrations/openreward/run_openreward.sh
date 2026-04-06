@@ -17,11 +17,7 @@ set -x
 # Override any config via positional args:
 #   bash run_openreward.sh trainer.epochs=2
 
-# Install openreward into system Python and expose it via PYTHONPATH so that
-# uv's isolated environment and Ray workers can both import it.
-pip install openreward
-export PYTHONPATH="$(python -c 'import site; print(site.getsitepackages()[0])'):${PYTHONPATH:-}"
-
+# Use uv's --with openreward to install the openreward package in the isolated environment
 DATA_DIR="${DATA_DIR:-/root/data/openreward}"
 CKPT_DIR="${CKPT_DIR:-/root/data/ckpts/openreward}"
 EXPORT_DIR="${EXPORT_DIR:-/root/data/export/openreward}"
