@@ -32,7 +32,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_router_args,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
@@ -420,7 +423,9 @@ class InferenceEngineState:
     client: Union[InferenceEngineClient, RemoteInferenceClient]
     pg: Optional[Any]  # placement group
     router: Optional[VLLMRouter]
-    server_group: Optional[ServerGroup]
+    server_groups: Optional[List[ServerGroup]] = None
+    prefill_server_groups: Optional[List[ServerGroup]] = None
+    decode_server_groups: Optional[List[ServerGroup]] = None
 
     def __post_init__(self):
         # internal attribute to track if the inference engines need a wake_up()
@@ -436,8 +441,10 @@ class InferenceEngineState:
         """
         if self.router is not None:
             self.router.shutdown()
-        if self.server_group is not None:
-            self.server_group.shutdown()
+        for group_list in (self.server_groups, self.prefill_server_groups, self.decode_server_groups):
+            if group_list is not None:
+                for group in group_list:
+                    group.shutdown()
 
         if isinstance(self.client, InferenceEngineClient):
             for engine in self.client.engines:
@@ -495,6 +502,8 @@ class InferenceEngineState:
         use_new_inference_servers: Optional[bool] = None,
         distributed_executor_backend: Optional[str] = None,
         expert_parallel_size: Optional[int] = None,
+        enable_pd: bool = False,
+        num_prefill: int = 0,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -528,6 +537,9 @@ class InferenceEngineState:
             ie_cfg.distributed_executor_backend = distributed_executor_backend
         if expert_parallel_size is not None:
             ie_cfg.expert_parallel_size = expert_parallel_size
+        if enable_pd:
+            ie_cfg.enable_pd = True
+            ie_cfg.num_prefill = num_prefill
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
@@ -555,8 +567,10 @@ class InferenceEngineState:
 
         # Return both router and server group if created to keep references alive
         router = None
-        server_group = None
         needs_wake_up = False
+        server_groups = None
+        prefill_server_groups = None
+        decode_server_groups = None
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
@@ -565,22 +579,90 @@ class InferenceEngineState:
                 cli_args.enable_lora = True
                 if active_lora_name is None:
                     active_lora_name = "skyrl-lora"
-            server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
-                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
-            )
-            server_infos = server_group.start()
-            server_urls = [info.url for info in server_infos]
 
-            router = VLLMRouter(server_urls=server_urls)
-            proxy_url = router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
-            )
+            gpus_per_server = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size
+
+            if ie_cfg.enable_pd:
+                from skyrl.backends.skyrl_train.inference_servers.utils import (
+                    get_pd_cli_args,
+                )
+
+                pd_cli_args = get_pd_cli_args(cli_args)
+                num_prefill = ie_cfg.num_prefill
+                num_decode = ie_cfg.num_engines - num_prefill
+                servers_per_group = ie_cfg.data_parallel_size
+
+                prefill_server_groups = [
+                    ServerGroup(
+                        cli_args=copy.deepcopy(pd_cli_args),
+                        num_servers=ie_cfg.data_parallel_size,
+                        start_port=8000 + i * servers_per_group,
+                        placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
+                        placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
+                        enable_dp=ie_cfg.data_parallel_size > 1,
+                        enable_pd=True,
+                        nixl_side_channel_base=5600 + i * servers_per_group,
+                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
+                    )
+                    for i in range(num_prefill)
+                ]
+                prefill_infos_nested = [g.start() for g in prefill_server_groups]
+                prefill_urls = [info.url for infos in prefill_infos_nested for info in infos]
+
+                decode_bundle_offset = num_prefill * gpus_per_server * servers_per_group if shared_pg else 0
+                decode_server_groups = [
+                    ServerGroup(
+                        cli_args=copy.deepcopy(pd_cli_args),
+                        num_servers=ie_cfg.data_parallel_size,
+                        start_port=8000 + (num_prefill + i) * servers_per_group,
+                        placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
+                        placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
+                        enable_dp=ie_cfg.data_parallel_size > 1,
+                        enable_pd=True,
+                        nixl_side_channel_base=5600 + (num_prefill + i) * servers_per_group,
+                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
+                    )
+                    for i in range(num_decode)
+                ]
+                decode_infos_nested = [g.start() for g in decode_server_groups]
+                decode_urls = [info.url for infos in decode_infos_nested for info in infos]
+
+                server_urls = prefill_urls + decode_urls
+
+                router_args = build_router_args(
+                    cfg,
+                    prefill_urls=prefill_urls,
+                    decode_urls=decode_urls,
+                )
+                router = VLLMRouter(router_args)
+                proxy_url = router.start()
+                logger.info(
+                    f"HTTP Inference (PD): prefill_urls={prefill_urls}, decode_urls={decode_urls}, "
+                    f"proxy_url={proxy_url}, colocated={cfg.trainer.placement.colocate_all}"
+                )
+            else:
+                server_groups = [
+                    ServerGroup(
+                        cli_args=cli_args,
+                        num_servers=ie_cfg.data_parallel_size,
+                        placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
+                        enable_dp=ie_cfg.data_parallel_size > 1,
+                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
+                        placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
+                    )
+                    for i in range(ie_cfg.num_engines)
+                ]
+                server_infos_nested = [g.start() for g in server_groups]
+                server_urls = [info.url for infos in server_infos_nested for info in infos]
+
+                router_args = build_router_args(cfg, server_urls=server_urls)
+                router = VLLMRouter(router_args)
+                proxy_url = router.start()
+                logger.info(
+                    f"HTTP Inference: Built servers and router internally - "
+                    f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
+                )
+
             client = RemoteInferenceClient(
                 proxy_url=proxy_url,
                 server_urls=server_urls,
@@ -630,7 +712,14 @@ class InferenceEngineState:
                     needs_wake_up = False
             else:
                 needs_wake_up = False
-        state = cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+        state = cls(
+            client=client,
+            pg=raw_pg if shared_pg else None,
+            router=router,
+            server_groups=server_groups,
+            prefill_server_groups=prefill_server_groups,
+            decode_server_groups=decode_server_groups,
+        )
         state._needs_wake_up = needs_wake_up
         return state
 

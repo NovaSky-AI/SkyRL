@@ -1,4 +1,7 @@
+import copy
+import json
 from argparse import Namespace
+from typing import Any, Dict, List, Optional
 
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
@@ -62,3 +65,101 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         setattr(args, key, value)
 
     return args
+
+
+def get_pd_cli_args(cli_args: Namespace, role: str = "prefill") -> Namespace:
+    """Build PD-specific CLI args by constructing kv_transfer_config JSON.
+
+    Reads ``kv_transfer_config`` from the args namespace (set via
+    ``engine_init_kwargs`` pass-through) and injects ``kv_role=kv_both``.
+    The result is serialized to a JSON string so that
+    ``VLLMServerActor._setup_nixl_side_channel`` can parse and enrich it
+    with ``engine_id``.
+
+    Args:
+        cli_args: Base CLI args from :func:`build_vllm_cli_args`.
+        role: Currently unused (kv_role is always ``kv_both``).
+            Kept for future flexibility.
+
+    Returns:
+        A deep copy of *cli_args* with ``kv_transfer_config`` set to a
+        JSON string.
+    """
+    args = copy.deepcopy(cli_args)
+
+    kv_config = getattr(args, "kv_transfer_config", None)
+    if kv_config is None:
+        raise ValueError(
+            "engine_init_kwargs.kv_transfer_config must be set when enable_pd=True "
+            "(e.g. engine_init_kwargs.kv_transfer_config.kv_connector=NixlConnector)"
+        )
+
+    # kv_transfer_config arrives as a dict from Hydra's nested key resolution
+    if isinstance(kv_config, str):
+        kv_config = json.loads(kv_config)
+
+    if "kv_connector" not in kv_config:
+        raise ValueError("kv_transfer_config.kv_connector must be set when enable_pd=True")
+
+    kv_config["kv_role"] = "kv_both"
+    args.kv_transfer_config = kv_config
+
+    return args
+
+
+def build_router_args(
+    cfg: SkyRLTrainConfig,
+    server_urls: Optional[List[str]] = None,
+    prefill_urls: Optional[List[str]] = None,
+    decode_urls: Optional[List[str]] = None,
+):
+    """Build ``RouterArgs`` for vllm-router from SkyRL config.
+
+    Constructs the dataclass used by ``vllm_router.Router``.  PD mode is
+    activated when *prefill_urls* and *decode_urls* are provided; otherwise
+    uniform mode uses *server_urls*.
+
+    User overrides from ``cfg.generator.inference_engine.router_init_kwargs``
+    are applied last so they can override any computed default.
+
+    Args:
+        cfg: Full SkyRL training config.
+        server_urls: Backend URLs for uniform (non-PD) routing.
+        prefill_urls: Prefill backend URLs (PD mode).
+        decode_urls: Decode backend URLs (PD mode).
+
+    Returns:
+        A populated ``RouterArgs`` instance.
+    """
+    from vllm_router.router_args import RouterArgs
+
+    from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
+
+    ie_cfg = cfg.generator.inference_engine
+    is_pd = prefill_urls is not None and decode_urls is not None
+
+    port = get_open_port()
+
+    kwargs: Dict[str, Any] = dict(
+        host="0.0.0.0",
+        port=port,
+        policy="consistent_hash",
+    )
+
+    if is_pd:
+        # prefill_urls in RouterArgs expects List[Tuple[str, Optional[int]]]
+        kwargs["prefill_urls"] = [(url, None) for url in prefill_urls]
+        kwargs["decode_urls"] = decode_urls
+        kwargs["vllm_pd_disaggregation"] = True
+        kwargs["prefill_policy"] = "consistent_hash"
+        kwargs["decode_policy"] = "consistent_hash"
+    else:
+        if server_urls is None:
+            raise ValueError("Either server_urls or prefill_urls/decode_urls must be provided")
+        kwargs["worker_urls"] = server_urls
+
+    # Apply user overrides from config
+    router_overrides = get_config_as_dict(ie_cfg.router_init_kwargs)
+    kwargs.update(router_overrides)
+
+    return RouterArgs(**kwargs)

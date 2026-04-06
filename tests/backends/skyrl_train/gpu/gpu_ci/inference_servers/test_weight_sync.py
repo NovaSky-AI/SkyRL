@@ -116,27 +116,47 @@ class Trainer:
             raise
 
 
-@pytest_asyncio.fixture(scope="class")
-async def weight_update_env(class_scoped_ray_init_fixture):
+@pytest_asyncio.fixture(scope="class", params=[False, True], ids=["no_pd", "pd"])
+async def weight_update_env(class_scoped_ray_init_fixture, request):
     """
     Create environment for weight update testing.
 
-    Non-colocated setup with TP=2 for both trainer and inference server:
-    - Trainer on separate GPU(s), server (TP=2) on its own GPUs
-    - Uses NCCL broadcast for weight sync
+    Non-colocated setup for both trainer and inference server:
+    - No PD: TP=2 server on its own GPUs, trainer on separate GPU(s). Uses NCCL broadcast.
+    - PD: 1P1D (2 engines, TP=1), trainer on separate GPU. Uses NCCL broadcast.
     """
+    enable_pd = request.param
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    async with InferenceEngineState.create(
-        cfg,
-        model=MODEL,
-        tp_size=2,
-        colocate_all=False,
-        gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
-        engine_init_kwargs={"load_format": "dummy"},
-    ) as engines:
+    if enable_pd:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            num_inference_engines=2,
+            colocate_all=False,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={
+                "load_format": "dummy",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                },
+            },
+            enable_pd=True,
+            num_prefill=1,
+        )
+    else:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=2,
+            colocate_all=False,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={"load_format": "dummy"},
+        )
+
+    async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
         trainer = Trainer.options(num_gpus=1.0).remote(MODEL)
         ray.get(trainer.ready.remote())
 
@@ -326,27 +346,48 @@ class IpcTrainer:
         }
 
 
-@pytest_asyncio.fixture(scope="class")
-async def ipc_weight_update_env(class_scoped_ray_init_fixture):
+@pytest_asyncio.fixture(scope="class", params=[False, True], ids=["no_pd", "pd"])
+async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
     """
     Create environment for colocated IPC weight update testing.
 
     Colocated setup with TP=1:
     - Trainer and server share the same GPU via placement group
     - Server uses CUDA IPC backend for weight sync
+    - PD variant: 1P1D (2 engines, TP=1), both colocated
     """
+    enable_pd = request.param
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    async with InferenceEngineState.create(
-        cfg,
-        model=MODEL,
-        tp_size=1,
-        colocate_all=True,
-        gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
-        engine_init_kwargs={"load_format": "dummy"},
-    ) as engines:
+    if enable_pd:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            num_inference_engines=2,
+            colocate_all=True,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={
+                "load_format": "dummy",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                },
+            },
+            enable_pd=True,
+            num_prefill=1,
+        )
+    else:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            colocate_all=True,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={"load_format": "dummy"},
+        )
+
+    async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
         # Trainer on same PG bundle as server (colocated) with fractional GPU
         trainer = IpcTrainer.options(
             num_gpus=0.2,

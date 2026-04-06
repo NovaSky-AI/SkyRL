@@ -98,6 +98,10 @@ skyrl-train = [
     "setuptools",
 ]
 
+pd = [
+    "nixl; sys_platform == 'linux'",
+]
+
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.18.0; sys_platform == 'linux'",
