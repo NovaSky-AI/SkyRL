@@ -261,7 +261,7 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "03c137d5634db7f271b09e7e5ee13e1f253a0456", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "420a7da37afea5eb4e8d3899d540c830b9c4cda2", marker = "sys_platform == 'linux'"}
 # megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 4/1/26
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "4ef64ebc468cd3da41a22d46a2db37163694e8e2", marker = "sys_platform == 'linux'"}
 
