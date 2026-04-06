@@ -4,9 +4,8 @@ set -x
 # OpenReward + SkyRL training on Modal (4x GPU).
 #
 # Prerequisites:
-#   1. pip install openreward
-#   2. export OPENREWARD_API_KEY="your-key"
-#   3. Prepare dataset:
+#   1. export OPENREWARD_API_KEY="your-key"
+#   2. Prepare dataset:
 #      python examples/train_integrations/openreward/prepare_tasks.py \
 #        --env "GeneralReasoning/WhoDunit" --split train --output /root/data/openreward/train.parquet
 #
@@ -17,7 +16,6 @@ set -x
 # Override any config via positional args:
 #   bash run_openreward.sh trainer.epochs=2
 
-# Use uv's --with openreward to install the openreward package in the isolated environment
 DATA_DIR="${DATA_DIR:-/root/data/openreward}"
 CKPT_DIR="${CKPT_DIR:-/root/data/ckpts/openreward}"
 EXPORT_DIR="${EXPORT_DIR:-/root/data/export/openreward}"
@@ -27,7 +25,7 @@ MODEL="${MODEL:-Qwen/Qwen2.5-3B-Instruct}"
 : "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}"
 
-uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp --with openreward \
   -m examples.train_integrations.openreward.entrypoints.main_openreward \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/train.parquet']" \

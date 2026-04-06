@@ -11,10 +11,10 @@ Expected env_extras (from the dataset prepared by prepare_tasks.py):
 
 import json
 import logging
-import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from openreward import OpenReward
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
 
 MAX_RETRIES = 5
@@ -39,42 +39,6 @@ def _retry_on_server_error(fn, *args, **kwargs):
 
 
 logger = logging.getLogger(__name__)
-
-# Lazy-loaded at first use
-_OpenReward = None
-
-
-def _get_openreward_client_class():
-    """Lazy import openreward, adding system site-packages to sys.path if needed."""
-    global _OpenReward
-    if _OpenReward is not None:
-        return _OpenReward
-
-    try:
-        from openreward import OpenReward
-
-        _OpenReward = OpenReward
-        return _OpenReward
-    except ImportError:
-        pass
-
-    # openreward was pip-installed into system Python by run_openreward.sh
-    # but Ray workers may not see it. Add system site-packages to sys.path.
-    import glob
-
-    for pattern in [
-        "/home/ray/anaconda3/lib/python3.*/site-packages",
-        "/usr/lib/python3/dist-packages",
-        "/usr/local/lib/python3.*/site-packages",
-    ]:
-        for sp in glob.glob(pattern):
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
-
-    from openreward import OpenReward
-
-    _OpenReward = OpenReward
-    return _OpenReward
 
 
 class OpenRewardEnv(BaseTextEnv):
@@ -103,7 +67,6 @@ class OpenRewardEnv(BaseTextEnv):
         if isinstance(prompt, str):
             prompt = json.loads(prompt)
 
-        OpenReward = _get_openreward_client_class()
         self._client = OpenReward()
         self._env = self._client.environments.get(name=self.env_name)
         self._session_ctx = self._env.session(split=self.split, index=self.task_index)
