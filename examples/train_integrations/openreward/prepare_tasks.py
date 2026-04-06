@@ -65,7 +65,7 @@ async def fetch_tasks_for_env(
 
     # Get task count
     num_tasks = await env.num_tasks(split)
-    effective = min(max_tasks, num_tasks) if max_tasks else num_tasks
+    effective = min(max_tasks, num_tasks) if max_tasks is not None else num_tasks
     logger.info(f"{env_name} [{split}]: {num_tasks} tasks total, fetching {effective}")
 
     rows = []

@@ -13,11 +13,11 @@ Rollout upload is controlled by the OPENREWARD_UPLOAD_ROLLOUT environment variab
 
 import hashlib
 import json
-import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from loguru import logger
 from openreward import OpenReward
 from openreward.api.rollouts.serializers.base import (
     AssistantMessage,
@@ -47,9 +47,6 @@ def _retry_on_server_error(fn, *args, **kwargs):
             delay = RETRY_BASE_DELAY * (2**attempt)
             logger.warning(f"OpenReward API error (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {delay}s: {e}")
             time.sleep(delay)
-
-
-logger = logging.getLogger(__name__)
 
 
 class OpenRewardEnv(BaseTextEnv):
@@ -248,7 +245,7 @@ class OpenRewardEnv(BaseTextEnv):
                 logger.warning(f"Failed to upload rollout: {e}")
 
         # Upload synchronously — close() immediately cleans up the client after this,
-        # so fire-and-forget would race with cleanup. The upload is non-blocking in spirit.
+        # so fire-and-forget would race with cleanup.
         try:
             _sync_upload()
         except Exception as e:

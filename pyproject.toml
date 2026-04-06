@@ -149,9 +149,6 @@ miniswe = [
 harbor = [
     "harbor; python_version >= '3.12'",
 ]
-openreward = [
-    "openreward",
-]
 
 dev = [
     "mkdocs",

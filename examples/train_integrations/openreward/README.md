@@ -14,8 +14,8 @@ Train language models on [OpenReward](https://openreward.ai) environments using 
 
 ```bash
 MODAL_GPU=L4:1 modal run examples/train_integrations/modal/main.py \
-  --command "pip install openreward pyarrow && \
-    OPENREWARD_API_KEY=<your-key> python examples/train_integrations/openreward/prepare_tasks.py \
+  --command "OPENREWARD_API_KEY=<your-key> uv run --isolated --with openreward --with pyarrow \
+    python examples/train_integrations/openreward/prepare_tasks.py \
     --env GeneralReasoning/WhoDunit --split train --max-tasks 50 \
     --output /root/data/openreward/train.parquet"
 ```
@@ -24,8 +24,7 @@ MODAL_GPU=L4:1 modal run examples/train_integrations/modal/main.py \
 
 ```bash
 MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
-  --command "pip install openreward && \
-    OPENREWARD_API_KEY=<your-key> WANDB_API_KEY=<your-key> \
+  --command "OPENREWARD_API_KEY=<your-key> WANDB_API_KEY=<your-key> \
     OPENREWARD_UPLOAD_ROLLOUT=true \
     bash examples/train_integrations/openreward/run_openreward.sh"
 ```
@@ -34,8 +33,7 @@ MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
 
 ```bash
 MODAL_GPU=A100:4 modal run examples/train_integrations/modal/main.py \
-  --command "pip install openreward && \
-    OPENREWARD_API_KEY=<your-key> \
+  --command "OPENREWARD_API_KEY=<your-key> \
     OPENREWARD_UPLOAD_ROLLOUT=true \
     LOGGER=console \
     bash examples/train_integrations/openreward/run_openreward.sh \
