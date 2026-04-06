@@ -52,7 +52,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_transformers_v5" \
+  trainer.run_name="gsm8k_test" \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
