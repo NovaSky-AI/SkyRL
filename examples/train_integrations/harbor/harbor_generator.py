@@ -151,8 +151,25 @@ class HarborGenerator(GeneratorInterface):
             mininterval=5,
         )
 
+        def _make_error_output(trajectory_id):
+            return HarborAgentOutput(
+                response_ids=[0],
+                reward=0,
+                stop_reason="error",
+                loss_mask=[0],
+                prompt_ids=[0],
+                trajectory_id=trajectory_id,
+            )
+
         async def _worker(idx, prompt, trajectory_id):
-            result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            try:
+                result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            except BaseException as e:
+                logger.warning(
+                    f"Trajectory {trajectory_id} raised unhandled exception in harbor_agent_loop: {type(e).__name__}: {e}. "
+                    "Returning zeroed-out output."
+                )
+                result = _make_error_output(trajectory_id)
             all_outputs[idx] = result
             progress.update(1)
 
@@ -160,8 +177,15 @@ class HarborGenerator(GeneratorInterface):
             async with asyncio.TaskGroup() as tg:
                 for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
                     tg.create_task(_worker(idx, prompt, trajectory_id))
+        except BaseException as e:
+            logger.warning(f"TaskGroup raised {type(e).__name__}: {e}. Some workers may have failed.")
         finally:
             progress.close()
+
+        # Safety: fill any remaining None entries (e.g. from cancelled tasks)
+        for idx in range(len(all_outputs)):
+            if all_outputs[idx] is None:
+                all_outputs[idx] = _make_error_output(trajectory_ids[idx])
 
         if self.step_wise:
             return self._build_step_wise_generator_output(all_outputs)

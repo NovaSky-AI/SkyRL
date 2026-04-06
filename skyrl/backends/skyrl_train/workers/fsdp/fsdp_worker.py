@@ -1,4 +1,5 @@
 from skyrl.train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+import gc
 import ray
 import torch
 import torch.distributed
@@ -237,6 +238,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
+        gc.collect()
         torch.cuda.empty_cache()
 
         # Check if this is a LoRA model
@@ -260,6 +262,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         if cache_reset_task is not None:
             await cache_reset_task
+        gc.collect()
         torch.cuda.empty_cache()
         torch.distributed.barrier()
 

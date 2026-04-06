@@ -1,4 +1,5 @@
 import copy
+import gc
 import math
 import os
 import shutil
@@ -955,6 +956,7 @@ class RayPPOTrainer:
         if self.ref_model is not None:
             ref_output = self.dispatch.forward("ref", data_fwd_pass)
             base_log_probs = ref_output["output"]
+            gc.collect()
             self.dispatch.empty_cache("ref")
 
         # Policy forward
@@ -962,6 +964,7 @@ class RayPPOTrainer:
         action_log_probs = policy_output["output"]
 
         # Empty cache after all forward passes
+        gc.collect()
         self.dispatch.empty_cache()
 
         sequences_all: torch.Tensor = training_input["sequences"]
@@ -1124,6 +1127,7 @@ class RayPPOTrainer:
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
 
+        gc.collect()
         self.dispatch.empty_cache()
 
         return policy_status
