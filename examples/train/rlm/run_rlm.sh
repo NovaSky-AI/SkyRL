@@ -46,7 +46,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.eval_batch_size=16 \
-  trainer.train_batch_size=8 \
+  trainer.train_batch_size=2 \
   trainer.policy_mini_batch_size=8 \
   trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
@@ -68,7 +68,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.75 \
+  generator.inference_engine.gpu_memory_utilization=0.6 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.inference_engine.enforce_eager=false \
