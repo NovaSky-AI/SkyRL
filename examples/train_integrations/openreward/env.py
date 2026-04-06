@@ -157,7 +157,7 @@ class OpenRewardEnv(BaseTextEnv):
             tool_output = _retry_on_server_error(self._session.call_tool, tool_name=tool_name, input=tool_args)
             output_text = "".join(b.text for b in tool_output.blocks if b.type == "text")
             finished = tool_output.finished
-            reward = tool_output.reward or 0.0
+            reward = tool_output.reward if tool_output.reward is not None else 0.0
         except Exception as e:
             # Catch ToolCallError, network errors, 429s etc. gracefully
             logger.warning(f"OpenReward call_tool failed: {e}")
@@ -182,12 +182,9 @@ class OpenRewardEnv(BaseTextEnv):
 
         obs = [{"role": "user", "content": f"<tool_response>\n{output_text}\n</tool_response>"}]
 
-        # Return per-step reward to avoid double-counting (Generator handles discounted returns)
-        final_reward = reward
-
         return BaseTextEnvStepOutput(
             observations=obs,
-            reward=final_reward,
+            reward=reward,
             done=done,
             metadata={
                 "tool_name": tool_name,
