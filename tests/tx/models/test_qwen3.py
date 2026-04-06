@@ -25,7 +25,7 @@ def test_qwen3(tp: int):
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-0.6B", attn_implementation="eager", use_safetensors=True
+        "Qwen/Qwen3-0.6B", attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
 
     inputs = ["The capital of France is", "The most popular programming language is"]
@@ -48,31 +48,37 @@ def test_qwen3(tp: int):
 
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
     assert outputs.hidden_states is not None
-    assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
-    assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-    assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=1e-3, atol=1e-3)
+    assert np.allclose(hf_outputs.hidden_states[0].float(), outputs.hidden_states[0], rtol=1e-6)
+    assert np.allclose(hf_outputs.hidden_states[1].float(), outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
+    assert np.allclose(hf_outputs.hidden_states[-1].float(), outputs.hidden_states[-1], rtol=1e-3, atol=1e-3)
 
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight.detach().numpy().T
-    for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight.detach().float().numpy().T
+    gate_up = hf_moe_layer.experts.gate_up_proj.detach().float().numpy()
+    intermediate = gate_up.shape[1] // 2
+    jax_moe_layer.experts.gate_proj.weight[:] = gate_up[:, :intermediate, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.up_proj.weight[:] = gate_up[:, intermediate:, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.down_proj.weight[:] = (
+        hf_moe_layer.experts.down_proj.detach().float().numpy().transpose(0, 2, 1)
+    )
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_qwen3_moe_layer(ep: int, tp: int):
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
 
     hf_moe_layer = hf_model.model.layers[0].mlp
     x = torch.randn(4, 2, config.hidden_size)
     with torch.no_grad():
-        hf_final_hidden_states, hf_router_logits = hf_moe_layer.forward(x)
+        hf_final_hidden_states = hf_moe_layer.forward(x)
+        hf_router_logits = torch.nn.functional.linear(x.view(-1, config.hidden_size), hf_moe_layer.gate.weight)
 
     mesh = jax.make_mesh((1, ep, tp), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):
@@ -117,7 +123,9 @@ def share_hf_lora_A(hf_modules: list) -> None:
 def test_qwen3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
@@ -200,7 +208,9 @@ def test_qwen3_lora():
         lora_configs.append(lora_config)
 
         hf_model = get_peft_model(
-            AutoModelForCausalLM.from_pretrained(base_model_name, attn_implementation="eager", use_safetensors=True),
+            AutoModelForCausalLM.from_pretrained(
+                base_model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+            ),
             lora_config,
         )
         hf_model.eval()
@@ -241,8 +251,8 @@ def test_qwen3_lora():
         load_lora_weights(
             model.model.embed_tokens,
             adapter_idx=adapter_idx,
-            lora_A_weights=hf_embed_tokens.lora_embedding_A["default"].detach().numpy().T,
-            lora_B_weights=hf_embed_tokens.lora_embedding_B["default"].detach().numpy().T,
+            lora_A_weights=hf_embed_tokens.lora_embedding_A["default"].detach().float().numpy().T,
+            lora_B_weights=hf_embed_tokens.lora_embedding_B["default"].detach().float().numpy().T,
             scaling=lora_config.lora_alpha / lora_config.r,
             rank=lora_config.r,
         )
@@ -262,9 +272,9 @@ def test_qwen3_lora():
                 load_lora_weights(
                     jax_proj,
                     adapter_idx=adapter_idx,
-                    lora_A_weights=hf_projs[0].lora_A["default"].weight.detach().numpy().T,
+                    lora_A_weights=hf_projs[0].lora_A["default"].weight.detach().float().numpy().T,
                     lora_B_weights=FusedLoRALinear.fuse(
-                        *(p.lora_B["default"].weight.detach().numpy().T for p in hf_projs),
+                        *(p.lora_B["default"].weight.detach().float().numpy().T for p in hf_projs),
                         group_sizes=group_sizes,
                     ),
                     scaling=lora_config.lora_alpha / lora_config.r,
@@ -284,4 +294,4 @@ def test_qwen3_lora():
 
     # Compare outputs with corresponding adapters
     for idx in range(len(lora_adapters)):
-        assert np.allclose(hf_outputs_list[idx].logits[0], logits[idx], rtol=1e-3, atol=1e-3)
+        assert np.allclose(hf_outputs_list[idx].logits[0].float(), logits[idx], rtol=1e-3, atol=1e-3)

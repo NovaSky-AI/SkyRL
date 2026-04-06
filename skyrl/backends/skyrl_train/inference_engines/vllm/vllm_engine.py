@@ -15,7 +15,6 @@ from uuid import uuid4
 import ray
 import vllm
 from loguru import logger
-from packaging import version
 from vllm import SamplingParams
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -28,7 +27,12 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    BaseModelPath,
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 
@@ -98,8 +102,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
-        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
-            # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
+        if vllm_v1_disable_multiproc:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
         # Store common attributes
@@ -351,10 +354,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         enable_log_requests = kwargs.pop("enable_log_requests", False)
         max_log_len = kwargs.pop("max_log_len", None)
 
-        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-            engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
-        else:
-            engine_args = vllm.AsyncEngineArgs(disable_log_requests=not enable_log_requests, **kwargs)
+        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
         stat_loggers = None
@@ -363,8 +363,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
-        # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
-        model_config = engine.model_config
         model_path = kwargs.get("model")
         # Use served_model_name if provided (from generator.served_model_name config),
         # otherwise fall back to model_path. This allows using a different model name
@@ -374,15 +372,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         model_name = served_model_name if served_model_name is not None else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-
-        # vllm >= 0.11.2 removed model_config from OpenAI serving APIs
-        is_new_api = version.parse(vllm.__version__) >= version.parse("0.11.2")
-        legacy_kwargs = {}
-        if is_new_api:
-            models = OpenAIServingModels(engine, base_model_paths)
-        else:
-            models = OpenAIServingModels(engine, model_config, base_model_paths)
-            legacy_kwargs["model_config"] = model_config
+        models = OpenAIServingModels(engine, base_model_paths)
 
         # Build request logger for debugging (off by default).
         # Enable via: generator.engine_init_kwargs.enable_log_requests=true
@@ -393,14 +383,39 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
             request_logger = RequestLogger(max_log_len=max_log_len)
 
+        chat_template = openai_kwargs.pop("chat_template", None)
+
+        from vllm.plugins.io_processors import get_io_processor
+        from vllm.renderers import renderer_from_config
+
+        model_registry = OpenAIModelRegistry(
+            model_config=engine.model_config,
+            base_model_paths=base_model_paths,
+        )
+        renderer = renderer_from_config(engine.vllm_config)
+        io_processor = get_io_processor(
+            engine.vllm_config,
+            renderer,
+            engine.model_config.io_processor_plugin,
+        )
+        openai_serving_render = OpenAIServingRender(
+            model_config=engine.model_config,
+            renderer=renderer,
+            io_processor=io_processor,
+            model_registry=model_registry,
+            request_logger=request_logger,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+        )
+
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
+            openai_serving_render=openai_serving_render,
             request_logger=request_logger,
-            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
+            chat_template=chat_template,
             chat_template_content_format="auto",
-            **legacy_kwargs,
             **openai_kwargs,
         )
 
@@ -409,8 +424,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
             models=models,
+            openai_serving_render=openai_serving_render,
             request_logger=request_logger,
-            **legacy_kwargs,
         )
         return engine
 
@@ -562,20 +577,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=HTTPStatus.BAD_REQUEST.phrase,
-                        code=HTTPStatus.BAD_REQUEST.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
+            return ErrorResponse(
+                error=ErrorInfo(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ).model_dump()
+                ),
+            ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -607,20 +615,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             else:
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=http_status.phrase,
-                        code=http_status.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
+            return ErrorResponse(
+                error=ErrorInfo(
                     message=str(e),
                     type=http_status.phrase,
                     code=http_status.value,
-                ).model_dump()
+                ),
+            ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.

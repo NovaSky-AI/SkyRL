@@ -4,13 +4,13 @@ import asyncio
 import pickle
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -46,18 +46,57 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
+        sp = body.get("sampling_params", {})
+        n = sp.get("n", 1)
+        # If logprobs is explicitly set (sample path), use n for num_choices.
+        # Otherwise (generate path), use len(token_ids) for per-prompt responses.
+        if "logprobs" in sp:
+            num_choices = n
+        else:
+            num_choices = 1
 
         return {
             "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
+                {
+                    "request_id": "dummy",
+                    "token_ids": [i, i + 1, i + 2],
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"logprob": -0.1 * (i + 1)}]},
+                }
+                for i in range(num_choices)
             ]
         }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return {"choices": [{"message": {"content": f"Chat from server {server_id}"}}]}
+
+    @app.post("/v1/chat/completions/render")
+    async def render_chat_completion(request: Request):
+        body = await request.json()
+        messages = body.get("messages", [])
+        has_multimodal = any(
+            isinstance(msg.get("content"), list) and any(c.get("type") == "image_url" for c in msg["content"])
+            for msg in messages
+        )
+        features = None
+        if has_multimodal:
+            features = {
+                "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+                "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+            }
+        return {
+            "request_id": f"chatcmpl-mock-{server_id}",
+            "token_ids": list(range(110)) if has_multimodal else list(range(10)),
+            "features": features,
+            "sampling_params": {"temperature": 0.7, "max_tokens": 100},
+            "model": body.get("model", "test"),
+            "stream": body.get("stream", False),
+            "stream_options": body.get("stream_options"),
+            "cache_salt": None,
+            "priority": 0,
+            "kv_transfer_params": None,
+        }
 
     @app.post("/tokenize")
     async def tokenize(request: Request):
@@ -82,12 +121,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_paused": False}
 
     @app.post("/sleep")
-    async def sleep(request: Request):
-        return {"status": "sleeping", "server_id": server_id}
+    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
 
     @app.post("/wake_up")
-    async def wake_up():
-        return {"status": "awake", "server_id": server_id}
+    async def wake_up(tags: Optional[List[str]] = Query(None)):
+        return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
@@ -309,12 +348,34 @@ class TestControlPlane:
         """Test sleep fans out to all servers."""
         result = await client.sleep(level=2)
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 2
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_sleep_with_tags(self, client):
+        """Test sleep with tags produces correct repeated query params."""
+        result = await client.sleep(level=1, tags=["weights", "kv_cache"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 1
+            assert response["body"]["tags"] == ["weights", "kv_cache"]
 
     @pytest.mark.asyncio
     async def test_wake_up(self, client):
         """Test wake_up fans out to all servers."""
         result = await client.wake_up()
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_wake_up_with_tags(self, client):
+        """Test wake_up with tags produces correct repeated query params."""
+        result = await client.wake_up(tags=["weights"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
     async def test_reset_prefix_cache(self, client):
@@ -370,6 +431,113 @@ class TestServerInfo:
         # Second call returns cached value
         total_world_size2, _ = await client.get_world_size()
         assert total_world_size2 == 4
+
+
+class TestSample:
+    """Test sample() method (Tinker API)."""
+
+    @pytest.mark.asyncio
+    async def test_sample(self, client):
+        """Test sample with n=1 returns correct structure."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert seq["tokens"] == [0, 1, 2]
+        assert seq["logprobs"] == [-0.1]
+        assert seq["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_n2(self, client):
+        """Test sample with n=2 returns two sequences."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
+                "num_samples": 2,
+                "sampling_params": {"temperature": 1.0, "max_tokens": 32},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert len(result["sequences"]) == 2
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][1]["tokens"] == [1, 2, 3]
+        assert result["sequences"][0]["logprobs"] == [-0.1]
+        assert result["sequences"][1]["logprobs"] == [-0.2]
+
+
+class TestRenderChatCompletion:
+    """Test render_chat_completion method (multimodal and text-only)."""
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_basic(self, client):
+        """Text-only render returns correct top-level fields and features is None."""
+        request_payload = {
+            "json": {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello, who are you?"}],
+            },
+        }
+        result = await client.render_chat_completion(request_payload)
+
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(10))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
+        assert result["model"] == "test"
+        assert result["features"] is None
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_multimodal(self, client):
+        """Multimodal render returns features with mm_hashes and mm_placeholders."""
+        request_payload = {
+            "json": {
+                "model": "test-vlm",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ"},
+                            },
+                            {"type": "text", "text": "What is in this image?"},
+                        ],
+                    }
+                ],
+            },
+        }
+        result = await client.render_chat_completion(request_payload)
+
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(110))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
+        assert result["model"] == "test-vlm"
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
+
+        assert result["features"] == {
+            "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+            "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+        }
 
 
 class TestContextManager:

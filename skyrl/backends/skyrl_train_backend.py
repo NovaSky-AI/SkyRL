@@ -258,8 +258,21 @@ class SkyRLTrainBackend(AbstractBackend):
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
             raise ValueError(f"Model {model_id} not found")
-        # TODO: For now, prefer shutting down the backend and re-launching. Will be improved shortly.
-        raise NotImplementedError("Deleting models not yet implemented")
+
+        # Currently only one model at a time is supported. Shut down Ray entirely
+        # and reset state; everything will be re-initialized in create_model().
+        logger.info(f"Deleting model {model_id}, shutting down Ray...")
+        ray.shutdown()
+
+        self._model_id = None
+        self._model_metadata = None
+        self._cfg = None
+        self._dispatch = None
+        self._inference_engine_client = None
+        self._inference_engines_initialized = False
+        self._colocate_pg = None
+
+        logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""

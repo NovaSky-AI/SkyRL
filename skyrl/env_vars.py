@@ -46,7 +46,7 @@ and server.
 
 This controls:
 - aiohttp TCPConnector limit in `RemoteInferenceClient`
-- httpx connection pool limits in the `InferenceRouter`
+- connection pool limits in the router
 - uvicorn TCP backlog in the router and vLLM server
 """
 

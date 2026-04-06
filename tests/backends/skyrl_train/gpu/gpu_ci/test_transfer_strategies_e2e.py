@@ -296,8 +296,8 @@ def _run_weight_sync_e2e(
             receiver_options = {"num_gpus": 1}
 
         # Use for_engine() to get per-engine init_info
-        # Test assumes tp_size=pp_size=1 (single worker per engine)
-        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1)
+        # Test assumes tp_size=pp_size=1,dp_size=1 (single worker per engine)
+        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1, dp_size=1)
 
         receiver = ReceiverActor.options(**receiver_options).remote(strategy_cls, receiver_init_info)
         receivers.append(receiver)
