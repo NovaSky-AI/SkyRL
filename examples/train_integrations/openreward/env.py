@@ -11,7 +11,6 @@ Expected env_extras (from the dataset prepared by prepare_tasks.py):
 Rollout upload is controlled by the OPENREWARD_UPLOAD_ROLLOUT environment variable.
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -115,7 +114,8 @@ class OpenRewardEnv(BaseTextEnv):
 
         # No tool call found — treat as final answer, end episode
         if tool_call is None:
-            reward = sum(self._rewards)
+            # No new tool call this turn, so reward = 0 (previous rewards already returned per-step)
+            reward = 0.0
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=reward,
@@ -182,8 +182,8 @@ class OpenRewardEnv(BaseTextEnv):
 
         obs = [{"role": "user", "content": f"<tool_response>\n{output_text}\n</tool_response>"}]
 
-        # On done, return cumulative reward
-        final_reward = sum(self._rewards) if done else reward
+        # Return per-step reward to avoid double-counting (Generator handles discounted returns)
+        final_reward = reward
 
         return BaseTextEnvStepOutput(
             observations=obs,
@@ -250,15 +250,12 @@ class OpenRewardEnv(BaseTextEnv):
             except Exception as e:
                 logger.warning(f"Failed to upload rollout: {e}")
 
-        # Fire-and-forget in background thread
+        # Upload synchronously — close() immediately cleans up the client after this,
+        # so fire-and-forget would race with cleanup. The upload is non-blocking in spirit.
         try:
-            asyncio.create_task(asyncio.to_thread(_sync_upload))
-        except Exception:
-            # Fallback: run synchronously if event loop not available
-            try:
-                _sync_upload()
-            except Exception as e:
-                logger.warning(f"Rollout upload failed: {e}")
+            _sync_upload()
+        except Exception as e:
+            logger.warning(f"Rollout upload failed: {e}")
 
     def get_metrics(self) -> Dict[str, Any]:
         return {
