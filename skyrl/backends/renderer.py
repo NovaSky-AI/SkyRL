@@ -56,7 +56,8 @@ def decode_mm_kwargs(rendered: RenderedModelInput) -> Tuple[torch.Tensor, torch.
             thw_parts.append(data["image_grid_thw"])
 
     pixel_values = torch.cat(pv_parts, dim=0) if pv_parts else torch.empty(0)
-    image_grid_thw = torch.stack(thw_parts, dim=0) if thw_parts else torch.empty(0, 3, dtype=torch.long)
+    thw_parts = [t.reshape(1, -1) if t.dim() == 1 else t for t in thw_parts]
+    image_grid_thw = torch.cat(thw_parts, dim=0) if thw_parts else torch.empty(0, 3, dtype=torch.long)
     return pixel_values, image_grid_thw
 
 
