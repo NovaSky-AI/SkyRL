@@ -47,6 +47,9 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
 def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
+    elif backend == "none":
+        # External generation backend (e.g. Atropos-SHM)
+        return {}
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")
 

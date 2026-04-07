@@ -16,23 +16,22 @@ import ray
 import vllm
 from loguru import logger
 from vllm import SamplingParams
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-)
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+    ErrorInfo,
+    ErrorResponse,
 )
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.openai.models.serving import (
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 
@@ -398,15 +397,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             renderer,
             engine.model_config.io_processor_plugin,
         )
-        openai_serving_render = OpenAIServingRender(
-            model_config=engine.model_config,
-            renderer=renderer,
-            io_processor=io_processor,
-            model_registry=model_registry,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format="auto",
-        )
+        # openai_serving_render = OpenAIServingRender(
+        #     model_config=engine.model_config,
+        #     renderer=renderer,
+        #     io_processor=io_processor,
+        #     model_registry=model_registry,
+        #     request_logger=request_logger,
+        #     chat_template=chat_template,
+        #     chat_template_content_format="auto",
+        # )
+        openai_serving_render = None
 
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,

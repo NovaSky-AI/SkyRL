@@ -493,6 +493,7 @@ class GeneratorConfig(BaseConfig):
     inference_engine: InferenceEngineConfig = field(default_factory=InferenceEngineConfig)
     n_samples_per_prompt: int = 5
     batched: bool = False
+    external_generation: bool = False
     max_turns: int = 1
     max_input_length: Optional[int] = None
     """Max generator input length for multi-turn conversations. For single-turn, set equal to ``max_prompt_length``."""
