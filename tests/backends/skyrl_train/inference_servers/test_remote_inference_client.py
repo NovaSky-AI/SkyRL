@@ -44,6 +44,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         }
 
     @app.post("/skyrl/v1/generate")
+    @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
