@@ -76,7 +76,7 @@ async def test_renderer_text_only(module_scoped_ray_init_fixture):
 
         tokens = _tokenize_text("Hello, world!")
         mi = ModelInput(chunks=[EncodedTextChunk(tokens=tokens)])
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert len(results) == 1
         assert results[0].prompt_ids == tokens
@@ -106,7 +106,7 @@ async def test_renderer_with_image(module_scoped_ray_init_fixture):
 
         jpeg_data = _make_tiny_jpeg_bytes()
         mi = ModelInput(chunks=[ImageChunk(data=jpeg_data, format="jpeg")])
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert len(results) == 1
         rendered = results[0]
@@ -150,7 +150,7 @@ async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
                 EncodedTextChunk(tokens=suffix_tokens),
             ]
         )
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert len(results) == 1
         rendered = results[0]

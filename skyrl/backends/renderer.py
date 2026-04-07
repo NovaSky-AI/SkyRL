@@ -82,11 +82,8 @@ class VLLMRenderer:
         self._client = client
         self._model_name = model_name
 
-    def __call__(self, model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
-        async def _render_all() -> list[RenderedModelInput]:
-            return list(await asyncio.gather(*[self._render_single(mi) for mi in model_inputs]))
-
-        return asyncio.run(_render_all())
+    async def __call__(self, model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
+        return list(await asyncio.gather(*[self._render_single(mi) for mi in model_inputs]))
 
     # -- internal -------------------------------------------------------------
 
@@ -162,7 +159,8 @@ class VLLMRenderer:
 
             chunk = image_chunks[i]
             if chunk.expected_tokens is not None and chunk.expected_tokens != length:
-                logger.warning(
+                # Tinker semantics raise an error if expected chunks is incorect.
+                raise ValueError(
                     f"Image {i}: expected_tokens={chunk.expected_tokens} but render returned {length} placeholder tokens"
                 )
 

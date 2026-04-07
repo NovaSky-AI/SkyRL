@@ -39,12 +39,13 @@ def _make_render_response(
 
 
 class TestVLLMRendererTextOnly:
-    def test_concatenates_tokens(self):
+    @pytest.mark.asyncio
+    async def test_concatenates_tokens(self):
         client = _make_mock_client()
         renderer = VLLMRenderer(client, model_name="test-model")
 
         mi = _make_text_input([[1, 2, 3], [4, 5]])
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert len(results) == 1
         assert results[0].prompt_ids == [1, 2, 3, 4, 5]
@@ -52,32 +53,35 @@ class TestVLLMRendererTextOnly:
         assert results[0].multi_modal_kwargs is None
         client.render_chat_completion.assert_not_called()
 
-    def test_multiple_text_inputs(self):
+    @pytest.mark.asyncio
+    async def test_multiple_text_inputs(self):
         client = _make_mock_client()
         renderer = VLLMRenderer(client, model_name="test-model")
 
         inputs = [_make_text_input([[10, 20]]), _make_text_input([[30]])]
-        results = renderer(inputs)
+        results = await renderer(inputs)
 
         assert len(results) == 2
         assert results[0].prompt_ids == [10, 20]
         assert results[1].prompt_ids == [30]
         client.render_chat_completion.assert_not_called()
 
-    def test_matches_render_model_input(self):
+    @pytest.mark.asyncio
+    async def test_matches_render_model_input(self):
         """Text-only fast path should produce the same result as the free function."""
         client = _make_mock_client()
         renderer = VLLMRenderer(client, model_name="test-model")
 
         mi = _make_text_input([[1, 2], [3, 4, 5]])
-        vllm_result = renderer([mi])[0]
+        vllm_result = (await renderer([mi]))[0]
         free_fn_result = render_model_input([mi])[0]
 
         assert vllm_result.prompt_ids == free_fn_result.prompt_ids
 
 
 class TestVLLMRendererImageOnly:
-    def test_single_image(self):
+    @pytest.mark.asyncio
+    async def test_single_image(self):
         client = _make_mock_client()
         placeholder_tokens = [100, 101, 102]
         client.render_chat_completion.return_value = _make_render_response(
@@ -88,7 +92,7 @@ class TestVLLMRendererImageOnly:
 
         renderer = VLLMRenderer(client, model_name="test-model")
         mi = ModelInput(chunks=[_make_image_chunk()])
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert len(results) == 1
         assert results[0].prompt_ids == [100, 101, 102]
@@ -98,7 +102,8 @@ class TestVLLMRendererImageOnly:
         assert results[0].multi_modal_placeholders[0].length == 3
         assert results[0].multi_modal_kwargs == {"image": ["base64-encoded-data"]}
 
-    def test_no_kwargs_data(self):
+    @pytest.mark.asyncio
+    async def test_no_kwargs_data(self):
         client = _make_mock_client()
         client.render_chat_completion.return_value = _make_render_response(
             token_ids=[200, 201],
@@ -107,12 +112,13 @@ class TestVLLMRendererImageOnly:
 
         renderer = VLLMRenderer(client, model_name="test-model")
         mi = ModelInput(chunks=[_make_image_chunk()])
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert results[0].prompt_ids == [200, 201]
         assert results[0].multi_modal_kwargs is None
 
-    def test_placeholder_count_mismatch_raises(self):
+    @pytest.mark.asyncio
+    async def test_placeholder_count_mismatch_raises(self):
         client = _make_mock_client()
         client.render_chat_completion.return_value = _make_render_response(
             token_ids=[1, 2, 3],
@@ -122,11 +128,12 @@ class TestVLLMRendererImageOnly:
         renderer = VLLMRenderer(client, model_name="test-model")
         mi = ModelInput(chunks=[_make_image_chunk()])
         with pytest.raises(RuntimeError, match="Expected 1 image placeholders, got 0"):
-            renderer([mi])
+            await renderer([mi])
 
 
 class TestVLLMRendererMixed:
-    def test_text_image_text(self):
+    @pytest.mark.asyncio
+    async def test_text_image_text(self):
         """Interleaved [text, image, text] should produce tokens in correct order."""
         client = _make_mock_client()
         placeholder_tokens = [50, 51, 52]
@@ -144,7 +151,7 @@ class TestVLLMRendererMixed:
                 EncodedTextChunk(tokens=[3, 4]),
             ]
         )
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert results[0].prompt_ids == [1, 2, 50, 51, 52, 3, 4]
         assert results[0].multi_modal_placeholders is not None
@@ -153,7 +160,8 @@ class TestVLLMRendererMixed:
         assert ph.length == 3
         assert results[0].multi_modal_kwargs == {"image": ["img-data"]}
 
-    def test_two_images(self):
+    @pytest.mark.asyncio
+    async def test_two_images(self):
         """Two images should produce two placeholder regions."""
         client = _make_mock_client()
         client.render_chat_completion.return_value = _make_render_response(
@@ -174,7 +182,7 @@ class TestVLLMRendererMixed:
                 EncodedTextChunk(tokens=[2]),
             ]
         )
-        results = renderer([mi])
+        results = await renderer([mi])
 
         assert results[0].prompt_ids == [1, 10, 11, 20, 21, 22, 2]
         phs = results[0].multi_modal_placeholders
