@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import logging
 from typing import TYPE_CHECKING, NamedTuple, Tuple, Union
 
 import torch
@@ -20,8 +19,6 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
-
-logger = logging.getLogger(__name__)
 
 
 def render_model_input(model_inputs: list[ModelInput]) -> list[RenderedModelInput]:

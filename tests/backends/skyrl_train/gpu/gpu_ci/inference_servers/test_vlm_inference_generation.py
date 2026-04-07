@@ -1,5 +1,5 @@
 """
-VLM integration tests for the inference path.
+VLM integration tests for the new inference path and tinker renderer.
 
 Tests /v1/chat/completions/render with a VLM to verify multimodal
 inputs are correctly tokenized and multimodal features are returned,
@@ -27,11 +27,12 @@ from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
 requires_local_vllm = pytest.mark.skipif(
     os.environ.get("SKYRL_LOCAL_VLLM") != "1",
-    reason="Requires local vLLM with /v1/chat/completions/render support",
+    reason="Requires local vLLM with multi-modal /v1/chat/completions/render support",
 )
 
 MODEL_QWEN3_VL = "Qwen/Qwen3-VL-2B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
+QWEN3_VL_IMAGE_PLACEHOLDER_TOKEN_ID = 151655
 TP_SIZE = 1
 
 
@@ -237,6 +238,9 @@ async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
         assert ph.offset == len(prefix_tokens)
         total_len = len(prefix_tokens) + ph.length + len(suffix_tokens)
         assert len(rendered.prompt_ids) == total_len
+
+        placeholder_tokens = rendered.prompt_ids[ph.offset : ph.offset + ph.length]
+        assert all(t == QWEN3_VL_IMAGE_PLACEHOLDER_TOKEN_ID for t in placeholder_tokens)
 
 
 # ---------------------------------------------------------------------------
