@@ -148,16 +148,24 @@ class MegatronWeightExtractor(WeightExtractor):
 
         for idx, task in enumerate(weight_conversion_tasks):
             if getattr(task.mapping, "is_grouped_export", False):
-                gk = task.mapping.group_key
+                gk = getattr(task.mapping, "group_key", None)
                 grouped_task_indices.setdefault(gk, []).append(idx)
             else:
                 regular_task_indices.append(idx)
 
         self.bucket_index_groups: list[list[int]] = []
 
-        # Place each group_key's tasks into its own bucket (they must not be split).
+        # Pack grouped-export tasks into buckets by size, keeping each
+        # group_key's tasks together (they must not be split across calls).
+        curr_size = 0
+        threshold = self.bucket_size_threshold_GB * 1024**3
         for gk, indices in grouped_task_indices.items():
-            self.bucket_index_groups.append(indices)
+            group_size = sum(sizes[idx] for idx in indices if sizes[idx] is not None)
+            if not self.bucket_index_groups or curr_size + group_size > threshold:
+                self.bucket_index_groups.append([])
+                curr_size = 0
+            self.bucket_index_groups[-1].extend(indices)
+            curr_size += group_size
 
         # Bucket regular (non-grouped) tasks by size as before.
         if regular_task_indices:
@@ -165,7 +173,7 @@ class MegatronWeightExtractor(WeightExtractor):
             curr_size = 0
             for idx in regular_task_indices:
                 size = sizes[idx]
-                if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+                if curr_size + size > threshold:
                     self.bucket_index_groups.append([])
                     curr_size = 0
                 self.bucket_index_groups[-1].append(idx)
