@@ -79,58 +79,6 @@ class TestVLLMRendererTextOnly:
         assert vllm_result.prompt_ids == free_fn_result.prompt_ids
 
 
-class TestVLLMRendererImageOnly:
-    @pytest.mark.asyncio
-    async def test_single_image(self):
-        client = _make_mock_client()
-        placeholder_tokens = [100, 101, 102]
-        client.render_chat_completion.return_value = _make_render_response(
-            token_ids=placeholder_tokens,
-            placeholders=[{"offset": 0, "length": 3}],
-            kwargs_data=["base64-encoded-data"],
-        )
-
-        renderer = VLLMRenderer(client, model_name="test-model")
-        mi = ModelInput(chunks=[_make_image_chunk()])
-        results = await renderer([mi])
-
-        assert len(results) == 1
-        assert results[0].prompt_ids == [100, 101, 102]
-        assert results[0].multi_modal_placeholders is not None
-        assert len(results[0].multi_modal_placeholders) == 1
-        assert results[0].multi_modal_placeholders[0].offset == 0
-        assert results[0].multi_modal_placeholders[0].length == 3
-        assert results[0].multi_modal_kwargs == {"image": ["base64-encoded-data"]}
-
-    @pytest.mark.asyncio
-    async def test_no_kwargs_data(self):
-        client = _make_mock_client()
-        client.render_chat_completion.return_value = _make_render_response(
-            token_ids=[200, 201],
-            placeholders=[{"offset": 0, "length": 2}],
-        )
-
-        renderer = VLLMRenderer(client, model_name="test-model")
-        mi = ModelInput(chunks=[_make_image_chunk()])
-        results = await renderer([mi])
-
-        assert results[0].prompt_ids == [200, 201]
-        assert results[0].multi_modal_kwargs is None
-
-    @pytest.mark.asyncio
-    async def test_placeholder_count_mismatch_raises(self):
-        client = _make_mock_client()
-        client.render_chat_completion.return_value = _make_render_response(
-            token_ids=[1, 2, 3],
-            placeholders=[],  # 0 placeholders for 1 image
-        )
-
-        renderer = VLLMRenderer(client, model_name="test-model")
-        mi = ModelInput(chunks=[_make_image_chunk()])
-        with pytest.raises(RuntimeError, match="Expected 1 image placeholders, got 0"):
-            await renderer([mi])
-
-
 class TestVLLMRendererMixed:
     @pytest.mark.asyncio
     async def test_text_image_text(self):

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def render_model_input(model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
-    """Text-only renderer. Concatenates token chunks, ignores images."""
+    """Text-only renderer. Concatenates token chunks."""
     return [
         RenderedModelInput(
             prompt_ids=[tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]

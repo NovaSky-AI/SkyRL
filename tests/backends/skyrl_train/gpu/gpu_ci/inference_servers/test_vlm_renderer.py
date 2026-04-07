@@ -6,6 +6,7 @@ Run with:
     SKYRL_LOCAL_VLLM=1 python -m pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_vlm_renderer.py -m vllm -v
 """
 
+import base64
 import io
 import os
 
@@ -42,11 +43,12 @@ def _get_config(num_inference_engines: int = 1) -> SkyRLTrainConfig:
     return cfg
 
 
-def _make_tiny_jpeg_bytes() -> bytes:
+def _make_tiny_jpeg_b64() -> bytes:
+    """Create a tiny JPEG and return it base64-encoded, matching the tinker API input format."""
     img = Image.new("RGB", (8, 8), color=(255, 0, 0))
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
-    return buf.getvalue()
+    return base64.b64encode(buf.getvalue())
 
 
 def _tokenize_text(text: str) -> list[int]:
@@ -104,8 +106,8 @@ async def test_renderer_with_image(module_scoped_ray_init_fixture):
     ) as engines:
         renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
 
-        jpeg_data = _make_tiny_jpeg_bytes()
-        mi = ModelInput(chunks=[ImageChunk(data=jpeg_data, format="jpeg")])
+        jpeg_b64 = _make_tiny_jpeg_b64()
+        mi = ModelInput(chunks=[ImageChunk(data=jpeg_b64, format="jpeg")])
         results = await renderer([mi])
 
         assert len(results) == 1
@@ -141,12 +143,12 @@ async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
 
         prefix_tokens = _tokenize_text("Describe this image:")
         suffix_tokens = _tokenize_text("Be concise.")
-        jpeg_data = _make_tiny_jpeg_bytes()
+        jpeg_b64 = _make_tiny_jpeg_b64()
 
         mi = ModelInput(
             chunks=[
                 EncodedTextChunk(tokens=prefix_tokens),
-                ImageChunk(data=jpeg_data, format="jpeg"),
+                ImageChunk(data=jpeg_b64, format="jpeg"),
                 EncodedTextChunk(tokens=suffix_tokens),
             ]
         )
