@@ -289,6 +289,10 @@ class BasePPOExp:
 
     def _get_legacy_inference_client(self) -> InferenceEngineInterface:
         """Legacy inference client using Ray actors."""
+        if self.cfg.generator.inference_engine.backend == "none":
+            from skyrl.backends.skyrl_train.inference_engines.noop_engine import NoOpInferenceClient
+            return NoOpInferenceClient()
+
         if self.cfg.generator.inference_engine.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg, self.colocate_pg, self.tokenizer

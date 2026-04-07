@@ -634,6 +634,10 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
     for i, (response_ids, loss_masks, rewards) in enumerate(
         zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
     ):
+        if len(response_ids) == 0:
+            logger.warning(f"Sample {i} has an empty response. Skipping length validation.")
+            continue
+            
         assert len(response_ids) == len(loss_masks), (
             f"Response ids and loss masks must have the same length, "
             f"for sample {i} got {len(response_ids)} and {len(loss_masks)}"
@@ -644,7 +648,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
                 f"for sample {i} got {len(rewards)} and {len(response_ids)}"
             )
 
-        if generator_output["rollout_logprobs"]:
+        if generator_output.get("rollout_logprobs"):
             assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
                 f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"

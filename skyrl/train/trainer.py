@@ -179,8 +179,9 @@ class RayPPOTrainer:
         Main training loop for PPO
         """
         # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state"):
-            self.init_weight_sync_state()
+        if not self.cfg.generator.external_generation:
+            with Timer("init_weight_sync_state"):
+                self.init_weight_sync_state()
 
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
@@ -188,8 +189,9 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
 
         # Prepare weights for sampling
-        with Timer("sync_weights"):
-            await self.dispatch.save_weights_for_sampler()
+        if not self.cfg.generator.external_generation:
+            with Timer("sync_weights"):
+                await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
@@ -240,7 +242,7 @@ class RayPPOTrainer:
                             pbar.update(1)
                             continue
 
-                    if self.colocate_all:
+                    if self.colocate_all and not self.cfg.generator.external_generation:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
 
@@ -310,8 +312,9 @@ class RayPPOTrainer:
                             self.update_ref_with_policy()
 
                     # 10. Prepare weights for sampling
-                    with Timer("sync_weights", self.all_timings):
-                        await self.dispatch.save_weights_for_sampler()
+                    if not self.cfg.generator.external_generation:
+                        with Timer("sync_weights", self.all_timings):
+                            await self.dispatch.save_weights_for_sampler()
 
                 # 11. set logs
                 logger.info(status)
@@ -341,7 +344,7 @@ class RayPPOTrainer:
                 del training_input, generator_output
 
         pbar.close()
-        if self.colocate_all:
+        if self.colocate_all and not self.cfg.generator.external_generation:
             await self.inference_engine_client.sleep()
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):

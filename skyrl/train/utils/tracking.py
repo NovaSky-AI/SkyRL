@@ -30,7 +30,7 @@ from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
-    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
+    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console", "none"]
 
     def __init__(
         self,

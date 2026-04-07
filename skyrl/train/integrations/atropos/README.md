@@ -1,12 +1,10 @@
 # Atropos-SkyRL SHM Integration
 
-This integration provides a high-performance **Zero-Copy Shared Memory (SHM)** transport backplane between the Atropos environment orchestrator and the SkyRL training core.
+This integration provides a **Zero-Copy Shared Memory (SHM)** transport backplane between the Atropos environment orchestrator and SkyRL.
 
 ## Overview
 
-Reasoning-dense RL workloads (e.g., PPO on long-context thinking traces) generate massive rollout data. Standard HTTP/JSON transport creates a significant "serialization tax" that often caps collection at ~2,000 trajectories/sec.
-
-This SHM-based integration eliminates that bottleneck, enabling **16.5k+ trajectories/sec** on local-cluster hardware (e.g., RTX 3090).
+Reasoning RL workloads generate large rollout data. Standard HTTP/JSON transport (capped at ~2k traj/s) creates a serialization bottleneck. This SHM integration enables **16.5k+ trajectories/sec** on local clusters (e.g., RTX 3090).
 
 ## Components
 

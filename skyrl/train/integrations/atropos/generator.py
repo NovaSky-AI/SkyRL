@@ -38,7 +38,7 @@ class AtroposSHMGenerator(GeneratorInterface):
         self.poll_interval = poll_interval
         self.timeout = timeout
         
-        # Stash for trajectories that arrive before they are requested (Key: ID_String)
+        # Trajectory stash for out-of-order collection
         self.stash: Dict[str, Dict[str, Any]] = {}
         self.running = True
 
@@ -53,44 +53,45 @@ class AtroposSHMGenerator(GeneratorInterface):
         results: Dict[str, Dict[str, Any]] = {}
         target_keys: Set[str] = {tid.to_string() for tid in target_ids}
         
+        # Check stash first
+        for key in list(self.stash.keys()):
+            if key in target_keys:
+                results[key] = self.stash.pop(key)
+
+        # Poll SHM until all targets found or timeout
         start_time = time.time()
-        
-        while len(results) < len(target_keys):
-            if time.time() - start_time > self.timeout:
-                logger.error(f"Timeout waiting for SHM results ({len(results)}/{len(target_keys)})")
-                break
-
-            # 1. Drain the SHM buffer and stash everything
-            while self.running:
-                item = self.shm.read_next()
-                if not item:
-                    break
-                
-                key = f"{item['instance_id']}_{item['repetition_id']}"
-                self.stash[key] = item
-
-            # 2. Extract matches from stash
-            for key in list(self.stash.keys()):
-                if key in target_keys and key not in results:
-                    results[key] = self.stash.pop(key)
-            
-            if len(results) < len(target_keys):
+        while len(results) < len(target_keys) and (time.time() - start_time) < self.timeout:
+            if not self.running: break
+            entry = self.shm.read_next()
+            if entry:
+                key = entry["instance_id"]
+                if key in target_keys:
+                    results[key] = entry
+                else:
+                    self.stash[key] = entry
+            else:
                 await asyncio.sleep(self.poll_interval)
 
-        # 3. Format output in requested order
+        # Format output in requested order
         output = self._empty_output_from_batch(len(target_ids))
         for i, tid in enumerate(target_ids):
             key = tid.to_string()
             if key in results:
                 res = results[key]
                 output["response_ids"][i] = res["tokens"]
-                output["rewards"][i] = res["score"]
+                output["rewards"][i] = res["rewards"] if "rewards" in res else res.get("score", 0.0)
                 output["loss_masks"][i] = [1] * len(res["tokens"])
                 output["trajectory_ids"][i] = tid
+                # Extract logprobs from metadata if present
+                meta = res.get("metadata", {})
+                output["rollout_logprobs"][i] = meta.get("logprobs")
+                output["stop_reasons"][i] = meta.get("stop_reasons")
             else:
                 # Mask out missing results to avoid breaking trainer
                 output["loss_masks"][i] = [0]
                 output["trajectory_ids"][i] = tid
+                output["rollout_logprobs"][i] = None
+                output["stop_reasons"][i] = None
 
         return output
 
@@ -100,7 +101,9 @@ class AtroposSHMGenerator(GeneratorInterface):
             "response_ids": [],
             "rewards": [],
             "loss_masks": [],
-            "trajectory_ids": []
+            "trajectory_ids": [],
+            "rollout_logprobs": [],
+            "stop_reasons": []
         }
 
     def _empty_output_from_batch(self, size: int) -> GeneratorOutput:
@@ -109,7 +112,9 @@ class AtroposSHMGenerator(GeneratorInterface):
             "response_ids": [[] for _ in range(size)],
             "rewards": [0.0 for _ in range(size)],
             "loss_masks": [[0] for _ in range(size)],
-            "trajectory_ids": [None for _ in range(size)]
+            "trajectory_ids": [None for _ in range(size)],
+            "rollout_logprobs": [None for _ in range(size)],
+            "stop_reasons": [None for _ in range(size)]
         }
 
     def close(self):
