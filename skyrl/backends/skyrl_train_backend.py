@@ -361,6 +361,13 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engines_initialized = False
         self._colocate_pg = None
 
+        if self._server_group:
+            self._server_group.shutdown()
+            self._server_group = None
+        if self._inference_router:
+            self._inference_router.shutdown()
+            self._inference_router = None
+
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
