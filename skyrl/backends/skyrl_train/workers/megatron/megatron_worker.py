@@ -596,10 +596,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
-        # Enable expandable_segments after model init so weights are in standard
-        # CUDA memory (IPC-compatible). Only new allocations (activations during
-        # training) will use expandable segments.
-        self._maybe_enable_expandable_segments()
+        self._set_expandable_segments(True)
 
     def forward_backward(
         self,
@@ -786,11 +783,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
-        # Disable expandable_segments before weight sync so that any new
-        # allocations (e.g. packed IPC buffers) use standard CUDA memory
-        # which is compatible with cudaIpcGetMemHandle.
-        use_expandable = self.cfg.placement.use_expandable_segments and self.cfg.placement.colocate_all
-        if use_expandable:
+        # Disable expandable_segments before weight sync so that new allocations
+        # use standard CUDA memory compatible with cudaIpcGetMemHandle.
+        if self.cfg.placement.colocate_all:
             self._set_expandable_segments(False)
 
         torch.cuda.empty_cache()
@@ -808,7 +803,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.distributed.barrier()
 
         # Re-enable expandable_segments after weight sync completes
-        if use_expandable:
+        if self.cfg.placement.colocate_all:
             self._set_expandable_segments(True)
 
     def get_weight_statistics(self):
@@ -895,7 +890,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # create worker model
         self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
 
-        self._maybe_enable_expandable_segments()
+        self._set_expandable_segments(True)
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

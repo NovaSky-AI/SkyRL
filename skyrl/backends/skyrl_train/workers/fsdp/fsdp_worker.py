@@ -201,10 +201,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
 
-        # Enable expandable_segments after model init so weights are in standard
-        # CUDA memory (IPC-compatible). Only new allocations (activations during
-        # training) will use expandable segments.
-        self._maybe_enable_expandable_segments()
+        self._set_expandable_segments(True)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
@@ -272,11 +269,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
-        # Disable expandable_segments before weight sync so that any new
-        # allocations (e.g. packed IPC buffers) use standard CUDA memory
-        # which is compatible with cudaIpcGetMemHandle.
-        use_expandable = self.cfg.placement.use_expandable_segments and self.cfg.placement.colocate_all
-        if use_expandable:
+        # Disable expandable_segments before weight sync so that new allocations
+        # use standard CUDA memory compatible with cudaIpcGetMemHandle.
+        if self.cfg.placement.colocate_all:
             self._set_expandable_segments(False)
 
         torch.cuda.empty_cache()
@@ -305,7 +300,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         torch.distributed.barrier()
 
         # Re-enable expandable_segments after weight sync completes
-        if use_expandable:
+        if self.cfg.placement.colocate_all:
             self._set_expandable_segments(True)
 
     def get_weight_statistics(self):
@@ -389,7 +384,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
-        self._maybe_enable_expandable_segments()
+        self._set_expandable_segments(True)
 
     def forward(
         self,
@@ -446,7 +441,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
 
-        self._maybe_enable_expandable_segments()
+        self._set_expandable_segments(True)
 
     def forward(
         self,
