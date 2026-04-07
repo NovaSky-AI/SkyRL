@@ -1,8 +1,9 @@
 """
-Multimodal render tests for the new inference path.
+VLM integration tests for the inference path.
 
 Tests /v1/chat/completions/render with a VLM to verify multimodal
-inputs are correctly tokenized and multimodal features are returned.
+inputs are correctly tokenized and multimodal features are returned,
+and exercises VLLMRenderer + decode_mm_kwargs end-to-end.
 
 Requires a local vLLM install with /v1/chat/completions/render support.
 
@@ -15,8 +16,12 @@ import io
 import os
 
 import pytest
+import torch
 from PIL import Image
+from transformers import AutoTokenizer
 
+from skyrl.backends.renderer import VLLMRenderer, decode_mm_kwargs
+from skyrl.tinker.types import EncodedTextChunk, ImageChunk, ModelInput
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -53,6 +58,24 @@ def _make_tiny_base64_image() -> str:
     img.save(buf, format="JPEG")
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/jpeg;base64,{b64}"
+
+
+def _make_tiny_jpeg_b64() -> bytes:
+    """Create a tiny JPEG and return raw base64 bytes for ImageChunk usage."""
+    img = Image.new("RGB", (8, 8), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue())
+
+
+def _tokenize_text(text: str) -> list[int]:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN3_VL, trust_remote_code=True)
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+# ---------------------------------------------------------------------------
+# Raw render endpoint test
+# ---------------------------------------------------------------------------
 
 
 @requires_local_vllm
@@ -130,3 +153,132 @@ async def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture)
         assert isinstance(placeholder["length"], int)
         assert placeholder["length"] > 0
         assert placeholder["offset"] + placeholder["length"] <= len(token_ids)
+
+
+# ---------------------------------------------------------------------------
+# VLLMRenderer tests
+# ---------------------------------------------------------------------------
+
+
+@requires_local_vllm
+@pytest.mark.vllm
+@pytest.mark.asyncio
+async def test_renderer_text_only(module_scoped_ray_init_fixture):
+    """Text-only inputs should not trigger any HTTP calls to the render endpoint."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
+    cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3_VL,
+        sleep_level=1,
+        engine_init_kwargs={
+            "max_model_len": 4096,
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
+        },
+        use_new_inference_servers=True,
+    ) as engines:
+        renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
+
+        tokens = _tokenize_text("Hello, world!")
+        mi = ModelInput(chunks=[EncodedTextChunk(tokens=tokens)])
+        results = await renderer([mi])
+
+        assert len(results) == 1
+        assert results[0].prompt_ids == tokens
+        assert results[0].multi_modal_placeholders is None
+        assert results[0].multi_modal_kwargs is None
+
+
+@requires_local_vllm
+@pytest.mark.vllm
+@pytest.mark.asyncio
+async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
+    """Mixed text + image input should assemble tokens in chunk order."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
+    cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3_VL,
+        sleep_level=1,
+        engine_init_kwargs={
+            "max_model_len": 4096,
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
+        },
+        use_new_inference_servers=True,
+    ) as engines:
+        renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
+
+        prefix_tokens = _tokenize_text("Describe this image:")
+        suffix_tokens = _tokenize_text("Be concise.")
+        jpeg_b64 = _make_tiny_jpeg_b64()
+
+        mi = ModelInput(
+            chunks=[
+                EncodedTextChunk(tokens=prefix_tokens),
+                ImageChunk(data=jpeg_b64, format="jpeg"),
+                EncodedTextChunk(tokens=suffix_tokens),
+            ]
+        )
+        results = await renderer([mi])
+
+        assert len(results) == 1
+        rendered = results[0]
+
+        assert rendered.prompt_ids[: len(prefix_tokens)] == prefix_tokens
+        assert rendered.prompt_ids[-len(suffix_tokens) :] == suffix_tokens
+
+        assert rendered.multi_modal_placeholders is not None
+        assert len(rendered.multi_modal_placeholders) == 1
+        ph = rendered.multi_modal_placeholders[0]
+        assert ph.offset == len(prefix_tokens)
+        total_len = len(prefix_tokens) + ph.length + len(suffix_tokens)
+        assert len(rendered.prompt_ids) == total_len
+
+
+# ---------------------------------------------------------------------------
+# decode_mm_kwargs tests
+# ---------------------------------------------------------------------------
+
+
+@requires_local_vllm
+@pytest.mark.vllm
+@pytest.mark.asyncio
+async def test_decode_mm_kwargs_with_image(module_scoped_ray_init_fixture):
+    """decode_mm_kwargs should produce valid pixel_values and image_grid_thw tensors."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
+    cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3_VL,
+        sleep_level=1,
+        engine_init_kwargs={
+            "max_model_len": 4096,
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
+        },
+        use_new_inference_servers=True,
+    ) as engines:
+        renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
+
+        jpeg_b64 = _make_tiny_jpeg_b64()
+        mi = ModelInput(chunks=[ImageChunk(data=jpeg_b64, format="jpeg")])
+        results = await renderer([mi])
+
+        assert len(results) == 1
+        rendered = results[0]
+        assert rendered.multi_modal_kwargs is not None
+
+        pixel_values, image_grid_thw = decode_mm_kwargs(rendered)
+
+        assert isinstance(pixel_values, torch.Tensor)
+        assert pixel_values.numel() > 0
+        assert pixel_values.ndim == 2
+
+        assert isinstance(image_grid_thw, torch.Tensor)
+        assert image_grid_thw.shape[1] == 3
+        assert image_grid_thw.dtype == torch.long
