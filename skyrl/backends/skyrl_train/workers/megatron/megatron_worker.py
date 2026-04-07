@@ -596,6 +596,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
+        # Enable expandable_segments after model init so weights are in standard
+        # CUDA memory (IPC-compatible). Only new allocations (activations during
+        # training) will use expandable segments.
+        self._maybe_enable_expandable_segments()
+
     def forward_backward(
         self,
         data: TrainingInputBatch,
@@ -781,6 +786,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
+        # Disable expandable_segments before weight sync so that any new
+        # allocations (e.g. packed IPC buffers) use standard CUDA memory
+        # which is compatible with cudaIpcGetMemHandle.
+        use_expandable = self.cfg.placement.use_expandable_segments and self.cfg.placement.colocate_all
+        if use_expandable:
+            self._set_expandable_segments(False)
+
         torch.cuda.empty_cache()
 
         # Extract and send weights using the sender created at init time
@@ -794,6 +806,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+        # Re-enable expandable_segments after weight sync completes
+        if use_expandable:
+            self._set_expandable_segments(True)
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
@@ -878,6 +894,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
 
         # create worker model
         self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+
+        self._maybe_enable_expandable_segments()
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

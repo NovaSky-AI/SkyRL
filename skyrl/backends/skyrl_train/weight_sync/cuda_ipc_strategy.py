@@ -198,7 +198,11 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         per_param_handles: List[Dict[str, IpcHandle]] = []
         for chunk in chunks:
             for name, tensor in zip(chunk.names, chunk.tensors):
-                weight = tensor.detach().contiguous()
+                # clone() ensures the tensor is allocated with the *current*
+                # allocator settings.  When expandable_segments has been toggled
+                # OFF before weight sync, the clone lives in standard CUDA
+                # memory which is compatible with cudaIpcGetMemHandle.
+                weight = tensor.detach().contiguous().clone()
                 tensor_refs.append(weight)
                 handle = reduce_tensor(weight)
                 per_param_handles.append({gpu_uuid: handle})

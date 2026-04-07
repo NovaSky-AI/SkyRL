@@ -183,6 +183,15 @@ class MegatronConfig(BaseConfig):
 class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     """When True, training and inference share the same GPUs."""
+    use_expandable_segments: bool = True
+    """Enable PyTorch CUDA expandable_segments allocator on training workers.
+
+    Reduces GPU memory fragmentation during training, allowing longer context
+    lengths and larger batches. Enabled after model init so that model weights
+    are allocated with the standard allocator (CUDA IPC compatible). For
+    colocate_all=True, expandable_segments is toggled off around weight sync
+    to preserve CUDA IPC compatibility.
+    """
     colocate_policy_ref: bool = True
     policy_num_nodes: int = 1
     policy_num_gpus_per_node: int = 1
