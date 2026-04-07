@@ -1,5 +1,6 @@
 """Unit tests for VLLMRenderer with a mocked RemoteInferenceClient."""
 
+import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,7 +24,7 @@ def _make_text_input(token_lists: list[list[int]]) -> ModelInput:
 
 
 def _make_image_chunk(fmt: str = "jpeg") -> ImageChunk:
-    return ImageChunk(data=b"\xff\xd8\xff\xe0", format=fmt)
+    return ImageChunk(data=base64.b64encode(b"\xff\xd8\xff\xe0"), format=fmt)
 
 
 def _make_render_response(
