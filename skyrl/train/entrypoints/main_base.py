@@ -359,8 +359,8 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            router_args = build_router_args(self.cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args)
+            router_args = build_router_args(self.cfg.generator.inference_engine, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args, log_path=self.cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external "
@@ -371,8 +371,9 @@ class BasePPOExp:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
             setup = create_inference_servers(
-                self.cfg,
+                self.cfg.generator.inference_engine,
                 cli_args,
+                log_path=self.cfg.trainer.log_path,
                 placement_group=self.colocate_pg if is_colocated else None,
             )
             self._inference_router = setup.router

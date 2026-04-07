@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from loguru import logger
 
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import InferenceEngineConfig
 
 from .server_group import ServerGroup
 from .utils import build_router_args, get_pd_cli_args
@@ -25,8 +25,9 @@ class InferenceServerSetup:
 
 
 def create_inference_servers(
-    cfg: SkyRLTrainConfig,
+    ie_cfg: InferenceEngineConfig,
     cli_args: Namespace,
+    log_path: str,
     placement_group=None,
 ) -> InferenceServerSetup:
     """Build server groups and router from config.
@@ -37,8 +38,9 @@ def create_inference_servers(
     created separately and the router is configured for PD disaggregation.
 
     Args:
-        cfg: Full SkyRL training config.
+        ie_cfg: Inference engine config.
         cli_args: vLLM CLI args from :func:`build_vllm_cli_args`.
+        log_path: Log path for SkyRL logs
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
 
@@ -49,7 +51,6 @@ def create_inference_servers(
     from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
     from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 
-    ie_cfg = cfg.generator.inference_engine
     gpus_per_server = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size
 
     if ie_cfg.enable_pd:
@@ -95,8 +96,8 @@ def create_inference_servers(
 
         server_urls = prefill_urls + decode_urls
 
-        router_args = build_router_args(cfg, prefill_urls=prefill_urls, decode_urls=decode_urls)
-        router = VLLMRouter(router_args)
+        router_args = build_router_args(ie_cfg, prefill_urls=prefill_urls, decode_urls=decode_urls)
+        router = VLLMRouter(router_args, log_path=log_path)
         proxy_url = router.start()
         logger.info(
             f"HTTP Inference (PD): prefill_urls={prefill_urls}, decode_urls={decode_urls}, "
@@ -124,8 +125,8 @@ def create_inference_servers(
         server_infos_nested = [g.start() for g in server_groups]
         server_urls = [info.url for infos in server_infos_nested for info in infos]
 
-        router_args = build_router_args(cfg, server_urls=server_urls)
-        router = VLLMRouter(router_args)
+        router_args = build_router_args(ie_cfg, server_urls=server_urls)
+        router = VLLMRouter(router_args, log_path=log_path)
         proxy_url = router.start()
         logger.info(
             f"HTTP Inference: proxy_url={proxy_url}, server_urls={server_urls}, "

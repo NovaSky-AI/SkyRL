@@ -103,9 +103,10 @@ class TestBuildRouterArgs:
 
     def test_uniform_mode(self):
         cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
         urls = ["http://w1:8000", "http://w2:8000"]
         with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
-            args = build_router_args(cfg, server_urls=urls)
+            args = build_router_args(ie_cfg, server_urls=urls)
         assert args.worker_urls == urls
         assert args.port == 30000
         assert args.policy == "consistent_hash"
@@ -113,10 +114,11 @@ class TestBuildRouterArgs:
 
     def test_pd_mode(self):
         cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
         prefill = ["http://p1:8000"]
         decode = ["http://d1:8001"]
         with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
-            args = build_router_args(cfg, prefill_urls=prefill, decode_urls=decode)
+            args = build_router_args(ie_cfg, prefill_urls=prefill, decode_urls=decode)
         assert args.vllm_pd_disaggregation is True
         assert args.prefill_urls == [("http://p1:8000", None)]
         assert args.decode_urls == ["http://d1:8001"]
@@ -125,15 +127,17 @@ class TestBuildRouterArgs:
 
     def test_no_urls_raises(self):
         cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
         with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
             with pytest.raises(ValueError, match="Either server_urls"):
-                build_router_args(cfg)
+                build_router_args(ie_cfg)
 
     def test_router_init_kwargs_override(self):
         cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
         cfg.generator.inference_engine.router_init_kwargs = {"policy": "round_robin", "request_timeout_secs": 60}
         urls = ["http://w1:8000"]
         with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
-            args = build_router_args(cfg, server_urls=urls)
+            args = build_router_args(ie_cfg, server_urls=urls)
         assert args.policy == "round_robin"
         assert args.request_timeout_secs == 60

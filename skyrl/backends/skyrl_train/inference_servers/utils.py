@@ -4,7 +4,11 @@ from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+from skyrl.train.config import (
+    InferenceEngineConfig,
+    SkyRLTrainConfig,
+    get_config_as_dict,
+)
 
 
 # TODO: Add a test for validation
@@ -101,6 +105,9 @@ def get_pd_cli_args(cli_args: Namespace, role: str = "prefill") -> Namespace:
     if "kv_connector" not in kv_config:
         raise ValueError("kv_transfer_config.kv_connector must be set when enable_pd=True")
 
+    if kv_config["kv_connector"].lower() != "NixlConnector".lower():
+        raise ValueError(f"Only NixlConnector is supported, got {kv_config['kv_connector']}")
+
     kv_config["kv_role"] = "kv_both"
     args.kv_transfer_config = kv_config
 
@@ -108,7 +115,7 @@ def get_pd_cli_args(cli_args: Namespace, role: str = "prefill") -> Namespace:
 
 
 def build_router_args(
-    cfg: SkyRLTrainConfig,
+    ie_cfg: InferenceEngineConfig,
     server_urls: Optional[List[str]] = None,
     prefill_urls: Optional[List[str]] = None,
     decode_urls: Optional[List[str]] = None,
@@ -123,7 +130,7 @@ def build_router_args(
     are applied last so they can override any computed default.
 
     Args:
-        cfg: Full SkyRL training config.
+        ie_cfg: Inference engine config.
         server_urls: Backend URLs for uniform (non-PD) routing.
         prefill_urls: Prefill backend URLs (PD mode).
         decode_urls: Decode backend URLs (PD mode).
@@ -135,7 +142,6 @@ def build_router_args(
 
     from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 
-    ie_cfg = cfg.generator.inference_engine
     is_pd = prefill_urls is not None and decode_urls is not None
 
     port = get_open_port()

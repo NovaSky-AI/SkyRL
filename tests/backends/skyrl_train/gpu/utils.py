@@ -581,8 +581,9 @@ class InferenceEngineState:
                     active_lora_name = "skyrl-lora"
 
             setup = create_inference_servers(
-                cfg,
+                ie_cfg,
                 cli_args,
+                log_path=cfg.trainer.log_path,
                 placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
             )
             router = setup.router

@@ -94,7 +94,7 @@ def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, VLLMRou
     server_urls = [info.url for info in server_infos]
 
     # Router
-    router_args = build_router_args(cfg, server_urls=server_urls)
+    router_args = build_router_args(ie_cfg, server_urls=server_urls)
     router = VLLMRouter(router_args)
     proxy_url = router.start()
 

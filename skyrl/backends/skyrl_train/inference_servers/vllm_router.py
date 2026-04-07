@@ -7,7 +7,11 @@ providing ``start()`` / ``shutdown()`` lifecycle methods.
 
 import logging
 import multiprocessing
+import os
+import sys
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -18,6 +22,23 @@ from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
+
+
+def _run_router_with_logging(router_args: RouterArgs, log_file: Optional[str]) -> None:
+    """Target for the router child process.
+
+    Redirects stdout/stderr to *log_file* (when provided) so that the
+    Rust router's output is captured instead of lost in the daemon
+    process.  Falls back to normal stdout/stderr when *log_file* is
+    ``None``.
+    """
+    if log_file is not None:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(fd, sys.stdout.fileno())
+        os.dup2(fd, sys.stderr.fileno())
+        os.close(fd)
+    launch_router(router_args)
 
 
 class VLLMRouter:
@@ -31,15 +52,24 @@ class VLLMRouter:
 
         from skyrl.backends.skyrl_train.inference_servers.utils import build_router_args
 
-        router_args = build_router_args(cfg, server_urls=urls)
+        router_args = build_router_args(ie_cfg, server_urls=urls)
         router = VLLMRouter(router_args)
         router_url = router.start()
         # ... use router_url ...
         router.shutdown()
     """
 
-    def __init__(self, router_args: RouterArgs):
+    def __init__(self, router_args: RouterArgs, log_path: Optional[str] = None):
+        """
+        Args:
+            router_args: Configuration for the vllm-router.
+            log_path: Directory for router log files.  When set, a file
+                ``router-YYMMDD_HHMMSS.log`` is created under this path
+                and the child process's stdout/stderr are redirected there.
+        """
         self._router_args = router_args
+        self._log_path = log_path
+        self._log_file: Optional[str] = None
         self._process: Optional[multiprocessing.Process] = None
 
     def start(self) -> str:
@@ -51,9 +81,13 @@ class VLLMRouter:
         Raises:
             RuntimeError: If the router process crashes before becoming healthy.
         """
+        if self._log_path is not None:
+            timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+            self._log_file = str(Path(self._log_path) / f"router-{timestamp}.log")
+
         self._process = multiprocessing.Process(
-            target=launch_router,
-            args=(self._router_args,),
+            target=_run_router_with_logging,
+            args=(self._router_args, self._log_file),
             daemon=True,
             name="vllm-router",
         )
@@ -72,6 +106,10 @@ class VLLMRouter:
             )
         else:
             logger.info(f"VLLMRouter started at {router_url}: " f"{len(self._router_args.worker_urls)} workers")
+
+        if self._log_file:
+            logger.info(f"VLLMRouter logs: {self._log_file}")
+
         return router_url
 
     def _wait_until_healthy(
