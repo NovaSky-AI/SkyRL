@@ -492,6 +492,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
                 backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
@@ -822,6 +827,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
                 backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
