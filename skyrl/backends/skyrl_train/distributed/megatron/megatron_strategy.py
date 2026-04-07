@@ -142,9 +142,10 @@ class MegatronStrategy(DistributedStrategy):
         self.is_lora = is_lora
         self.node_local_rank = node_local_rank
 
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        # NOTE: Defer setting the persistent async backend to save_checkpoint time.
+        # Creating AsyncCallsQueue(persistent=True) at init time spawns mp.JoinableQueue
+        # which can interfere with lazy NCCL communicator initialization on multi-node
+        # setups with cpu:gloo,cuda:nccl split backend.
 
     def set_seed(self, seed: int) -> None:
         # Vary seed by pipeline parallel rank so that different PP stages get
@@ -286,11 +287,16 @@ class MegatronStrategy(DistributedStrategy):
         # Save RNG state.
         sharded_state_dict["rng"] = self.get_rng_state()
 
+        # Set persistent async backend for checkpoint saving (deferred from __init__
+        # to avoid interfering with lazy NCCL communicator init on multi-node).
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+
         # Save the checkpoint across ranks in parallel.
         save_strategy = get_default_save_sharded_strategy("torch_dist")
-        save_strategy = FullyParallelSaveStrategyWrapper(
-            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-        )
+        if not os.environ.get("SKYRL_SKIP_FULLY_PARALLEL_SAVE"):
+            save_strategy = FullyParallelSaveStrategyWrapper(
+                save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+            )
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             # TODO(tgriggs): Support configurable async saves.
@@ -424,62 +430,72 @@ class MegatronStrategy(DistributedStrategy):
     _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
 
     def _load_dist_checkpoint_from_cloud(self, ckpt_dir: str, sharded_state_dict: dict) -> dict:
-        """Download checkpoint shards from cloud storage with per-rank parallelism.
+        """Download checkpoint from cloud storage with per-node parallelism.
 
-        All ranks on the same node share a single local directory. Each rank
-        downloads only its own shard file(s) into the shared dir, so the total
-        download per node equals one full copy of the checkpoint (instead of one
-        copy per rank).
+        All ranks on the same node share a single local directory.  Shard files
+        are distributed across local ranks for parallel download so that each
+        node ends up with a complete copy of the checkpoint.  This is required
+        because ``FullyParallelLoadStrategyWrapper`` may ask any rank to read
+        any shard (it redistributes across the DP group).
 
         Local rank 0 creates the directory and downloads common metadata files.
-        After a barrier, all shard files are present and every rank can load.
-
-        Does not currently support flexible trainer resharding.
+        Each local rank downloads a round-robin subset of shard files.
+        After a barrier every file is present and all ranks can load.
         """
-        global_rank = dist.get_rank()
         node_local_rank = self.node_local_rank
+        world_size = dist.get_world_size()
 
         dir_hash = hashlib.md5(ckpt_dir.encode()).hexdigest()[:12]
-        local_dir = os.path.join(tempfile.gettempdir(), f"skyrl_ckpt_load_{dir_hash}")
+        staging_dir = io._get_checkpoint_tmpdir() or tempfile.gettempdir()
+        local_dir = os.path.join(staging_dir, f"skyrl_ckpt_load_{dir_hash}")
 
         try:
             all_entries = io.list_dir(ckpt_dir)
 
-            # Local rank 0: create dir and download common/metadata files.
+            # Local rank 0 on each node creates the directory.
             if node_local_rank == 0:
                 if os.path.exists(local_dir):
                     shutil.rmtree(local_dir)
                 os.makedirs(local_dir)
+            dist.barrier()
 
+            if os.environ.get("SKYRL_CKPT_LOAD_PER_RANK_ONLY"):
+                # Legacy per-rank download: each rank downloads only its own
+                # shard files.  Broken with FullyParallelLoadStrategyWrapper +
+                # multi-node + DP > 1 because the load wrapper may ask rank 0
+                # (node A) to read rank N's shard (only on node B's local_dir).
+                global_rank = dist.get_rank()
                 for entry in all_entries:
                     name = entry.rstrip("/").split("/")[-1]
                     if not name:
                         continue
-                    if self._SHARD_FILE_PATTERN.search(name):
-                        continue
-                    cloud_entry = ckpt_dir.rstrip("/") + "/" + name
-                    if io.isdir(cloud_entry):
-                        continue
-                    io.download_file(cloud_entry, os.path.join(local_dir, name))
-
-            # Wait for the directory and common files to be ready.
-            dist.barrier()
-
-            # Each rank downloads its own shard file(s) into the shared dir.
-            for entry in all_entries:
-                name = entry.rstrip("/").split("/")[-1]
-                if not name:
-                    continue
-                match = self._SHARD_FILE_PATTERN.search(name)
-                if match and int(match.group(1)) == global_rank:
                     cloud_path = ckpt_dir.rstrip("/") + "/" + name
-                    local_path = os.path.join(local_dir, name)
-                    io.download_file(cloud_path, local_path)
+                    if io.isdir(cloud_path):
+                        continue
+                    match = self._SHARD_FILE_PATTERN.search(name)
+                    if match and int(match.group(1)) == global_rank:
+                        io.download_file(cloud_path, os.path.join(local_dir, name))
+                    elif not match and node_local_rank == 0:
+                        # Common/metadata files — only local rank 0
+                        io.download_file(cloud_path, os.path.join(local_dir, name))
+            else:
+                # Per-node download: local rank 0 downloads the entire
+                # checkpoint (common + all shards).  This is required because
+                # FullyParallelLoadStrategyWrapper may ask any rank to read
+                # any shard file.
+                if node_local_rank == 0:
+                    for entry in all_entries:
+                        name = entry.rstrip("/").split("/")[-1]
+                        if not name:
+                            continue
+                        cloud_path = ckpt_dir.rstrip("/") + "/" + name
+                        if io.isdir(cloud_path):
+                            continue
+                        io.download_file(cloud_path, os.path.join(local_dir, name))
 
-            # Wait for all ranks to finish downloading their shards.
             dist.barrier()
 
-            self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir}")
+            self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir} to {local_dir}")
 
             load_strategy = get_default_load_sharded_strategy(local_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(

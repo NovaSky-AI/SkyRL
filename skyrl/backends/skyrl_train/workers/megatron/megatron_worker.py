@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
     print_model_size,
+    print_with_rank,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
@@ -278,6 +279,18 @@ class MegatronWorker:
                 transformer_config_kwargs[key] = None
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+
+        # Workaround for transformers v5 removing rope_theta as a top-level
+        # config attribute.  megatron-bridge's provider_bridge() methods
+        # (e.g. Qwen3Bridge) read hf_config.rope_theta which raises
+        # AttributeError in v5.  Inject rope_theta onto the bridge's
+        # internal config so provider_bridge() can read it.
+        _bridge_config = getattr(bridge.hf_pretrained, "config", None)
+        if _bridge_config is not None and not hasattr(_bridge_config, "rope_theta"):
+            _rope_params = getattr(_bridge_config, "rope_parameters", None)
+            if isinstance(_rope_params, dict) and "rope_theta" in _rope_params:
+                _bridge_config.rope_theta = _rope_params["rope_theta"]
+
         provider = bridge.to_megatron_provider()
 
         # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
@@ -492,11 +505,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            # Ensure CUDA device is set before process group init — required when
-            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
-            # errors during NCCL communicator creation in subgroups.
-            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
                 backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
@@ -539,6 +547,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
+        cuda_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "not set")
+        print_with_rank(self._rank, f"PYTORCH_CUDA_ALLOC_CONF={cuda_alloc_conf}")
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -827,9 +838,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            # Ensure CUDA device is set before process group init — required when
-            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
-            # errors during NCCL communicator creation in subgroups.
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
