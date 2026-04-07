@@ -72,12 +72,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
 
 
 def get_pd_cli_args(cli_args: Namespace, role: str = "prefill") -> Namespace:
-    """Build PD-specific CLI args by constructing kv_transfer_config JSON.
+    """Build PD-specific CLI args by injecting ``kv_role=kv_both``.
 
     Reads ``kv_transfer_config`` from the args namespace (set via
     ``engine_init_kwargs`` pass-through) and injects ``kv_role=kv_both``.
-    The result is serialized to a JSON string so that
-    ``VLLMServerActor._setup_nixl_side_channel`` can parse and enrich it
+    ``VLLMServerActor._setup_nixl_side_channel`` later enriches the dict
     with ``engine_id``.
 
     Args:
@@ -86,8 +85,8 @@ def get_pd_cli_args(cli_args: Namespace, role: str = "prefill") -> Namespace:
             Kept for future flexibility.
 
     Returns:
-        A deep copy of *cli_args* with ``kv_transfer_config`` set to a
-        JSON string.
+        A deep copy of *cli_args* with ``kv_transfer_config`` as a dict
+        containing ``kv_role=kv_both``.
     """
     args = copy.deepcopy(cli_args)
 
