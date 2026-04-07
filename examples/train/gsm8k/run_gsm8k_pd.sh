@@ -7,7 +7,6 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/gsm8k/run_gsm8k_pd.sh
 
-# NOTE: Requires nixl to be installed (pip install nixl) for NixlConnector.
 # Minimum 4 GPUs: 2 prefill + 2 decode engines, colocated with training.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
