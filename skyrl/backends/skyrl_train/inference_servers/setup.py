@@ -14,7 +14,7 @@ from .vllm_router import VLLMRouter
 
 @dataclass
 class InferenceServerSetup:
-    """Return value of :func:`create_inference_servers`."""
+    """Simple dataclass for inference server setup result."""
 
     router: "VLLMRouter"
     proxy_url: str

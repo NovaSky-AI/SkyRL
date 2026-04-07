@@ -326,6 +326,9 @@ async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         client, pg = engines.client, engines.pg
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
+        # Sleep inference engine before initializing policy worker to avoid OOM on colocated GPU
+        await client.sleep()
+
         server_thread, server_port = None, None
         try:
             server_thread, server_port = set_up_http_server(client)
@@ -344,12 +347,25 @@ async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
-            await client.reset_prefix_cache()
+            # Colocated weight sync: offload optimizer, partially wake engine, broadcast, then fully wake
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "offload_to_cpu", offload_optimizer=True, offload_model=False
+                )
+            )
+            await client.wake_up(tags=["weights"])
             ray.get(
                 policy.async_run_ray_method(
                     "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
                 )
             )
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "offload_to_cpu", offload_optimizer=False, offload_model=True
+                )
+            )
+            await client.wake_up(tags=["kv_cache"])
+            await client.reset_prefix_cache()
 
             # 2. Do tests
             num_samples = 20
