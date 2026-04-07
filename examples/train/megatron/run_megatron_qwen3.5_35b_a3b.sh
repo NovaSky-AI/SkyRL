@@ -1,6 +1,7 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen3.5-35B-A3B on GSM8K with Megatron.
+# runs on 1 node of 8xH100s
 
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -15,7 +16,7 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 NUM_NODES=1
 NUM_GPUS=8
 
-MEGATRON_TP=4
+MEGATRON_TP=2
 MEGATRON_PP=1
 MEGATRON_CP=1
 MEGATRON_EP=8
@@ -24,8 +25,10 @@ MEGATRON_ETP=1
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=8
 
+OPTIMIZER_OFFLOAD=true
+OPTIMIZER_OFFLOAD_FRACTION=1.0
+
 # Qwen3.5 flags
-# make sure to add `transformers>=5.3.0` to the `override-dependencies` section in `pyproject.toml` for Qwen3.5 support
 USE_SAMPLE_PACKING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
@@ -44,6 +47,10 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.use_sample_packing=$USE_SAMPLE_PACKING \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
@@ -52,8 +59,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=4 \
-  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
