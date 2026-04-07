@@ -7,8 +7,6 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/router_replay/run_moonlight16b_router_replay.sh
 
-export _SKYRL_USE_NEW_INFERENCE=1
-
 DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
 MODEL_NAME="moonshotai/Moonlight-16B-A3B-Instruct"
