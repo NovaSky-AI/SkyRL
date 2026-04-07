@@ -106,6 +106,14 @@ class MegatronWeightExtractor(WeightExtractor):
         every ``extract_weights`` call so that mapping objects start with clean
         PP-collective caches, avoiding stale cached state across offload/reload
         and training cycles.
+
+        Tasks that participate in grouped export (e.g., fused MoE expert
+        weights) are collected first and placed into dedicated buckets so that
+        all tasks sharing the same ``group_key`` end up in a single
+        ``export_hf_weights`` call.  The bridge's
+        ``_accumulate_grouped_export`` requires every task for a group to be
+        present in one call; splitting them across buckets causes expert
+        weights to never be yielded.
         """
         weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
 
@@ -130,14 +138,38 @@ class MegatronWeightExtractor(WeightExtractor):
             for task in weight_conversion_tasks
         ]
 
-        self.bucket_index_groups: list[list[int]] = [[]]
-        curr_size = 0
-        for idx, size in enumerate(sizes):
-            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
-                self.bucket_index_groups.append([])
-                curr_size = 0
-            self.bucket_index_groups[-1].append(idx)
-            curr_size += size
+        # ---- Separate grouped-export tasks from regular tasks ----
+        # Grouped-export tasks (is_grouped_export=True, e.g. FusedGatedExpertMapping /
+        # FusedExpertMapping for MoE expert weights) must ALL be present in a single
+        # export_hf_weights call for the bridge's _accumulate_grouped_export to produce
+        # the fused tensor.  Collect them by group_key and give each group its own bucket.
+        grouped_task_indices: dict[str, list[int]] = {}  # group_key -> list of task indices
+        regular_task_indices: list[int] = []
+
+        for idx, task in enumerate(weight_conversion_tasks):
+            if getattr(task.mapping, "is_grouped_export", False):
+                gk = task.mapping.group_key
+                grouped_task_indices.setdefault(gk, []).append(idx)
+            else:
+                regular_task_indices.append(idx)
+
+        self.bucket_index_groups: list[list[int]] = []
+
+        # Place each group_key's tasks into its own bucket (they must not be split).
+        for gk, indices in grouped_task_indices.items():
+            self.bucket_index_groups.append(indices)
+
+        # Bucket regular (non-grouped) tasks by size as before.
+        if regular_task_indices:
+            self.bucket_index_groups.append([])
+            curr_size = 0
+            for idx in regular_task_indices:
+                size = sizes[idx]
+                if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+                    self.bucket_index_groups.append([])
+                    curr_size = 0
+                self.bucket_index_groups[-1].append(idx)
+                curr_size += size
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
