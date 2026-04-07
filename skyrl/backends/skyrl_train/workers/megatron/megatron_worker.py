@@ -106,6 +106,14 @@ class MegatronWeightExtractor(WeightExtractor):
         every ``extract_weights`` call so that mapping objects start with clean
         PP-collective caches, avoiding stale cached state across offload/reload
         and training cycles.
+
+        Tasks that participate in grouped export (e.g., fused MoE expert
+        weights) are collected first and placed into dedicated buckets so that
+        all tasks sharing the same ``group_key`` end up in a single
+        ``export_hf_weights`` call.  The bridge's
+        ``_accumulate_grouped_export`` requires every task for a group to be
+        present in one call; splitting them across buckets causes expert
+        weights to never be yielded.
         """
         weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
 
@@ -130,14 +138,46 @@ class MegatronWeightExtractor(WeightExtractor):
             for task in weight_conversion_tasks
         ]
 
-        self.bucket_index_groups: list[list[int]] = [[]]
+        # ---- Separate grouped-export tasks from regular tasks ----
+        # Grouped-export tasks (is_grouped_export=True, e.g. FusedGatedExpertMapping /
+        # FusedExpertMapping for MoE expert weights) must ALL be present in a single
+        # export_hf_weights call for the bridge's _accumulate_grouped_export to produce
+        # the fused tensor.  Collect them by group_key and give each group its own bucket.
+        grouped_task_indices: dict[str, list[int]] = {}  # group_key -> list of task indices
+        regular_task_indices: list[int] = []
+
+        for idx, task in enumerate(weight_conversion_tasks):
+            if getattr(task.mapping, "is_grouped_export", False):
+                gk = getattr(task.mapping, "group_key", None)
+                grouped_task_indices.setdefault(gk, []).append(idx)
+            else:
+                regular_task_indices.append(idx)
+
+        self.bucket_index_groups: list[list[int]] = []
+
+        # Pack grouped-export tasks into buckets by size, keeping each
+        # group_key's tasks together (they must not be split across calls).
         curr_size = 0
-        for idx, size in enumerate(sizes):
-            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+        threshold = self.bucket_size_threshold_GB * 1024**3
+        for gk, indices in grouped_task_indices.items():
+            group_size = sum(sizes[idx] for idx in indices if sizes[idx] is not None)
+            if not self.bucket_index_groups or curr_size + group_size > threshold:
                 self.bucket_index_groups.append([])
                 curr_size = 0
-            self.bucket_index_groups[-1].append(idx)
-            curr_size += size
+            self.bucket_index_groups[-1].extend(indices)
+            curr_size += group_size
+
+        # Bucket regular (non-grouped) tasks by size as before.
+        if regular_task_indices:
+            self.bucket_index_groups.append([])
+            curr_size = 0
+            for idx in regular_task_indices:
+                size = sizes[idx]
+                if curr_size + size > threshold:
+                    self.bucket_index_groups.append([])
+                    curr_size = 0
+                self.bucket_index_groups[-1].append(idx)
+                curr_size += size
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
@@ -492,9 +532,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
@@ -822,9 +867,14 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         self.strategy = MegatronStrategy(
