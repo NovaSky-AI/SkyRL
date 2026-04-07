@@ -555,6 +555,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+                if len(agent_loop_state.input_ids) > max_input_length:
+                    stop_reason = "length"
+                    break
             _tokenize_s = time.perf_counter() - _t_tokenize
             _prompt_tokens = len(agent_loop_state.input_ids)
 
