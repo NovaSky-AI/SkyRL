@@ -539,6 +539,11 @@ class GeneratorConfig(BaseConfig):
     step_wise_trajectories: bool = False
     train_child_trajectories: bool = False
     """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
+    child_openrouter_model: Optional[str] = None
+    """When set, child RLM agents (depth >= 1) use this model via an OpenAI-compatible API instead of the
+    policy inference engine.  Requires the ``OPENROUTER_API_KEY`` environment variable."""
+    child_openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    """Base URL for the OpenAI-compatible chat completions endpoint used by child agents."""
 
     def __post_init__(self):
 

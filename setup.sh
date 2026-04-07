@@ -1,8 +1,8 @@
 # Initialize upstream git repo
 git init
 git remote add origin https://github.com/alphaXiv/SkyRL.git
-git fetch origin daniel/overlong
-git checkout -f -B daniel/overlong origin/daniel/overlong
+git fetch origin daniel/sub-rlm
+git checkout -f -B daniel/sub-rlm origin/daniel/sub-rlm
 
 # Set global git config 
 git config --global user.name "Daniel Kim" && git config --global user.email "sox8502@gmail.com"

@@ -314,6 +314,83 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    # ------------------------------------------------------------------
+    # OpenRouter / OpenAI-compatible external generation
+    # ------------------------------------------------------------------
+
+    async def _openrouter_generate(
+        self,
+        messages: List[Dict[str, str]],
+        sampling_params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Call an OpenAI-compatible endpoint (e.g. OpenRouter) and return the assistant message."""
+        try:
+            import httpx
+        except ImportError:
+            raise ImportError("httpx is required for child_openrouter_model support.  Install with: pip install httpx")
+
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable must be set when using child_openrouter_model")
+
+        model = self.generator_cfg.child_openrouter_model
+        base_url = self.generator_cfg.child_openrouter_base_url.rstrip("/")
+
+        params = sampling_params or {}
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": params.get("temperature", 0.7),
+            "top_p": params.get("top_p", 1.0),
+            "max_tokens": params.get("max_generate_length", 1024),
+        }
+        if params.get("additional_kwargs"):
+            body.update(params["additional_kwargs"])
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=300) as client:
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=body,
+                    )
+                    resp.raise_for_status()
+                    return resp.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                last_exc = e
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        raise RuntimeError(f"OpenRouter API call failed after 3 attempts: {last_exc}") from last_exc
+
+    def _make_openrouter_lm_callback(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        sampling_params: Optional[Dict[str, Any]],
+    ) -> Callable[[List[str]], List[str]]:
+        """Build an lm_callback that routes through OpenRouter instead of the inference engine."""
+
+        async def _generate(prompts: List[str]) -> List[str]:
+            tasks = [
+                self._openrouter_generate([{"role": "user", "content": p}], sampling_params)
+                for p in prompts
+            ]
+            return list(await asyncio.gather(*tasks))
+
+        def callback(prompts: List[str]) -> List[str]:
+            future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
+            return future.result(timeout=300)
+
+        return callback
+
+    # ------------------------------------------------------------------
+    # Inference-engine lm_callback (default)
+    # ------------------------------------------------------------------
+
     def _make_lm_callback(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -362,15 +439,26 @@ class SkyRLGymGenerator(GeneratorInterface):
         The child env gets the same lm_callback as the parent so it can make LLM
         calls, but does NOT get a subcall_fn — preventing unbounded recursion.
 
+        When ``child_openrouter_model`` is configured, both the child's main
+        generation loop and its ``lm_callback`` (for ``llm_query``) are routed
+        through the OpenRouter API so that only the top-level (depth-0) agent
+        uses the policy inference engine.
+
         child_histories: if provided, each child's chat_history is appended to this
         list after the child completes (used for rollout logging).
         """
+        use_openrouter = self.generator_cfg.child_openrouter_model is not None
+        external_generate_fn = self._openrouter_generate if use_openrouter else None
+
         async def _run_child(prompt: str, context=None) -> str:
             child_prompt = [{"role": "user", "content": prompt}]
             # Strip lm_callback/subcall_fn so the child cannot recurse further
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            # Re-inject lm_callback so the child can still call llm_query
-            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            # Re-inject lm_callback — via OpenRouter when configured, else via the inference engine
+            if use_openrouter:
+                child_extras["lm_callback"] = self._make_openrouter_lm_callback(loop, sampling_params)
+            else:
+                child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
             # If a child-specific system prompt is configured, use it as the child's custom_system_prompt
             child_system_prompt = child_extras.pop("child_system_prompt", None)
             if child_system_prompt:
@@ -401,6 +489,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 max_tokens=max_tokens,
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
+                external_generate_fn=external_generate_fn,
             )
             if child_histories is not None:
                 child_chat_history = result.env_metrics.get("chat_history") if isinstance(result.env_metrics, dict) else None
@@ -425,6 +514,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        external_generate_fn: Optional[Callable] = None,
     ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -443,6 +533,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_tokens: int
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
+            external_generate_fn: Optional async callable ``(messages, sampling_params) -> str``.
+                When provided, each generation step calls this function (e.g. OpenRouter)
+                instead of the local inference engine.  The returned text is tokenized with
+                the policy tokenizer so that loss-mask / step-wise bookkeeping still works.
         Returns:
             response_ids: List[int]
             reward: Union[float, List[float]]
@@ -562,20 +656,32 @@ class SkyRLGymGenerator(GeneratorInterface):
             _prompt_tokens = len(agent_loop_state.input_ids)
 
             _t_infer = time.perf_counter()
-            engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
-            )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            if external_generate_fn is not None:
+                # Route through an external API (e.g. OpenRouter) instead of the
+                # policy inference engine.  We send the full message list and
+                # tokenize the returned text so step-wise bookkeeping still works.
+                _ext_msgs = list(chat_history) + ([next_user_message] if next_user_message else [])
+                output = await external_generate_fn(_ext_msgs, current_sampling_params)
+                output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                stop_reason = "stop"
+                response_logprobs = None
+                rollout_expert_indices = None
+            else:
+                engine_input = InferenceEngineInput(
+                    prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                )
+                engine_output = await self.inference_engine_client.generate(engine_input)
+                output = engine_output["responses"][0]
+                output_ids = engine_output["response_ids"][0]
+                stop_reason = engine_output["stop_reasons"][0]
+                response_logprobs = engine_output.get("response_logprobs", None)
+                rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
+                if response_logprobs is not None:
+                    response_logprobs = response_logprobs[0]
+                    if self.custom_chat_template is not None:
+                        raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
+
             _inference_s = time.perf_counter() - _t_infer
-            output = engine_output["responses"][0]
-            output_ids = engine_output["response_ids"][0]
-            stop_reason = engine_output["stop_reasons"][0]
-            response_logprobs = engine_output.get("response_logprobs", None)
-            rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
-            if response_logprobs is not None:
-                response_logprobs = response_logprobs[0]
-                if self.custom_chat_template is not None:
-                    raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
 
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices[0]

@@ -382,6 +382,8 @@ generator:
 
   step_wise_trajectories: false
   train_child_trajectories: false
+  child_openrouter_model: null
+  child_openrouter_base_url: "https://openrouter.ai/api/v1"
 
 environment:
   env_class: "gsm8k"

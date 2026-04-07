@@ -1,10 +1,9 @@
 set -x
 
-# RLM training on QASPER with alphaXiv/rlm-sft-Qwen3.5-9B-v1.
-# One step = 8 prompts × 8 samples = 64 rollouts, then one optimizer step.
+# Multi-paper RLM training with alphaXiv/rlm-sft-multi-9b-v1.
 #
-# 1. Create data: uv run -- python examples/train/rlm/rlm_dataset.py --output_dir $DATA_DIR
-# 2. Run: bash examples/train/rlm/run_rlm.sh
+# 1. Create data: uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir $DATA_DIR
+# 2. Run: bash examples/train/rlm/run_multi_paper_rlm.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -97,4 +96,8 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
 #   trainer.algorithm.leash.lambda_lr=0.05 \
 #   trainer.algorithm.leash.lambda_min=0.0 \
 #   trainer.algorithm.leash.lambda_max=1.0 \
-#   trainer.algorithm.leash.target_length=4096 \
+#   trainer.algorithm.leash.target_length=4096 \  
+
+# To route child agents (depth >= 1) through OpenRouter instead of the policy
+# inference engine, set OPENROUTER_API_KEY and add:
+#   generator.child_openrouter_model="google/gemini-2.5-flash" \
