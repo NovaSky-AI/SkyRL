@@ -322,8 +322,8 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.server_group import (
-            ServerGroup,
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            create_inference_servers,
         )
         from skyrl.backends.skyrl_train.inference_servers.utils import (
             build_router_args,
@@ -370,100 +370,17 @@ class BasePPOExp:
         else:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
-            gpus_per_server = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size
-
-            if ie_cfg.enable_pd:
-                import copy
-
-                from skyrl.backends.skyrl_train.inference_servers.utils import (
-                    get_pd_cli_args,
-                )
-
-                pd_cli_args = get_pd_cli_args(cli_args)
-                num_prefill = ie_cfg.num_prefill
-                num_decode = ie_cfg.num_engines - num_prefill
-                servers_per_group = ie_cfg.data_parallel_size
-
-                self._prefill_server_groups = [
-                    ServerGroup(
-                        cli_args=copy.deepcopy(pd_cli_args),
-                        num_servers=ie_cfg.data_parallel_size,
-                        start_port=8000 + i * servers_per_group,
-                        placement_group=self.colocate_pg if is_colocated else None,
-                        placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
-                        enable_dp=ie_cfg.data_parallel_size > 1,
-                        enable_pd=True,
-                        nixl_side_channel_base=5600 + i * servers_per_group,
-                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
-                    )
-                    for i in range(num_prefill)
-                ]
-                _prefill_infos_nested = [
-                    prefill_server_group.start() for prefill_server_group in self._prefill_server_groups
-                ]
-                prefill_urls = []
-                for dp_infos in _prefill_infos_nested:
-                    prefill_urls.extend([info.url for info in dp_infos])
-
-                decode_bundle_offset = num_prefill * gpus_per_server * servers_per_group if is_colocated else 0
-                self._decode_server_groups = [
-                    ServerGroup(
-                        cli_args=copy.deepcopy(pd_cli_args),
-                        num_servers=ie_cfg.data_parallel_size,
-                        start_port=8000 + (num_prefill + i) * servers_per_group,
-                        placement_group=self.colocate_pg if is_colocated else None,
-                        placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
-                        enable_dp=ie_cfg.data_parallel_size > 1,
-                        enable_pd=True,
-                        nixl_side_channel_base=5600 + (num_prefill + i) * servers_per_group,
-                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
-                    )
-                    for i in range(num_decode)
-                ]
-                decode_infos_nested = [
-                    decode_server_group.start() for decode_server_group in self._decode_server_groups
-                ]
-                decode_urls = []
-                for decode_infos in decode_infos_nested:
-                    decode_urls.extend([info.url for info in decode_infos])
-
-                server_urls = prefill_urls + decode_urls
-
-                router_args = build_router_args(
-                    self.cfg,
-                    prefill_urls=prefill_urls,
-                    decode_urls=decode_urls,
-                )
-                self._inference_router = VLLMRouter(router_args)
-                proxy_url = self._inference_router.start()
-                logger.info(
-                    f"HTTP Inference (PD): prefill_urls={prefill_urls}, decode_urls={decode_urls}, "
-                    f"proxy_url={proxy_url}, colocated={is_colocated}"
-                )
-            else:
-                self._server_groups = [
-                    ServerGroup(
-                        cli_args=cli_args,
-                        num_servers=ie_cfg.data_parallel_size,
-                        placement_group=self.colocate_pg if is_colocated else None,
-                        enable_dp=ie_cfg.data_parallel_size > 1,
-                        distributed_executor_backend=ie_cfg.distributed_executor_backend,
-                        placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
-                    )
-                    for i in range(ie_cfg.num_engines)
-                ]
-                server_infos_nested = [server_group.start() for server_group in self._server_groups]
-                server_urls = []
-                for server_infos in server_infos_nested:
-                    server_urls.extend([info.url for info in server_infos])
-
-                router_args = build_router_args(self.cfg, server_urls=server_urls)
-                self._inference_router = VLLMRouter(router_args)
-                proxy_url = self._inference_router.start()
-                logger.info(
-                    f"HTTP Inference: Built servers and router internally - "
-                    f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-                )
+            setup = create_inference_servers(
+                self.cfg,
+                cli_args,
+                placement_group=self.colocate_pg if is_colocated else None,
+            )
+            self._inference_router = setup.router
+            self._server_groups = setup.server_groups
+            self._prefill_server_groups = setup.prefill_server_groups
+            self._decode_server_groups = setup.decode_server_groups
+            proxy_url = setup.proxy_url
+            server_urls = setup.server_urls
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
