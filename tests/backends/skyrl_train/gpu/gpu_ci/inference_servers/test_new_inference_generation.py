@@ -14,6 +14,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): Remove the tests in Group B once we migrate all generation interactions to the router's HTTP API.
 
+import asyncio
 import json
 from http import HTTPStatus
 from typing import Any, Dict, List, Literal
@@ -35,7 +36,6 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
-import asyncio
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
