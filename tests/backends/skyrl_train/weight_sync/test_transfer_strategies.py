@@ -78,13 +78,14 @@ class TestCreateInitInfo:
             data_parallel_size=1,
             override_existing_update_group="enable",
         )
-        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
+        # inference_world_size = num_engines * tp * pp * dp = 2 * 2 * 1 * 1 = 4
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=4)
 
         assert isinstance(init_info, BroadcastInitInfo)
         assert init_info.master_addr == "192.168.1.1"
         assert isinstance(init_info.master_port, int)
         assert init_info.rank_offset == 1
-        # world_size = num_engines * tp * pp * dp + 1 = 2 * 2 * 1 * 1 + 1 = 5
+        # world_size = inference_world_size + 1 = 4 + 1 = 5
         assert init_info.world_size == 5
         assert init_info.group_name == "skyrl"
         assert init_info.backend == "gloo"
@@ -98,7 +99,8 @@ class TestCreateInitInfo:
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
         ie_cfg = self._make_ie_cfg(override_existing_update_group="disable")
-        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
+        # inference_world_size = num_engines * tp * pp * dp = 1 * 1 * 1 * 1 = 1
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=1)
 
         assert init_info.override_existing_receiver is False
 
