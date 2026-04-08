@@ -1125,12 +1125,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_output_dir = cfg.get("rollout_output_dir")
                     if rollout_output_dir:
                         batch_metadata = input_batch.get("batch_metadata")
-                        if batch_metadata:
+                        if batch_metadata and batch_metadata.training_phase == "eval":
                             step = batch_metadata.global_step
-                            phase = getattr(batch_metadata, "training_phase", None) or "train"
-                            step_label = f"{phase}_step_{step}" if step is not None else phase
-                            rollout_output_dir = os.path.join(rollout_output_dir, step_label)
-                        env_extras[i]["rollout_output_dir"] = rollout_output_dir
+                            step_label = f"eval_step_{step}" if step is not None else "eval"
+                            env_extras[i]["rollout_output_dir"] = os.path.join(rollout_output_dir, step_label)
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []
