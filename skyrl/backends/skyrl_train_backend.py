@@ -718,7 +718,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 }
                 tasks.append(self._inference_engine_client.sample(request_payload))
 
-            return await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                return await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await self._inference_engine_client.aclose()
 
         sample_outputs = asyncio.run(sample_all())
         logger.info(f"Collected {len(sample_outputs)} sample outputs")
