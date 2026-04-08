@@ -355,7 +355,11 @@ class RemoteInferenceClient:
         Returns:
             Dict with keys: stop_reason, response_ids, response_logprobs
         """
-        url = f"{self.proxy_url}/skyrl/v1/generate" if self.enable_return_routed_experts else f"{self.proxy_url}/inference/v1/generate"
+        url = (
+            f"{self.proxy_url}/skyrl/v1/generate"
+            if self.enable_return_routed_experts
+            else f"{self.proxy_url}/inference/v1/generate"
+        )
 
         # Use LoRA adapter name if one is active, otherwise use base model name
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
