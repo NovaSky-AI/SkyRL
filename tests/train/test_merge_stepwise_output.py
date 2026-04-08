@@ -440,6 +440,69 @@ def test_prefix_of_prompt_plus_response_but_not_prompt_alone_no_merge():
     assert merged["is_last_step"] == [False, True]
 
 
+def test_partial_merge_within_trajectory():
+    """4 turns where prefix breaks mid-trajectory, producing 2 merged sequences.
+
+    Turn 1: prompt=[1],       response=[2]         → prefix OK for turn 2
+    Turn 2: prompt=[1,2,3],   response=[4]         → prefix BREAKS for turn 3
+                                                      (re-tokenization changed [2,3] to [23])
+    Turn 3: prompt=[1,23,4,5], response=[6]        → prefix OK for turn 4
+    Turn 4: prompt=[1,23,4,5,6,7], response=[8]
+
+    Turns 1+2 merge into one sequence, turns 3+4 merge into another.
+    Result: 4 turns → 2 sequences.
+    """
+    tid = _make_tid("partial")
+    gen_out: GeneratorOutput = {
+        "prompt_token_ids": [
+            [1],              # turn 1
+            [1, 2, 3],        # turn 2: prompt[0]+resp[0]=[1,2] is prefix of [1,2,3] ✓
+            [1, 23, 4, 5],    # turn 3: prompt[1]+resp[1]=[1,2,3,4] is NOT prefix of [1,23,4,5] ✗
+            [1, 23, 4, 5, 6, 7],  # turn 4: prompt[2]+resp[2]=[1,23,4,5,6] is prefix ✓
+        ],
+        "response_ids": [
+            [2],    # turn 1
+            [4],    # turn 2
+            [6],    # turn 3
+            [8],    # turn 4
+        ],
+        "rewards": [[0.0], [0.0], [0.0], [10.0]],
+        "loss_masks": [[1], [1], [1], [1]],
+        "stop_reasons": ["c", "c", "c", "eos"],
+        "rollout_metrics": None,
+        "rollout_logprobs": [[-1.0], [-2.0], [-3.0], [-4.0]],
+        "trajectory_ids": [tid, tid, tid, tid],
+        "rollout_expert_indices": None,
+        "is_last_step": [False, False, False, True],
+    }
+
+    merged = merge_stepwise_output(gen_out)
+
+    # 4 turns → 2 merged sequences
+    assert len(merged["response_ids"]) == 2
+
+    # First merged group: turns 1+2
+    # prompt=[1], response=[2] + obs_delta=[3] + [4] = [2, 3, 4]
+    assert merged["prompt_token_ids"][0] == [1]
+    assert merged["response_ids"][0] == [2, 3, 4]
+    assert merged["loss_masks"][0] == [1, 0, 1]
+    assert merged["rollout_logprobs"][0] == [-1.0, 0.0, -2.0]
+    assert merged["rewards"][0] == [0.0, 0.0, 0.0]
+    assert merged["is_last_step"][0] is False
+
+    # Second merged group: turns 3+4
+    # prompt=[1,23,4,5], response=[6] + obs_delta=[7] + [8] = [6, 7, 8]
+    assert merged["prompt_token_ids"][1] == [1, 23, 4, 5]
+    assert merged["response_ids"][1] == [6, 7, 8]
+    assert merged["loss_masks"][1] == [1, 0, 1]
+    assert merged["rollout_logprobs"][1] == [-3.0, 0.0, -4.0]
+    assert merged["rewards"][1] == [0.0, 0.0, 10.0]
+    assert merged["is_last_step"][1] is True
+
+    assert merged["stop_reasons"] == ["c", "eos"]
+    assert merged["trajectory_ids"] == [tid, tid]
+
+
 # ───────────────────────────────────────────────────────────────────
 # Assertion / validation tests
 # ───────────────────────────────────────────────────────────────────

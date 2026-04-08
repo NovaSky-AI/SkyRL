@@ -829,10 +829,26 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         out_trajectory_ids.append(gen_out["trajectory_ids"][last])
         out_is_last_step.append(gen_out["is_last_step"][last])
 
+    prefix_failures_logged = 0
     for i in range(1, n):
         full_merged = acc_prompt + acc_response
 
         if not _is_prefix(full_merged, list(gen_out["prompt_token_ids"][i])):
+            if prefix_failures_logged < 3:
+                next_prompt = list(gen_out["prompt_token_ids"][i])
+                # Find the first divergence point
+                diverge_idx = next(
+                    (j for j in range(min(len(full_merged), len(next_prompt))) if full_merged[j] != next_prompt[j]),
+                    min(len(full_merged), len(next_prompt)),
+                )
+                logger.warning(
+                    f"Prefix mismatch at turn {i}: "
+                    f"len(full_merged)={len(full_merged)}, len(next_prompt)={len(next_prompt)}, "
+                    f"first_diverge_idx={diverge_idx}, "
+                    f"full_merged[{diverge_idx-2}:{diverge_idx+3}]={full_merged[max(0,diverge_idx-2):diverge_idx+3]}, "
+                    f"next_prompt[{diverge_idx-2}:{diverge_idx+3}]={next_prompt[max(0,diverge_idx-2):diverge_idx+3]}"
+                )
+                prefix_failures_logged += 1
             flush()
             acc_prompt = list(gen_out["prompt_token_ids"][i])
             acc_response = list(gen_out["response_ids"][i])

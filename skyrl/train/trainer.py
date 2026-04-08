@@ -614,6 +614,8 @@ class RayPPOTrainer:
                     "generate/num_seq_after_merge": num_seq_after_merge,
                 }
             )
+            # Update uids to match the merged output length
+            uids = [tid.instance_id for tid in generator_output["trajectory_ids"]]
 
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
@@ -901,11 +903,25 @@ class RayPPOTrainer:
         data.save(data_save_dir / f"{file_name}.pkl")
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
-        """Pad the batch to be divisible by dp size"""
+        """Pad the batch to be divisible by the training mini-batch size.
+
+        For step-wise training the batch size is variable (depends on how many
+        turns each trajectory takes), so we pad to the full mini_batch_size to
+        satisfy the divisibility requirement in stage_data.
+        """
         import math
 
         dp_size = self.dispatch.get_lcm_dp_size()
-        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
+        if self.cfg.generator.step_wise_trajectories:
+            n_samples = self.cfg.generator.n_samples_per_prompt
+            pad_target = max(
+                self.cfg.trainer.policy_mini_batch_size * n_samples,
+                self.cfg.trainer.critic_mini_batch_size * n_samples,
+                dp_size,
+            )
+        else:
+            pad_target = dp_size
+        pad_size = math.ceil(training_input.batch_size / pad_target) * pad_target - training_input.batch_size
         new_tensors = {}
         training_input.metadata["pad_size"] = pad_size
         if pad_size == 0:
