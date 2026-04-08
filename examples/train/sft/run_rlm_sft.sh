@@ -6,9 +6,16 @@ set -x
 # export HF_TOKEN=<your_token>
 # bash examples/train/sft/run_rlm_sft.sh
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+: "${UV_CACHE_DIR:=$PROJECT_ROOT/.uv-cache}"
+: "${UV_PROJECT_ENVIRONMENT:=$PROJECT_ROOT/.venv}"
+export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
+
+
 : "${LOGGER:=wandb}"
 : "${NUM_GPUS:=8}"
-: "${BATCH_SIZE:=4}"
+: "${BATCH_SIZE:=8}"
 : "${NUM_EPOCHS:=2}"
 : "${MAX_LENGTH:=16384}"
 : "${MICRO_BATCH_SIZE:=2}"
@@ -19,4 +26,4 @@ set -x
 
 export LOGGER NUM_GPUS BATCH_SIZE NUM_EPOCHS MAX_LENGTH MICRO_BATCH_SIZE LEARNING_RATE LOG_INTERVAL WANDB_PROJECT WANDB_RUN_NAME
 
-uv run --isolated --extra fsdp python examples/train/sft/rlm_sft_trainer.py $@
+uv run --extra fsdp python examples/train/sft/rlm_sft_trainer.py $@

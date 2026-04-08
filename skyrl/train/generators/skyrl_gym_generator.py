@@ -164,45 +164,61 @@ def _write_rlm_rollout(
     tokenizer,
     trajectory_id_str: Optional[str] = None,
 ) -> None:
-    """Append one JSONL record to rollout_output_dir/rollouts.jsonl."""
+    """Write one JSON file per trajectory (parent + children) into rollout_output_dir."""
     os.makedirs(rollout_output_dir, exist_ok=True)
 
+    tid = trajectory_id_str or "unknown"
+    # Sanitize so it's safe as a filename
+    tid_safe = tid.replace("/", "_").replace(":", "-")
+
     reward_spec = env_extras.get("reward_spec", {})
-    record = {
-        "trajectory_id": trajectory_id_str,
+
+    # Write each child as its own file: child_{parent_tid}_{idx}.json
+    child_refs = []
+    for idx, child in enumerate(child_step_outputs):
+        if not child:
+            continue
+        child_record = {
+            "trajectory_id": f"child_{tid}_{idx}",
+            "parent_trajectory_id": tid,
+            "child_index": idx,
+            "turns": [
+                {
+                    "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
+                    "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
+                }
+                for s in child
+            ],
+            "reward": (child[-1].env_metrics or {}).get("reward") if child else None,
+            "stop_reason": child[-1].stop_reason if child else None,
+            "final_answer": (child[-1].env_metrics or {}).get("final_answer") if child else None,
+        }
+        child_filename = f"child_{tid_safe}_{idx}.json"
+        child_path = os.path.join(rollout_output_dir, child_filename)
+        with open(child_path, "w") as f:
+            f.write(json.dumps(child_record, ensure_ascii=False, indent=2))
+        child_refs.append(child_filename)
+
+    # Write the parent trajectory file: traj_{tid}.json
+    parent_record = {
+        "trajectory_id": tid,
         "reward": env_metrics.get("reward", 0.0),
         "turns_used": env_metrics.get("turns_used", 0),
         "stop_reason": parent_step_outputs[-1].stop_reason if parent_step_outputs else None,
         "final_answer": env_metrics.get("final_answer"),
         "evidence": reward_spec.get("evidence"),
-        "parent_turns": [
+        "turns": [
             {
                 "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
                 "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
             }
             for s in parent_step_outputs
         ],
-        "children": [
-            {
-                "turns": [
-                    {
-                        "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
-                        "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
-                    }
-                    for s in child
-                ],
-                "reward": (child[-1].env_metrics or {}).get("reward") if child else None,
-                "stop_reason": child[-1].stop_reason if child else None,
-                "final_answer": (child[-1].env_metrics or {}).get("final_answer") if child else None,
-            }
-            for child in child_step_outputs
-            if child
-        ],
+        "child_files": child_refs,
     }
-
-    jsonl_path = os.path.join(rollout_output_dir, "rollouts.jsonl")
-    with open(jsonl_path, "a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    parent_path = os.path.join(rollout_output_dir, f"traj_{tid_safe}.json")
+    with open(parent_path, "w") as f:
+        f.write(json.dumps(parent_record, ensure_ascii=False, indent=2))
 
 
 class SkyRLGymGenerator(GeneratorInterface):
