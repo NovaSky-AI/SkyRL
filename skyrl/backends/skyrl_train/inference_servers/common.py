@@ -89,6 +89,7 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("", port))
             sock.listen(1)
             return port, sock
