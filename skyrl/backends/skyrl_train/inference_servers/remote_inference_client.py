@@ -428,7 +428,12 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/inference/v1/generate"
-        response = await self._post(url, json=payload, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            response = await self._post(url, json=payload, headers=headers)
+        else:
+            async with gen_sem:
+                response = await self._post(url, json=payload, headers=headers)
 
         # Transform response choices → sequences
         sequences = []
