@@ -351,7 +351,7 @@ class VLLMServerActor(ServerActorProtocol):
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
             if getattr(cli_args, "enable_lora", False):
-                raise NotImplementedError("/skyrl/v1/generate does not support LoRA.")
+                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
 
             body = await request.json()
             token_ids = body["token_ids"]
