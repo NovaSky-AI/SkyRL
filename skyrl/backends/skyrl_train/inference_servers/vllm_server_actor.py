@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.api_server import (
     create_server_socket,
     init_app_state,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
