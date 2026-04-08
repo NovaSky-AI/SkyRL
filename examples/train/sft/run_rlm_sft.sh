@@ -9,7 +9,7 @@ set -x
 : "${LOGGER:=wandb}"
 : "${NUM_GPUS:=4}"
 : "${BATCH_SIZE:=4}"
-: "${NUM_EPOCHS:=4}"
+: "${NUM_EPOCHS:=2}"
 : "${MAX_LENGTH:=16384}"
 : "${MICRO_BATCH_SIZE:=1}"
 : "${LEARNING_RATE:=1e-5}"
