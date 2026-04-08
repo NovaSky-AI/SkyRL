@@ -485,8 +485,9 @@ class RemoteInferenceClient:
         gen_sem, _ = self._get_semaphores()
         if gen_sem is None:
             return await self._post(url, json=body, headers=headers)
-        async with gen_sem:
-            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def render_chat_completion(
         self,
@@ -513,8 +514,9 @@ class RemoteInferenceClient:
         gen_sem, _ = self._get_semaphores()
         if gen_sem is None:
             return await self._post(url, json=body, headers=headers)
-        async with gen_sem:
-            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def completion(
         self,
@@ -541,8 +543,9 @@ class RemoteInferenceClient:
         gen_sem, _ = self._get_semaphores()
         if gen_sem is None:
             return await self._post(url, json=body, headers=headers)
-        async with gen_sem:
-            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def tokenize(
         self,
