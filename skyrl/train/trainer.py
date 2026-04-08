@@ -71,6 +71,7 @@ from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    merge_stepwise_output,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -600,6 +601,20 @@ class RayPPOTrainer:
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
+        if self.cfg.generator.merge_stepwise_output:
+            num_seq_before_merge = len(generator_output["response_ids"])
+            generator_output = merge_stepwise_output(generator_output)
+            num_seq_after_merge = len(generator_output["response_ids"])
+            logger.info(
+                f"merge_stepwise_output: {num_seq_before_merge} sequences -> {num_seq_after_merge} sequences"
+            )
+            self.all_metrics.update(
+                {
+                    "generate/num_seq_before_merge": num_seq_before_merge,
+                    "generate/num_seq_after_merge": num_seq_after_merge,
+                }
+            )
+
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
         rewards: List[List[float]] = generator_output["rewards"]

@@ -744,6 +744,182 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
             )
 
 
+def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
+    """Check if maybe_prefix is a prefix of candidate (or equal)."""
+    if len(maybe_prefix) > len(candidate):
+        return False
+    return maybe_prefix == candidate[: len(maybe_prefix)]
+
+
+def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+    """Slice a GeneratorOutput to keep only the entries at the given indices."""
+    return {
+        "prompt_token_ids": [generator_output["prompt_token_ids"][i] for i in indices],
+        "response_ids": [generator_output["response_ids"][i] for i in indices],
+        "rewards": [generator_output["rewards"][i] for i in indices],
+        "loss_masks": [generator_output["loss_masks"][i] for i in indices],
+        "stop_reasons": (
+            [generator_output["stop_reasons"][i] for i in indices]
+            if generator_output.get("stop_reasons") is not None
+            else None
+        ),
+        "rollout_metrics": generator_output.get("rollout_metrics"),
+        "rollout_logprobs": (
+            [generator_output["rollout_logprobs"][i] for i in indices]
+            if generator_output.get("rollout_logprobs") is not None
+            else None
+        ),
+        "trajectory_ids": (
+            [generator_output["trajectory_ids"][i] for i in indices]
+            if generator_output.get("trajectory_ids") is not None
+            else None
+        ),
+        "rollout_expert_indices": (
+            [generator_output["rollout_expert_indices"][i] for i in indices]
+            if generator_output.get("rollout_expert_indices") is not None
+            else None
+        ),
+        "is_last_step": (
+            [generator_output["is_last_step"][i] for i in indices]
+            if generator_output.get("is_last_step") is not None
+            else None
+        ),
+    }
+
+
+def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
+    """Greedily merge turns of a single trajectory using prefix matching.
+
+    Takes a GeneratorOutput whose entries all belong to the same trajectory
+    and returns a merged GeneratorOutput (potentially fewer entries).
+    """
+    n = len(gen_out["response_ids"])
+    token_level_rewards = n > 0 and isinstance(gen_out["rewards"][0], list)
+    has_logprobs = gen_out.get("rollout_logprobs") is not None
+    has_stop_reasons = gen_out.get("stop_reasons") is not None
+
+    # Per-field output accumulators (lists of per-entry values)
+    out_prompt_ids: List[List[int]] = []
+    out_response_ids: List[List[int]] = []
+    out_loss_masks: List[List[int]] = []
+    out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    out_rewards: list = []
+    out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_trajectory_ids: list = []
+    out_is_last_step: List[bool] = []
+
+    # Accumulator for the current merge group
+    acc_prompt: List[int] = list(gen_out["prompt_token_ids"][0])
+    acc_response: List[int] = list(gen_out["response_ids"][0])
+    acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
+    acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if token_level_rewards else None
+    last = 0
+
+    def flush():
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        out_prompt_ids.append(acc_prompt)
+        out_response_ids.append(acc_response)
+        out_loss_masks.append(acc_loss_mask)
+        if has_logprobs:
+            out_logprobs.append(acc_logprobs)
+        out_rewards.append(acc_rewards_tokens if token_level_rewards else gen_out["rewards"][last])
+        if has_stop_reasons:
+            out_stop_reasons.append(gen_out["stop_reasons"][last])
+        out_trajectory_ids.append(gen_out["trajectory_ids"][last])
+        out_is_last_step.append(gen_out["is_last_step"][last])
+
+    for i in range(1, n):
+        full_merged = acc_prompt + acc_response
+
+        if not _is_prefix(full_merged, list(gen_out["prompt_token_ids"][i])):
+            flush()
+            acc_prompt = list(gen_out["prompt_token_ids"][i])
+            acc_response = list(gen_out["response_ids"][i])
+            acc_loss_mask = list(gen_out["loss_masks"][i])
+            acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_rewards_tokens = list(gen_out["rewards"][i]) if token_level_rewards else None
+            last = i
+            continue
+
+        obs_delta = list(gen_out["prompt_token_ids"][i][len(full_merged):])
+
+        acc_response.extend(obs_delta)
+        acc_loss_mask.extend([0] * len(obs_delta))
+        if acc_logprobs is not None:
+            acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend([0.0] * len(obs_delta))
+
+        acc_response.extend(gen_out["response_ids"][i])
+        acc_loss_mask.extend(gen_out["loss_masks"][i])
+        if acc_logprobs is not None:
+            acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend(list(gen_out["rewards"][i]))
+
+        last = i
+
+    flush()
+
+    return {
+        "prompt_token_ids": out_prompt_ids,
+        "response_ids": out_response_ids,
+        "rewards": out_rewards,
+        "loss_masks": out_loss_masks,
+        "stop_reasons": out_stop_reasons,
+        "rollout_metrics": gen_out.get("rollout_metrics"),
+        "rollout_logprobs": out_logprobs,
+        "trajectory_ids": out_trajectory_ids,
+        "rollout_expert_indices": None,
+        "is_last_step": out_is_last_step,
+    }
+
+
+def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
+    """Merge step-wise GeneratorOutput entries using prefix-aware merging.
+
+    For consecutive turns within the same trajectory where
+    prompt[i] + response[i] is a prefix of prompt[i+1],
+    merges them into a single entry with:
+    - prompt from the first turn in the merge group
+    - response tokens concatenated with observation deltas (obs_delta) in between
+    - Per-token fields (loss_masks, rewards, logprobs) concatenated, with default
+      values (0) for obs_delta positions
+    - Per-turn fields (stop_reason, is_last_step, trajectory_id) taken from the
+      last turn in the merge group
+
+    When the prefix condition fails between two consecutive turns, the current
+    merge group is flushed and a new group starts (greedy merging).
+
+    Args:
+        generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
+
+    Returns:
+        Merged GeneratorOutput with one entry per merged group.
+    """
+    num_samples = len(generator_output["response_ids"])
+    # step_wise=True validates trajectory_ids, is_last_step, and contiguous ordering
+    validate_generator_output(num_samples, generator_output, step_wise=True)
+    assert generator_output.get("rollout_expert_indices") is None, (
+        "rollout_expert_indices not supported for prefix-aware merging"
+    )
+
+    # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
+    # (contiguity is guaranteed by validate_generator_output with step_wise=True)
+    is_last_step = generator_output["is_last_step"]
+    trajectory_slices: List[GeneratorOutput] = []
+    start = 0
+    for i in range(num_samples):
+        if is_last_step[i]:
+            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            start = i + 1
+
+    merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
+    # concatenate_generator_outputs re-aggregates rollout_metrics and validates
+    return concatenate_generator_outputs(merged_slices)
+
+
 def build_dataloader(
     cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
