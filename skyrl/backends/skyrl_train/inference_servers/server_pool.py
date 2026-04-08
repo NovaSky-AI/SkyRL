@@ -52,6 +52,8 @@ class ServerActorPool:
         return self._actors
 
     def shutdown(self) -> None:
-        """Shutdown all actors."""
+        """Shutdown all actors and kill them to release GPU memory."""
         shutdown_refs = [actor.shutdown.remote() for actor in self._actors]
         ray.get(shutdown_refs)
+        for actor in self._actors:
+            ray.kill(actor)

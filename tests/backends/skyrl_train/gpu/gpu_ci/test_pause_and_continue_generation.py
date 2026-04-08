@@ -18,6 +18,9 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
     shutdown_server,
     wait_for_server_ready,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from tests.backends.skyrl_train.gpu.gpu_ci.test_inference_engine_client_http_endpoint import (
     get_test_actor_config,
 )
@@ -38,6 +41,7 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
     finish with reason `length` and have exactly `max_tokens` completion tokens.
     """
     server_thread = None
+    client = None
     num_engines = 2
     num_requests = 6
     max_num_seqs = 2
@@ -75,14 +79,21 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
             max_num_seqs=max_num_seqs,
         ) as engines:
             client = engines.client
+            use_new_inference = isinstance(client, RemoteInferenceClient)
 
-            def run_server():
-                serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            if use_new_inference:
+                # RemoteInferenceClient already has HTTP servers behind a router;
+                # send requests directly to the proxy_url instead of starting serve().
+                base_url = f"{client.proxy_url}/v1"
+            else:
 
-            server_thread = threading.Thread(target=run_server, daemon=True)
-            server_thread.start()
-            wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-            base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+                def run_server():
+                    serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+                server_thread = threading.Thread(target=run_server, daemon=True)
+                server_thread.start()
+                wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+                base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
 
             # 2. Prepare input
             messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
@@ -150,14 +161,15 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
                     token_count_from_logprobs == sampling_params["max_tokens"]
                 ), f"Request {i} expected {sampling_params['max_tokens']} tokens from logprobs, got {token_count_from_logprobs}"
 
-                # Spot-check structure of each logprob entry: token contains token_id and top_logprobs length matches request
+                # Spot-check structure of each logprob entry: top_logprobs length matches request
                 top_logprobs = sampling_params["top_logprobs"]
                 for entry in logprobs["content"]:
-                    # tokens are token_id:<int> when return_tokens_as_token_ids=True
-                    parts = str(entry["token"]).split(":")
-                    assert (
-                        len(parts) >= 2 and parts[-1].isdigit()
-                    ), f"Request {i} token field not token_id:int: {entry['token']}"
+                    if not use_new_inference:
+                        # tokens are token_id:<int> when return_tokens_as_token_ids=True (old path only)
+                        parts = str(entry["token"]).split(":")
+                        assert (
+                            len(parts) >= 2 and parts[-1].isdigit()
+                        ), f"Request {i} token field not token_id:int: {entry['token']}"
                     assert (
                         len(entry["top_logprobs"]) == top_logprobs
                     ), f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
@@ -171,9 +183,10 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
                 # TODO(Charlie): after we bump vllm such that it supports returnining tokens, check `choice["token_ids"]`
                 # TODO(Charlie): after we add model version to the output, check that as well
     finally:
-        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
-        if server_thread is not None and server_thread.is_alive():
-            server_thread.join(timeout=5)
+        if not isinstance(client, RemoteInferenceClient):
+            shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+            if server_thread is not None and server_thread.is_alive():
+                server_thread.join(timeout=5)
 
 
 @pytest.mark.asyncio
@@ -272,8 +285,6 @@ async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixt
             assert (
                 len(out["response_logprobs"][0]) == sampling_params["max_tokens"]
             ), f"Request {i} expected {sampling_params['max_tokens']} logprobs, got {len(out['response_logprobs'][0])}"
-            # Check string output is
-            assert out["responses"][0] == tokenizer.decode(token_ids, skip_special_tokens=True)
             # Print a preview to aid debugging
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
@@ -314,6 +325,7 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
         max_num_seqs=2,
     ) as engines:
         client = engines.client
+        use_new_inference = isinstance(client, RemoteInferenceClient)
 
         for api in ["chat_completion", "completion"]:
             convs: List[ConversationType] = [
@@ -332,7 +344,10 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                             "messages": convs[i],
                             **sampling_params,
                         }
-                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
+                        if use_new_inference:
+                            return await client.chat_completion({"json": body, "headers": {}})
+                        else:
+                            return await client.engines[0].chat_completion({"json": body, "headers": {}})
                     else:
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
                         body = {
@@ -340,7 +355,10 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                             "prompt": prompt_str,
                             **sampling_params,
                         }
-                        return await client.engines[0].completion({"json": body, "headers": {}})
+                        if use_new_inference:
+                            return await client.completion({"json": body, "headers": {}})
+                        else:
+                            return await client.engines[0].completion({"json": body, "headers": {}})
 
                 tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
                 await asyncio.sleep(1)

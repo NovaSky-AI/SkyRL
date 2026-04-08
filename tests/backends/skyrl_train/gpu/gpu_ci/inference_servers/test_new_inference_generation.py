@@ -619,7 +619,7 @@ def _get_test_token_ids(model: str) -> List[int]:
         add_generation_prompt=True,
         tokenize=True,
     )
-    return token_ids
+    return token_ids["input_ids"]
 
 
 @pytest.mark.vllm

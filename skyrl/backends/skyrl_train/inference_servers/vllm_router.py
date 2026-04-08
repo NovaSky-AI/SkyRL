@@ -31,7 +31,7 @@ class VLLMRouter:
     routing semantics.
 
     Usage:
-        router = VLLMRouter(server_urls, host="0.0.0.0", port=8080)
+        router = VLLMRouter(server_urls, host="0.0.0.0")
         router_url = router.start()
         # ... use router_url for inference ...
         router.shutdown()
@@ -41,7 +41,7 @@ class VLLMRouter:
         self,
         server_urls: List[str],
         host: str = "0.0.0.0",
-        port: int = 8080,
+        port: int = 0,
         policy: str = "consistent_hash",
         health_check_interval_secs: Optional[int] = None,
         max_concurrent_requests: Optional[int] = None,
@@ -49,7 +49,7 @@ class VLLMRouter:
     ):
         self._server_urls = server_urls
         self._host = host
-        self._port = port
+        self._port = port if port != 0 else self._get_free_port()
         self._policy = policy
         self._health_check_interval_secs = health_check_interval_secs
         self._max_concurrent_requests = max_concurrent_requests
@@ -57,6 +57,15 @@ class VLLMRouter:
         self._process: Optional[subprocess.Popen] = None
 
         logger.info(f"VLLMRouter: {len(server_urls)} servers, port={port}, policy={policy}")
+
+    @staticmethod
+    def _get_free_port() -> int:
+        """Get a free port from the OS."""
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
 
     def _build_cmd(self) -> List[str]:
         """Build the vllm-router CLI command."""
@@ -68,6 +77,8 @@ class VLLMRouter:
             str(self._port),
             "--policy",
             self._policy,
+            "--prometheus-port",
+            str(self._get_free_port()),
             "--worker-urls",
             *self._server_urls,
         ]
