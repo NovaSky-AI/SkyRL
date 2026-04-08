@@ -482,7 +482,11 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/chat/completions"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        async with gen_sem:
+            return await self._post(url, json=body, headers=headers)
 
     async def render_chat_completion(
         self,
@@ -506,7 +510,11 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/chat/completions/render"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        async with gen_sem:
+            return await self._post(url, json=body, headers=headers)
 
     async def completion(
         self,
@@ -530,7 +538,11 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/completions"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        async with gen_sem:
+            return await self._post(url, json=body, headers=headers)
 
     async def tokenize(
         self,
