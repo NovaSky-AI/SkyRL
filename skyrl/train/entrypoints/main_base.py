@@ -388,6 +388,7 @@ class BasePPOExp:
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
+            enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
             tokenizer=self.tokenizer,
         )

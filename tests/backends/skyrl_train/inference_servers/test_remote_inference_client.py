@@ -43,10 +43,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             ]
         }
 
+    @app.post("/skyrl/v1/generate")
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
+        input_token_ids = body.get("token_ids", [])
         n = sp.get("n", 1)
         # If logprobs is explicitly set (sample path), use n for num_choices.
         # Otherwise (generate path), use len(token_ids) for per-prompt responses.
@@ -55,7 +57,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         else:
             num_choices = 1
 
-        return {
+        response: dict = {
             "choices": [
                 {
                     "request_id": "dummy",
@@ -66,6 +68,34 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
+
+        # Mock prompt_logprobs when requested via sampling_params
+        pl = sp.get("prompt_logprobs")
+        # vLLM returns k or k+1 logprobs per position (extra entry when
+        # the prompt token falls outside the top-k).
+        if pl is not None and input_token_ids:
+            prompt_logprobs = [None]  # position 0: no prior context
+            for idx in range(1, len(input_token_ids)):
+                position_dict = {
+                    str(input_token_ids[idx]): {
+                        "logprob": -0.5 * idx,
+                        "rank": 1,
+                        "decoded_token": None,
+                    }
+                }
+                # If topk > 0, add extra entries
+                if pl > 0:
+                    for extra in range(pl):
+                        fake_token_id = 9000 + idx * 10 + extra
+                        position_dict[str(fake_token_id)] = {
+                            "logprob": -1.0 * idx - 0.1 * extra,
+                            "rank": extra + 2,
+                            "decoded_token": None,
+                        }
+                prompt_logprobs.append(position_dict)
+            response["prompt_logprobs"] = prompt_logprobs
+
+        return response
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -438,19 +468,18 @@ class TestSample:
 
     @pytest.mark.asyncio
     async def test_sample(self, client):
-        """Test sample with n=1 returns correct structure."""
+        """Test sample with n=1 returns correct structure and prompt_logprobs."""
         request_payload = {
             "json": {
                 "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
             }
         }
         result = await client.sample(request_payload)
 
         assert result["type"] == "sample"
-        assert result["prompt_logprobs"] is None
-        assert result["topk_prompt_logprobs"] is None
         assert len(result["sequences"]) == 1
 
         seq = result["sequences"][0]
@@ -458,14 +487,25 @@ class TestSample:
         assert seq["logprobs"] == [-0.1]
         assert seq["stop_reason"] == "stop"
 
+        # prompt_logprobs: one float per prompt token, position 0 is None
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+        # topk not requested
+        assert result["topk_prompt_logprobs"] is None
+
     @pytest.mark.asyncio
     async def test_sample_n2(self, client):
-        """Test sample with n=2 returns two sequences."""
+        """Test sample with n=2 returns two sequences and prompt_logprobs."""
         request_payload = {
             "json": {
                 "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
                 "num_samples": 2,
                 "sampling_params": {"temperature": 1.0, "max_tokens": 32},
+                "include_prompt_logprobs": True,
             }
         }
         result = await client.sample(request_payload)
@@ -475,6 +515,61 @@ class TestSample:
         assert result["sequences"][1]["tokens"] == [1, 2, 3]
         assert result["sequences"][0]["logprobs"] == [-0.1]
         assert result["sequences"][1]["logprobs"] == [-0.2]
+
+        # prompt_logprobs shared across choices
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_prompt_logprobs(self, client):
+        """Test topk_prompt_logprobs returns both prompt_logprobs and topk tuples."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+
+        topk = result["topk_prompt_logprobs"]
+        assert topk is not None
+        assert len(topk) == 3
+        assert topk[0] is None
+        # Exactly top-k (2) entries per position, sorted by logprob descending
+        assert len(topk[1]) == 2
+        assert len(topk[2]) == 2
+        # Position 1: top-2 are token 20 at -0.5 and 9010 at -1.0 (9011 at -1.1 is dropped)
+        topk1 = dict(topk[1])
+        assert topk1[20] == pytest.approx(-0.5)
+        assert topk1[9010] == pytest.approx(-1.0)
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_without_include_returns_none(self, client):
+        """topk_prompt_logprobs alone does not return prompt logprobs when include_prompt_logprobs is False."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
 
 
 class TestRenderChatCompletion:
