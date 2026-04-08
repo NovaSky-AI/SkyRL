@@ -145,14 +145,10 @@ def build_router_args(
 
     port = get_open_port()
 
-    # Get a free port for Prometheus metrics to avoid collisions
-    prometheus_port = get_open_port()
-
     kwargs: Dict[str, Any] = dict(
         host="0.0.0.0",
         port=port,
         policy="consistent_hash",
-        prometheus_port=prometheus_port,
     )
 
     if is_pd:
