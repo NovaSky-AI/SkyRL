@@ -3,7 +3,7 @@ VLM integration tests for the new inference path and tinker renderer.
 
 Tests /v1/chat/completions/render with a VLM to verify multimodal
 inputs are correctly tokenized and multimodal features are returned,
-and exercises VLLMRenderer + decode_mm_kwargs end-to-end.
+and exercises VLLMRenderer end-to-end.
 
 Requires a local vLLM install with /v1/chat/completions/render support.
 
@@ -20,7 +20,7 @@ import torch
 from PIL import Image
 from transformers import AutoTokenizer
 
-from skyrl.backends.renderer import VLLMRenderer, decode_mm_kwargs
+from skyrl.backends.renderer import VLLMRenderer
 from skyrl.tinker.types import EncodedTextChunk, ImageChunk, ModelInput
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
@@ -244,15 +244,15 @@ async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
 
 
 # ---------------------------------------------------------------------------
-# decode_mm_kwargs tests
+# multi_modal_kwargs tests
 # ---------------------------------------------------------------------------
 
 
 @requires_local_vllm
 @pytest.mark.vllm
 @pytest.mark.asyncio
-async def test_decode_mm_kwargs_with_image(module_scoped_ray_init_fixture):
-    """decode_mm_kwargs should produce valid pixel_values and image_grid_thw tensors."""
+async def test_renderer_decodes_mm_kwargs(module_scoped_ray_init_fixture):
+    """VLLMRenderer should produce decoded pixel_values and image_grid_thw in multi_modal_kwargs."""
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
     cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
     async with InferenceEngineState.create(
@@ -275,9 +275,11 @@ async def test_decode_mm_kwargs_with_image(module_scoped_ray_init_fixture):
 
         assert len(results) == 1
         rendered = results[0]
-        assert rendered.multi_modal_kwargs is not None
+        mm = rendered.multi_modal_kwargs
+        assert mm is not None
 
-        pixel_values, image_grid_thw = decode_mm_kwargs(rendered)
+        pixel_values = mm["pixel_values"]
+        image_grid_thw = mm["image_grid_thw"]
 
         assert isinstance(pixel_values, torch.Tensor)
         assert pixel_values.numel() > 0

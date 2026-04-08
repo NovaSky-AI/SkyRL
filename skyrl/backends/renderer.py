@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from typing import TYPE_CHECKING, NamedTuple, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Union
 
 import torch
 
@@ -11,6 +11,7 @@ from skyrl.tinker.types import (
     ImageAssetPointerChunk,
     ImageChunk,
     ModelInput,
+    MultiModalKwargs,
     MultiModalPlaceholder,
     RenderedModelInput,
 )
@@ -31,15 +32,18 @@ def render_model_input(model_inputs: list[ModelInput]) -> list[RenderedModelInpu
     ]
 
 
-def decode_mm_kwargs(rendered: RenderedModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Decode a RenderedModelInput's multi_modal_kwargs into vision tensors.
+def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs:
+    """Decode raw base64-encoded multimodal kwargs from vLLM into vision arrays.
+
+    Args:
+        mm_kwargs: Raw kwargs dict from vLLM's render endpoint, e.g. {"image": [b64_str, ...]}.
 
     Returns:
-        (pixel_values, image_grid_thw) — concatenated across all images in this
-        sample.  Returns empty tensors when the sample has no vision data.
+        MultiModalKwargs with decoded and concatenated pixel_values and image_grid_thw.
+        Values are None when no vision data is present.
     """
-    if not rendered.multi_modal_kwargs or "image" not in rendered.multi_modal_kwargs:
-        return torch.empty(0), torch.empty(0, 3, dtype=torch.long)
+    if not mm_kwargs or "image" not in mm_kwargs:
+        return MultiModalKwargs(pixel_values=None, image_grid_thw=None)
 
     from vllm.entrypoints.serve.disagg.mm_serde import (
         decode_mm_kwargs_item as _vllm_decode,
@@ -47,7 +51,7 @@ def decode_mm_kwargs(rendered: RenderedModelInput) -> Tuple[torch.Tensor, torch.
 
     pv_parts: list[torch.Tensor] = []
     thw_parts: list[torch.Tensor] = []
-    for b64_str in rendered.multi_modal_kwargs["image"]:
+    for b64_str in mm_kwargs["image"]:
         item = _vllm_decode(b64_str)
         data = item.get_data()
         if "pixel_values" in data and isinstance(data["pixel_values"], torch.Tensor):
@@ -55,10 +59,10 @@ def decode_mm_kwargs(rendered: RenderedModelInput) -> Tuple[torch.Tensor, torch.
         if "image_grid_thw" in data and isinstance(data["image_grid_thw"], torch.Tensor):
             thw_parts.append(data["image_grid_thw"])
 
-    pixel_values = torch.cat(pv_parts, dim=0) if pv_parts else torch.empty(0)
+    pixel_values = torch.cat(pv_parts, dim=0) if pv_parts else None
     thw_parts = [t.reshape(1, -1) if t.dim() == 1 else t for t in thw_parts]
-    image_grid_thw = torch.cat(thw_parts, dim=0) if thw_parts else torch.empty(0, 3, dtype=torch.long)
-    return pixel_values, image_grid_thw
+    image_grid_thw = torch.cat(thw_parts, dim=0) if thw_parts else None
+    return MultiModalKwargs(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
 
 
 class RenderedImage(NamedTuple):
@@ -108,12 +112,12 @@ class VLLMRenderer:
                 image_idx += 1
 
         kwargs_data_items = [ri.kwargs_data for ri in rendered_images if ri.kwargs_data is not None]
-        mm_kwargs = {"image": kwargs_data_items} if kwargs_data_items else None
+        mm_kwargs_raw = {"image": kwargs_data_items} if kwargs_data_items else None
 
         return RenderedModelInput(
             prompt_ids=token_ids,
             multi_modal_placeholders=placeholders if placeholders else None,
-            multi_modal_kwargs=mm_kwargs,
+            multi_modal_kwargs=decode_mm_kwargs(mm_kwargs_raw),
         )
 
     async def _render_images(
