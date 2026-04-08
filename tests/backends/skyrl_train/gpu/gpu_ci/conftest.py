@@ -34,7 +34,7 @@ def _build_ray_env_vars():
 
     # needed for megatron tests
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    env_vars["NVTE_FUSED_ATTN"] = "1"
+    env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
