@@ -100,7 +100,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.18.0; sys_platform == 'linux'",
+    "vllm==0.19.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
     # flash-attn wheels), drop the custom wheel URL
@@ -119,13 +119,15 @@ megatron = [
     # flash-attn wheels), drop the custom wheel URL
     "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
-    "vllm==0.18.0; sys_platform == 'linux'",
+    "vllm==0.19.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
-    "megatron-bridge==0.3.1; sys_platform == 'linux'",
-    "megatron-core==0.16.1; sys_platform == 'linux'",
+    # megatron-bridge requires Python 3.12+; pin megatron-core to the same
+    # constraint so both packages are consistently available (or absent).
+    "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
+    "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
     "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
@@ -215,8 +217,8 @@ override-dependencies = [
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "megatron-core==0.16.1; sys_platform == 'linux'",
     "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
+    "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
 
@@ -261,6 +263,9 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "420a7da37afea5eb4e8d3899d540c830b9c4cda2", marker = "sys_platform == 'linux'"}
+# megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 4/1/26
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "4ef64ebc468cd3da41a22d46a2db37163694e8e2", marker = "sys_platform == 'linux'"}
 
 [tool.black]
 line-length = 120
