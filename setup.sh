@@ -19,13 +19,19 @@ source .venv/bin/activate
 # Install libnuma-dev & tmux
 apt update && apt-get install build-essential libnuma-dev && apt install -y tmux
 
-# Install AWS
+# Save current directory
+CWD=$(pwd)
+
+# Move to home directory, install AWS CLI, then return to original directory
+cd ~
 apt update
 apt install -y unzip curl
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
+unzip -o awscliv2.zip
 ./aws/install
 aws --version
+cd "$CWD"
+
 # Ideally I can do configuration here with env variables, not there yet
 
 # Prepare dataset 
