@@ -191,7 +191,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                         if token_id in pos_logprobs:
                             _prompt_logprobs.append(pos_logprobs[token_id].logprob)
                         else:
-                            _prompt_logprobs.append(0.0)
+                            _prompt_logprobs.append(float('-inf'))
             prompt_logprobs_list.append(_prompt_logprobs)
 
             _routed_experts = None
