@@ -254,6 +254,7 @@ def dump_per_dataset_eval_results(
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
     env_metrics_list = concat_generator_outputs.get("env_metrics", None)
+    step_metadata_list = concat_generator_outputs.get("step_metadata", None)
 
     # Group indices by data source
     data_source_indices = {}
@@ -275,7 +276,6 @@ def dump_per_dataset_eval_results(
                 serializable_extras = {
                     k: v for k, v in concat_env_extras[i].items() if not callable(v) and k not in _skip_keys
                 }
-                # context_text is the full paper text — too large to include in eval dumps
                 if "extra_info" in serializable_extras and isinstance(serializable_extras["extra_info"], dict):
                     serializable_extras["extra_info"] = {
                         k: v for k, v in serializable_extras["extra_info"].items() if k != "context_text"
@@ -283,16 +283,59 @@ def dump_per_dataset_eval_results(
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    # "score": concat_generator_outputs["rewards"][i],  # usually all zeros for RLM, not useful
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": serializable_extras,
                     "data_source": data_source,
                     "latency": env_metrics_list[i].get("latency") if env_metrics_list else None,
                 }
+                if step_metadata_list is not None:
+                    entry["step_metadata"] = step_metadata_list[i]
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
+
+    # Dump per-RLM files when step_metadata is available (parent vs child rollouts)
+    if step_metadata_list is not None:
+        rlm_dir = dump_dir_path / "per_rlm"
+        rlm_dir.mkdir(parents=True, exist_ok=True)
+        rlm_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for i, meta in enumerate(step_metadata_list):
+            depth = meta.get("depth", 0)
+            child_index = meta.get("child_index")
+            if depth == 0:
+                rlm_key = "root_rlm"
+            else:
+                rlm_key = f"child_rlm_{child_index}"
+            rlm_buckets[rlm_key].append({
+                "step_index": meta.get("step_index", 0),
+                "depth": depth,
+                "child_index": child_index,
+                "is_last_step": (concat_generator_outputs.get("is_last_step") or [])[i]
+                    if i < len(concat_generator_outputs.get("is_last_step") or []) else None,
+                "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
+                "input_prompt": input_prompts[i],
+                "output_response": output_responses[i],
+                "env_class": concat_all_envs[i] if i < len(concat_all_envs) else None,
+                "data_source": concat_data_sources[i] if i < len(concat_data_sources) else None,
+                "latency": env_metrics_list[i].get("latency") if env_metrics_list and i < len(env_metrics_list) else None,
+            })
+        manifest = {}
+        for rlm_key, entries in sorted(rlm_buckets.items()):
+            rlm_file = rlm_dir / f"{rlm_key}.jsonl"
+            with open(rlm_file, "w") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            manifest[rlm_key] = {
+                "file": f"{rlm_key}.jsonl",
+                "num_steps": len(entries),
+                "depth": entries[0]["depth"],
+                "child_index": entries[0]["child_index"],
+            }
+        manifest_path = rlm_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            f.write(json.dumps(manifest, indent=2))
+        logger.info(f"Dumped per-RLM eval data to {rlm_dir} ({len(rlm_buckets)} RLM files)")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"

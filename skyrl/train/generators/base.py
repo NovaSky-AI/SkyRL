@@ -43,6 +43,8 @@ class GeneratorOutput(TypedDict):
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # Per-entry metadata for parent/child distinction (depth, child_index, step_index)
+    step_metadata: Optional[List[Dict[str, Any]]]
 
 
 class MetricsOutput(TypedDict):

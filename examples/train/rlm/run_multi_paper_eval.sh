@@ -49,5 +49,6 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   trainer.run_name="multi_paper_eval" \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
+  generator.child_openrouter_model="openai/gpt-5.4-nano" \
   environment.skyrl_gym.rlm.rollout_output_dir="$ROLLOUT_OUTPUT_DIR" \
   "$@"

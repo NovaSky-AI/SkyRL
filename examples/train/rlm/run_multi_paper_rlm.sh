@@ -49,7 +49,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.policy_mini_batch_size=2 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=100 \
+  trainer.ckpt_interval=20 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=1024 \
@@ -82,6 +82,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
+  generator.child_openrouter_model="openai/gpt-5.4-nano" \
   trainer.algorithm.leash.use_leash=true \
   trainer.algorithm.leash.lambda_init=0.2 \
   trainer.algorithm.leash.lambda_lr=0.05 \

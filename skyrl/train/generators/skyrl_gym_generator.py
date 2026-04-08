@@ -260,6 +260,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
+        self.openrouter_usage = {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "requests": 0}
+
         self._validate_cfg(generator_cfg)
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
@@ -343,6 +345,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "temperature": params.get("temperature", 0.7),
             "top_p": params.get("top_p", 1.0),
             "max_tokens": params.get("max_generate_length", 1024),
+            "reasoning": {"effort": "none"},
         }
         if params.get("additional_kwargs"):
             body.update(params["additional_kwargs"])
@@ -360,7 +363,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                         json=body,
                     )
                     resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
+                    data = resp.json()
+                    usage = data.get("usage", {})
+                    if usage:
+                        self.openrouter_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                        self.openrouter_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+                        self.openrouter_usage["requests"] += 1
+                        details = usage.get("prompt_tokens_details") or {}
+                        self.openrouter_usage["cached_tokens"] += details.get("cached_tokens", 0)
+                    return data["choices"][0]["message"]["content"]
             except Exception as e:
                 last_exc = e
                 if attempt < 2:
@@ -1172,6 +1183,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = []
             out_trajectory_ids = []
             out_env_classes = []
+            step_metadata = []
             for i, output in enumerate(all_outputs):
                 # Propagate parent's scalar reward to each child's last step
                 if self.generator_cfg.train_child_trajectories and output.child_outputs:
@@ -1199,11 +1211,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
+                    step_metadata.append({"depth": 0, "child_index": None, "step_index": j})
 
                 if not self.generator_cfg.train_child_trajectories:
                     continue
 
-                for child_output in output.child_outputs:
+                for child_idx, child_output in enumerate(output.child_outputs):
                     for j, step_output in enumerate(child_output.step_outputs):
                         responses.append(step_output.response_ids)
                         rewards.append(step_output.reward)
@@ -1214,6 +1227,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                         is_last_step.append(j == len(child_output.step_outputs) - 1)
                         out_trajectory_ids.append(trajectory_ids[i])
                         out_env_classes.append(env_classes[i])
+                        step_metadata.append({"depth": 1, "child_index": child_idx, "step_index": j})
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -1224,6 +1238,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_metrics = [output.env_metrics for output in all_outputs]
             is_last_step = None
             out_trajectory_ids = None
+            step_metadata = None
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -1269,6 +1284,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "env_metrics": env_metrics,
+            "step_metadata": step_metadata,
         }
 
         return generator_output
@@ -1498,7 +1514,15 @@ if __name__ == "__main__":
     """
     Standalone entrypoint: generate one trajectory for a single dataset row.
 
-    Two modes:
+    Two task types:
+      - Single-paper (default): uses alphaXiv/rlm-sft-Qwen3.5-9B-v1 with
+        single-paper parquet data from ~/data/rlm/validation.parquet.
+      - Multi-paper (--multi_paper): uses alphaXiv/rlm-sft-multi-9b-v1-epoch-4
+        with multi-paper parquet data from ~/data/multi-paper/validation.parquet,
+        multipaper system prompts, and eval-tuned sampling params. All defaults
+        can be overridden by explicit CLI args.
+
+    Two engine modes:
       1. Cold start  – spins up a fresh vLLM engine via Ray (slower first run).
       2. Hot connect  – pass --vllm_url <host:port> to reuse a running vLLM
          server, skipping model load entirely.  Start the server once with:
@@ -1510,7 +1534,7 @@ if __name__ == "__main__":
                --language-model-only --enable-prefix-caching \
                --cudagraph-capture-sizes 1
 
-         Then iterate instantly:
+         Single-paper example:
 
            python -m skyrl.train.generators.skyrl_gym_generator \
                --vllm_url localhost:8000 --row_idx 0 \
@@ -1523,6 +1547,18 @@ if __name__ == "__main__":
                generator.eval_sampling_params.max_generate_length=1024 \
                generator.eval_sampling_params.temperature=1.0 \
                generator.chat_template_kwargs.enable_thinking=false
+
+         Multi-paper example (uses built-in defaults, just pass --multi_paper):
+
+           python -m skyrl.train.generators.skyrl_gym_generator \
+               --multi_paper --vllm_url localhost:8000 --row_idx 0
+
+         Or override the data dir / model:
+
+           python -m skyrl.train.generators.skyrl_gym_generator \
+               --multi_paper --vllm_url localhost:8000 --row_idx 0 \
+               "data.val_data=['$HOME/data/multi-paper/test.parquet']" \
+               trainer.policy.model.path=my-org/my-multi-paper-model
     """
     import json
     import sys
@@ -1532,7 +1568,7 @@ if __name__ == "__main__":
 
     from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
     from skyrl.train.config import SkyRLTrainConfig
-    from skyrl.train.generators.base import BatchMetadata, GeneratorInput, TrajectoryID
+    from skyrl.train.generators.base import TrajectoryID
     from skyrl.train.utils.utils import validate_generator_cfg
     from skyrl.utils.tok import get_tokenizer  # noqa: E402
 
@@ -1552,6 +1588,42 @@ if __name__ == "__main__":
         pos = argv.index("--vllm_url")
         vllm_url = argv[pos + 1]
         argv = argv[:pos] + argv[pos + 2:]
+
+    multi_paper = False
+    if "--multi_paper" in argv:
+        pos = argv.index("--multi_paper")
+        multi_paper = True
+        argv = argv[:pos] + argv[pos + 1:]
+
+    dump_eval = False
+    if "--dump_eval" in argv:
+        pos = argv.index("--dump_eval")
+        dump_eval = True
+        argv = argv[:pos] + argv[pos + 1:]
+
+    if multi_paper:
+        # Prepend multi-paper defaults; explicit user args that follow will override.
+        _mp_defaults = [
+            "trainer.policy.model.path=alphaXiv/rlm-sft-multi-9b-v1-epoch-4",
+            "data.val_data=['~/data/multi-paper/validation.parquet']",
+            "environment.env_class=rlm",
+            "environment.skyrl_gym.rlm.custom_system_prompt=multipaper",
+            "environment.skyrl_gym.rlm.child_system_prompt=multipaper_child",
+            "generator.max_turns=10",
+            "generator.eval_sampling_params.max_generate_length=4096",
+            "generator.eval_sampling_params.temperature=0.7",
+            "generator.eval_sampling_params.top_p=0.8",
+            "generator.eval_sampling_params.top_k=20",
+            "generator.eval_sampling_params.min_p=0.0",
+            "generator.eval_sampling_params.repetition_penalty=1.0",
+            "generator.eval_sampling_params.additional_kwargs.presence_penalty=1.5",
+            "trainer.max_prompt_length=32768",
+            "generator.max_input_length=32768",
+            "generator.chat_template_kwargs.enable_thinking=false",
+            "generator.child_openrouter_model=openai/gpt-5.4-nano",
+        ]
+        argv = _mp_defaults + argv
+        logger.info("Multi-paper mode: injected default overrides (model, data, prompts, sampling)")
 
     cfg = SkyRLTrainConfig.from_cli_overrides(argv)
 
@@ -1656,68 +1728,177 @@ if __name__ == "__main__":
             cfg.generator.eval_sampling_params,
         )
 
-        generator_input: GeneratorInput = {
-            "prompts": [messages],
-            "env_classes": [env_class],
-            "env_extras": [env_extras],
-            "sampling_params": sampling_params,
-            "trajectory_ids": [TrajectoryID(instance_id=uid, repetition_id=0)],
-            "batch_metadata": BatchMetadata(global_step=0, training_phase="eval"),
-        }
+        # Inject RLM config into env_extras (mirrors what generate() does)
+        if env_class == "rlm":
+            rlm_config = getattr(cfg.environment.skyrl_gym, "rlm", None)
+            if rlm_config is not None:
+                _rlm_cfg = vars(rlm_config) if hasattr(rlm_config, "__dict__") else rlm_config
+                if _rlm_cfg.get("custom_system_prompt"):
+                    env_extras["custom_system_prompt"] = _rlm_cfg["custom_system_prompt"]
+                if _rlm_cfg.get("child_system_prompt"):
+                    env_extras["child_system_prompt"] = _rlm_cfg["child_system_prompt"]
 
-        logger.info(f"Row {row_idx} | uid={uid} | env_class={env_class}")
-        # logger.info(f"Prompt: {json.dumps(messages, indent=2)[:1000]}")
+        max_tokens = cfg.generator.eval_sampling_params.max_generate_length
+        max_input_length = cfg.generator.max_input_length
+
+        _task_label = "multi-paper" if multi_paper else "single-paper"
+        logger.info(f"[{_task_label}] Row {row_idx} | uid={uid} | env_class={env_class}")
 
         _t2 = _time.perf_counter()
-        output = await generator.generate(generator_input)
-        logger.info(f"generate() took {_time.perf_counter() - _t2:.1f}s")
+        agent_output = await generator.agent_loop(
+            prompt=messages,
+            env_class=env_class,
+            env_extras=env_extras,
+            max_tokens=max_tokens,
+            max_input_length=max_input_length,
+            sampling_params=sampling_params,
+            trajectory_id=TrajectoryID(instance_id=uid, repetition_id=0),
+        )
+        logger.info(f"agent_loop() took {_time.perf_counter() - _t2:.1f}s")
 
         import pathlib
+        _traj_prefix = "mp_trajectory" if multi_paper else "trajectory"
         traj_root = pathlib.Path("trajectories")
-        existing = sorted(traj_root.glob("trajectory_*")) if traj_root.exists() else []
+        existing = sorted(traj_root.glob(f"{_traj_prefix}_*")) if traj_root.exists() else []
         next_id = len(existing) + 1
-        traj_dir = traj_root / f"trajectory_{next_id}"
+        traj_dir = traj_root / f"{_traj_prefix}_{next_id}"
         traj_dir.mkdir(parents=True, exist_ok=True)
 
-        num_steps = len(output["response_ids"])
-        for step_idx in range(num_steps):
-            is_last = output["is_last_step"][step_idx] if output.get("is_last_step") else (step_idx == num_steps - 1)
-            prompt_ids = output["prompt_token_ids"][step_idx]
-            response_ids = output["response_ids"][step_idx]
-            prompt_text = tokenizer.decode(prompt_ids)
-            response_text = tokenizer.decode(response_ids)
-            stop_reason = output["stop_reasons"][step_idx]
-            latency = output["env_metrics"][step_idx].get("latency", {})
+        def _save_stepwise_output(sw_output, traj_dir, depth=0, child_idx=None):
+            """Recursively save parent + child step outputs with depth in filename."""
+            n_saved = 0
+            for step_idx, step_output in enumerate(sw_output.step_outputs):
+                prompt_text = tokenizer.decode(step_output.prompt_ids)
+                response_text = tokenizer.decode(step_output.response_ids)
+                is_last = step_idx == len(sw_output.step_outputs) - 1
 
-            step_data = {
-                "step": step_idx + 1,
-                "is_last": is_last,
-                "stop_reason": stop_reason,
-                "prompt_text": prompt_text,
-                "response_text": response_text,
-                "prompt_token_ids": prompt_ids,
-                "response_token_ids": response_ids,
-                "latency": latency,
+                step_data = {
+                    "step": step_idx + 1,
+                    "depth": depth,
+                    "child_index": child_idx,
+                    "is_last": is_last,
+                    "stop_reason": step_output.stop_reason,
+                    "prompt_text": prompt_text,
+                    "response_text": response_text,
+                    "prompt_token_ids": step_output.prompt_ids,
+                    "response_token_ids": step_output.response_ids,
+                    "latency": step_output.env_metrics.get("latency", {}),
+                }
+
+                if child_idx is not None:
+                    filename = f"depth-{depth}_child-{child_idx}_step_{step_idx + 1}.json"
+                else:
+                    filename = f"depth-{depth}_step_{step_idx + 1}.json"
+
+                (traj_dir / filename).write_text(json.dumps(step_data, indent=2, ensure_ascii=False))
+                n_saved += 1
+
+            for ci, child_output in enumerate(sw_output.child_outputs or []):
+                n_saved += _save_stepwise_output(child_output, traj_dir, depth=depth + 1, child_idx=ci)
+
+            return n_saved
+
+        n_parent = len(agent_output.step_outputs)
+        n_children = len(agent_output.child_outputs) if hasattr(agent_output, "child_outputs") else 0
+        total_saved = _save_stepwise_output(agent_output, traj_dir)
+
+        # Save rollout metrics from the last step's env_metrics + OpenRouter pricing
+        _PRICING = {
+            "openai/gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+            "openai/gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+        }
+        last_metrics = agent_output.step_outputs[-1].env_metrics if agent_output.step_outputs else {}
+        usage = generator.openrouter_usage
+        if usage["requests"] > 0:
+            model_name = cfg.generator.child_openrouter_model
+            pricing = _PRICING.get(model_name, _PRICING["openai/gpt-5.4-mini"])
+            if model_name not in _PRICING:
+                logger.warning(f"No pricing entry for {model_name}, falling back to gpt-5.4-mini rates")
+
+            prompt_tok = usage["prompt_tokens"]
+            cached_tok = usage["cached_tokens"]
+            uncached_tok = prompt_tok - cached_tok
+            completion_tok = usage["completion_tokens"]
+            cost_input = uncached_tok / 1_000_000 * pricing["input"]
+            cost_cached = cached_tok / 1_000_000 * pricing["cached_input"]
+            cost_output = completion_tok / 1_000_000 * pricing["output"]
+            cost_total = cost_input + cost_cached + cost_output
+            last_metrics["openrouter"] = {
+                "requests": usage["requests"],
+                "prompt_tokens": prompt_tok,
+                "cached_tokens": cached_tok,
+                "uncached_tokens": uncached_tok,
+                "completion_tokens": completion_tok,
+                "cost_input_usd": round(cost_input, 6),
+                "cost_cached_usd": round(cost_cached, 6),
+                "cost_output_usd": round(cost_output, 6),
+                "cost_total_usd": round(cost_total, 6),
+                "model": model_name,
+                "pricing_per_million": pricing,
             }
-            step_path = traj_dir / f"step_{step_idx + 1}.json"
-            step_path.write_text(json.dumps(step_data, indent=2, ensure_ascii=False))
-
-            inf_s = latency.get("inference_s")
-            env_s = latency.get("env_step_s")
-            timing = ""
-            if inf_s is not None:
-                timing = f"  inference={inf_s:.1f}s  env_step={env_s:.1f}s"
-            # logger.info(
-            #     f"STEP {step_idx + 1}/{num_steps} (last={is_last})  "
-            #     f"prompt_tokens={len(prompt_ids)}  response_tokens={len(response_ids)}  "
-            #     f"stop={stop_reason}{timing}"
-            # )
-
-        if output.get("rollout_metrics"):
+            logger.info(
+                f"OpenRouter usage: {usage['requests']} requests, "
+                f"{uncached_tok:,} uncached + {cached_tok:,} cached input tok, "
+                f"{completion_tok:,} output tok → ${cost_total:.4f}"
+            )
+        if last_metrics:
             meta_path = traj_dir / "metadata.json"
-            meta_path.write_text(json.dumps(output["rollout_metrics"], indent=2))
-            logger.info(f"Rollout metrics:\n{json.dumps(output['rollout_metrics'], indent=2)}")
-        logger.info(f"Wrote {num_steps} steps to {traj_dir}")
+            meta_path.write_text(json.dumps(last_metrics, indent=2))
+            logger.info(f"Rollout metrics:\n{json.dumps(last_metrics, indent=2)}")
+
+        logger.info(
+            f"Wrote {total_saved} files to {traj_dir} "
+            f"({n_parent} parent steps, {n_children} child rollouts)"
+        )
+
+        if dump_eval:
+            from collections import defaultdict as _defaultdict
+
+            eval_dump_dir = traj_dir / "eval_dump"
+            eval_dump_dir.mkdir(parents=True, exist_ok=True)
+
+            rlm_entries: dict[str, list] = _defaultdict(list)
+
+            def _collect_for_eval(sw_output, depth=0, child_idx=None):
+                if depth == 0:
+                    rlm_key = "root_rlm"
+                else:
+                    rlm_key = f"child_rlm_{child_idx}"
+                for j, step_out in enumerate(sw_output.step_outputs):
+                    rlm_entries[rlm_key].append({
+                        "step_index": j,
+                        "depth": depth,
+                        "child_index": child_idx,
+                        "is_last_step": j == len(sw_output.step_outputs) - 1,
+                        "stop_reason": step_out.stop_reason,
+                        "input_prompt": tokenizer.decode(step_out.prompt_ids),
+                        "output_response": tokenizer.decode(step_out.response_ids),
+                        "latency": step_out.env_metrics.get("latency", {}),
+                        "env_class": env_class,
+                    })
+                for ci, child_out in enumerate(sw_output.child_outputs or []):
+                    _collect_for_eval(child_out, depth=depth + 1, child_idx=ci)
+
+            _collect_for_eval(agent_output)
+
+            manifest = {}
+            for rlm_key, entries in sorted(rlm_entries.items()):
+                filename = eval_dump_dir / f"{rlm_key}.jsonl"
+                with open(filename, "w") as f:
+                    for entry in entries:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                manifest[rlm_key] = {
+                    "file": str(filename.name),
+                    "num_steps": len(entries),
+                    "depth": entries[0]["depth"],
+                    "child_index": entries[0]["child_index"],
+                }
+                logger.info(f"  {rlm_key}: {len(entries)} steps → {filename.name}")
+
+            manifest_path = eval_dump_dir / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            logger.info(f"Eval dump written to {eval_dump_dir} ({len(rlm_entries)} RLM files + manifest)")
+
         logger.info(f"Total wall time: {_time.perf_counter() - _t0:.1f}s")
 
     asyncio.run(_run())
