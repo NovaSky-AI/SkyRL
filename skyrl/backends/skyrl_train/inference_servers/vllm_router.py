@@ -50,7 +50,7 @@ class VLLMRouter:
         health_check_interval_secs: Optional[int] = None,
         max_concurrent_requests: Optional[int] = None,
         request_timeout_secs: Optional[int] = None,
-        prometheus_port: Optional[int] = None,
+        prometheus_port: int = 29000,
     ):
         self._server_urls = server_urls
         self._host = host
@@ -59,10 +59,12 @@ class VLLMRouter:
         self._health_check_interval_secs = health_check_interval_secs
         self._max_concurrent_requests = max_concurrent_requests
         self._request_timeout_secs = request_timeout_secs
-        self._prometheus_port = prometheus_port if prometheus_port is not None else get_open_port(29000)
+        self._prometheus_port = get_open_port(prometheus_port)
         self._process: Optional[subprocess.Popen] = None
 
-        logger.info(f"VLLMRouter: {len(server_urls)} servers, port={port}, policy={policy}")
+        logger.info(
+            f"VLLMRouter: {len(server_urls)} servers, port={self._port}, policy={policy}, prometheus_port={self._prometheus_port}"
+        )
 
     def _build_cmd(self) -> List[str]:
         """Build the vllm-router CLI command."""
