@@ -443,6 +443,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
 class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
+    PPO = "ppo"
     GSPO = "gspo"
     CISPO = "cispo"
     ROLLOUT_IS = "rollout_is"
@@ -476,6 +477,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
         pl_types = {
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
+            "ppo": [PolicyLossType.PPO, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
@@ -529,6 +531,7 @@ def sync_registries():
 
 @register_policy_loss(PolicyLossType.REGULAR)
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
+@register_policy_loss(PolicyLossType.PPO)
 def ppo_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
@@ -537,7 +540,7 @@ def ppo_policy_loss(
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
-    assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
+    assert config.policy_loss_type in ["regular", "dual_clip", "ppo"], "loss_type must be 'regular', 'dual_clip', or 'ppo'"
 
     ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
@@ -545,7 +548,7 @@ def ppo_policy_loss(
     loss = -torch.min(surr1, surr2)
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
     clip_pg_losses1 = loss
-    if config.policy_loss_type == "dual_clip":
+    if config.policy_loss_type in ["dual_clip", "ppo"]:
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
