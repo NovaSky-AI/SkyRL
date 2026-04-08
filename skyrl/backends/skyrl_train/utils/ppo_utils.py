@@ -548,7 +548,7 @@ def ppo_policy_loss(
     loss = -torch.min(surr1, surr2)
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
     clip_pg_losses1 = loss
-    if config.policy_loss_type in ["dual_clip", "ppo"]:
+    if config.policy_loss_type == "dual_clip":
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
