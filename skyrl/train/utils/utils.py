@@ -206,12 +206,6 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
-        assert (
-            cfg.trainer.policy.megatron_config.pipeline_model_parallel_size == 1
-        ), "pipeline parallel is not yet supported for router replay (r3) with megatron"
-        assert (
-            cfg.trainer.policy.megatron_config.context_parallel_size == 1
-        ), "context parallel is not yet supported for router replay (r3) with megatron"
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -282,6 +276,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
+        "token_mean_legacy",
         "sequence_mean",
         "seq_mean_token_sum_norm",
     ), (
@@ -515,16 +510,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
         )
 
-    if cfg.generator.inference_engine.distributed_executor_backend == "mp":
-        raise ValueError(
-            "the mp backend for vLLM is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/1309. Use the ray backend instead."
-        )
-
-    if cfg.generator.inference_engine.enable_return_routed_experts:
-        raise ValueError(
-            "rollout router replay (r3) is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/815."
-        )
-
 
 @ray.remote
 def get_all_env_variables():
@@ -670,6 +655,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+
+    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
+        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
     return env_vars
 

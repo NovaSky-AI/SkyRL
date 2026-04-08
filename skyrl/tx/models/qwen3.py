@@ -6,7 +6,7 @@ from jax.sharding import get_abstract_mesh
 from skyrl.tx.layers.attention import dot_product_attention
 from skyrl.tx.layers.connectors import LoRAConnector
 from skyrl.tx.layers.layernorm import RMSNorm
-from skyrl.tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from skyrl.tx.layers.lora import FusedLoRALinear, LoRAEmbed, LoRAExpert, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
 from skyrl.tx.layers.stacked import StackedDecoderLayers
 from skyrl.tx.layers.util import prepare_routing, shard_map_ep
@@ -28,43 +28,24 @@ class Qwen3Attention(nnx.Module):
         if shard_attention_heads:
             assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
+        assert (
+            self.num_heads % self.num_kv_heads == 0
+        ), f"num_heads={self.num_heads} must be divisible by num_kv_heads={self.num_kv_heads}"
         tp_shard = "tp" if shard_attention_heads else None
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
+        q_per_kv = self.num_heads // self.num_kv_heads
 
-        self.q_proj = LoRALinear(
+        self.qkv_proj = FusedLoRALinear(
             in_features=config.hidden_size,
-            out_features=self.num_heads * self.head_dim,
+            out_features=(self.num_heads + 2 * self.num_kv_heads) * self.head_dim,
+            components=("q_proj", "k_proj", "v_proj"),
+            group_sizes=(q_per_kv * self.head_dim, self.head_dim, self.head_dim),
             sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
+            use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.k_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            sharding=("fsdp", tp_shard),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.v_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            sharding=("fsdp", tp_shard),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -94,14 +75,14 @@ class Qwen3Attention(nnx.Module):
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
-        # Project and reshape to [B, T, num_heads, head_dim]
-        q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
-        k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))
-        v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
+        q, k, v = self.qkv_proj(x, adapter_indices=adapter_indices)
+        q = self.q_norm(q.reshape(B, T, self.num_heads, self.head_dim))
+        k = self.k_norm(k.reshape(B, T, self.num_kv_heads, self.head_dim))
+        v = v.reshape(B, T, self.num_kv_heads, self.head_dim)
 
         # Apply RoPE
-        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
-        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
+        q = apply_rope(q, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
+        k = apply_rope(k, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
 
         # Handle KV cache
         if kv_cache is not None:
@@ -119,28 +100,17 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = LoRALinear(
+        self.gate_up_proj = FusedLoRALinear(
             config.hidden_size,
-            config.intermediate_size,
+            2 * config.intermediate_size,
+            components=("gate_proj", "up_proj"),
+            group_sizes=(1, 1),
             sharding=("fsdp", "tp"),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.up_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
-            sharding=("fsdp", "tp"),
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
@@ -157,9 +127,8 @@ class Qwen3MLP(nnx.Module):
         )
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        gate_out = self.gate_proj(x, adapter_indices)
-        up_out = self.up_proj(x, adapter_indices)
-        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
+        gate_out, up_out = self.gate_up_proj(x, adapter_indices=adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices=adapter_indices)
 
 
 class Qwen3Experts(nnx.Module):
@@ -203,8 +172,10 @@ class Qwen3Experts(nnx.Module):
     def __call__(
         self, hidden_states: jax.Array, router_logits: jax.Array, adapter_indices: jax.Array | None = None
     ) -> jax.Array:
-        routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
-        routing_weights = nnx.softmax(routing_weights, axis=-1)
+        routing_weights = nnx.softmax(router_logits, axis=-1)
+        routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
+        if getattr(self.config, "norm_topk_prob", True):
+            routing_weights = routing_weights / routing_weights.sum(axis=-1, keepdims=True)
 
         num_experts = self.config.num_experts
         num_experts_per_tok = self.config.num_experts_per_tok
@@ -367,6 +338,7 @@ class Qwen3Model(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -384,6 +356,7 @@ class Qwen3Model(nnx.Module):
             output_hidden_states=output_hidden_states,
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         hidden_states = hidden_states.sum(axis=-2)
@@ -427,6 +400,9 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         """Return the lm_head callable for logits computation."""
         return self.lm_head or self.model.embed_tokens.T
 
+    def get_decode_layers(self):
+        return self.model.layers.preextract_decode()
+
     def __call__(
         self,
         input_ids: jax.Array,
@@ -437,6 +413,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -449,6 +426,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         return CausalLMOutput(

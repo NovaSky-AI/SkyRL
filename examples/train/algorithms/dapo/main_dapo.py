@@ -40,7 +40,7 @@ class DAPOTrainer(RayPPOTrainer):
         # NOTE (sumanthrh): Given the usage of `make_config`, the algorithm config subclass for DAPO is
         # created dynamically and thus IDEs will not be able to resolve the attributes
         # For better typing, you can always define a custom subclass of DAPOConfig manually.
-        # See examples/terminal_bench for an example.
+        # See examples/train_integrations/harbor for an example.
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         # modify rewards here

@@ -114,7 +114,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]
@@ -243,7 +246,9 @@ class MegatronModelWrapper:
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
             action_mask = data.get("action_mask")
+            num_microbatches = data.get("num_microbatches")
 
+            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
@@ -297,13 +302,17 @@ class MegatronModelWrapper:
 
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                            "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                            "logprobs": (
+                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
+                            "elementwise_loss": (
+                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
                         }
                     )
 
                 metrics = {
-                    "loss": loss.detach().item(),
+                    "loss": loss.item(),
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
@@ -333,7 +342,23 @@ class MegatronModelWrapper:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            # Policy losses are pre-scaled to achieve the correct loss_reduction
+            # when summing across the entire minibatch (see `apply_loss_reduction_to_advantages_minibatch`).
+            # Megatron divides loss by num_microbatches
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
+            # and the data parallel all-reduce averages gradients across dp_size (including CP ranks)
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
+            # so we multiply by both factors to recover the correct sum reduction.
+            grad_sum_correction_factor = num_microbatches * dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
+            # Megatron's DDP averages gradients across the full DP+CP group,
+            # but KL/entropy should only be averaged across DP (not CP).
+            # Multiply by cp_size to counteract the unwanted CP averaging.
+            cp_size = mpu.get_context_parallel_world_size()
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * cp_size
+            unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
@@ -351,12 +376,12 @@ class MegatronModelWrapper:
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
             metrics = {
-                "final_loss": loss.detach().item(),
+                "final_loss": unscaled_loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),
@@ -376,7 +401,10 @@ class MegatronModelWrapper:
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
-                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]

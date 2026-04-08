@@ -8,6 +8,7 @@ import asyncio
 import threading
 from typing import List
 
+import pytest
 import requests
 from transformers import AutoTokenizer
 
@@ -28,7 +29,8 @@ SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
 
-def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     """
     We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
     so that in each engine, 2 run and 1 wait. We ignore eos and let model geneate 2048 tokens.
@@ -39,7 +41,6 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     num_engines = 2
     num_requests = 6
     max_num_seqs = 2
-    engines = None
     # Create tokenizer separately to work with both InferenceEngineClient and RemoteInferenceClient
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     try:
@@ -60,7 +61,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             "top_logprobs": 1,
             "return_tokens_as_token_ids": True,
         }
-        engines = InferenceEngineState.create(
+        async with InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.inference_engine.async_engine,
@@ -72,112 +73,111 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             sleep_level=1,
             # We test aborting 2 running requests and 1 waiting requests
             max_num_seqs=max_num_seqs,
-        )
-        client = engines.client
+        ) as engines:
+            client = engines.client
 
-        def run_server():
-            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            def run_server():
+                serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
 
-        server_thread = threading.Thread(target=run_server, daemon=True)
-        server_thread.start()
-        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+            server_thread = threading.Thread(target=run_server, daemon=True)
+            server_thread.start()
+            wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+            base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
 
-        # 2. Prepare input
-        messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+            # 2. Prepare input
+            messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
 
-        # 3. Fire 6 concurrent HTTP requests, then pause/resume mid-flight
-        results = {}
+            # 3. Fire 6 concurrent HTTP requests, then pause/resume mid-flight
+            results = {}
 
-        def send_request(i: int):
-            r = requests.post(
-                f"{base_url}/chat/completions",
-                json={"model": MODEL, "messages": messages, **sampling_params},
-            )
-            # Store minimal structured result for assertions
-            content_type = r.headers.get("Content-Type", "")
-            resp_json = r.json() if content_type.startswith("application/json") else {}
-            results[i] = {
-                "status_code": r.status_code,
-                "text": r.text,
-                "response": resp_json,
-            }
+            def send_request(i: int):
+                r = requests.post(
+                    f"{base_url}/chat/completions",
+                    json={"model": MODEL, "messages": messages, **sampling_params},
+                )
+                # Store minimal structured result for assertions
+                content_type = r.headers.get("Content-Type", "")
+                resp_json = r.json() if content_type.startswith("application/json") else {}
+                results[i] = {
+                    "status_code": r.status_code,
+                    "text": r.text,
+                    "response": resp_json,
+                }
 
-        threads = [threading.Thread(target=send_request, args=(i,), daemon=True) for i in range(num_requests)]
-        for t in threads:
-            t.start()
+            threads = [threading.Thread(target=send_request, args=(i,), daemon=True) for i in range(num_requests)]
+            for t in threads:
+                t.start()
 
-        # Let the requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait
-        asyncio.run(asyncio.sleep(1))
+            # Let the requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait
+            await asyncio.sleep(1)
 
-        # Pause then resume while requests are in-flight
-        asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
-        # Run for another two seconds, then pause and resume again
-        asyncio.run(asyncio.sleep(2))
-        asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
+            # Pause then resume while requests are in-flight
+            await client.pause_generation()
+            await client.resume_generation()
+            # Run for another two seconds, then pause and resume again
+            await asyncio.sleep(2)
+            await client.pause_generation()
+            await client.resume_generation()
 
-        # Wait for all requests to finish
-        for t in threads:
-            t.join(timeout=180)
+            # Wait for all requests to finish
+            for t in threads:
+                t.join(timeout=180)
 
-        # Ensure we collected all num_requests results
-        assert len(results) == num_requests, f"Expected {num_requests} responses, got {len(results)}"
+            # Ensure we collected all num_requests results
+            assert len(results) == num_requests, f"Expected {num_requests} responses, got {len(results)}"
 
-        # 4. Validate each output: finish_reason is length and completion_tokens == max_tokens
-        for i in range(num_requests):
-            assert i in results, f"Missing result for index {i}"
-            cur = results[i]
-            assert cur.get("status_code") == 200, f"Request {i} failed: {cur.get('status_code')} {cur.get('text')}"
-            out = cur["response"]
-            assert "choices" in out and len(out["choices"]) == 1, f"Invalid choices for request {i}: {out}"
-            assert (
-                out["choices"][0].get("finish_reason") == "length"
-            ), f"Request {i} finish_reason is not 'length': {out['choices'][0].get('finish_reason')}"
-
-            choice = out["choices"][0]
-            logprobs = choice["logprobs"]
-            token_count_from_logprobs = len(logprobs["content"])
-            print(f"Output first 1500 chars: {choice['message']['content'][:1500]}...")
-
-            # Check completion tokens
-            assert (
-                out["usage"]["completion_tokens"] == sampling_params["max_tokens"]
-            ), f"Request {i} expected completion_tokens={sampling_params['max_tokens']}, got {out['usage']['completion_tokens']}"
-            assert (
-                token_count_from_logprobs == sampling_params["max_tokens"]
-            ), f"Request {i} expected {sampling_params['max_tokens']} tokens from logprobs, got {token_count_from_logprobs}"
-
-            # Spot-check structure of each logprob entry: token contains token_id and top_logprobs length matches request
-            top_logprobs = sampling_params["top_logprobs"]
-            for entry in logprobs["content"]:
-                # tokens are token_id:<int> when return_tokens_as_token_ids=True
-                parts = str(entry["token"]).split(":")
+            # 4. Validate each output: finish_reason is length and completion_tokens == max_tokens
+            for i in range(num_requests):
+                assert i in results, f"Missing result for index {i}"
+                cur = results[i]
+                assert cur.get("status_code") == 200, f"Request {i} failed: {cur.get('status_code')} {cur.get('text')}"
+                out = cur["response"]
+                assert "choices" in out and len(out["choices"]) == 1, f"Invalid choices for request {i}: {out}"
                 assert (
-                    len(parts) >= 2 and parts[-1].isdigit()
-                ), f"Request {i} token field not token_id:int: {entry['token']}"
+                    out["choices"][0].get("finish_reason") == "length"
+                ), f"Request {i} finish_reason is not 'length': {out['choices'][0].get('finish_reason')}"
+
+                choice = out["choices"][0]
+                logprobs = choice["logprobs"]
+                token_count_from_logprobs = len(logprobs["content"])
+                print(f"Output first 1500 chars: {choice['message']['content'][:1500]}...")
+
+                # Check completion tokens
                 assert (
-                    len(entry["top_logprobs"]) == top_logprobs
-                ), f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
-            # Check prompt tokens
-            prompt_tokens = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, return_dict=False, tokenize=True
-            )
-            assert (
-                len(prompt_tokens) == out["usage"]["prompt_tokens"]
-            ), f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
-            # TODO(Charlie): after we bump vllm such that it supports returnining tokens, check `choice["token_ids"]`
-            # TODO(Charlie): after we add model version to the output, check that as well
+                    out["usage"]["completion_tokens"] == sampling_params["max_tokens"]
+                ), f"Request {i} expected completion_tokens={sampling_params['max_tokens']}, got {out['usage']['completion_tokens']}"
+                assert (
+                    token_count_from_logprobs == sampling_params["max_tokens"]
+                ), f"Request {i} expected {sampling_params['max_tokens']} tokens from logprobs, got {token_count_from_logprobs}"
+
+                # Spot-check structure of each logprob entry: token contains token_id and top_logprobs length matches request
+                top_logprobs = sampling_params["top_logprobs"]
+                for entry in logprobs["content"]:
+                    # tokens are token_id:<int> when return_tokens_as_token_ids=True
+                    parts = str(entry["token"]).split(":")
+                    assert (
+                        len(parts) >= 2 and parts[-1].isdigit()
+                    ), f"Request {i} token field not token_id:int: {entry['token']}"
+                    assert (
+                        len(entry["top_logprobs"]) == top_logprobs
+                    ), f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
+                # Check prompt tokens
+                prompt_tokens = tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, return_dict=False, tokenize=True
+                )
+                assert (
+                    len(prompt_tokens) == out["usage"]["prompt_tokens"]
+                ), f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
+                # TODO(Charlie): after we bump vllm such that it supports returnining tokens, check `choice["token_ids"]`
+                # TODO(Charlie): after we add model version to the output, check that as well
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
-        if engines is not None:
-            engines.close()
 
 
-def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     """
     Identical to `test_continue_generation_vllm_engine_chat_completion` except we use `generate()`
     instead of `/chat/completions`.
@@ -208,7 +208,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         # Request token logprobs (vLLM SamplingParams expects an int for how many to return)
         "logprobs": 1,
     }
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -251,7 +251,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             await client.resume_generation()
             return await asyncio.gather(*tasks)
 
-        outputs = asyncio.run(run_requests_then_pause())
+        outputs = await run_requests_then_pause()
 
         # 4. Validate each output: stop_reason is "length" and tokens/logprobs == max_tokens
         assert len(outputs) == num_requests, f"Expected {num_requests} outputs, got {len(outputs)}"
@@ -278,7 +278,8 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
 
-def test_pause_keep_generation_vllm_engine(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     """
     Test that keep-mode pause freezes in-flight requests and resume lets them
     complete normally.
@@ -300,7 +301,7 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     }
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -348,7 +349,7 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                 await client.resume_generation()
                 return await asyncio.gather(*tasks)
 
-            outputs = asyncio.run(run_requests_with_pause_resume())
+            outputs = await run_requests_with_pause_resume()
 
             for out in outputs:
                 assert "choices" in out and len(out["choices"]) == 1

@@ -1,7 +1,11 @@
+import base64
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from skyrl.tinker import api
+from skyrl.tinker import api, types
+
+_B64_PNG = base64.b64encode(b"\x89PNG").decode()
 
 
 def _make_datum() -> api.Datum:
@@ -52,3 +56,57 @@ class TestApiChunkDiscriminatorWithoutType:
     def test_encoded_text(self):
         obj = _api_adapter.validate_python({"tokens": [1, 2]})
         assert isinstance(obj, api.EncodedTextChunk)
+
+    def test_image(self):
+        obj = _api_adapter.validate_python({"data": _B64_PNG, "format": "png"})
+        assert isinstance(obj, api.ImageChunk)
+
+    def test_image_asset_pointer(self):
+        obj = _api_adapter.validate_python({"format": "png", "location": "s3://bucket/img.png"})
+        assert isinstance(obj, api.ImageAssetPointerChunk)
+
+
+def test_api_chunk_discriminator_rejects_ambiguous_payload():
+    with pytest.raises(ValueError, match="Ambiguous model chunk type"):
+        _api_adapter.validate_python({"tokens": [1, 2], "data": _B64_PNG, "format": "png"})
+
+
+def test_api_chunk_discriminator_rejects_unrecognised_payload():
+    with pytest.raises(ValidationError):
+        _api_adapter.validate_python({"format": "png"})
+
+
+# --- ImageChunk base64 round-trip tests ---
+
+_RAW_PNG = b"\x89PNG\r\n\x1a\nfake_image_data"
+_B64_PNG_FULL = base64.b64encode(_RAW_PNG).decode()
+
+
+class TestImageChunkBase64RoundTrip:
+    """Verify that image data survives the api -> types -> JSON -> types cycle."""
+
+    def test_to_types_preserves_bytes(self):
+        api_chunk = api.ImageChunk.model_validate({"data": _B64_PNG_FULL, "format": "png"})
+        assert api_chunk.data == _RAW_PNG
+
+    def test_json_round_trip(self):
+
+        api_chunk = api.ImageChunk.model_validate({"data": _B64_PNG_FULL, "format": "png"})
+        types_chunk = api_chunk.to_types()
+        assert types_chunk.data == _RAW_PNG
+
+        json_dict = types_chunk.model_dump(mode="json")
+        assert json_dict["data"] == _B64_PNG_FULL
+
+        recovered = types.ImageChunk.model_validate(json_dict)
+        assert recovered.data == _RAW_PNG
+
+    def test_nested_in_model_input(self):
+
+        api_chunk = api.ImageChunk.model_validate({"data": _B64_PNG_FULL, "format": "png"})
+        model_input = api.ModelInput(chunks=[api_chunk])
+        types_input = model_input.to_types()
+
+        json_dict = types_input.model_dump(mode="json")
+        recovered = types.ModelInput.model_validate(json_dict)
+        assert recovered.chunks[0].data == _RAW_PNG

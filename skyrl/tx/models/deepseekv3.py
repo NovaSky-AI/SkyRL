@@ -119,7 +119,9 @@ class DeepseekV3Attention(nnx.Module):
             rngs=rngs,
         )
 
-        self.rotary_emb, mscale = get_rope(self.qk_rope_head_dim, config.rope_theta, config.rope_scaling)
+        self.rotary_emb, mscale = get_rope(
+            self.qk_rope_head_dim, config.rope_parameters["rope_theta"], config.rope_parameters
+        )
         self.scaling = self.qk_head_dim ** (-0.5) * mscale * mscale
 
     def __call__(
@@ -524,6 +526,7 @@ class DeepseekV3Model(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -542,6 +545,7 @@ class DeepseekV3Model(nnx.Module):
             output_hidden_states=output_hidden_states,
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         hidden_states = hidden_states.sum(axis=-2)
@@ -585,6 +589,9 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         """Return the lm_head callable for logits computation."""
         return self.lm_head or self.model.embed_tokens.T
 
+    def get_decode_layers(self):
+        return self.model.layers.preextract_decode()
+
     def __call__(
         self,
         input_ids: jax.Array,
@@ -595,6 +602,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        decode_layers=None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -607,6 +615,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             is_training=is_training,
+            decode_layers=decode_layers,
         )
 
         return CausalLMOutput(

@@ -26,7 +26,7 @@ def test_deepseekv3(tp: int):
     model_name = "yujiepan/deepseek-v3-tiny-random"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, trust_remote_code=True
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
 
     inputs = ["The capital of France is", "The most popular programming language is"]
@@ -40,7 +40,7 @@ def test_deepseekv3(tp: int):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
-        base_config = PretrainedConfig.from_pretrained(model_name, trust_remote_code=True)
+        base_config = PretrainedConfig.from_pretrained(model_name)
         config = DeepseekV3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
         # EP axis required for MoE expert sharding
         mesh = jax.make_mesh((1, 1, tp), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
@@ -52,30 +52,41 @@ def test_deepseekv3(tp: int):
             )
 
         assert outputs.hidden_states is not None
-        assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
-        assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-        assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=3e-2, atol=6e-2)
+    assert np.allclose(hf_outputs.hidden_states[0].float(), outputs.hidden_states[0], rtol=1e-6)
+    assert np.allclose(hf_outputs.hidden_states[1].float(), outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
+    assert np.allclose(hf_outputs.hidden_states[-1].float(), outputs.hidden_states[-1], rtol=3e-2, atol=6e-2)
 
 
 def load_moe_base_weights(jax_moe_layer: DeepseekV3MoE, hf_moe_layer: HFDeepseekV3MoE) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.weight[:] = hf_moe_layer.gate.weight.detach().numpy().T
-    jax_moe_layer.gate.e_score_correction_bias[:] = hf_moe_layer.gate.e_score_correction_bias.detach().numpy()
+    jax_moe_layer.gate.weight[:] = hf_moe_layer.gate.weight.detach().float().numpy().T
+    jax_moe_layer.gate.e_score_correction_bias[:] = hf_moe_layer.gate.e_score_correction_bias.detach().float().numpy()
 
-    for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+    gate_up = hf_moe_layer.experts.gate_up_proj.detach().float().numpy()
+    intermediate = gate_up.shape[1] // 2
+    jax_moe_layer.experts.gate_proj.weight[:] = gate_up[:, :intermediate, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.up_proj.weight[:] = gate_up[:, intermediate:, :].transpose(0, 2, 1)
+    jax_moe_layer.experts.down_proj.weight[:] = (
+        hf_moe_layer.experts.down_proj.detach().float().numpy().transpose(0, 2, 1)
+    )
 
-    jax_moe_layer.shared_experts.gate_proj.kernel[:] = hf_moe_layer.shared_experts.gate_proj.weight.detach().numpy().T
-    jax_moe_layer.shared_experts.up_proj.kernel[:] = hf_moe_layer.shared_experts.up_proj.weight.detach().numpy().T
-    jax_moe_layer.shared_experts.down_proj.kernel[:] = hf_moe_layer.shared_experts.down_proj.weight.detach().numpy().T
+    jax_moe_layer.shared_experts.gate_proj.kernel[:] = (
+        hf_moe_layer.shared_experts.gate_proj.weight.detach().float().numpy().T
+    )
+    jax_moe_layer.shared_experts.up_proj.kernel[:] = (
+        hf_moe_layer.shared_experts.up_proj.weight.detach().float().numpy().T
+    )
+    jax_moe_layer.shared_experts.down_proj.kernel[:] = (
+        hf_moe_layer.shared_experts.down_proj.weight.detach().float().numpy().T
+    )
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_deepseekv3_moe_layer(ep: int, tp: int):
     model_name = "yujiepan/deepseek-v3-tiny-random"
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = DeepseekV3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
 
@@ -94,7 +105,7 @@ def test_deepseekv3_moe_layer(ep: int, tp: int):
         jax_expert_output = moe_layer(x.numpy())
 
         # Higher tolerance due to cross-platform BLAS differences
-        assert np.allclose(hf_expert_output.detach().numpy(), jax_expert_output, rtol=6e-3, atol=6e-3)
+        assert np.allclose(hf_expert_output.detach().float().numpy(), jax_expert_output, rtol=6e-3, atol=6e-3)
 
 
 def load_lora_weights(
@@ -122,7 +133,9 @@ def load_lora_weights(
 def test_deepseekv3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "yujiepan/deepseek-v3-tiny-random"
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = DeepseekV3Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
@@ -198,7 +211,7 @@ def test_deepseekv3_gradient_checkpointing():
     that gradient checkpointing works correctly with heterogeneous layer types.
     """
     model_name = "yujiepan/deepseek-v3-tiny-random"
-    base_config = PretrainedConfig.from_pretrained(model_name, trust_remote_code=True)
+    base_config = PretrainedConfig.from_pretrained(model_name)
 
     batch_size, seq_len = 2, 8
     mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)

@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, ClassVar, Literal
+from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -14,8 +14,11 @@ import psutil
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import (
+    Base64Bytes,
     BaseModel,
+    Discriminator,
     Field,
+    Tag,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -196,7 +199,7 @@ async def create_future(
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data.model_dump(),
+        request_data=request_data.model_dump(mode="json"),
         status=RequestStatus.PENDING,
     )
     session.add(future_db)
@@ -307,7 +310,61 @@ class EncodedTextChunk(BaseModel):
         return types.EncodedTextChunk(tokens=self.tokens)
 
 
-ModelInputChunk = EncodedTextChunk
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: Base64Bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+    def to_types(self) -> types.ImageChunk:
+        return types.ImageChunk.model_construct(
+            data=self.data,
+            format=self.format,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str = Field(min_length=1)
+    expected_tokens: int | None = None
+
+    def to_types(self) -> types.ImageAssetPointerChunk:
+        return types.ImageAssetPointerChunk(
+            format=self.format,
+            location=self.location,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+def _get_model_chunk_type(v: Any) -> str:
+    if isinstance(v, dict):
+        if "type" in v:
+            return v["type"]
+        is_encoded_text = "tokens" in v
+        is_image_asset_pointer = "location" in v
+        is_image = "data" in v
+
+        if sum([is_encoded_text, is_image_asset_pointer, is_image]) > 1:
+            raise ValueError(
+                "Ambiguous model chunk type: must be exactly one of 'encoded_text', 'image_asset_pointer', or 'image'"
+            )
+        if is_encoded_text:
+            return "encoded_text"
+        if is_image_asset_pointer:
+            return "image_asset_pointer"
+        if is_image:
+            return "image"
+    return getattr(v, "type", "encoded_text")
+
+
+ModelInputChunk = Annotated[
+    Annotated[EncodedTextChunk, Tag("encoded_text")]
+    | Annotated[ImageAssetPointerChunk, Tag("image_asset_pointer")]
+    | Annotated[ImageChunk, Tag("image")],
+    Discriminator(_get_model_chunk_type),
+]
 
 
 class ModelInput(BaseModel):

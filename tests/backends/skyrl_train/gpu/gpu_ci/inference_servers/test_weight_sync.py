@@ -107,8 +107,7 @@ class Trainer:
         try:
             NCCLWeightTransferEngine.trainer_send_weights(
                 iterator=iter(params),
-                group=self.pg,
-                packed=True,
+                trainer_args={"group": self.pg, "packed": True},
             )
             torch.cuda.synchronize()
             print("[Trainer.broadcast_weights] Send complete")
@@ -118,7 +117,7 @@ class Trainer:
 
 
 @pytest_asyncio.fixture(scope="class")
-async def weight_update_env(ray_init_fixture):
+async def weight_update_env(class_scoped_ray_init_fixture):
     """
     Create environment for weight update testing.
 
@@ -129,7 +128,7 @@ async def weight_update_env(ray_init_fixture):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    engines = InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg,
         model=MODEL,
         tp_size=2,
@@ -137,20 +136,18 @@ async def weight_update_env(ray_init_fixture):
         gpu_memory_utilization=0.5,
         use_new_inference_servers=True,
         engine_init_kwargs={"load_format": "dummy"},
-    )
+    ) as engines:
+        trainer = Trainer.options(num_gpus=1.0).remote(MODEL)
+        ray.get(trainer.ready.remote())
 
-    trainer = Trainer.options(num_gpus=1.0).remote(MODEL)
-    ray.get(trainer.ready.remote())
+        yield {
+            "engines": engines,
+            "trainer": trainer,
+            "client": engines.client,
+            "router_url": engines.client.proxy_url,
+        }
 
-    yield {
-        "engines": engines,
-        "trainer": trainer,
-        "client": engines.client,
-        "router_url": engines.client.proxy_url,
-    }
-
-    await engines.client.teardown()
-    engines.close()
+        await engines.client.teardown()
 
 
 @pytest.mark.asyncio(loop_scope="class")
@@ -330,7 +327,7 @@ class IpcTrainer:
 
 
 @pytest_asyncio.fixture(scope="class")
-async def ipc_weight_update_env(ray_init_fixture):
+async def ipc_weight_update_env(class_scoped_ray_init_fixture):
     """
     Create environment for colocated IPC weight update testing.
 
@@ -341,7 +338,7 @@ async def ipc_weight_update_env(ray_init_fixture):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    engines = InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg,
         model=MODEL,
         tp_size=1,
@@ -349,28 +346,26 @@ async def ipc_weight_update_env(ray_init_fixture):
         gpu_memory_utilization=0.5,
         use_new_inference_servers=True,
         engine_init_kwargs={"load_format": "dummy"},
-    )
+    ) as engines:
+        # Trainer on same PG bundle as server (colocated) with fractional GPU
+        trainer = IpcTrainer.options(
+            num_gpus=0.2,
+            num_cpus=0.2,
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=engines.pg,
+                placement_group_bundle_index=0,
+            ),
+        ).remote(MODEL)
+        ray.get(trainer.ready.remote())
 
-    # Trainer on same PG bundle as server (colocated) with fractional GPU
-    trainer = IpcTrainer.options(
-        num_gpus=0.2,
-        num_cpus=0.2,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=engines.pg,
-            placement_group_bundle_index=0,
-        ),
-    ).remote(MODEL)
-    ray.get(trainer.ready.remote())
+        yield {
+            "engines": engines,
+            "trainer": trainer,
+            "client": engines.client,
+            "router_url": engines.client.proxy_url,
+        }
 
-    yield {
-        "engines": engines,
-        "trainer": trainer,
-        "client": engines.client,
-        "router_url": engines.client.proxy_url,
-    }
-
-    await engines.client.teardown()
-    engines.close()
+        await engines.client.teardown()
 
 
 @pytest.mark.asyncio(loop_scope="class")

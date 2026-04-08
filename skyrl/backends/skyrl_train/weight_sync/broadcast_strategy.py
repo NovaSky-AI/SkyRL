@@ -47,18 +47,19 @@ class BroadcastInitInfo(WeightSyncInitInfo):
         """Return the strategy class for this init info type."""
         return BroadcastTransferStrategy
 
-    def for_engine(self, engine_index: int, tp_size: int, pp_size: int) -> "BroadcastInitInfo":
+    def for_engine(self, engine_index: int, tp_size: int, pp_size: int, dp_size: int) -> "BroadcastInitInfo":
         """Return init_info with rank_offset adjusted for this engine.
 
         Args:
             engine_index: Index of the engine (0-based).
             tp_size: Tensor parallel size of the engine.
             pp_size: Pipeline parallel size of the engine.
+            dp_size: Data parallel size of the engine.
 
         Returns:
             BroadcastInitInfo with adjusted rank_offset.
         """
-        cumulative_offset = engine_index * tp_size * pp_size
+        cumulative_offset = engine_index * tp_size * pp_size * dp_size
         return replace(self, rank_offset=self.rank_offset + cumulative_offset)
 
     # TODO (Aaron): native weight sync only needs the following params:
@@ -187,8 +188,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             await asyncio.to_thread(
                 NCCLWeightTransferEngine.trainer_send_weights,
                 iterator=weight_iterator(),
-                group=self._model_update_group,
-                packed=True,
+                trainer_args={"group": self._model_update_group, "packed": True},
             )
             await update_task
         else:

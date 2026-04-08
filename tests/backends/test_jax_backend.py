@@ -106,7 +106,7 @@ def test_clear_lora_adapter():
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
-    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.qkv_proj
     connector = model.model.layers[0].attn_connector
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
@@ -633,7 +633,7 @@ def test_adapter_reuse_initializes_lora_adapter():
     # (slot 0 is reserved for base model)
     backend = create_backend(max_lora_adapters=2)
     model = backend.model
-    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.qkv_proj
 
     # Create first model
     model_id_1 = "model_1"

@@ -173,6 +173,12 @@ def convert_prompts_responses_to_batch_tensors(
                     padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
             rollout_expert_indices_tensor = padded
 
+            # downcast to uint8 if possible, otherwise int16 to save memory
+            if rollout_expert_indices_tensor.max().item() < 2**8:
+                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
+            elif rollout_expert_indices_tensor.max().item() < 2**15:
+                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
+
     return (
         sequences,
         attention_mask,
