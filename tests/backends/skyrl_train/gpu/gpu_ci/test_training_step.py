@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py
+uv run --isolated --extra dev --extra fsdp -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py
 """
 
 import pytest
@@ -13,7 +13,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     make_dummy_training_batch,
 )
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 

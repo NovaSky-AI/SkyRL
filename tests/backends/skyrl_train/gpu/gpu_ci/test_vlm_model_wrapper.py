@@ -78,6 +78,9 @@ def build_vlm_inputs(processor, prompt_text, response_text, image=None, device="
         "num_actions": num_actions,
     }
 
+    if "mm_token_type_ids" in full_inputs:
+        result["mm_token_type_ids"] = full_inputs["mm_token_type_ids"].to(device)
+
     if image is not None:
         result["pixel_values"] = TensorList([full_inputs["pixel_values"].to(device)])
         result["image_grid_thw"] = TensorList([full_inputs["image_grid_thw"].to(device)])
@@ -104,6 +107,8 @@ def test_vlm_log_probs_match_manual(vlm_model, processor):
     pv = inputs["pixel_values"]
     igt = inputs["image_grid_thw"]
 
+    mm_token_type_ids = inputs.get("mm_token_type_ids")
+
     # Wrapper path
     with torch.no_grad():
         wrapper_log_probs = vlm_model(
@@ -112,19 +117,23 @@ def test_vlm_log_probs_match_manual(vlm_model, processor):
             attention_mask,
             pixel_values=pv,
             image_grid_thw=igt,
+            mm_token_type_ids=mm_token_type_ids,
         )
 
     # Manual path: run the raw model
     pv_cat = torch.cat(pv.tensors, dim=0)
     igt_cat = torch.cat(igt.tensors, dim=0)
 
+    manual_kwargs = dict(pixel_values=pv_cat, image_grid_thw=igt_cat)
+    if mm_token_type_ids is not None:
+        manual_kwargs["mm_token_type_ids"] = mm_token_type_ids
+
     with torch.no_grad():
         output = vlm_model.model(
             input_ids,
             attention_mask=attention_mask,
             position_ids=None,
-            pixel_values=pv_cat,
-            image_grid_thw=igt_cat,
+            **manual_kwargs,
         )
 
     logits = output["logits"].float()
@@ -165,6 +174,7 @@ def test_vlm_semantic_color_recognition(vlm_model, processor):
                     inputs["attention_mask"],
                     pixel_values=inputs["pixel_values"],
                     image_grid_thw=inputs["image_grid_thw"],
+                    mm_token_type_ids=inputs.get("mm_token_type_ids"),
                 )
 
             log_p[resp_color] = action_lp.sum().item()
@@ -180,13 +190,16 @@ def _build_batched_vlm_inputs(processor, prompt, response, images, device="cuda"
     """Build batched model inputs from a list of images with shared prompt/response text."""
     per_sample = [build_vlm_inputs(processor, prompt, response, image=img, device=device) for img in images]
     num_actions = per_sample[0]["num_actions"]
-    return {
+    result = {
         "input_ids": torch.cat([inp["input_ids"] for inp in per_sample], dim=0),
         "attention_mask": torch.cat([inp["attention_mask"] for inp in per_sample], dim=0),
         "num_actions": num_actions,
         "pixel_values": TensorList([inp["pixel_values"].tensors[0] for inp in per_sample]),
         "image_grid_thw": TensorList([inp["image_grid_thw"].tensors[0] for inp in per_sample]),
     }
+    if "mm_token_type_ids" in per_sample[0]:
+        result["mm_token_type_ids"] = torch.cat([inp["mm_token_type_ids"] for inp in per_sample], dim=0)
+    return result
 
 
 def test_vlm_forward_batched_vision(vlm_model, processor):
@@ -212,6 +225,7 @@ def test_vlm_forward_batched_vision(vlm_model, processor):
             fwd["attention_mask"],
             pixel_values=fwd["pixel_values"],
             image_grid_thw=fwd["image_grid_thw"],
+            mm_token_type_ids=fwd.get("mm_token_type_ids"),
         )
 
     # 2. Run batch in reversed order [blue, red]
@@ -224,6 +238,7 @@ def test_vlm_forward_batched_vision(vlm_model, processor):
             rev["attention_mask"],
             pixel_values=rev["pixel_values"],
             image_grid_thw=rev["image_grid_thw"],
+            mm_token_type_ids=rev.get("mm_token_type_ids"),
         )
 
     # 3. Basic shape / sanity checks

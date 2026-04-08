@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
@@ -110,7 +111,9 @@ def test_compute_logits(
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Load HF model, get logits, then delete to free memory
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
     hf_logits = hf_outputs.logits.detach().numpy()
     del hf_model, hf_outputs

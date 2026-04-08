@@ -20,7 +20,9 @@ def test_qwen3_generate():
     """Test batched text generation with KV caching matches HuggingFace."""
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
 
     inputs = ["My name is", "The capital of France is", "Test stopping", "Test stopping"]
     max_new_tokens = [10, 20, 50, 2]
@@ -117,7 +119,7 @@ def test_qwen3_generate():
             with torch.no_grad():
                 hf_logits = hf_model(tokens.input_ids).logits[0, :-1]
                 hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
-                expected = hf_logprobs[torch.arange(len(hf_logprobs)), tokens.input_ids[0, 1:]].numpy()
+                expected = hf_logprobs[torch.arange(len(hf_logprobs)), tokens.input_ids[0, 1:]].float().numpy()
             assert np.allclose(result_with_prompt_logprobs.prompt_logprobs[i], expected, rtol=1e-3, atol=1e-3)
 
 
@@ -126,7 +128,9 @@ def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="right")
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+    )
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
