@@ -73,7 +73,7 @@ async def evaluate(
             global_step,
         )
         t0 = time.perf_counter()
-        generator_output: GeneratorOutput = await generator.generate(generator_input)
+        generator_output: GeneratorOutput = await generator.generate(generator_input, include_children=False)
         total_generate_time += time.perf_counter() - t0
         total_rollouts += len(generator_input["prompts"])
         validate_generator_output(len(generator_input["prompts"]), generator_output)
@@ -179,7 +179,7 @@ async def evaluate_step_wise(
             global_step,
         )
         t0 = time.perf_counter()
-        generator_output: GeneratorOutput = await generator.generate(generator_input)
+        generator_output: GeneratorOutput = await generator.generate(generator_input, include_children=True)
         total_generate_time += time.perf_counter() - t0
         total_rollouts += len(generator_input["prompts"])
         traj_id_to_input = {

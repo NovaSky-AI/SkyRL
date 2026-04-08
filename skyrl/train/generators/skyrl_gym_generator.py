@@ -7,11 +7,10 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
-import hashlib
+import functools
 import json
 import os
 import re
-import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -154,26 +153,6 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
-def _write_step_files(
-    folder: str,
-    prefix: str,
-    step_outputs: List["TrajectoryOutput"],
-    tokenizer,
-) -> None:
-    """Write per-turn input/output files decoded from token IDs.
-
-    Creates ``<prefix>-turn-<N>-input.txt`` and ``<prefix>-turn-<N>-output.txt``
-    for each turn so you can see exactly what the LLM received and produced.
-    """
-    for i, step in enumerate(step_outputs):
-        input_text = tokenizer.decode(step.prompt_ids, skip_special_tokens=False)
-        with open(os.path.join(folder, f"{prefix}-turn-{i}-input.txt"), "w") as f:
-            f.write(input_text)
-
-        output_text = tokenizer.decode(step.response_ids, skip_special_tokens=False)
-        with open(os.path.join(folder, f"{prefix}-turn-{i}-output.txt"), "w") as f:
-            f.write(output_text)
-
 
 def _write_rlm_rollout(
     rollout_output_dir: str,
@@ -183,49 +162,47 @@ def _write_rlm_rollout(
     parent_step_outputs: List["TrajectoryOutput"],
     child_step_outputs: List[List["TrajectoryOutput"]],
     tokenizer,
+    trajectory_id_str: Optional[str] = None,
 ) -> None:
-    """Write per-example rollout files into rollout_output_dir/<question_hash>/.
+    """Append one JSONL record to rollout_output_dir/rollouts.jsonl."""
+    os.makedirs(rollout_output_dir, exist_ok=True)
 
-    For each agent (parent + children) we write one file per turn per direction:
-      parent-turn-0-input.txt   — exact string fed to the LLM on turn 0
-      parent-turn-0-output.txt  — exact string the LLM produced on turn 0
-      child-0-turn-0-input.txt  — same for child 0, turn 0
-      ...
-    Plus a meta.json with scalar metrics.
-    """
-    # Build a unique folder name from the prompt text + current timestamp so that
-    # different questions never collide and re-runs of the same data don't overwrite.
-    question_text = "\n".join(m.get("content", "") for m in prompt if m.get("content"))
-    hash_input = question_text + "\n" + str(time.time())
-    q_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
-    folder = os.path.join(rollout_output_dir, q_hash)
-    os.makedirs(folder, exist_ok=True)
-
-    reward = env_metrics.get("reward", 0.0)
-    turns = env_metrics.get("turns_used", 0)
-
-    # --- per-turn files for parent ---
-    _write_step_files(folder, "parent", parent_step_outputs, tokenizer)
-
-    # --- per-turn files for each child ---
-    for i, child_steps in enumerate(child_step_outputs):
-        if not child_steps:
-            continue
-        _write_step_files(folder, f"child-{i}", child_steps, tokenizer)
-
-    # --- meta.json ---
     reward_spec = env_extras.get("reward_spec", {})
-    meta = {
-        "prompt": prompt,
-        "reward": reward,
-        "turns_used": turns,
-        "n_children": len(child_step_outputs),
-        "final_value_set": env_metrics.get("final_value_set", False),
+    record = {
+        "trajectory_id": trajectory_id_str,
+        "reward": env_metrics.get("reward", 0.0),
+        "turns_used": env_metrics.get("turns_used", 0),
+        "stop_reason": parent_step_outputs[-1].stop_reason if parent_step_outputs else None,
         "final_answer": env_metrics.get("final_answer"),
         "evidence": reward_spec.get("evidence"),
+        "parent_turns": [
+            {
+                "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
+                "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
+            }
+            for s in parent_step_outputs
+        ],
+        "children": [
+            {
+                "turns": [
+                    {
+                        "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
+                        "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
+                    }
+                    for s in child
+                ],
+                "reward": (child[-1].env_metrics or {}).get("reward") if child else None,
+                "stop_reason": child[-1].stop_reason if child else None,
+                "final_answer": (child[-1].env_metrics or {}).get("final_answer") if child else None,
+            }
+            for child in child_step_outputs
+            if child
+        ],
     }
-    with open(os.path.join(folder, "meta.json"), "w") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
+
+    jsonl_path = os.path.join(rollout_output_dir, "rollouts.jsonl")
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -809,15 +786,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
             agent_loop_output.child_outputs = child_results
 
-        # Write per-example rollout files for RLM envs when rollout_output_dir is configured.
+        # Write rollout JSONL for RLM envs when rollout_output_dir is configured.
         rollout_output_dir = env_extras.get("rollout_output_dir")
         if env_class == "rlm" and rollout_output_dir and isinstance(agent_loop_output, StepWiseOutput):
             parent_steps = agent_loop_output.step_outputs
-            child_steps = [
-                co.step_outputs for co in (agent_loop_output.child_outputs or [])
-            ]
+            child_steps = [co.step_outputs for co in (agent_loop_output.child_outputs or [])]
+            _tid_str = trajectory_id.to_string() if trajectory_id is not None else None
             await self._run_in_executor_if_available(
-                _write_rlm_rollout,
+                functools.partial(_write_rlm_rollout, trajectory_id_str=_tid_str),
                 rollout_output_dir,
                 prompt,
                 env_extras,
@@ -1111,7 +1087,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False, include_children: bool = True) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
@@ -1148,6 +1124,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                         env_extras[i]["child_system_prompt"] = child_prompt
                     rollout_output_dir = cfg.get("rollout_output_dir")
                     if rollout_output_dir:
+                        batch_metadata = input_batch.get("batch_metadata")
+                        if batch_metadata:
+                            step = batch_metadata.global_step
+                            phase = getattr(batch_metadata, "training_phase", None) or "train"
+                            step_label = f"{phase}_step_{step}" if step is not None else phase
+                            rollout_output_dir = os.path.join(rollout_output_dir, step_label)
                         env_extras[i]["rollout_output_dir"] = rollout_output_dir
 
         # Async agent loop to generate trajectories in parallel.
@@ -1185,32 +1167,27 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_env_classes = []
             step_metadata = []
             for i, output in enumerate(all_outputs):
-                # Propagate parent's scalar reward to each child's last step
-                if self.generator_cfg.train_child_trajectories and output.child_outputs:
-                    parent_scalar_reward = sum(output.step_outputs[-1].reward)
-                    for child_output in output.child_outputs:
-                        if child_output.step_outputs:
-                            last_child_step = child_output.step_outputs[-1]
-                            last_model_token_idx = next(
-                                (k for k in range(len(last_child_step.loss_mask) - 1, -1, -1)
-                                 if last_child_step.loss_mask[k] == 1),
-                                None,
-                            )
-                            if last_model_token_idx is not None:
-                                new_reward = [0.0] * len(last_child_step.reward)
-                                new_reward[last_model_token_idx] = parent_scalar_reward
-                                last_child_step.reward = new_reward
+                include_children_for_output = (
+                    self.generator_cfg.train_child_trajectories
+                    and include_children
+                    and output.child_outputs
+                )
 
-                for j, step_output in enumerate(output.step_outputs):
-                    responses.append(step_output.response_ids)
-                    rewards.append(step_output.reward)
-                    stop_reasons.append(step_output.stop_reason)
-                    loss_masks.append(step_output.loss_mask)
-                    prompt_token_ids.append(step_output.prompt_ids)
-                    env_metrics.append(step_output.env_metrics)
-                    is_last_step.append(j == len(output.step_outputs) - 1)
-                    out_trajectory_ids.append(trajectory_ids[i])
-                    out_env_classes.append(env_classes[i])
+                # Append child steps first (all is_last_step=False, share
+                # parent's trajectory_id).  They inherit the parent's GRPO
+                # advantage via the cumsum broadcast.
+                if include_children_for_output:
+                    for child_output in output.child_outputs:
+                        for step_output in child_output.step_outputs:
+                            responses.append(step_output.response_ids)
+                            rewards.append(step_output.reward)
+                            stop_reasons.append(step_output.stop_reason)
+                            loss_masks.append(step_output.loss_mask)
+                            prompt_token_ids.append(step_output.prompt_ids)
+                            env_metrics.append(step_output.env_metrics)
+                            is_last_step.append(False)
+                            out_trajectory_ids.append(trajectory_ids[i])
+                            out_env_classes.append(env_classes[i])
                     step_metadata.append({"depth": 0, "child_index": None, "step_index": j})
 
                 if not self.generator_cfg.train_child_trajectories:
@@ -1248,10 +1225,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
-                rollout_logprobs = sum(
-                    [[step_output.rollout_logprobs for step_output in output.step_outputs] for output in all_outputs],
-                    [],
-                )
+                rollout_logprobs = []
+                for output in all_outputs:
+                    # Match flattening order: children first, then all parent steps
+                    if self.generator_cfg.train_child_trajectories and include_children and output.child_outputs:
+                        for child in output.child_outputs:
+                            rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
+                    rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]
             else:
                 rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:

@@ -55,13 +55,15 @@ class MetricsOutput(TypedDict):
 
 class GeneratorInterface(ABC):
     @abstractmethod
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, include_children: bool = True) -> GeneratorOutput:
         """Generate trajectories for the input batch.
 
         Returns outputs in the same order as the input batch.
 
         Args:
             input_batch (GeneratorInput): Input batch
+            include_children (bool): If True and train_child_trajectories is enabled, include
+                child trajectory steps in the output. Pass False during eval to exclude children.
         Returns:
             GeneratorOutput: Generated trajectories
         """

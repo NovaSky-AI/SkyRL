@@ -578,7 +578,7 @@ class RLMEnvConfig(BaseConfig):
     child_system_prompt: Optional[str] = None
     """Custom system prompt for child RLM agents spawned via rlm_query(). Defaults to None (inherits parent prompt)."""
     rollout_output_dir: Optional[str] = None
-    """Directory to write per-example rollout files (parent.txt, child-N.txt, meta.json). None disables logging."""
+    """Directory to write rollouts.jsonl. None disables logging."""
 
 
 @dataclass
