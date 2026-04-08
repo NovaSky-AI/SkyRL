@@ -7,11 +7,11 @@ set -x
 # bash examples/train/sft/run_rlm_sft.sh
 
 : "${LOGGER:=wandb}"
-: "${NUM_GPUS:=4}"
+: "${NUM_GPUS:=8}"
 : "${BATCH_SIZE:=4}"
 : "${NUM_EPOCHS:=2}"
 : "${MAX_LENGTH:=16384}"
-: "${MICRO_BATCH_SIZE:=1}"
+: "${MICRO_BATCH_SIZE:=2}"
 : "${LEARNING_RATE:=1e-5}"
 : "${LOG_INTERVAL:=250}"
 : "${WANDB_PROJECT:=alphaxiv-rlm-sft}"
