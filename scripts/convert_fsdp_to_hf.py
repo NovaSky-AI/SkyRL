@@ -165,8 +165,6 @@ def save_hf_checkpoint(merged: dict[str, torch.Tensor], output_dir: Path, ckpt_d
             (output_dir / old_name).rename(output_dir / new_name)
             final_names.append(new_name)
 
-        all_keys = list(torch.load(ckpt_dir / f"model_world_size_{4}_rank_0.pt", map_location="cpu", weights_only=False).keys())
-        key_idx = 0
         for shard_i, shard_name in enumerate(final_names):
             from safetensors import safe_open
             with safe_open(output_dir / shard_name, framework="pt") as f:

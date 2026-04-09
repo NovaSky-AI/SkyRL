@@ -14,7 +14,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${TP_SIZE:=4}"
 : "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-v1-epoch-4}"
+: "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-step-500}"
 : "${ROLLOUT_OUTPUT_DIR:=$(pwd)/tmp/multi-paper-eval/rollouts}"
 
 uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \

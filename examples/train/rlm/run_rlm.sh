@@ -65,7 +65,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/rlm-sft-Qwen3.5-9B-v1" \
+  trainer.policy.model.path="alphaXiv/rlm-sft-Qwen3.5-9B-step-250" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TP_SIZE \
