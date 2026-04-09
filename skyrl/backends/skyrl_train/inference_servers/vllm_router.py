@@ -15,11 +15,7 @@ from typing import List, Optional
 
 import httpx
 
-from skyrl.backends.skyrl_train.inference_servers.common import (
-    find_and_reserve_port,
-    get_node_ip,
-    get_open_port,
-)
+from skyrl.backends.skyrl_train.inference_servers.common import find_and_reserve_port, get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
@@ -59,7 +55,7 @@ class VLLMRouter:
         self._health_check_interval_secs = health_check_interval_secs
         self._max_concurrent_requests = max_concurrent_requests
         self._request_timeout_secs = request_timeout_secs
-        self._prometheus_port = get_open_port(prometheus_port)
+        self._prometheus_port, self._prometheus_port_reservation = find_and_reserve_port(prometheus_port)
         self._process: Optional[subprocess.Popen] = None
 
         logger.info(
@@ -88,6 +84,14 @@ class VLLMRouter:
         if self._request_timeout_secs is not None:
             cmd.extend(["--request-timeout-secs", str(self._request_timeout_secs)])
         return cmd
+
+    def _release_port_reservations(self) -> None:
+        """Close any held port reservation sockets."""
+        for attr in ("_port_reservation", "_prometheus_port_reservation"):
+            sock = getattr(self, attr, None)
+            if sock is not None:
+                sock.close()
+                setattr(self, attr, None)
 
     @staticmethod
     def _drain_stream(stream, log_fn):
@@ -119,36 +123,38 @@ class VLLMRouter:
         env = os.environ.copy()
         env.setdefault("RUST_LOG", "warn")
 
-        # Release the port reservation right before the router rebinds.
-        if self._port_reservation is not None:
-            self._port_reservation.close()
-            self._port_reservation = None
+        try:
+            # Release port reservations right before the router rebinds.
+            self._release_port_reservations()
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
 
-        # Drain subprocess output to prevent pipe buffer blocking
-        threading.Thread(
-            target=self._drain_stream,
-            args=(self._process.stdout, logger.info),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._drain_stream,
-            args=(self._process.stderr, logger.warning),
-            daemon=True,
-        ).start()
+            # Drain subprocess output to prevent pipe buffer blocking
+            threading.Thread(
+                target=self._drain_stream,
+                args=(self._process.stdout, logger.info),
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=self._drain_stream,
+                args=(self._process.stderr, logger.warning),
+                daemon=True,
+            ).start()
 
-        ip = get_node_ip()
-        router_url = f"http://{ip}:{self._port}"
-        self._wait_until_healthy(router_url)
+            ip = get_node_ip()
+            router_url = f"http://{ip}:{self._port}"
+            self._wait_until_healthy(router_url)
 
-        logger.info(f"VLLMRouter started at {router_url}")
-        return router_url
+            logger.info(f"VLLMRouter started at {router_url}")
+            return router_url
+        except Exception:
+            self._release_port_reservations()
+            raise
 
     def _wait_until_healthy(
         self,
