@@ -317,18 +317,19 @@ class HFModelWrapper(nn.Module):
     ) -> torch.Tensor:
         """Returns action log probs"""
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
-        if self.is_vlm and has_image_inputs:
+        if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
             # model specific logic to compute.
             assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
-            # Convert TensorList -> concatenated tensors for the HF model
-            if isinstance(pixel_values, TensorList):
-                pixel_values = torch.cat(pixel_values.tensors, dim=0)
-            if isinstance(image_grid_thw, TensorList):
-                image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+            if has_image_inputs:
+                # Convert TensorList -> concatenated tensors for the HF model
+                if isinstance(pixel_values, TensorList):
+                    pixel_values = torch.cat(pixel_values.tensors, dim=0)
+                if isinstance(image_grid_thw, TensorList):
+                    image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
