@@ -219,7 +219,7 @@ def main():
 
         for i in tqdm(range(0, len(tokenized), batch_size), desc=f"Epoch {epoch + 1}"):
             batch_examples = tokenized[i : i + batch_size]
-            if len(batch_examples) < 2:
+            if len(batch_examples) < num_gpus or len(batch_examples) % num_gpus != 0:
                 continue
 
             batch = collate_sft_batch(batch_examples, tokenizer)
