@@ -36,4 +36,5 @@ cd "$CWD"
 
 # Prepare dataset 
 python examples/train/rlm/rlm_dataset.py
+python examples/train/rlm/multi_paper_dataset.py
 

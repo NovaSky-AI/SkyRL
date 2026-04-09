@@ -6,9 +6,9 @@ Produces three files:
   validation.parquet - validation split (cap with --n_val; omitted if no val split and --n_val not set)
   test.parquet       - test split (cap with --n_test)
 
-Each HF row has one source paper + N questions; we flatten to one row per question.
+Each HF row has one source paper, one question, and evidence spans.
 
-Each example:
+Each output example:
 - prompt: "Extract verbatim text passages from the context that serve as evidence for the query: <question>"
 - extra_info.context_text: dict {paperId -> "### PAPER: title\\n<abstract>\\ntext"}
 - reward_spec.evidence: list of {paperId, selections: [{text}]} (ground-truth spans)
@@ -38,27 +38,24 @@ def build_context(papers: list) -> dict:
     return ctx
 
 
-def flatten_datapoint(datapoint: dict, max_turns: int) -> list:
+def convert_datapoint(datapoint: dict, max_turns: int) -> dict:
     ctx = build_context(datapoint["papers"])
-    rows = []
-    for question in datapoint["questions"]:
-        q_text = question["question"]
-        rows.append({
-            "prompt": [{"role": "user", "content": (
-                f"Extract verbatim text passages from the context that serve as evidence for the query: {q_text}\n"
-                f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
-            )}],
-            "env_class": "rlm",
-            "reward_spec": {
-                "ground_truth": None,
-                "evidence": question["evidence"],
-            },
-            "max_turns": max_turns,
-            "extra_info": {
-                "context_text": json.dumps(ctx),
-            },
-        })
-    return rows
+    q_text = datapoint["question"]
+    return {
+        "prompt": [{"role": "user", "content": (
+            f"Extract verbatim text passages from the context that serve as evidence for the query: {q_text}\n"
+            f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
+        )}],
+        "env_class": "rlm",
+        "reward_spec": {
+            "ground_truth": None,
+            "evidence": datapoint["evidence"],
+        },
+        "max_turns": max_turns,
+        "extra_info": {
+            "context_text": json.dumps(ctx),
+        },
+    }
 
 
 def main():
@@ -92,7 +89,7 @@ def main():
         raw = list(hf_ds[hf_split])
         rows = []
         for dp in raw:
-            rows.extend(flatten_datapoint(dp, args.max_turns))
+            rows.append(convert_datapoint(dp, args.max_turns))
             if cap is not None and len(rows) >= cap:
                 rows = rows[:cap]
                 break
