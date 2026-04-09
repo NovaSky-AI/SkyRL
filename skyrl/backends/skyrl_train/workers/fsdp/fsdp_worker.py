@@ -186,6 +186,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
+            language_model_only=self.cfg.policy.language_model_only,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
@@ -422,6 +423,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
             rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
             meta_init=use_meta,
+            language_model_only=self.cfg.ref.language_model_only,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

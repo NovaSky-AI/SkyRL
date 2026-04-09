@@ -56,6 +56,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         args.max_loras = 1
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
 
+    if ie_cfg.language_model_only:
+        args.language_model_only = True
+
     # Add any extra engine_init_kwargs
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
     for key, value in engine_kwargs.items():
