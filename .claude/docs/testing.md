@@ -34,4 +34,5 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 ## Known Quirks
 
 - **`_SKYRL_USE_NEW_INFERENCE`**: Defaults to `False` (0). Controls old vs new inference codepath. Set to `1` to enable new inference. Tests that skip on this flag are marked with `@pytest.mark.skipif`.
+- **vLLM 0.19**: `vllm.inputs.data` was renamed to `vllm.inputs`. Import `TokensPrompt` from `vllm.inputs`, not `vllm.inputs.data`.
 - **Megatron tests**: Require `NVTE_FLASH_ATTN=0 NVTE_FUSED_ATTN=0` env vars.
