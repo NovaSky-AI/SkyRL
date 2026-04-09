@@ -251,6 +251,10 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
+    if cfg.trainer.policy.language_model_only or cfg.trainer.ref.language_model_only:
+        assert cfg.generator.language_model_only or cfg.generator.engine_init_kwargs.get(
+            "language_model_only", False
+        ), f"language_model_only should be set consistently between generator and policy/ref but got {cfg.generator.language_model_only} for generator, {cfg.trainer.policy.language_model_only} for policy and {cfg.trainer.ref.language_model_only} for ref"
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:

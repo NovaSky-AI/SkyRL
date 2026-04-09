@@ -3,9 +3,6 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_models.py
 """
 
-import os
-import tempfile
-
 import pytest
 import ray
 import torch
@@ -249,11 +246,13 @@ async def test_logprobs_matching_roundtrip(ray_init_fixture, tp, pp, cp, ep, etp
 
         logprobs_diff = (vllm_valid - logprobs_megatron_valid).abs()
         print(f"vLLM logprobs     - mean: {vllm_valid.mean().item():.6f}, std: {vllm_valid.std().item():.6f}")
-        print(f"Megatron - mean: {logprobs_megatron_valid.mean().item():.6f}, std: {logprobs_megatron_valid.std().item():.6f}")
+        print(
+            f"Megatron - mean: {logprobs_megatron_valid.mean().item():.6f}, std: {logprobs_megatron_valid.std().item():.6f}"
+        )
         print(f"logprob diff mean: {logprobs_diff.mean().item():.6f}, std: {logprobs_diff.std().item():.6f}")
 
-        assert logprobs_diff.mean().item() < 1e-6, (
-            f"Logprob diff should be close to 0, but is {logprobs_diff.mean().item():.6f}"
-        )
+        assert (
+            logprobs_diff.mean().item() < 1e-6
+        ), f"Logprob diff should be close to 0, but is {logprobs_diff.mean().item():.6f}"
     finally:
         ray.shutdown()

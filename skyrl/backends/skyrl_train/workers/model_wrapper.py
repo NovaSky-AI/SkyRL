@@ -117,7 +117,9 @@ class HFModelWrapper(nn.Module):
             if language_model_only:
                 logger.info("[VLM] language_model_only=True, skipping vision encoder initialization")
             else:
-                self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+                self.is_vlm = (
+                    hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+                )
                 if self.is_vlm:
                     logger.info(
                         f"[VLM] Config {type(model_config).__name__} has a vision config, "
