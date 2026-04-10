@@ -116,24 +116,37 @@ class Trainer:
             raise
 
 
-@pytest_asyncio.fixture(scope="class", params=[False, True], ids=["no_pd", "pd"])
+@pytest_asyncio.fixture(
+    scope="class",
+    params=[
+        pytest.param({"enable_pd": False}, id="no_pd"),
+        pytest.param(
+            {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
+            id="pd_1P1D_non_colocated",
+        ),
+    ],
+)
 async def weight_update_env(class_scoped_ray_init_fixture, request):
     """
-    Create environment for weight update testing.
+    Create environment for weight update testing (non-colocated, NCCL broadcast).
 
-    Non-colocated setup for both trainer and inference server:
-    - No PD: TP=2 server on its own GPUs, trainer on separate GPU(s). Uses NCCL broadcast.
-    - PD: 1P1D (2 engines, TP=1), trainer on separate GPU. Uses NCCL broadcast.
+    - no_pd: TP=2 server on its own GPUs, trainer on separate GPU(s) (4 GPUs).
+    - pd_1P1D_non_colocated: 1P1D (2 engines, TP=1), trainer on separate GPU (3 GPUs).
+      Exercises non-colocated PD path in create_inference_servers with separate
+      prefill/decode placement groups.
     """
-    enable_pd = request.param
+    pd_cfg = request.param
+    enable_pd = pd_cfg["enable_pd"]
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
     if enable_pd:
+        num_prefill = pd_cfg["num_prefill"]
+        num_decode = pd_cfg["num_decode"]
         create_kwargs = dict(
             model=MODEL,
             tp_size=1,
-            num_inference_engines=2,
+            num_inference_engines=num_prefill + num_decode,
             colocate_all=False,
             gpu_memory_utilization=0.5,
             use_new_inference_servers=True,
@@ -144,7 +157,7 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
                 },
             },
             enable_pd=True,
-            num_prefill=1,
+            num_prefill=num_prefill,
         )
     else:
         create_kwargs = dict(
@@ -346,25 +359,36 @@ class IpcTrainer:
         }
 
 
-@pytest_asyncio.fixture(scope="class", params=[False, True], ids=["no_pd", "pd"])
+@pytest_asyncio.fixture(
+    scope="class",
+    params=[
+        pytest.param({"enable_pd": False}, id="no_pd"),
+        pytest.param(
+            {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
+            id="pd_1P1D_colocated",
+        ),
+    ],
+)
 async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
     """
     Create environment for colocated IPC weight update testing.
 
     Colocated setup with TP=1:
-    - Trainer and server share the same GPU via placement group
-    - Server uses CUDA IPC backend for weight sync
-    - PD variant: 1P1D (2 engines, TP=1), both colocated
+    - no_pd: Trainer and server share the same GPU via placement group (1 GPU).
+    - pd_1P1D_colocated: 1P1D (2 engines, TP=1), both colocated (2 GPUs).
     """
-    enable_pd = request.param
+    pd_cfg = request.param
+    enable_pd = pd_cfg["enable_pd"]
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
     if enable_pd:
+        num_prefill = pd_cfg["num_prefill"]
+        num_decode = pd_cfg["num_decode"]
         create_kwargs = dict(
             model=MODEL,
             tp_size=1,
-            num_inference_engines=2,
+            num_inference_engines=num_prefill + num_decode,
             colocate_all=True,
             gpu_memory_utilization=0.5,
             use_new_inference_servers=True,
@@ -375,7 +399,7 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
                 },
             },
             enable_pd=True,
-            num_prefill=1,
+            num_prefill=num_prefill,
         )
     else:
         create_kwargs = dict(

@@ -1,13 +1,13 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K
+# Non-colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K
 # with prefill-decode (PD) disaggregation.
 
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/gsm8k/run_gsm8k_pd.sh
 
-# Minimum 4 GPUs: 2 prefill + 2 decode engines, colocated with training.
+# Minimum 4 GPUs: 2 prefill + 2 decode engines, non-colocated with training.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_GPUS:=4}"
@@ -23,7 +23,7 @@ uv run --isolated --extra fsdp --extra pd -m skyrl.train.entrypoints.main_base \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \

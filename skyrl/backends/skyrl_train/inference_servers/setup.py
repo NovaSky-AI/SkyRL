@@ -4,8 +4,14 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from loguru import logger
+from ray.util.placement_group import placement_group as ray_placement_group
 
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import InferenceEngineConfig
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+)
 
 from .server_group import ServerGroup
 from .utils import build_router_args, get_pd_cli_args
@@ -52,6 +58,7 @@ def create_inference_servers(
     from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 
     gpus_per_server = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size
+    is_colocated = placement_group is not None
 
     if ie_cfg.enable_pd:
         pd_cli_args = get_pd_cli_args(cli_args)
@@ -59,12 +66,30 @@ def create_inference_servers(
         num_decode = ie_cfg.num_engines - num_prefill
         servers_per_group = ie_cfg.data_parallel_size
 
+        # When not colocated, create separate shared PGs for prefill and
+        # decode groups so that bundle offsets index into a valid range.
+        if placement_group is None:
+            prefill_total_gpus = num_prefill * gpus_per_server * servers_per_group
+            prefill_bundles = [{"GPU": 1, "CPU": 1} for _ in range(prefill_total_gpus)]
+            raw_prefill_pg = ray_placement_group(prefill_bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_prefill_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            prefill_pg = ResolvedPlacementGroup(raw_prefill_pg)
+
+            decode_total_gpus = num_decode * gpus_per_server * servers_per_group
+            decode_bundles = [{"GPU": 1, "CPU": 1} for _ in range(decode_total_gpus)]
+            raw_decode_pg = ray_placement_group(decode_bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_decode_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            decode_pg = ResolvedPlacementGroup(raw_decode_pg)
+        else:
+            prefill_pg = placement_group
+            decode_pg = placement_group
+
         prefill_server_groups = [
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
                 start_port=8000 + i * servers_per_group,
-                placement_group=placement_group,
+                placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
@@ -76,13 +101,15 @@ def create_inference_servers(
         prefill_infos_nested = [g.start() for g in prefill_server_groups]
         prefill_urls = [info.url for infos in prefill_infos_nested for info in infos]
 
-        decode_bundle_offset = num_prefill * gpus_per_server * servers_per_group if placement_group else 0
+        # When colocated, decode bundles follow prefill bundles in the shared PG.
+        # When not colocated, decode_pg is a separate PG so offset starts at 0.
+        decode_bundle_offset = num_prefill * gpus_per_server * servers_per_group if is_colocated else 0
         decode_server_groups = [
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
                 start_port=8000 + (num_prefill + i) * servers_per_group,
-                placement_group=placement_group,
+                placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
@@ -101,7 +128,7 @@ def create_inference_servers(
         proxy_url = router.start()
         logger.info(
             f"HTTP Inference (PD): prefill_urls={prefill_urls}, decode_urls={decode_urls}, "
-            f"proxy_url={proxy_url}, colocated={placement_group is not None}"
+            f"proxy_url={proxy_url}, colocated={is_colocated}"
         )
         return InferenceServerSetup(
             router=router,
@@ -111,6 +138,15 @@ def create_inference_servers(
             decode_server_groups=decode_server_groups,
         )
     else:
+        # When not colocated, create a shared PG for all engine groups so
+        # that bundle offsets index into a valid range.
+        if placement_group is None:
+            total_gpus = ie_cfg.num_engines * gpus_per_server * ie_cfg.data_parallel_size
+            bundles = [{"GPU": 1, "CPU": 1} for _ in range(total_gpus)]
+            raw_pg = ray_placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            placement_group = ResolvedPlacementGroup(raw_pg)
+
         server_groups = [
             ServerGroup(
                 cli_args=cli_args,
@@ -128,10 +164,7 @@ def create_inference_servers(
         router_args = build_router_args(ie_cfg, server_urls=server_urls)
         router = VLLMRouter(router_args, log_path=log_path)
         proxy_url = router.start()
-        logger.info(
-            f"HTTP Inference: proxy_url={proxy_url}, server_urls={server_urls}, "
-            f"colocated={placement_group is not None}"
-        )
+        logger.info(f"HTTP Inference: proxy_url={proxy_url}, server_urls={server_urls}, " f"colocated={is_colocated}")
         return InferenceServerSetup(
             router=router,
             proxy_url=proxy_url,
