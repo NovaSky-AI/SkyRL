@@ -1,7 +1,7 @@
 """
 GPU E2E test for SkyRLVLMGymGenerator.
 
-Requires a local vLLM install with /v1/chat/completions/render support.
+Requires a local vLLM install with multi-modal /inference/v1/generate support.
 
 SKYRL_LOCAL_VLLM=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_vlm_gym_generator.py -m vllm -v
 """

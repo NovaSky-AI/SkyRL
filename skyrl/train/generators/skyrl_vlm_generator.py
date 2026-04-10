@@ -1,15 +1,5 @@
 """
 SkyRLVLMGymGenerator: VLM (vision-language model) multi-turn RL generator.
-
-Subclasses SkyRLGymGenerator to handle multi-modal observations (images)
-from VisGym environments. Uses pure Python types (OpenAI-format messages
-with base64-encoded images) rather than Tinker chunks.
-
-Token bookkeeping uses a "render delta" approach: the conversation (list of
-messages) is the source of truth and is re-tokenized via vLLM's
-render_chat_completion at each step.  Generated tokens keep their original
-logprobs; observation tokens are obtained by slicing the re-render and
-are masked out (loss_mask=0).
 """
 
 import copy
