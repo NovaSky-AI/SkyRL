@@ -206,7 +206,7 @@ class RayPPOTrainer:
         start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for step_idx, rand_prompts in enumerate(self.train_dataloader):
+            for _, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
