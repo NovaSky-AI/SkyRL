@@ -288,3 +288,66 @@ async def test_renderer_decodes_mm_kwargs(module_scoped_ray_init_fixture):
         assert isinstance(image_grid_thw, torch.Tensor)
         assert image_grid_thw.shape[1] == 3
         assert image_grid_thw.dtype == torch.long
+
+
+# ---------------------------------------------------------------------------
+# Render + Generate round-trip test
+# ---------------------------------------------------------------------------
+
+
+@requires_local_vllm
+@pytest.mark.vllm
+@pytest.mark.asyncio
+async def test_generate_with_multimodal_features_red_square(module_scoped_ray_init_fixture):
+    """Render a red square image, then generate with mm_features and verify the model sees red."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3_VL)
+    cfg.generator.inference_engine.served_model_name = MODEL_QWEN3_VL
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN3_VL,
+        sleep_level=1,
+        engine_init_kwargs={
+            "max_model_len": 4096,
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
+        },
+        use_new_inference_servers=True,
+    ) as engines:
+        client = engines.client
+
+        # Step 1: Render the image prompt to get token_ids and multi-modal features
+        data_uri = _make_tiny_base64_image()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                    {"type": "text", "text": "What color is this square? Answer with just the color name."},
+                ],
+            }
+        ]
+
+        render_result = await client.render_chat_completion({"json": {"model": MODEL_QWEN3_VL, "messages": messages}})
+
+        token_ids = render_result["token_ids"]
+        features = render_result.get("features")
+        assert features is not None, "Render should return multi-modal features for image input"
+
+        # Step 2: Generate using the rendered token_ids + mm_features
+        input_batch = {
+            "prompt_token_ids": [token_ids],
+            "sampling_params": {"max_tokens": 64, "temperature": 0.0},
+            "mm_features": features,
+        }
+        gen_result = await client.generate(input_batch)
+
+        # Structural assertions
+        assert len(gen_result["responses"]) == 1
+        assert len(gen_result["response_ids"]) == 1
+        assert len(gen_result["response_ids"][0]) > 0
+        assert gen_result["stop_reasons"][0] in ("stop", "length")
+
+        # Semantic assertion: the model should identify the red square
+        response_text = gen_result["responses"][0].lower()
+        assert "red" in response_text, f"Expected model to identify the red square, got: {gen_result['responses'][0]}"
