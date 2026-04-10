@@ -154,7 +154,13 @@ class WorkerDispatch:
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:
-            self._gpu_state[model] = GPUState()
+            self.mark_as_offloaded(model)
+
+    def mark_as_offloaded(self, model: str) -> None:
+        """Mark a specific model as offloaded without changing others."""
+        if model not in self._actor_groups:
+            return
+        self._gpu_state[model] = GPUState()
 
     def forward(self, model: str, data: TrainingInputBatch) -> TrainingOutputBatch:
         """Run inference forward pass. Only loads model (not optimizer)."""

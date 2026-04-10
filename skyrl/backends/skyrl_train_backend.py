@@ -113,7 +113,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self.base_model = base_model
         # NOTE: We currently have two config attributes "config" which is just config overrides and "_cfg" which is the actual config object. This is a temporary state given that the Tinker engine expects a .config attribute
         self.config = config
-        self._model_ids: dict[str, str] = {}
+        self._model_ids_to_role: dict[str, str] = {}
         self._model_metadata: dict[str, types.ModelMetadata] = {}
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
@@ -123,23 +123,21 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engines_initialized = False
 
     def has_model(self, model_id: str) -> bool:
-        return model_id in self._model_ids
+        return model_id in self._model_ids_to_role
 
     def _get_role(self, model_id: str) -> str:
         try:
-            return self._model_ids[model_id]
+            return self._model_ids_to_role[model_id]
         except KeyError as exc:
             raise ValueError(f"Model {model_id} not found") from exc
 
     def _get_batch_role(self, model_ids: list[str]) -> str:
         if not model_ids:
             return "policy"
-        roles = {self._get_role(model_id) for model_id in model_ids}
-        if len(roles) != 1:
-            raise ValueError(f"Mixed model roles in one batch are not supported: {sorted(roles)}")
-        if len(set(model_ids)) != 1:
-            raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(set(model_ids))}")
-        return next(iter(roles))
+        unique_model_ids = set(model_ids)
+        if len(unique_model_ids) != 1:
+            raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(unique_model_ids)}")
+        return self._get_role(next(iter(unique_model_ids)))
 
     def _build_policy(self, PolicyWorker):
         cfg = self._cfg
@@ -192,9 +190,9 @@ class SkyRLTrainBackend(AbstractBackend):
             inference_engine_client=self._inference_engine_client,
         )
 
-        # Mark all models as offloaded
+        # Mark the offloaded policy model in dispatch state
         if colocate_all:
-            self._dispatch.mark_all_offloaded()
+            self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
 
@@ -225,7 +223,7 @@ class SkyRLTrainBackend(AbstractBackend):
         ray.get(critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
         if colocate_all:
             critic_model.offload_to_cpu()
-            self._dispatch.mark_all_offloaded()
+            self._dispatch.mark_as_offloaded("critic")
         logger.info("init critic model done")
 
     def init_weight_sync_state(self):
@@ -253,9 +251,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engines_initialized = True
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
-        if model_id in self._model_ids:
+        if model_id in self._model_ids_to_role:
             raise ValueError(f"Model '{model_id}' already exists")
-        if model_role in self._model_ids.values():
+        if model_role in self._model_ids_to_role.values():
             raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
 
         if model_role == "policy":
@@ -281,7 +279,7 @@ class SkyRLTrainBackend(AbstractBackend):
             logger.info("Building models.")
             self._build_policy(PolicyWorker)
         elif model_role == "critic":
-            if "policy" not in self._model_ids.values():
+            if "policy" not in self._model_ids_to_role.values():
                 raise ValueError("Create a policy model before creating a critic model")
             if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
@@ -295,7 +293,7 @@ class SkyRLTrainBackend(AbstractBackend):
         else:
             raise ValueError(f"Unknown model_role: {model_role}")
 
-        self._model_ids[model_id] = model_role
+        self._model_ids_to_role[model_id] = model_role
         self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
         logger.info(f"Created {model_role} model {model_id} using RayPPOTrainer")
 
@@ -577,14 +575,14 @@ class SkyRLTrainBackend(AbstractBackend):
                 # Use token weights length to determine each example's actual response length
                 valid_len = len(prepared_batch.all_token_weights[i])
                 start = max(output_tensor.shape[1] - valid_len, 0)
-                values = output_tensor[i, start:].tolist()
+                outputs = output_tensor[i, start:].tolist()
                 output_key = "values" if role == "critic" else "logprobs"
                 loss_fn_outputs.append(
                     {
                         output_key: {
-                            "data": values,
+                            "data": outputs,
                             "dtype": "float32",
-                            "shape": [len(values)],
+                            "shape": [len(outputs)],
                         },
                     }
                 )
@@ -633,7 +631,8 @@ class SkyRLTrainBackend(AbstractBackend):
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
         model_id = next(iter(unique_models))
-        if self._get_role(model_id) != "policy":
+        role = self._model_ids_to_role.get(model_id)
+        if role != "policy":
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got '{model_id}'", status="error"
             )
