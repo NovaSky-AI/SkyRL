@@ -151,7 +151,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 prompt_token_ids=[input_ids],
                 session_ids=[session_id],
                 sampling_params=current_sampling_params,
-                mm_features=[latest_features],
+                mm_features=[latest_features] if latest_features is not None else None,
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
 
