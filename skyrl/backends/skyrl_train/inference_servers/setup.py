@@ -3,6 +3,7 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import List, Optional
 
+import ray
 from loguru import logger
 from ray.util.placement_group import placement_group as ray_placement_group
 
@@ -98,8 +99,6 @@ def create_inference_servers(
             )
             for i in range(num_prefill)
         ]
-        prefill_infos_nested = [g.start() for g in prefill_server_groups]
-        prefill_urls = [info.url for infos in prefill_infos_nested for info in infos]
 
         # When colocated, decode bundles follow prefill bundles in the shared PG.
         # When not colocated, decode_pg is a separate PG so offset starts at 0.
@@ -118,8 +117,21 @@ def create_inference_servers(
             )
             for i in range(num_decode)
         ]
-        decode_infos_nested = [g.start() for g in decode_server_groups]
-        decode_urls = [info.url for infos in decode_infos_nested for info in infos]
+
+        # Start all prefill and decode groups in parallel (non-blocking)
+        all_refs = []
+        for g in prefill_server_groups:
+            all_refs.extend(g.start(blocking=False))
+
+        for g in decode_server_groups:
+            all_refs.extend(g.start(blocking=False))
+
+        # Wait for all servers to be ready in one shot
+        ray.get(all_refs)
+
+        # Collect URLs — refs are already resolved so lazy property returns immediately
+        prefill_urls = [info.url for g in prefill_server_groups for info in g.server_infos]
+        decode_urls = [info.url for g in decode_server_groups for info in g.server_infos]
 
         server_urls = prefill_urls + decode_urls
 
@@ -158,8 +170,17 @@ def create_inference_servers(
             )
             for i in range(ie_cfg.num_engines)
         ]
-        server_infos_nested = [g.start() for g in server_groups]
-        server_urls = [info.url for infos in server_infos_nested for info in infos]
+
+        # Start all engine groups in parallel (non-blocking)
+        all_refs = []
+        for g in server_groups:
+            all_refs.extend(g.start(blocking=False))
+
+        # Wait for all servers to be ready in one shot
+        ray.get(all_refs)
+
+        # Collect URLs — refs are already resolved so lazy property returns immediately
+        server_urls = [info.url for g in server_groups for info in g.server_infos]
 
         router_args = build_router_args(ie_cfg, server_urls=server_urls)
         router = VLLMRouter(router_args, log_path=log_path)

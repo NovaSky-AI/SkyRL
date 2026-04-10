@@ -18,7 +18,7 @@ set -x
 
 export _SKYRL_USE_NEW_INFERENCE=1
 
-uv run --isolated --extra fsdp --extra pd -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

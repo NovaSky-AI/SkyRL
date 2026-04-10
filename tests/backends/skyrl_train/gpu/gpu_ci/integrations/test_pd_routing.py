@@ -5,7 +5,7 @@ Verifies that the vllm-router correctly routes prefill requests to prefill
 servers and decode requests to decode servers by inspecting router debug logs.
 
 Run:
-    uv run --isolated --extra dev --extra fsdp --extra pd pytest \
+    uv run --isolated --extra dev --extra fsdp pytest \
         tests/backends/skyrl_train/gpu/gpu_ci/integrations/test_pd_routing.py -v -s
 """
 
