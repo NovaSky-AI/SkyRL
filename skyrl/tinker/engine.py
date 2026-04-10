@@ -296,6 +296,23 @@ class TinkerEngine:
                     )
                 session.commit()
 
+    def _find_destructive_barriers(self, session: Session) -> dict[str, int]:
+        """Find the earliest pending destructive operation (optim_step/load_weights) per model.
+
+        These act as scheduling barriers: model passes before them can be batched
+        safely, and single requests after a blocked pass must wait.
+        """
+        query = (
+            select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
+            .where(
+                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
+                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
+            )
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .group_by(FutureDB.model_id)
+        )
+        return dict(session.exec(query).all())
+
     def find_batchable_model_passes(
         self, session: Session, request_type: types.RequestType
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
@@ -311,17 +328,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
-        # Find the earliest pending optim_step or load_weights per model (these act as barriers)
-        barriers_query = (
-            select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(
-                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
-                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
-            )
-            .where(FutureDB.status == RequestStatus.PENDING)
-            .group_by(FutureDB.model_id)
-        )
-        barriers = dict(session.exec(barriers_query).all())
+        barriers = self._find_destructive_barriers(session)
 
         # Get all pending operations of the requested type ordered by request_id
         query = (
@@ -389,6 +396,25 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_type, request_data) tuples
         """
+        # Find the first blocked forward pass per model: a pending FORWARD/FORWARD_BACKWARD
+        # that sits behind a destructive barrier and won't be batched this iteration.
+        # Single requests must not jump ahead of these.
+        destructive_barriers = self._find_destructive_barriers(session)
+        blocked_pass_barriers: dict[str, int] = {}
+        if destructive_barriers:
+            pending_passes = session.exec(
+                select(FutureDB.model_id, FutureDB.request_id)
+                .where(
+                    (FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
+                    | (FutureDB.request_type == types.RequestType.FORWARD)
+                )
+                .where(FutureDB.status == RequestStatus.PENDING)
+                .order_by(FutureDB.request_id)
+            ).all()
+            for model_id, req_id in pending_passes:
+                if model_id in destructive_barriers and req_id >= destructive_barriers[model_id]:
+                    blocked_pass_barriers.setdefault(model_id, req_id)
+
         statement = (
             select(FutureDB)
             .where(FutureDB.status == RequestStatus.PENDING)
@@ -399,6 +425,13 @@ class TinkerEngine:
             .order_by(FutureDB.request_id)
         )
         other_futures = session.exec(statement).all()
+
+        # Filter: only include ops that come before the first blocked pass for their model
+        other_futures = [
+            op
+            for op in other_futures
+            if op.model_id not in blocked_pass_barriers or op.request_id < blocked_pass_barriers[op.model_id]
+        ]
 
         return {str(f.request_id): (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
