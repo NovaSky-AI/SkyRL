@@ -7,7 +7,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/gsm8k/run_gsm8k_pd.sh
 
-# Minimum 4 GPUs: 2 prefill + 2 decode engines, non-colocated with training.
+# Requires 8 GPUs: 2 prefill + 2 decode engines, non-colocated with 4 training workers.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_GPUS:=4}"
