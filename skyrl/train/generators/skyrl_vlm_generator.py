@@ -83,7 +83,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         rendered = await self.inference_client.render_chat_completion(
             {"json": {"model": self.inference_client.model_name, "messages": conversation}}
         )
-        return RenderedConversation(prompt_ids=rendered["token_ids"], features=rendered.get("features", {}))
+        return RenderedConversation(prompt_ids=rendered["token_ids"], features=rendered.get("features", None))
 
     async def agent_loop(
         self,
