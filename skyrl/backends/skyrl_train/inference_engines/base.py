@@ -28,7 +28,7 @@ class InferenceEngineInput(TypedDict):
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
-    mm_features: Optional[MultiModalFeatures]
+    mm_features: Optional[List[MultiModalFeatures]]
 
 
 class InferenceEngineOutput(TypedDict):

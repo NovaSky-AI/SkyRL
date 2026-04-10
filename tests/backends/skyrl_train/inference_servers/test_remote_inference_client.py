@@ -658,7 +658,7 @@ class TestMultiModalGeneration:
         input_batch = {
             "prompt_token_ids": [[1, 2, 3]],
             "sampling_params": {"max_tokens": 50},
-            "mm_features": mm_features,
+            "mm_features": [mm_features],
         }
         result = await client.generate(input_batch)
 

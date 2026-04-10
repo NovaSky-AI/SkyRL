@@ -349,14 +349,14 @@ class RemoteInferenceClient:
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
-                    mm_features=mm_features,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
             async with gen_sem:
                 return await self._generate_single(
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
-                    mm_features=mm_features,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
