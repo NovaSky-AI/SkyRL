@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen3-1.7B-Base on DAPO training data and validate on AIME 2024.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen3_1.7b_aime.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime.sh
 
 MODEL_NAME="Qwen/Qwen3-1.7B-Base"
 DATA_DIR="$HOME/data/dapo"

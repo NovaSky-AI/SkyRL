@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/livecodebench/run_lcb.sh
+# bash examples/train/livecodebench/run_lcb.sh
 
 DATA_DIR="$HOME/data/lcb"
 train_data="['${DATA_DIR}/deepcoder_train.json']"

@@ -319,9 +319,11 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
         from skyrl.backends.skyrl_train.inference_servers.server_group import (
             ServerGroup,
+        )
+        from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
+            VLLMRouter,
         )
 
         ie_cfg = self.cfg.generator.inference_engine
@@ -351,10 +353,10 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = VLLMRouter(server_urls=server_urls)
             proxy_url = self._inference_router.start()
             logger.info(
-                f"HTTP Inference: Created internal router over external "
+                f"HTTP Inference: Created router over external "
                 f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
             )
 
@@ -372,7 +374,7 @@ class BasePPOExp:
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = InferenceRouter(server_urls=server_urls)
+            self._inference_router = VLLMRouter(server_urls=server_urls)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -381,12 +383,21 @@ class BasePPOExp:
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        return RemoteInferenceClient(
+        client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
+            enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
+            tokenizer=self.tokenizer,
         )
+
+        if is_colocated:
+            # Callers must invoke get_inference_client() from a sync context (no running event loop).
+            asyncio.run(client.sleep())
+            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+
+        return client
 
     def _setup_trainer(self):
         """Setup and return the trainer.

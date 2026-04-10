@@ -1,0 +1,23 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -213,8 +213,8 @@
+ # unpinned dependencies.
+ override-dependencies = [
+     "nvidia-resiliency-ext; sys_platform == 'never'",
+-    "mamba-ssm; sys_platform == 'never'",
+-    "causal-conv1d; sys_platform == 'never'",
++    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
++    "causal-conv1d>=1.4.0; sys_platform == 'linux'",
+     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+     "megatron-core==0.16.0; sys_platform == 'linux'",
+     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+@@ -261,7 +261,7 @@
+     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+ ]
+ # pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
+-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "02b5fccab5e5b21856d36c2e357839e0123b4b8f", marker = "sys_platform == 'linux'"}
++megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "nano-v3", marker = "sys_platform == 'linux'"}
+ harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
+
+ [tool.black]

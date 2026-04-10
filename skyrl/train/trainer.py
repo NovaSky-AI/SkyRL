@@ -33,9 +33,9 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     FixedKLController,
+    apply_loss_reduction_to_advantages_minibatch,
     compute_approx_kl,
     get_kl_controller,
-    normalize_advantages_dict,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
@@ -206,7 +206,7 @@ class RayPPOTrainer:
         start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for iter, rand_prompts in enumerate(self.train_dataloader):
+            for _, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -278,9 +278,6 @@ class RayPPOTrainer:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
-
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
                         with Timer("dump_data_batch"):
@@ -292,21 +289,21 @@ class RayPPOTrainer:
                         status = self.train_critic_and_policy(training_input)
 
                     # 8. conditionally save checkpoints and hf model
-                    if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                        with Timer("save_checkpoints", self.all_timings):
-                            self.save_checkpoints()
-                    if (
-                        self.cfg.trainer.hf_save_interval > 0
-                        and self.global_step % self.cfg.trainer.hf_save_interval == 0
-                    ):
-                        with Timer("save_hf_model", self.all_timings):
-                            self.save_models()
+                    is_epoch_end = self.global_step % len(self.train_dataloader) == 0
+                    if self.cfg.trainer.ckpt_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                            with Timer("save_checkpoints", self.all_timings):
+                                self.save_checkpoints()
+                    if self.cfg.trainer.hf_save_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                            with Timer("save_hf_model", self.all_timings):
+                                self.save_models()
 
                     # 9. conditionally sync policy and ref at the end of the epoch
                     if (
                         self.cfg.trainer.update_ref_every_epoch
                         and self.ref_model is not None
-                        and iter == len(self.train_dataloader) - 1
+                        and is_epoch_end
                         and epoch != self.cfg.trainer.epochs - 1  # skip updating ref at the end of the last epoch
                     ):
                         with Timer("update_ref_with_policy", self.all_timings):
@@ -346,6 +343,8 @@ class RayPPOTrainer:
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
+
+        # Safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()
@@ -1057,15 +1056,46 @@ class RayPPOTrainer:
 
         return data
 
+    @torch.no_grad()
+    def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
+        advantages = data["advantages"]
+        response_mask = data["response_mask"]
+
+        # Step 1: Z-score normalization (if enabled)
+        if self.cfg.trainer.algorithm.advantage_batch_normalize:
+            num_actions = response_mask.sum()
+            mean = advantages.mean()
+            std = ((advantages - mean).pow(2) * response_mask).sum()
+            rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
+            data["advantages"] = (advantages - mean) * rstd
+
+        # Step 2: Loss reduction normalization per mini-batch
+        num_mini_batches = len(data) // mini_batch_size
+        normalized_advantages = torch.zeros_like(advantages)
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
+            mini_batch = data[start_idx:end_idx]
+            normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
+                advantages=mini_batch["advantages"],
+                loss_mask=mini_batch["loss_mask"],
+                loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
+                micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+            )
+
+        data["advantages"] = normalized_advantages
+        return data
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
-        Execute training step for FSDP strategy using forward_backward + optim_step.
+        Execute training step using forward_backward + optim_step.
 
         The trainer loops over epochs and mini-batches. Workers handle micro-batching
         internally for gradient accumulation (memory efficiency).
 
-        Uses staged data approach: the full batch is put in Ray object store once,
-        and workers fetch + slice locally to avoid repeated serialization.
+        All per-DP mini-batch chunks are pre-staged in the Ray object store before
+        the training loop so serialization stays off the GPU critical path.
 
         Args:
             model: Model name ("policy" or "critic")
@@ -1078,23 +1108,21 @@ class RayPPOTrainer:
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
             mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
+            # Normalize advantages for policy training; critic training does not need this
+            data = self._normalize_advantages(data, mini_batch_size)
         else:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
-        # Stage full batch in object store ONCE to avoid repeated serialization
-        data_ref = self.dispatch.stage_data(data)
+        # Pre-stage all per-DP mini-batch chunks in the object store so that
+        # serialization is fully off the critical path during training.
+        all_chunk_refs = self.dispatch.stage_data(model, data, mini_batch_size)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            num_mini_batches = len(data) // mini_batch_size
-            for local_step in range(num_mini_batches):
-                start_idx = local_step * mini_batch_size
-                end_idx = (local_step + 1) * mini_batch_size
-
-                # Workers fetch from object store and slice locally
-                status = self.dispatch.forward_backward_from_staged(model, data_ref, start_idx, end_idx)
+            for chunk_refs in all_chunk_refs:
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
@@ -1106,7 +1134,7 @@ class RayPPOTrainer:
         # Reduce metrics across all mini-batches and epochs
         # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
         all_metrics.pop("loss_fn_outputs", None)
-        reduced_metrics = reduce_metrics(all_metrics)
+        reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

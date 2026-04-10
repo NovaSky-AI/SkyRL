@@ -60,68 +60,7 @@ if TYPE_CHECKING:
     )
     from skyrl.train.config.config import InferenceEngineConfig
 
-# ---------------------------------------------------------------------------
-# Register additional model bridges for architectures not yet in the upstream
-# Megatron-Bridge package. GLM-4.7-Flash uses the same architecture as
-# DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
-# ---------------------------------------------------------------------------
-try:
-    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-    from megatron.bridge.models.deepseek.common import get_common_configs
-    from megatron.bridge.models.deepseek.deepseek_provider import (
-        DeepSeekV3ModelProvider,
-    )
-    from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
-    from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
-    from megatron.core.models.gpt.gpt_model import GPTModel
-
-    @MegatronModelBridge.register_bridge(
-        source="Glm4MoeLiteForCausalLM",
-        target=GPTModel,
-    )
-    class _GLM47FlashBridge(DeepSeekV3Bridge):
-        """Bridge for GLM-4.7-Flash (Glm4MoeLiteForCausalLM).
-
-        GLM-4.7-Flash is architecturally identical to DeepSeek-V3 (MLA + MoE)
-        but its HF config differs in rope_scaling format:
-        - DeepSeek: rope_scaling has factor/mscale/mscale_all_dim, top-level rope_theta
-        - GLM-4.7-Flash: rope_scaling has rope_theta/rope_type, no mscale fields
-        """
-
-        def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> DeepSeekV3ModelProvider:
-            hf_config = hf_pretrained.config
-
-            # Temporarily normalize rope_scaling so get_common_configs works.
-            # GLM-4.7-Flash uses default rope (no scaling), so set factor=1.0.
-            orig_rope_scaling = hf_config.rope_scaling
-            orig_rope_theta = getattr(hf_config, "rope_theta", None)
-            rope_theta = orig_rope_scaling.get("rope_theta", 10000.0) if orig_rope_scaling else 10000.0
-            hf_config.rope_scaling = None  # triggers the else branch (defaults to 1.0)
-            hf_config.rope_theta = rope_theta
-
-            try:
-                configs = get_common_configs(hf_pretrained)
-            finally:
-                hf_config.rope_scaling = orig_rope_scaling
-                if orig_rope_theta is None:
-                    delattr(hf_config, "rope_theta")
-                else:
-                    hf_config.rope_theta = orig_rope_theta
-
-            configs["fp16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.float16
-            configs["bf16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.bfloat16
-            configs["params_dtype"] = self.dtype_from_hf(hf_config, default=torch.float32)
-
-            configs["make_vocab_size_divisible_by"] = 1280
-            configs["moe_router_score_function"] = "sigmoid"
-            configs["moe_router_enable_expert_bias"] = True
-            if hasattr(hf_config, "aux_loss_alpha"):
-                configs["moe_aux_loss_coeff"] = hf_config.aux_loss_alpha
-
-            return DeepSeekV3ModelProvider(**configs)
-
-except ImportError:
-    pass  # megatron-bridge not installed (e.g. CPU-only environment)
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -167,6 +106,14 @@ class MegatronWeightExtractor(WeightExtractor):
         every ``extract_weights`` call so that mapping objects start with clean
         PP-collective caches, avoiding stale cached state across offload/reload
         and training cycles.
+
+        Tasks that participate in grouped export (e.g., fused MoE expert
+        weights) are collected first and placed into dedicated buckets so that
+        all tasks sharing the same ``group_key`` end up in a single
+        ``export_hf_weights`` call.  The bridge's
+        ``_accumulate_grouped_export`` requires every task for a group to be
+        present in one call; splitting them across buckets causes expert
+        weights to never be yielded.
         """
         weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
 
@@ -191,14 +138,46 @@ class MegatronWeightExtractor(WeightExtractor):
             for task in weight_conversion_tasks
         ]
 
-        self.bucket_index_groups: list[list[int]] = [[]]
+        # ---- Separate grouped-export tasks from regular tasks ----
+        # Grouped-export tasks (is_grouped_export=True, e.g. FusedGatedExpertMapping /
+        # FusedExpertMapping for MoE expert weights) must ALL be present in a single
+        # export_hf_weights call for the bridge's _accumulate_grouped_export to produce
+        # the fused tensor.  Collect them by group_key and give each group its own bucket.
+        grouped_task_indices: dict[str, list[int]] = {}  # group_key -> list of task indices
+        regular_task_indices: list[int] = []
+
+        for idx, task in enumerate(weight_conversion_tasks):
+            if getattr(task.mapping, "is_grouped_export", False):
+                gk = getattr(task.mapping, "group_key", None)
+                grouped_task_indices.setdefault(gk, []).append(idx)
+            else:
+                regular_task_indices.append(idx)
+
+        self.bucket_index_groups: list[list[int]] = []
+
+        # Pack grouped-export tasks into buckets by size, keeping each
+        # group_key's tasks together (they must not be split across calls).
         curr_size = 0
-        for idx, size in enumerate(sizes):
-            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+        threshold = self.bucket_size_threshold_GB * 1024**3
+        for gk, indices in grouped_task_indices.items():
+            group_size = sum(sizes[idx] for idx in indices if sizes[idx] is not None)
+            if not self.bucket_index_groups or curr_size + group_size > threshold:
                 self.bucket_index_groups.append([])
                 curr_size = 0
-            self.bucket_index_groups[-1].append(idx)
-            curr_size += size
+            self.bucket_index_groups[-1].extend(indices)
+            curr_size += group_size
+
+        # Bucket regular (non-grouped) tasks by size as before.
+        if regular_task_indices:
+            self.bucket_index_groups.append([])
+            curr_size = 0
+            for idx in regular_task_indices:
+                size = sizes[idx]
+                if curr_size + size > threshold:
+                    self.bucket_index_groups.append([])
+                    curr_size = 0
+                self.bucket_index_groups[-1].append(idx)
+                curr_size += size
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
@@ -340,6 +319,23 @@ class MegatronWorker:
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
+
+        # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
+        # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
+        # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
+        # (512) is used instead, causing the wrong model architecture to be built.
+        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
+        if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
+            provider.q_lora_rank = hf_config.q_lora_rank
+
+        # Workaround for transformers v5 moving rope_theta into rope_parameters
+        # (previously it was a top-level config attribute). megatron-bridge's
+        # CONFIG_MAPPING reads config.rope_theta which no longer exists in v5,
+        # causing it to fall back to the default rotary_base of 10000.
+        rope_params = getattr(hf_config, "rope_parameters", None) or getattr(hf_config, "rope_scaling", None)
+        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
+            provider.rotary_base = rope_params["rope_theta"]
+
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -470,15 +466,16 @@ class MegatronWorker:
             num_actions = micro.metadata["response_length"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
             micro_dicts.append(
                 {
                     "sequences": sequences,
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                     "num_actions": num_actions,
-                    "rollout_expert_indices": (
-                        micro.get("rollout_expert_indices") if self.enable_router_replay else None
-                    ),
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                 }
             )
 
@@ -535,9 +532,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
@@ -559,6 +561,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optimizer_config=self.cfg.policy.optimizer_config,
             seed=self.cfg.seed,
             is_lora=self._is_lora,
+            node_local_rank=self._local_rank,
         )
         self.strategy.setup_distributed()
 
@@ -679,6 +682,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             micro_buffer.append(
                 {
@@ -692,9 +698,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
-                    "rollout_expert_indices": experience.rollout_expert_indices if self.enable_router_replay else None,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                 }
             )
+
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
 
         if not micro_buffer:
             return {}
@@ -714,9 +723,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
 
-        # Track number of micro-batches for metrics
-        self._micro_batches_accumulated += len(micro_buffer)
-
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
         for metrics in metrics_list:
@@ -726,10 +732,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # Reduce and all-reduce metrics
-        status = reduce_metrics(dict(all_metrics))
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
+        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        status = all_reduce_metrics(status, self.strategy)
+        group = mpu.get_data_parallel_group(with_context_parallel=False)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:
@@ -853,15 +867,21 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
+            # Ensure CUDA device is set before process group init — required when
+            # using split "cpu:gloo,cuda:nccl" backend to avoid 'invalid device ordinal'
+            # errors during NCCL communicator creation in subgroups.
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.ref.megatron_config,
             optimizer_config=None,
             seed=self.cfg.seed,
+            node_local_rank=self._local_rank,
         )
         self.strategy.setup_distributed()
 

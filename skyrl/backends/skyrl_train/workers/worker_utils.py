@@ -6,9 +6,19 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.dataset.replay_buffer import Experience
 
 
-def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
-    """
-    Reduce scalar metrics from a list of entries per key by averaging.
+def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
+    """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
+
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+
+    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged.
+    This should be used if the scaling is already done at the advantage level.
+    See `apply_loss_reduction_to_advantages_minibatch` for more details.
+
+    Args:
+        metrics: Dictionary of metrics with keys as metric names and values as lists of metric values.
+            The list of values corresponds to micro-batches within a single mini-batch.
+        sum_loss_metrics: If True, metrics ending in `_loss` are summed (for pre-scaled policy losses).
     """
     reduced_metrics = dict()
     for k, v in metrics.items():
@@ -20,21 +30,43 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
+        elif sum_loss_metrics and k.endswith("_loss"):
+            reduced_metrics[k] = sum(v)
         else:
             reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
 
 
-def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy) -> Dict[str, float]:
-    """All reduce metrics across all processes."""
+def all_reduce_metrics(
+    metrics: Dict[str, float],
+    strategy: DistributedStrategy,
+    group=None,
+    sum_loss_metrics: bool = False,
+) -> Dict[str, float]:
+    """All reduce metrics across all processes.
+
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged.
+
+    Args:
+        metrics: Dictionary of metric name to scalar value.
+        strategy: Distributed strategy for all-reduce.
+        group: Process group for all-reduce.
+        sum_loss_metrics: If True, metrics ending in `_loss` are summed (for pre-scaled policy losses).
+    """
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
-    mean_metrics = {k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics}
-    status_mean = strategy.all_reduce(mean_metrics, op="mean")
-    status_min = strategy.all_reduce(min_metrics, op="min")
-    status_max = strategy.all_reduce(max_metrics, op="max")
+    sum_metrics = {k: v for k, v in metrics.items() if sum_loss_metrics and k.endswith("_loss")}
+    mean_metrics = {
+        k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
+    }
+    status_mean = strategy.all_reduce(mean_metrics, op="mean", group=group)
+    status_min = strategy.all_reduce(min_metrics, op="min", group=group)
+    status_max = strategy.all_reduce(max_metrics, op="max", group=group)
+    status_sum = strategy.all_reduce(sum_metrics, op="sum", group=group)
     status_mean.update(status_min)
     status_mean.update(status_max)
+    status_mean.update(status_sum)
     return status_mean
 
 
@@ -90,5 +122,8 @@ class BatchIterator:
             info={},
             # propagate metadata as is
             metadata=batch.metadata,
+            # Multi-modal vision fields (may be absent for text-only)
+            pixel_values=batch.get("pixel_values"),
+            image_grid_thw=batch.get("image_grid_thw"),
         )
         return exp

@@ -3,8 +3,8 @@ set -x
 # Colocated DAPO training+generation for Qwen3-30B-A3B-Base on DAPO with Megatron and LoRA.
 # Should run on 2 node of 8xH100s
 
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
 DATA_DIR="$HOME/data/dapo"

@@ -24,7 +24,7 @@ except ImportError:
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
-    get_init_weight_context_manager,
+    should_use_meta_init,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -165,37 +165,34 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._is_lora = self.cfg.policy.model.lora.rank > 0
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
-        with init_context():
 
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.policy.model.lora.rank,
-                lora_alpha=self.cfg.policy.model.lora.alpha,
-                lora_dropout=self.cfg.policy.model.lora.dropout,
-                lora_init_method=self.cfg.policy.model.lora.init_method,
-                target_modules=self.cfg.policy.model.lora.target_modules,
-                exclude_modules=self.cfg.policy.model.lora.exclude_modules,
-                sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                use_torch_compile=self.cfg.policy.use_torch_compile,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.policy.model_config_kwargs,
+        wrapped_model = HFModelWrapper(
+            model_path,
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=False,
+            lora_rank=self.cfg.policy.model.lora.rank,
+            lora_alpha=self.cfg.policy.model.lora.alpha,
+            lora_dropout=self.cfg.policy.model.lora.dropout,
+            lora_init_method=self.cfg.policy.model.lora.init_method,
+            target_modules=self.cfg.policy.model.lora.target_modules,
+            exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            use_torch_compile=self.cfg.policy.use_torch_compile,
+            rope_scaling=get_rope_scaling_config(self.cfg),
+            rope_theta=get_rope_theta_config(self.cfg),
+            model_config_kwargs=self.cfg.policy.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
+
+        if self.cfg.gradient_checkpointing:
+            wrapped_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
             )
-            # in-place patch
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
-
-            if self.cfg.gradient_checkpointing:
-                wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
-                )
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
@@ -342,34 +339,33 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
-        with init_context():
-            critic = get_llm_for_sequence_regression(
-                model_path,
-                "critic",
-                use_flash_attention_2=self.cfg.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.critic.model.lora.rank,
-                lora_alpha=self.cfg.critic.model.lora.alpha,
-                lora_dropout=self.cfg.critic.model.lora.dropout,
-                target_modules=self.cfg.critic.model.lora.target_modules,
-                exclude_modules=self.cfg.critic.model.lora.exclude_modules,
-                value_head_prefix=self.cfg.algorithm.value_head_prefix,
-                init_value_head=self.cfg.policy.model.path == self.cfg.critic.model.path,
-                sequence_parallel_size=self.cfg.critic.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                model_config_kwargs=self.cfg.critic.model_config_kwargs,
-            )
-            self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
-            if self.cfg.gradient_checkpointing:
-                critic.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
-                )
+        critic = get_llm_for_sequence_regression(
+            model_path,
+            "critic",
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=False,
+            lora_rank=self.cfg.critic.model.lora.rank,
+            lora_alpha=self.cfg.critic.model.lora.alpha,
+            lora_dropout=self.cfg.critic.model.lora.dropout,
+            target_modules=self.cfg.critic.model.lora.target_modules,
+            exclude_modules=self.cfg.critic.model.lora.exclude_modules,
+            value_head_prefix=self.cfg.algorithm.value_head_prefix,
+            init_value_head=self.cfg.policy.model.path == self.cfg.critic.model.path,
+            sequence_parallel_size=self.cfg.critic.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            model_config_kwargs=self.cfg.critic.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
+
+        if self.cfg.gradient_checkpointing:
+            critic.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+            )
 
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
@@ -412,22 +408,22 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
 
-        with init_context():
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                bf16=self.cfg.bf16,
-                sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.ref.model_config_kwargs,
-            )
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        wrapped_model = HFModelWrapper(
+            model_path,
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=self.cfg.bf16,
+            sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            rope_scaling=get_rope_scaling_config(self.cfg),
+            rope_theta=get_rope_theta_config(self.cfg),
+            model_config_kwargs=self.cfg.ref.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()

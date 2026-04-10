@@ -30,7 +30,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     data.train_data="['$HOME/data/gsm8k/train.parquet']" \
     data.val_data="['$HOME/data/gsm8k/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-    ... # Other parameters (see `examples/gsm8k/run_gsm8k.sh` for more)
+    ... # Other parameters (see `examples/train/gsm8k/run_gsm8k.sh` for more)
 
 ```
 
@@ -39,8 +39,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
 To switch to FSDP or FSDP2, set the `trainer.strategy` parameter to `fsdp` or `fsdp2` respectively.
 
 ```bash
-# bash examples/training_backends/fsdp/run_fsdp2.sh (or just)
-bash examples/gsm8k/run_gsm8k.sh trainer.strategy=fsdp2
+# bash examples/train/training_backends/fsdp/run_fsdp2.sh (or just)
+bash examples/train/gsm8k/run_gsm8k.sh trainer.strategy=fsdp2
 
 ```
 
