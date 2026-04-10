@@ -289,15 +289,15 @@ class RayPPOTrainer:
                         status = self.train_critic_and_policy(training_input)
 
                     # 8. conditionally save checkpoints and hf model
-                    if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                        with Timer("save_checkpoints", self.all_timings):
-                            self.save_checkpoints()
-                    if (
-                        self.cfg.trainer.hf_save_interval > 0
-                        and self.global_step % self.cfg.trainer.hf_save_interval == 0
-                    ):
-                        with Timer("save_hf_model", self.all_timings):
-                            self.save_models()
+                    is_epoch_end = iter == len(self.train_dataloader) - 1
+                    if self.cfg.trainer.ckpt_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                            with Timer("save_checkpoints", self.all_timings):
+                                self.save_checkpoints()
+                    if self.cfg.trainer.hf_save_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                            with Timer("save_hf_model", self.all_timings):
+                                self.save_models()
 
                     # 9. conditionally sync policy and ref at the end of the epoch
                     if (
@@ -343,14 +343,6 @@ class RayPPOTrainer:
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
-        if self.cfg.trainer.ckpt_interval > 0:
-            with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
-                logger.info("Saved final checkpoint.")
-        if self.cfg.trainer.hf_save_interval > 0:
-            with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final model.")
         self.tracker.finish()
         logger.info("Training done!")
 
