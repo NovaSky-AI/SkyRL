@@ -1,6 +1,6 @@
 # SkyRL
 
-SkyRL is a unified RL training and inference framework for LLMs, supporting multiple training backends (FSDP, Megatron, JAX) and inference engines (vLLM), orchestrated via Ray.
+SkyRL is a full-stack reinforcement learning library for training LLMs, designed for modularity and extensibility.
 
 ## Critical Rules
 

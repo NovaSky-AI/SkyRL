@@ -6,11 +6,11 @@ Workflows in `.github/workflows/`. GPU tests run on Anyscale clusters via `anysc
 
 ## CI Directory
 
-- `ci/` contains job YAML configs and run scripts.
-- GPU CI script: `ci/gpu_ci_run_skyrl_train.sh` — runs broad test suite, then new-inference-specific tests.
-- GPU CI image: `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8`.
-
-## CI Test Phases
-
-1. **Phase 1**: Broad test suite with no `_SKYRL_USE_NEW_INFERENCE` env var (uses default=False, legacy codepath).
-2. **Phase 2**: Test files run explicitly with `_SKYRL_USE_NEW_INFERENCE=1` (new inference codepath).
+- `ci/` contains job YAML configs and run scripts. Uses Anyscale `l4_ci` compute config.
+- GPU CI scripts: 
+    - SkyRL-Train (FSDP): `ci/gpu_ci_run_skyrl_train.sh`
+    - SkyRL-Train (Megatron): `ci/gpu_ci_run_skyrl_train_megatron.sh`
+    - JAX: `ci/gpu_ci_run.sh`
+- GPU CI images:
+    - FSDP/default: `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8`
+    - Megatron: `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron`

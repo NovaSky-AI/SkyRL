@@ -12,7 +12,6 @@ The new codepath uses:
 ## vLLM Router
 
 - `VLLMRouter` in `skyrl/backends/skyrl_train/inference_servers/vllm_router.py` wraps a child process running the `vllm-router` binary.
-- Configured via constructor args: `server_urls`, `host`, `port`, `policy` (default `consistent_hash`), etc.
 
 ## PD Disaggregation
 

@@ -5,10 +5,10 @@
 ```
 skyrl/                  # Core library
 ├── backends/           # Backend implementations
-│   └── skyrl_train/    # GPU training backend
+│   └── skyrl_train/    # FSDP/Megatron training backend
 │       ├── distributed/        # Dispatch, FSDP/Megatron strategies
-│       ├── inference_engines/  # vLLM engine clients (legacy)
-│       ├── inference_servers/  # Remote inference routing (new)
+│       ├── inference_engines/  # Legacy inference path
+│       ├── inference_servers/  # New inference path
 │       ├── weight_sync/        # Weight extraction and transfer
 │       └── workers/            # FSDP/Megatron workers
 ├── train/              # Training entrypoints, config, dataset, generators, trainer
@@ -28,9 +28,12 @@ examples/train/         # Example training scripts per model/backend
 
 ## Key Patterns
 
-- **Ray orchestration**: Training workers and inference engines run as Ray actors. Use `ray.remote()` with `spawn` start method (not fork).
+- Refer to `docs/content/docs/getting-started/overview.mdx` for a detailed system overview of SkyRL's training backend (non-Jax). 
+- Refer to `docs/content/docs/tinker/architecture.mdx` for an overview of SkyRL's tinker API server implementation.
+
+- **Ray orchestration**: Training workers and inference engines run as Ray actors.
 - **Config hierarchy**: `SkyRLTrainConfig` → `TrainerConfig`, `GeneratorConfig`, `DataConfig`, `EnvironmentConfig`. Accessed as `cfg.trainer.*`, `cfg.generator.*`, etc.
-- **Hydra**: Config uses OmegaConf. Pass overrides as `key=value` CLI args.
+- **CLI**: Config uses Hydra/OmegaConf — Hydra for YAML config composition, OmegaConf for CLI parsing and merging. Pass overrides as `key=value` CLI args.
 - **Backend selection**: `trainer.strategy` chooses backend — `fsdp2` (default), `fsdp`, `megatron`, or `jax`.
 
 ## Weight Sync
@@ -38,8 +41,7 @@ examples/train/         # Example training scripts per model/backend
 Training weights are synced to inference engines via:
 - **Broadcast strategy**: NCCL-based, for non-colocated setups.
 - **CUDA IPC strategy**: For colocated setups (`colocate_all=true`).
-- Four-phase protocol: `init_weight_transfer_engine` → `start_weight_update` → `update_weights` → `finish_weight_update`.
 
 ## Environments
 
-Defined in `skyrl-gym/skyrl_gym/envs/`. Each env implements `BaseTextEnv` with `_get_reward()` and `step()`. Available: gsm8k, aime, lcb, search, searchcode, sql.
+Defined in `skyrl-gym/skyrl_gym/envs/`. Each env extends `BaseTextEnv` with `step()` (and typically a `_get_reward()` helper). Available: gsm8k, aime, lcb, search, searchcode, sql.
