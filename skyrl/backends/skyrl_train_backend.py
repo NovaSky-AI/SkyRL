@@ -152,6 +152,61 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(unique_model_ids)}")
         return self._get_role(next(iter(unique_model_ids)))
 
+    def _split_model_pass_batch_by_model_id(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> list[types.PreparedModelPassBatch]:
+        """Split a mixed model-pass batch into per-model sub-batches.
+
+        The engine batches pending forward/forward_backward requests across all
+        models. Worker dispatch still executes one logical training model at a
+        time, so mixed batches must be partitioned here while preserving
+        request-level boundaries.
+        """
+        unique_model_ids = list(dict.fromkeys(prepared_batch.all_model_ids))
+        if len(unique_model_ids) <= 1:
+            return [prepared_batch]
+
+        batch_fields = (
+            "all_model_inputs",
+            "all_targets",
+            "all_token_weights",
+            "all_sampling_logprobs",
+            "all_advantages",
+            "all_values",
+            "all_returns",
+            "all_model_ids",
+            "all_loss_fns",
+            "all_loss_fn_configs",
+        )
+
+        request_slices_by_model_id: dict[str, list[tuple[str, str, int, int]]] = {}
+        for request_id, model_id, start_idx, end_idx in prepared_batch.request_batch_slices:
+            # Validate early so an unknown model_id still surfaces clearly.
+            self._get_role(model_id)
+            request_slices_by_model_id.setdefault(model_id, []).append((request_id, model_id, start_idx, end_idx))
+
+        sub_batches = []
+        for request_slices in request_slices_by_model_id.values():
+            sub_batch_data = {field: [] for field in batch_fields}
+            sub_request_batch_slices = []
+
+            for request_id, model_id, start_idx, end_idx in request_slices:
+                sub_start_idx = len(sub_batch_data["all_model_inputs"])
+                for field in batch_fields:
+                    sub_batch_data[field].extend(getattr(prepared_batch, field)[start_idx:end_idx])
+                sub_end_idx = len(sub_batch_data["all_model_inputs"])
+                sub_request_batch_slices.append((request_id, model_id, sub_start_idx, sub_end_idx))
+
+            sub_batches.append(
+                types.PreparedModelPassBatch(
+                    request_batch_slices=sub_request_batch_slices,
+                    **sub_batch_data,
+                )
+            )
+
+        return sub_batches
+
     def _build_policy(self, PolicyWorker):
         cfg = self._cfg
         colocate_all = cfg.trainer.placement.colocate_all
@@ -590,6 +645,15 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         self._sleep_inference_engines()
+        results = {}
+        for sub_batch in self._split_model_pass_batch_by_model_id(prepared_batch):
+            results.update(self._forward_backward_single_model_batch(sub_batch))
+        return results
+
+    def _forward_backward_single_model_batch(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         role = self._get_batch_role(prepared_batch.all_model_ids)
         loss_fn = prepared_batch.all_loss_fns[0]
         self._validate_batch_role_and_loss(role, loss_fn)
@@ -667,6 +731,15 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         self._sleep_inference_engines()
+        results = {}
+        for sub_batch in self._split_model_pass_batch_by_model_id(prepared_batch):
+            results.update(self._forward_single_model_batch(sub_batch))
+        return results
+
+    def _forward_single_model_batch(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         role = self._get_batch_role(prepared_batch.all_model_ids)
         loss_fn = prepared_batch.all_loss_fns[0]
         self._validate_batch_role_and_loss(role, loss_fn)
