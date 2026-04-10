@@ -226,14 +226,15 @@ def get_available_gpus():
 def wait_for_server(url: str, health_path: str, timeout: int = 60, interval: float = 1.0):
     start_time = time.time()
     while True:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Server at {url} did not come online within {timeout} seconds")
         try:
             response = requests.get(f"http://{url}/{health_path}")
             if response.ok:
                 return
         except requests.exceptions.ConnectionError:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Server at {url} did not come online within {timeout} seconds")
-            time.sleep(interval)
+            pass
+        time.sleep(interval)
 
 
 def levenshtein(s1, s2):
@@ -702,7 +703,7 @@ def init_remote_inference_servers(
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
     try:
-        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=200)
+        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=400)
     except TimeoutError as e:
         print(f"Received timeout error while waiting for server: {e}")
         server_process.terminate()
