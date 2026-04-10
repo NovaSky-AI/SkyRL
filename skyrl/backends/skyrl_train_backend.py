@@ -23,10 +23,16 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
+from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
@@ -36,6 +42,9 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
+
+# Fixed LoRA adapter name used for generation requests when LoRA is active.
+_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -122,6 +131,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
 
+        # New inference infrastructure
+        self._server_group = None
+        self._inference_router = None
+
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
 
@@ -189,12 +202,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
-    def _ensure_inference_engines(self):
-        """Lazily create inference engines and init weight sync on first sampling-related call."""
-        if self._inference_engines_initialized:
-            return
-
-        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
+    def _create_legacy_inference_client(self):
+        """Create legacy inference client using Ray-wrapped engines."""
+        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} Ray-wrapped inference engines")
         self._inference_engine_client = InferenceEngineClient(
             create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
             self._tokenizer,
@@ -202,6 +212,85 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.trainer.policy.model.lora,
             self._cfg.generator.inference_engine,
         )
+
+    def _create_new_inference_client(self):
+        """Create new HTTP-based inference client.
+
+        Possible config combinations:
+        - Both external_proxy_url and external_server_urls → fully external setup
+        - external_proxy_url only → proxy for both data + control plane
+        - external_server_urls only → create internal router over them
+        - Neither → build servers and router internally
+        """
+        ie_cfg = self._cfg.generator.inference_engine
+        is_colocated = self._cfg.trainer.placement.colocate_all
+        external_proxy_url = ie_cfg.external_proxy_url
+        external_server_urls = ie_cfg.external_server_urls
+
+        has_external_proxy = external_proxy_url is not None
+        has_external_servers = external_server_urls is not None
+
+        if has_external_proxy and has_external_servers:
+            proxy_url = external_proxy_url
+            server_urls = list(external_server_urls)
+            logger.info(
+                f"HTTP Inference: Using fully external setup - proxy_url={proxy_url}, server_urls={server_urls}"
+            )
+
+        elif has_external_proxy and not has_external_servers:
+            proxy_url = external_proxy_url
+            server_urls = [proxy_url]
+            logger.info(f"HTTP Inference: Using external proxy for both data and control plane - proxy_url={proxy_url}")
+
+        elif has_external_servers and not has_external_proxy:
+            server_urls = list(external_server_urls)
+            self._inference_router = VLLMRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Created router over external servers - "
+                f"server_urls={server_urls}, proxy_url={proxy_url}"
+            )
+
+        else:
+            cli_args = build_vllm_cli_args(self._cfg)
+
+            self._server_group = ServerGroup(
+                cli_args=cli_args,
+                num_servers=ie_cfg.num_engines,
+                placement_group=self._colocate_pg if is_colocated else None,
+                enable_dp=ie_cfg.data_parallel_size > 1,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
+            )
+            server_infos = self._server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            self._inference_router = VLLMRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            )
+
+        lora_cfg = self._cfg.trainer.policy.model.lora
+        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
+        self._inference_engine_client = RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            model_name=self._cfg.trainer.policy.model.path,
+            active_lora_name=active_lora_name,
+            tokenizer=self._tokenizer,
+        )
+
+    def _ensure_inference_engines(self):
+        """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if self._inference_engines_initialized:
+            return
+
+        if _SKYRL_USE_NEW_INFERENCE:
+            self._create_new_inference_client()
+        else:
+            self._create_legacy_inference_client()
+
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
@@ -262,6 +351,12 @@ class SkyRLTrainBackend(AbstractBackend):
         # Currently only one model at a time is supported. Shut down Ray entirely
         # and reset state; everything will be re-initialized in create_model().
         logger.info(f"Deleting model {model_id}, shutting down Ray...")
+        if self._server_group:
+            self._server_group.shutdown()
+            self._server_group = None
+        if self._inference_router:
+            self._inference_router.shutdown()
+            self._inference_router = None
         ray.shutdown()
 
         self._model_id = None
@@ -398,7 +493,15 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
-            asyncio.run(self._inference_engine_client.sleep())
+            lora_cfg = self._cfg.trainer.policy.model.lora
+            # TODO(team): remove once vllm fixes this
+            # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
+            sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
+            if _SKYRL_USE_NEW_INFERENCE:
+                asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
+            else:
+                # Legacy client has a preset sleep level passed during create_ray_wrapped_inference_engines_from_config
+                asyncio.run(self._inference_engine_client.sleep())
 
     def forward_backward(
         self,
@@ -530,7 +633,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Generate samples using InferenceEngineClient.
+        """Generate samples using inference engine.
 
         NOTE: Weight sync is NOT triggered automatically. The caller must call
         save_weights_for_sampler() explicitly before calling sample() if weights
@@ -547,7 +650,16 @@ class SkyRLTrainBackend(AbstractBackend):
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
-        # 3. Sample all prompts in parallel
+        # 3. Dispatch to appropriate sampling path
+        if _SKYRL_USE_NEW_INFERENCE:
+            return self._sample_with_remote_client(prepared_batch)
+        return self._sample_with_legacy_client(prepared_batch)
+
+    def _sample_with_legacy_client(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Sample using legacy InferenceEngineClient with Ray-wrapped engines."""
         all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
         async def sample_all():
@@ -583,11 +695,36 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Backend runs in engine subprocess with no event loop
         sample_outputs = asyncio.run(sample_all())
+        return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
-        # Note: sample_outputs may contain Exception objects (from return_exceptions=True)
-        # We preserve these to include error messages in responses
+    def _sample_with_remote_client(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
 
-        # 4. Aggregate results by request
+        async def sample_all():
+            tasks = []
+            for i in range(len(prepared_batch.all_model_inputs)):
+                model_input = prepared_batch.all_model_inputs[i]
+                sampling_params = prepared_batch.all_sampling_params[i]
+
+                request_payload = {
+                    "json": {
+                        "prompt": model_input.model_dump(),
+                        "num_samples": 1,
+                        "sampling_params": sampling_params.model_dump(),
+                    }
+                }
+                tasks.append(self._inference_engine_client.sample(request_payload))
+
+            try:
+                return await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await self._inference_engine_client.aclose()
+
+        sample_outputs = asyncio.run(sample_all())
+        logger.info(f"Collected {len(sample_outputs)} sample outputs")
         return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
     def _aggregate_sample_results(
@@ -595,9 +732,22 @@ class SkyRLTrainBackend(AbstractBackend):
         prepared_batch: types.PreparedSampleBatch,
         sample_outputs: list,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Convert InferenceEngineClient outputs to Tinker format."""
-        results = {}
+        """Convert sample outputs to Tinker format. Handles both legacy and remote client outputs."""
+        logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
 
+        def _extract_sequences(output):
+            """Yield (tokens, logprobs, stop_reason) from a single sample output."""
+            if _SKYRL_USE_NEW_INFERENCE:
+                for seq in output["sequences"]:
+                    yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
+            else:
+                yield (
+                    output["response_ids"][0],
+                    (output.get("response_logprobs") or [[]])[0],
+                    output["stop_reasons"][0],
+                )
+
+        results = {}
         for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
@@ -618,26 +768,23 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                # Extract tokens and logprobs
-                response_tokens = output["response_ids"][0]
-                response_logprobs = (output.get("response_logprobs") or [[]])[0]
-                stop_reason_raw = output["stop_reasons"][0]
+                for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
+                    # Map vLLM stop reason to Tinker format
+                    stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
+                    logprobs = logprobs_raw or []
 
-                # Map vLLM stop reason to Tinker format
-                stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
+                    # Ensure logprobs exist (critical for RL)
+                    if not logprobs and tokens:
+                        logger.warning("No logprobs returned - filling with zeros")
+                        logprobs = [0.0] * len(tokens)
 
-                # Ensure logprobs exist (critical for RL)
-                if response_logprobs is None or len(response_logprobs) == 0:
-                    logger.warning("No logprobs returned - filling with zeros")
-                    response_logprobs = [0.0] * len(response_tokens)
-
-                sequences.append(
-                    types.GeneratedSequence(
-                        tokens=response_tokens,
-                        logprobs=response_logprobs,
-                        stop_reason=stop_reason,
+                    sequences.append(
+                        types.GeneratedSequence(
+                            tokens=tokens,
+                            logprobs=logprobs,
+                            stop_reason=stop_reason,
+                        )
                     )
-                )
 
             if has_error:
                 results[request_id] = types.ErrorResponse(

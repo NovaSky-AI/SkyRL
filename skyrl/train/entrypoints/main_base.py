@@ -6,7 +6,6 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -388,30 +387,14 @@ class BasePPOExp:
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
+            enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
             tokenizer=self.tokenizer,
         )
 
         if is_colocated:
-            # This method is called from both sync (BasePPOExp.run) and async
-            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
-            # event loop avoids the "cannot call asyncio.run() from a running
-            # event loop" error that occurs in the async case.
-            exc_holder = [None]
-
-            def _sleep_engines():
-                try:
-                    asyncio.run(client.sleep())
-                except Exception as e:
-                    exc_holder[0] = e
-
-            thread = threading.Thread(target=_sleep_engines)
-            thread.start()
-            thread.join()
-
-            if exc_holder[0] is not None:
-                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
-
+            # Callers must invoke get_inference_client() from a sync context (no running event loop).
+            asyncio.run(client.sleep())
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client

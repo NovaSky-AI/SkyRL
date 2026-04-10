@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request
+from fastapi import HTTPException, Request
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -21,7 +21,10 @@ from vllm.entrypoints.openai.api_server import (
     create_server_socket,
     init_app_state,
 )
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import random_uuid
 from vllm.utils.system_utils import set_ulimit
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
@@ -329,6 +332,7 @@ class VLLMServerActor(ServerActorProtocol):
     def _add_custom_endpoints(self, app) -> None:
         """Add custom SkyRL endpoints to the FastAPI app."""
         engine = self._engine
+        cli_args = self._cli_args
 
         # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
         # /update_weights, /get_world_size) registered by the RLHF router when
@@ -339,6 +343,63 @@ class VLLMServerActor(ServerActorProtocol):
             """Reset the prefix cache."""
             await engine.reset_prefix_cache()
             return {"status": "ok"}
+
+        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
+        # endpoint /inference/v1/generate does not support returning routed expert IDs.
+        # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side
+        @app.post("/skyrl/v1/generate")
+        async def _skyrl_generate(request: Request):
+            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            if getattr(cli_args, "enable_lora", False):
+                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
+
+            body = await request.json()
+            token_ids = body["token_ids"]
+            sampling_params_dict = body.get("sampling_params", {})
+
+            sampling_params = VLLMSamplingParams(**sampling_params_dict)
+            prompt = TokensPrompt(prompt_token_ids=token_ids)
+            request_id = random_uuid()
+
+            final_res = None
+            async for res in engine.generate(prompt, sampling_params, request_id=request_id):
+                final_res = res
+
+            if final_res is None:
+                raise HTTPException(status_code=500, detail="vLLM returned no output")
+            resp = final_res.outputs[0]
+
+            token_ids_out = list(resp.token_ids)
+            finish_reason = resp.finish_reason
+
+            logprobs = None
+            if resp.logprobs is not None:
+                content = []
+                for tid, lp_dict in zip(token_ids_out, resp.logprobs):
+                    if lp_dict and tid in lp_dict:
+                        content.append({"logprob": lp_dict[tid].logprob})
+                    else:
+                        # -9999.0 is the default in vLLM's ChatCompletionLogProb
+                        content.append({"logprob": -9999.0})
+                logprobs = {"content": content}
+
+            routed_experts = None
+            if resp.routed_experts is not None:
+                if hasattr(resp.routed_experts, "tolist"):
+                    routed_experts = resp.routed_experts.tolist()
+                else:
+                    routed_experts = resp.routed_experts
+
+            return {
+                "choices": [
+                    {
+                        "token_ids": token_ids_out,
+                        "finish_reason": finish_reason,
+                        "logprobs": logprobs,
+                        "routed_experts": routed_experts,
+                    }
+                ]
+            }
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""

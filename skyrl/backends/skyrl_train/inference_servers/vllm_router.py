@@ -46,6 +46,7 @@ class VLLMRouter:
         health_check_interval_secs: Optional[int] = None,
         max_concurrent_requests: Optional[int] = None,
         request_timeout_secs: Optional[int] = None,
+        prometheus_port: Optional[int] = None,
     ):
         self._server_urls = server_urls
         self._host = host
@@ -54,6 +55,7 @@ class VLLMRouter:
         self._health_check_interval_secs = health_check_interval_secs
         self._max_concurrent_requests = max_concurrent_requests
         self._request_timeout_secs = request_timeout_secs
+        self._prometheus_port = prometheus_port
         self._process: Optional[subprocess.Popen] = None
 
         logger.info(f"VLLMRouter: {len(server_urls)} servers, port={port}, policy={policy}")
@@ -77,6 +79,8 @@ class VLLMRouter:
             cmd.extend(["--max-concurrent-requests", str(self._max_concurrent_requests)])
         if self._request_timeout_secs is not None:
             cmd.extend(["--request-timeout-secs", str(self._request_timeout_secs)])
+        if self._prometheus_port is not None:
+            cmd.extend(["--prometheus-port", str(self._prometheus_port)])
         return cmd
 
     @staticmethod
