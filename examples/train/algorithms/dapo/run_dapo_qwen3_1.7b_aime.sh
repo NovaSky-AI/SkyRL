@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen3-1.7B-Base on DAPO training data and validate on AIME 2024.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen3_1.7b_aime.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime.sh
 
 MODEL_NAME="Qwen/Qwen3-1.7B-Base"
 DATA_DIR="$HOME/data/dapo"
@@ -55,6 +55,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \

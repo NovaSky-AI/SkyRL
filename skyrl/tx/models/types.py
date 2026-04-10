@@ -1,6 +1,7 @@
 """Model output dataclasses."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 import jax
@@ -15,6 +16,16 @@ class ModelForCausalLM:
 
     def get_model_config(self) -> ModelConfig:
         return self.config
+
+    def get_decode_layers(self):
+        """Return pre-extracted per-layer parameters for decode.
+
+        Called once outside the while_loop; the result is passed as the
+        ``decode_layers`` argument to every decode-step ``model(...)`` call.
+        Override in subclasses that benefit from hoisting work out of the
+        loop (e.g. pre-extracting stacked layer parameters).
+        """
+        return None
 
     def is_lora_param(self, path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to trainable LoRA/connector weights."""

@@ -7,17 +7,17 @@ Run with:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_weights_for_sampler.py -v
 """
 
-import asyncio
-
 import pytest
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.utils.utils import validate_cfg
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
     init_worker_with_type,
     make_dummy_training_batch,
     run_inference,
@@ -55,7 +55,8 @@ def get_test_config() -> SkyRLTrainConfig:
         "colocate_fsdp2",
     ],
 )
-def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy):
+@pytest.mark.asyncio
+async def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy):
     """
     Test that save_weights_for_sampler() correctly syncs weights before sampling.
 
@@ -68,7 +69,7 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.strategy = strategy
 
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
@@ -78,6 +79,11 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         sleep_level=2,  # Full sleep since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
+
+        # Sleep inference engine before initializing policy worker to avoid OOM on colocated GPU
+        if colocate_all:
+            await client.sleep()
+
         # Initialize policy worker
         policy_group = init_worker_with_type(
             "policy",
@@ -97,11 +103,6 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         # Initialize weight sync state
         dispatch.init_weight_sync_state(client)
 
-        # If colocate_all, sleep inference engine to free GPU memory for training
-        if colocate_all:
-            asyncio.run(client.sleep())
-            dispatch.mark_all_offloaded()
-
         # === Step 1: Do a training step ===
         dp_size = policy_group.actor_infos[0].rank.dp_size
         dummy_batch = make_dummy_training_batch(batch_size=dp_size)
@@ -112,14 +113,14 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         assert grad_norm is not None, "optim_step should return gradient norm"
 
         # === Step 2: Call save_weights_for_sampler ===
-        asyncio.run(dispatch.save_weights_for_sampler())
+        await dispatch.save_weights_for_sampler()
 
         # === Step 3: Sample using inference engine ===
-        asyncio.run(client.reset_prefix_cache())
+        await client.reset_prefix_cache()
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params))
+        outputs = await run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params)
 
         # Verify we got responses
         assert "responses" in outputs, "Inference should return responses"
@@ -132,7 +133,8 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         print(f"Example output: {outputs['responses'][0][:3]}...")
 
 
-def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
     """
     Test that multiple training steps followed by one save_weights_for_sampler works correctly.
     """
@@ -141,7 +143,7 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
     cfg.trainer.strategy = "fsdp2"
 
     # Initialize inference engine (uses 1 GPU)
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
@@ -177,12 +179,12 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
             dispatch.optim_step("policy")
 
         # Now sync once - should sync all accumulated changes
-        asyncio.run(dispatch.save_weights_for_sampler())
+        await dispatch.save_weights_for_sampler()
 
         # Verify inference works
-        asyncio.run(client.reset_prefix_cache())
+        await client.reset_prefix_cache()
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params))
+        outputs = await run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params)
         assert len(outputs["responses"]) == 2, "Should get 2 responses"

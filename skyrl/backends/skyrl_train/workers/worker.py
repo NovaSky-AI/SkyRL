@@ -6,17 +6,16 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
-from omegaconf import OmegaConf
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
 
 import ray
 import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
+from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroup,
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
@@ -25,8 +24,6 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
-from skyrl.train.config import TrainerConfig
-from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
     Dispatch,
@@ -38,17 +35,12 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
-    SKYRL_RAY_PG_TIMEOUT_IN_S,
-    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.train.utils.utils import (
-    get_ray_pg_ready_with_timeout,
-    get_reordered_bundle_indices,
-    ray_noset_visible_devices,
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -57,13 +49,31 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     ppo_critic_loss,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-from skyrl.train.utils.utils import configure_ray_worker_logging
-from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BatchIterator,
+    all_reduce_metrics,
+    reduce_metrics,
+)
+from skyrl.env_vars import (
+    _SKYRL_USE_NEW_INFERENCE,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
+from skyrl.train.config import TrainerConfig
+from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    configure_ray_worker_logging,
+    get_ray_pg_ready_with_timeout,
+    ray_noset_visible_devices,
+)
 
 _SET_AFFINITY = False
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
+    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import (
+        RemoteInferenceClient,
+    )
     from skyrl.train.config.config import InferenceEngineConfig
 
 
@@ -109,7 +119,7 @@ class DistributedTorchRayActor:
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
             torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         # setup device mesh
@@ -395,7 +405,7 @@ class PPORayActorGroup:
         num_nodes (int): Number of nodes for this actor group.
         num_gpus_per_node (int): Number of gpus for this actor group.
         ray_actor_type (Type[Worker]): PPO model type that this actor group serve on.
-        pg (PlacementGroup, optional): Placement group to schedule actor on.
+        pg (ResolvedPlacementGroup, optional): Placement group to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
@@ -407,7 +417,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg: Optional[PlacementGroup] = None,
+        pg: Optional[ResolvedPlacementGroup] = None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -415,6 +425,11 @@ class PPORayActorGroup:
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
     ) -> None:
+        """
+        Args:
+            pg: Placement group for the worker group. Accepts a single PlacementGroup, or None.
+                Note that if colocate_all is True, the number of bundles in the placement group must match world_size.
+        """
         self.cfg = cfg
         self._num_nodes = num_nodes
         self._num_gpus_per_node = num_gpus_per_node
@@ -429,118 +444,108 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
+    def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:
-            pg: The placement group for the worker group
+            pg: A single placement group for the worker group, or None.
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
+
+        # Extract raw Ray PlacementGroup and pre-computed reordered indices from ResolvedPlacementGroup.
+        # Only use reordered indices when the PG has one bundle per GPU (single-GPU bundles),
+        # i.e. the bundle count matches world_size. Multi-GPU bundles (whole-node bundles)
+        # don't need reordering since each bundle already represents a full node.
+        reordered_bundle_indices = []
+        raw_pg = None
+        if pg is not None:
+            assert isinstance(pg, ResolvedPlacementGroup), f"pg must be a `ResolvedPlacementGroup` got {type(pg)}."
+            raw_pg = pg.pg
+            if len(placement_group_table(raw_pg)["bundles"]) == world_size:
+                reordered_bundle_indices = pg.reordered_bundle_indices
+
         if self.colocate_all:
             assert (
-                pg is not None
+                raw_pg is not None
             ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
-            pg_data = placement_group_table(pg)
-            assert (
-                len(pg_data["bundles"]) == world_size
-            ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
+            pg_data = placement_group_table(raw_pg)
+            assert len(pg_data["bundles"]) == world_size, (
+                f"if colocate_all is True, the number of bundles in the placement group "
+                f"must match world_size. Got {len(pg_data['bundles'])} bundles but world_size={world_size}"
+            )
 
-        reordered_bundle_indices = []
-        if pg is not None:
-            pg_data = placement_group_table(pg)
-            should_reorder_bundles = len(pg_data["bundles"]) == world_size
-            if should_reorder_bundles:
-                reordered_bundle_indices = get_reordered_bundle_indices(pg)
-
-        if self._num_gpus_per_node > 1 and pg is None:
+        # If no PG provided, create one internally
+        if raw_pg is None and self._num_gpus_per_node > 1:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        if pg:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
-                ),
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-            )
-        else:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-            )
+            raw_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+
+        def _scheduling_strategy_for_rank(rank):
+            if reordered_bundle_indices:
+                return PlacementGroupSchedulingStrategy(
+                    placement_group=raw_pg,
+                    placement_group_bundle_index=reordered_bundle_indices[rank],
+                )
+            elif raw_pg is not None:
+                return PlacementGroupSchedulingStrategy(
+                    placement_group=raw_pg,
+                    placement_group_bundle_index=rank // self._num_gpus_per_node,
+                )
+            # else we are in the single gpu case per node case in which case we don't need to set
+            # bundle indices
+            return None
+
+        sched = _scheduling_strategy_for_rank(0)
+        actor_options = {
+            "num_cpus": num_gpus_per_actor,
+            "num_gpus": num_gpus_per_actor,
+            "resources": self._resources,
+        }
+        if sched is not None:
+            actor_options["scheduling_strategy"] = sched
+
+        master_actor = self.ray_actor_type.options(**actor_options).remote(
+            cfg=self.cfg,
+            world_size=world_size,
+            rank=0,
+            local_rank=0,
+            master_addr=None,
+            master_port=None,
+            sequence_parallel_size=self.sequence_parallel_size,
+            record_memory=self.record_memory,
+        )
         self._actor_handlers = [master_actor]
-        # Create worker actors
+
         if world_size > 1:
             master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
             for rank in range(1, world_size):
                 local_rank = rank % self._num_gpus_per_node
 
-                if pg:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                        scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
-                            placement_group_bundle_index=(
-                                reordered_bundle_indices[rank]
-                                if reordered_bundle_indices
-                                else rank // self._num_gpus_per_node
-                            ),
-                        ),
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                    )
-                else:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                    )
+                sched = _scheduling_strategy_for_rank(rank)
+                actor_options = {
+                    "num_cpus": num_gpus_per_actor,
+                    "num_gpus": num_gpus_per_actor,
+                    "resources": self._resources,
+                }
+                if sched is not None:
+                    actor_options["scheduling_strategy"] = sched
+
+                worker_actor = self.ray_actor_type.options(**actor_options).remote(
+                    cfg=self.cfg,
+                    world_size=world_size,
+                    rank=rank,
+                    local_rank=local_rank,
+                    master_addr=master_addr,
+                    master_port=master_port,
+                    sequence_parallel_size=self.sequence_parallel_size,
+                    record_memory=self.record_memory,
+                )
                 self._actor_handlers.append(worker_actor)
 
         # Initialize process group
@@ -670,7 +675,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
-        self._micro_batches_accumulated = 0
 
     def forward_backward(
         self,
@@ -699,8 +703,10 @@ class PolicyWorkerBase(Worker):
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            metrics = self._forward_backward_micro(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-            self._micro_batches_accumulated += 1
+            microbatch_weight = micro_batch_size / len(data)
+            metrics = self._forward_backward_micro(
+                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+            )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
@@ -709,7 +715,16 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        result = reduce_metrics(dict(all_metrics))
+        # TODO: SFT path still averages metrics across microbatches and workers.
+        # This needs to be unified with the RL path which sums.
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        # Reduce across microbatches and all-reduce metrics across DP ranks
+        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
+        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        dp_group = self.device_mesh.get_group("dp")
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
@@ -717,53 +732,24 @@ class PolicyWorkerBase(Worker):
 
         return result
 
-    def forward_backward_from_staged(
-        self,
-        data: TrainingInputBatch,
-        start_idx: int,
-        end_idx: int,
-        loss_fn: Optional[str] = None,
-        loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
-
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-            loss_fn: Optional loss function name to use instead of config default
-            loss_fn_config: Optional config overrides for the loss function
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-
     def _forward_backward_micro(
         self,
         experience: Experience,
+        microbatch_weight: float,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
 
-        Loss is not scaled here - gradient scaling happens at optim_step time.
-
         Args:
             experience: Experience object for one micro batch
+            microbatch_weight: Weight of the micro batch in the overall batch
             loss_fn: Optional loss function name to use instead of config default
             loss_fn_config: Optional config overrides for the loss function
 
         Returns:
-            All-reduced metrics dict for this micro batch
+            Metrics dict for the worker's local micro batch
         """
         self.model.train()
 
@@ -812,6 +798,8 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
+                pixel_values=experience.pixel_values,
+                image_grid_thw=experience.image_grid_thw,
             )
             # loss function
             # TODO: recompute advantages
@@ -826,7 +814,8 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            loss = policy_loss
+            unscaled_loss = policy_loss
+            loss = unscaled_loss * microbatch_weight
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -851,8 +840,10 @@ class PolicyWorkerBase(Worker):
 
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                        "elementwise_loss": (
+                            elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                        ),
                     }
                 )
 
@@ -889,7 +880,15 @@ class PolicyWorkerBase(Worker):
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
 
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+            # dp_size to recover the correct sum reduction across workers.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * microbatch_weight
+            unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -908,12 +907,12 @@ class PolicyWorkerBase(Worker):
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
             status = {
-                "final_loss": loss.item(),
+                "final_loss": unscaled_loss.item(),
                 "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
@@ -925,36 +924,17 @@ class PolicyWorkerBase(Worker):
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        loss_fn_outputs = status.pop("loss_fn_outputs", None)
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
-
-        # Add back loss_fn_outputs after all_reduce
-        if loss_fn_outputs is not None:
-            status["loss_fn_outputs"] = loss_fn_outputs
-
         return status
 
     def optim_step(self) -> float:
         """
-        Scale gradients by 1/micro_batches_accumulated, perform optimizer step, and reset counter.
+        Perform optimizer step.
 
         Returns:
             The gradient norm (before scaling, after clipping)
         """
-        # Scale accumulated gradients by 1/N to get correct average
-        if self._micro_batches_accumulated > 0:
-            scale = 1.0 / self._micro_batches_accumulated
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    param.grad.mul_(scale)
-
         # Perform optimizer step (includes gradient clipping)
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-
-        # Reset counter for next accumulation cycle
-        self._micro_batches_accumulated = 0
 
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
@@ -1020,6 +1000,8 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        pixel_values = micro_batch.get("pixel_values", None)
+        image_grid_thw = micro_batch.get("image_grid_thw", None)
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1028,6 +1010,8 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.algorithm.temperature,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1074,27 +1058,13 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        # reduce metrics across micro batches
+        result = reduce_metrics(all_metrics)
 
-    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
-        """
-        Perform forward/backward using pre-staged data from object store.
+        # all reduce metrics across DP workers
+        result = all_reduce_metrics(result, self.strategy)
 
-        Fetches the full batch from object store and slices locally to avoid
-        repeated serialization during the training loop.
-
-        Args:
-            data: TrainingInputBatch via the ray object store
-            start_idx: Start index for this worker's slice
-            end_idx: End index for this worker's slice
-
-        Returns:
-            Aggregated metrics dict across all micro batches
-        """
-        # Slice to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Delegate to regular forward_backward
-        return self.forward_backward(data)
+        return result
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1144,9 +1114,6 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1262,8 +1229,17 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        pixel_values = micro_batch.get("pixel_values", None)
+        image_grid_thw = micro_batch.get("image_grid_thw", None)
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            log_probs = self.model(sequences, response_length, attention_mask, return_output=False)
+            log_probs = self.model(
+                sequences,
+                response_length,
+                attention_mask,
+                return_output=False,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(
             {"output": log_probs},

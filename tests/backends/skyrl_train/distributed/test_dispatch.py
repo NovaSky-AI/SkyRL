@@ -2,20 +2,22 @@
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/distributed/test_dispatch.py
 """
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.distributed.dispatch import (
-    MeshDispatch,
-    PassThroughDispatch,
-    MeshRank,
-    ActorInfo,
-    DispatchRegistry,
-    Dispatch,
-)
+from typing import List, Optional, Union
+
+import pytest
 import ray
 import torch
-from typing import List, Optional, Union
 from ray import ObjectRef
-import pytest
+
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    Dispatch,
+    DispatchRegistry,
+    MeshDispatch,
+    MeshRank,
+    PassThroughDispatch,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 @ray.remote
@@ -27,17 +29,6 @@ class RayActor:
     def do_work(self, data: TrainingInputBatch):
         # intentionally create different outputs for each rank
         data["a"] += self.rank
-        return data
-
-    def do_work_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int):
-        """
-        Method compatible with dispatch_from_staged.
-        Ray auto-resolves ObjectRef to actual data, so we receive TrainingInputBatch directly.
-        """
-        # Slice the data to get this worker's portion
-        data = data[start_idx:end_idx]
-        # Apply same transformation as do_work
-        data["a"] = data["a"] + self.rank
         return data
 
     def dummy(self, a, b):
@@ -81,42 +72,39 @@ def test_mesh_dispatch():
     assert torch.equal(databatch["a"], torch.tensor([1, 3, 5, 7]))
 
 
-def test_dispatch_from_staged():
-    """Test dispatch_from_staged: workers receive ObjectRef + slice indices and fetch/slice locally."""
+def test_stage_chunks_and_dispatch_from_staged():
+    """Test stage_chunks + dispatch_from_staged: pre-stage per-DP chunks, then dispatch."""
     num_actors = 8
     actor_group = RayActorGroup(num_actors)
+    dp_size = actor_group.actor_infos[0].rank.dp_size  # 4
 
-    # Create a larger batch that will be sliced into mini-batches
-    # Full batch has 16 elements, we'll request a mini-batch of indices [4:12]
+    # Full batch has 16 elements, mini_batch_size=8 → 2 mini-batches
     full_data = TrainingInputBatch({"a": torch.arange(16)})
+    mini_batch_size = 8
 
-    # Stage the full data in Ray object store once
-    data_ref = ray.put(full_data)
+    all_chunk_refs = MeshDispatch.stage_chunks(dp_size, full_data, mini_batch_size)
+    assert len(all_chunk_refs) == 2
+    assert len(all_chunk_refs[0]) == dp_size
 
-    # Request mini-batch from index 4 to 12 (size=8)
+    # Dispatch mini-batch 1 (indices [8:16])
     # With dp_size=4, each worker gets chunk_size=2
-    # dp_rank 0: [4:6], dp_rank 1: [6:8], dp_rank 2: [8:10], dp_rank 3: [10:12]
-    start_idx = 4
-    end_idx = 12
-
+    # dp_rank 0: [8,9], dp_rank 1: [10,11], dp_rank 2: [12,13], dp_rank 3: [14,15]
     object_refs = MeshDispatch.dispatch_from_staged(
         actor_group.actor_infos,
-        "do_work_from_staged",
-        data_ref=data_ref,
-        start_idx=start_idx,
-        end_idx=end_idx,
+        "do_work",
+        chunk_refs=all_chunk_refs[1],
     )
 
     # Collect results (only sp=0 workers contribute, which are ranks 0,1,2,3)
     results = MeshDispatch.sync_collect(actor_group.actor_infos, object_refs)
 
     # Expected: each dp_rank gets 2 elements, adds its rank
-    # dp_rank 0 (rank 0): [4,5] + 0 = [4,5]
-    # dp_rank 1 (rank 1): [6,7] + 1 = [7,8]
-    # dp_rank 2 (rank 2): [8,9] + 2 = [10,11]
-    # dp_rank 3 (rank 3): [10,11] + 3 = [13,14]
-    # Concatenated: [4,5,7,8,10,11,13,14]
-    expected = torch.tensor([4, 5, 7, 8, 10, 11, 13, 14])
+    # dp_rank 0 (rank 0): [8,9] + 0 = [8,9]
+    # dp_rank 1 (rank 1): [10,11] + 1 = [11,12]
+    # dp_rank 2 (rank 2): [12,13] + 2 = [14,15]
+    # dp_rank 3 (rank 3): [14,15] + 3 = [17,18]
+    # Concatenated: [8,9,11,12,14,15,17,18]
+    expected = torch.tensor([8, 9, 11, 12, 14, 15, 17, 18])
     assert torch.equal(results["a"], expected), f"Expected {expected}, got {results['a']}"
 
 

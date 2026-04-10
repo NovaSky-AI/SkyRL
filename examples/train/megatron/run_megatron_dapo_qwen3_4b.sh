@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen3-4B-Base on DAPO training data with Megatron.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/megatron/run_megatron_dapo_qwen3_4b.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/megatron/run_megatron_dapo_qwen3_4b.sh
 
 MODEL_NAME="Qwen/Qwen3-4B-Base"
 DATA_DIR="$HOME/data/dapo"
@@ -66,6 +66,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \

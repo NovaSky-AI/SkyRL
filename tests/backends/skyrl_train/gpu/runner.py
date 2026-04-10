@@ -13,9 +13,10 @@ uv run --isolated tests/gpu/runner.py --num-gpus 4 --test-file tests/gpu/
 ```
 """
 
-import ray
-import pytest
 import argparse
+
+import pytest
+import ray
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num-gpus", type=int, default=4)

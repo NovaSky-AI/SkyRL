@@ -4,7 +4,7 @@ set -x
 # Uses 1 node with 8 GPUs.
 # huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_skyrl_sql_megatron_lora.sh
+# bash examples/train/text_to_sql/run_skyrl_sql_megatron_lora.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
@@ -82,6 +82,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \

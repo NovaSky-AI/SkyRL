@@ -4,16 +4,19 @@ import asyncio
 import pickle
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient, PauseMode
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    PauseMode,
+    RemoteInferenceClient,
+)
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -40,21 +43,90 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             ]
         }
 
+    @app.post("/skyrl/v1/generate")
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
+        sp = body.get("sampling_params", {})
+        input_token_ids = body.get("token_ids", [])
+        n = sp.get("n", 1)
+        # If logprobs is explicitly set (sample path), use n for num_choices.
+        # Otherwise (generate path), use len(token_ids) for per-prompt responses.
+        if "logprobs" in sp:
+            num_choices = n
+        else:
+            num_choices = 1
 
-        return {
+        response: dict = {
             "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
+                {
+                    "request_id": "dummy",
+                    "token_ids": [i, i + 1, i + 2],
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"logprob": -0.1 * (i + 1)}]},
+                }
+                for i in range(num_choices)
             ]
         }
+
+        # Mock prompt_logprobs when requested via sampling_params
+        pl = sp.get("prompt_logprobs")
+        # vLLM returns k or k+1 logprobs per position (extra entry when
+        # the prompt token falls outside the top-k).
+        if pl is not None and input_token_ids:
+            prompt_logprobs = [None]  # position 0: no prior context
+            for idx in range(1, len(input_token_ids)):
+                position_dict = {
+                    str(input_token_ids[idx]): {
+                        "logprob": -0.5 * idx,
+                        "rank": 1,
+                        "decoded_token": None,
+                    }
+                }
+                # If topk > 0, add extra entries
+                if pl > 0:
+                    for extra in range(pl):
+                        fake_token_id = 9000 + idx * 10 + extra
+                        position_dict[str(fake_token_id)] = {
+                            "logprob": -1.0 * idx - 0.1 * extra,
+                            "rank": extra + 2,
+                            "decoded_token": None,
+                        }
+                prompt_logprobs.append(position_dict)
+            response["prompt_logprobs"] = prompt_logprobs
+
+        return response
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return {"choices": [{"message": {"content": f"Chat from server {server_id}"}}]}
+
+    @app.post("/v1/chat/completions/render")
+    async def render_chat_completion(request: Request):
+        body = await request.json()
+        messages = body.get("messages", [])
+        has_multimodal = any(
+            isinstance(msg.get("content"), list) and any(c.get("type") == "image_url" for c in msg["content"])
+            for msg in messages
+        )
+        features = None
+        if has_multimodal:
+            features = {
+                "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+                "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+            }
+        return {
+            "request_id": f"chatcmpl-mock-{server_id}",
+            "token_ids": list(range(110)) if has_multimodal else list(range(10)),
+            "features": features,
+            "sampling_params": {"temperature": 0.7, "max_tokens": 100},
+            "model": body.get("model", "test"),
+            "stream": body.get("stream", False),
+            "stream_options": body.get("stream_options"),
+            "cache_salt": None,
+            "priority": 0,
+            "kv_transfer_params": None,
+        }
 
     @app.post("/tokenize")
     async def tokenize(request: Request):
@@ -66,8 +138,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     # Control plane endpoints
     @app.post("/pause")
-    async def pause(request: Request):
-        return {"status": "paused", "server_id": server_id}
+    async def pause(request: Request, mode: str = "abort", clear_cache: str = "true"):
+        return {"status": "paused", "server_id": server_id, "mode": mode, "clear_cache": clear_cache}
 
     @app.post("/resume")
     async def resume():
@@ -79,12 +151,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_paused": False}
 
     @app.post("/sleep")
-    async def sleep(request: Request):
-        return {"status": "sleeping", "server_id": server_id}
+    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
 
     @app.post("/wake_up")
-    async def wake_up():
-        return {"status": "awake", "server_id": server_id}
+    async def wake_up(tags: Optional[List[str]] = Query(None)):
+        return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
@@ -252,29 +324,50 @@ class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
 
     @pytest.mark.asyncio
+    async def test_pause_keep_mode(self, client):
+        """Test pause with KEEP mode (default) sends mode=keep and clear_cache=false."""
+        result = await client.pause(mode=PauseMode.KEEP)
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert response["body"]["status"] == "paused"
+            assert response["body"]["mode"] == "keep"
+            assert response["body"]["clear_cache"] == "false"
+
+    @pytest.mark.asyncio
     async def test_pause_abort_mode(self, client):
-        """Test pause with ABORT mode (default) fans out to all servers."""
+        """Test pause with ABORT mode fans out to all servers with mode=abort."""
         result = await client.pause(mode=PauseMode.ABORT)
         assert len(result) == 2
         for url, response in result.items():
             assert response["status"] == 200
             assert response["body"]["status"] == "paused"
+            assert response["body"]["mode"] == "abort"
 
     @pytest.mark.asyncio
-    async def test_pause_finish_mode(self, client):
-        """Test pause with FINISH mode fans out to all servers."""
-        result = await client.pause(mode=PauseMode.FINISH)
+    async def test_pause_wait_mode(self, client):
+        """Test pause with WAIT mode fans out to all servers with mode=wait."""
+        result = await client.pause(mode=PauseMode.WAIT)
         assert len(result) == 2
         for url, response in result.items():
             assert response["status"] == 200
+            assert response["body"]["mode"] == "wait"
+
+    @pytest.mark.asyncio
+    async def test_pause_generation_uses_keep_mode(self, client):
+        """Test that pause_generation() alias uses KEEP mode."""
+        result = await client.pause_generation()
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert response["body"]["mode"] == "keep"
+            assert response["body"]["clear_cache"] == "false"
 
     @pytest.mark.asyncio
     async def test_resume(self, client):
         """Test resume fans out to all servers."""
-        # Pause first
         await client.pause()
 
-        # Resume
         result = await client.resume()
         assert len(result) == 2
         for url, response in result.items():
@@ -285,12 +378,34 @@ class TestControlPlane:
         """Test sleep fans out to all servers."""
         result = await client.sleep(level=2)
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 2
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_sleep_with_tags(self, client):
+        """Test sleep with tags produces correct repeated query params."""
+        result = await client.sleep(level=1, tags=["weights", "kv_cache"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["level"] == 1
+            assert response["body"]["tags"] == ["weights", "kv_cache"]
 
     @pytest.mark.asyncio
     async def test_wake_up(self, client):
         """Test wake_up fans out to all servers."""
         result = await client.wake_up()
         assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_wake_up_with_tags(self, client):
+        """Test wake_up with tags produces correct repeated query params."""
+        result = await client.wake_up(tags=["weights"])
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
     async def test_reset_prefix_cache(self, client):
@@ -348,6 +463,178 @@ class TestServerInfo:
         assert total_world_size2 == 4
 
 
+class TestSample:
+    """Test sample() method (Tinker API)."""
+
+    @pytest.mark.asyncio
+    async def test_sample(self, client):
+        """Test sample with n=1 returns correct structure and prompt_logprobs."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert seq["tokens"] == [0, 1, 2]
+        assert seq["logprobs"] == [-0.1]
+        assert seq["stop_reason"] == "stop"
+
+        # prompt_logprobs: one float per prompt token, position 0 is None
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+        # topk not requested
+        assert result["topk_prompt_logprobs"] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_n2(self, client):
+        """Test sample with n=2 returns two sequences and prompt_logprobs."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
+                "num_samples": 2,
+                "sampling_params": {"temperature": 1.0, "max_tokens": 32},
+                "include_prompt_logprobs": True,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert len(result["sequences"]) == 2
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][1]["tokens"] == [1, 2, 3]
+        assert result["sequences"][0]["logprobs"] == [-0.1]
+        assert result["sequences"][1]["logprobs"] == [-0.2]
+
+        # prompt_logprobs shared across choices
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_prompt_logprobs(self, client):
+        """Test topk_prompt_logprobs returns both prompt_logprobs and topk tuples."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+
+        topk = result["topk_prompt_logprobs"]
+        assert topk is not None
+        assert len(topk) == 3
+        assert topk[0] is None
+        # Exactly top-k (2) entries per position, sorted by logprob descending
+        assert len(topk[1]) == 2
+        assert len(topk[2]) == 2
+        # Position 1: top-2 are token 20 at -0.5 and 9010 at -1.0 (9011 at -1.1 is dropped)
+        topk1 = dict(topk[1])
+        assert topk1[20] == pytest.approx(-0.5)
+        assert topk1[9010] == pytest.approx(-1.0)
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_without_include_returns_none(self, client):
+        """topk_prompt_logprobs alone does not return prompt logprobs when include_prompt_logprobs is False."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
+
+
+class TestRenderChatCompletion:
+    """Test render_chat_completion method (multimodal and text-only)."""
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_basic(self, client):
+        """Text-only render returns correct top-level fields and features is None."""
+        request_payload = {
+            "json": {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello, who are you?"}],
+            },
+        }
+        result = await client.render_chat_completion(request_payload)
+
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(10))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
+        assert result["model"] == "test"
+        assert result["features"] is None
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_multimodal(self, client):
+        """Multimodal render returns features with mm_hashes and mm_placeholders."""
+        request_payload = {
+            "json": {
+                "model": "test-vlm",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ"},
+                            },
+                            {"type": "text", "text": "What is in this image?"},
+                        ],
+                    }
+                ],
+            },
+        }
+        result = await client.render_chat_completion(request_payload)
+
+        assert result["request_id"] == "chatcmpl-mock-0"
+        assert result["token_ids"] == list(range(110))
+        assert result["sampling_params"] == {"temperature": 0.7, "max_tokens": 100}
+        assert result["model"] == "test-vlm"
+        assert result["stream"] is False
+        assert result["stream_options"] is None
+        assert result["cache_salt"] is None
+        assert result["priority"] == 0
+        assert result["kv_transfer_params"] is None
+
+        assert result["features"] == {
+            "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+            "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+        }
+
+
 class TestContextManager:
     """Test async context manager."""
 
@@ -366,106 +653,3 @@ class TestContextManager:
 
         # Session should be closed after exiting context
         assert client._session is None or client._session.closed
-
-
-class TestRetryOnAbort:
-    """Test retry on abort functionality."""
-
-    @pytest.fixture
-    def abort_mock_server(self):
-        """Create a mock server that returns abort on first call, then stop."""
-        app = FastAPI()
-        call_count = {"generations": 0}
-
-        @app.get("/health")
-        async def health():
-            return {"status": "ok"}
-
-        @app.post("/inference/v1/generate")
-        async def generate(request: Request):
-            call_count["generations"] += 1
-            await request.json()  # Consume body
-
-            # First call returns abort with partial response
-            if call_count["generations"] == 1:
-                return {"choices": [{"request_id": "dummy", "token_ids": [1, 2, 3], "finish_reason": "abort"}]}
-            # Second call returns complete response
-            else:
-                return {"choices": [{"request_id": "dummy", "token_ids": [4, 5, 6], "finish_reason": "stop"}]}
-
-        @app.post("/v1/completions")
-        async def completions(request: Request):
-            await request.json()  # Consume body
-
-            return {"choices": [{"index": 0, "text": "Dummy response", "finish_reason": "stop"}]}
-
-        @app.post("/tokenize")
-        async def tokenize(request: Request):
-            body = await request.json()
-            prompt = body.get("prompt", "")
-            # Simple tokenization: one token per word
-            tokens = [hash(word) % 10000 for word in prompt.split()]
-            return {"tokens": tokens}
-
-        @app.post("/detokenize")
-        async def detokenize(request: Request):
-            body = await request.json()
-            token_ids = body.get("tokens", "")
-            # Simple detokenization: one word per token
-            tokens = [str(i) for i in token_ids]
-            return {"prompt": " ".join(tokens)}
-
-        @app.get("/get_world_size")
-        async def get_world_size():
-            return {"world_size": 1}
-
-        @app.get("/is_paused")
-        async def is_paused():
-            # Not paused - allows retry to proceed immediately
-            return {"is_paused": False}
-
-        # Start server in background thread
-        port = get_open_port()
-        config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="warning")
-        server = uvicorn.Server(config)
-        thread = threading.Thread(target=server.run, daemon=True)
-        thread.start()
-
-        # Wait for server to be ready
-        for _ in range(100):
-            try:
-                httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.1)
-                break
-            except Exception:
-                time.sleep(0.05)
-
-        yield f"http://127.0.0.1:{port}", call_count
-
-        server.should_exit = True
-        thread.join(timeout=1)
-
-    @pytest.mark.asyncio
-    async def test_retry_on_abort(self, abort_mock_server):
-        """Test that retry on abort is always active (built-in behavior)."""
-        url, call_count = abort_mock_server
-        client = RemoteInferenceClient(
-            proxy_url=url,
-            server_urls=[url],
-        )
-
-        try:
-            result = await client.generate(
-                {
-                    "prompt_token_ids": [[1, 2, 3]],
-                    "sampling_params": {"max_tokens": 100},
-                }
-            )
-
-            # Should get complete response after retry
-            assert result["stop_reasons"][0] == "stop"
-            assert result["responses"][0] == "1 2 3 4 5 6"
-            assert call_count["generations"] == 2
-            # Should have response_ids from tokenization
-            assert len(result["response_ids"][0]) > 0
-        finally:
-            await client.teardown()

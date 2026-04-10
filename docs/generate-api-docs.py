@@ -290,6 +290,13 @@ def sanitize_for_mdx(md: str) -> str:
                         r"&lt;\1&gt;",
                         part,
                     )
+                    # Escape bare < not followed by a valid tag-start character (letter, /, !)
+                    # to prevent MDX from choking on things like <= or <2 in docstrings
+                    part = re.sub(
+                        r"<(?![a-zA-Z/!])",
+                        r"&lt;",
+                        part,
+                    )
                 new_parts.append(part)
             line = "".join(new_parts)
         result_lines.append(line)

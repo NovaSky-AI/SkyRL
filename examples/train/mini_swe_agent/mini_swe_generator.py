@@ -175,7 +175,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
                 "user",
             ), "Expected the first two messages to be system and user messages"
 
-        initial_input_ids = self.tokenizer.apply_chat_template(messages[:2], add_generation_prompt=False, tokenize=True)
+        initial_input_ids = self.tokenizer.apply_chat_template(
+            messages[:2], add_generation_prompt=False, return_dict=False, tokenize=True
+        )
         initial_prompt_length = len(initial_input_ids)
 
         # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory

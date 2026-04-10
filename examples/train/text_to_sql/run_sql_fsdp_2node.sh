@@ -6,7 +6,7 @@ set -x
 # will be scheduled on a worker node
 # hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_sql_fsdp_2node.sh
+# bash examples/train/text_to_sql/run_sql_fsdp_2node.sh
 
 DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/data/sql/db_files/data"
@@ -54,6 +54,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=3000 \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \

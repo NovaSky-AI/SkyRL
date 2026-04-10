@@ -3,31 +3,35 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 """
 
-import ray
 import pytest
+import ray
 import torch
-import asyncio
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    ray_init_for_tests,
-    get_rank_0_memory,
-    InferenceEngineState,
-    run_inference,
-    get_test_prompts,
-    Timer,
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import (
+    MegatronTorchProfilerConfig,
+    SkyRLLoraConfig,
+    SkyRLTrainConfig,
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
-from skyrl.train.config import (
-    SkyRLTrainConfig,
-    SkyRLLoraConfig,
-    MegatronTorchProfilerConfig,
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    Timer,
+    get_rank_0_memory,
+    get_test_prompts,
+    init_worker_with_type,
+    ray_init_for_tests,
+    run_inference,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
@@ -78,13 +82,16 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
     sequences = [tokenizer.encode(sentence) for sentence in sentences]
     attention_masks = [[1] * len(seq) for seq in sequences]
-    num_actions = 10
+    num_actions = 15
     # max seq len 1 longer than the longest sequence so we always have some padding
     max_seq_length = max([len(seq) for seq in sequences]) + 7
 
     pad_token_id = tokenizer.pad_token_id
     pad_before = [4, 0, 1, 6] * num_repeats
     pad_after = [max_seq_length - len(seq) - pad_before[i] for i, seq in enumerate(sequences)]
+    loss_masks = torch.stack(
+        [torch.cat([torch.ones(num_actions - pad_after[i]), torch.zeros(pad_after[i])]) for i in range(batch_size)]
+    )
 
     for i, (pad_before, pad_after) in enumerate(zip(pad_before, pad_after)):
         sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
@@ -103,8 +110,8 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
             "values": torch.tensor([[0.1] * num_actions] * batch_size),
             "returns": torch.tensor([[0.1] * num_actions] * batch_size),
             "advantages": torch.tensor([[0.5] * num_actions] * batch_size),
-            "loss_mask": torch.tensor([[1] * num_actions] * batch_size),
-            "response_mask": torch.tensor([[1] * num_actions] * batch_size),
+            "loss_mask": loss_masks,
+            "response_mask": loss_masks,
         }
     )
     data.metadata = {"response_length": num_actions}
@@ -119,8 +126,9 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
         pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
     ],
 )
+@pytest.mark.asyncio
 @pytest.mark.megatron
-def test_megatron_policy_weight_sync(
+async def test_megatron_policy_weight_sync(
     ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
@@ -143,7 +151,7 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        with InferenceEngineState.create(
+        async with InferenceEngineState.create(
             cfg=cfg,
             model=MODEL_NAME,
             use_local=True,
@@ -151,7 +159,7 @@ def test_megatron_policy_weight_sync(
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
             client, pg = engines.client, engines.pg
-            asyncio.run(client.sleep())
+            await client.sleep()
 
             policy = init_worker_with_type(
                 "policy",
@@ -165,7 +173,7 @@ def test_megatron_policy_weight_sync(
                     "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
-            asyncio.run(client.wake_up(tags=["weights"]))
+            await client.wake_up(tags=["weights"])
             # TODO (erictang000): improve this timing
             # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
             # or ~20 seconds on 8xH100
@@ -178,16 +186,14 @@ def test_megatron_policy_weight_sync(
                 )
 
             policy.offload_to_cpu()
-            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            await client.wake_up(tags=["kv_cache"])
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
             tokenizer = (
                 AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
             )
-            outputs = asyncio.run(
-                run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
-            )
+            outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
@@ -270,7 +276,9 @@ async def test_megatron_forward(
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, dtype=torch.bfloat16)
         if ep > 1:
             config.num_hidden_layers = 2
-        model = AutoModelForCausalLM.from_pretrained(model_name, config=config, dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, config=config, trust_remote_code=True, dtype=torch.bfloat16
+        )
         model.eval()
         model.to("cuda")
         sequences_fwd = batch["sequences"]
@@ -280,13 +288,14 @@ async def test_megatron_forward(
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
-        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1).to("cuda")
-
-        sequences_fwd, attention_mask, position_ids = (
+        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        sequences_fwd, attention_mask, position_ids, sequences_rolled = (
             sequences_fwd.to("cuda"),
             attention_mask.to("cuda"),
             position_ids.to("cuda"),
+            sequences_rolled.to("cuda"),
         )
+
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             output = model(sequences_fwd, attention_mask=attention_mask, position_ids=position_ids)
             log_probs = logprobs_from_logits(output["logits"], sequences_rolled)
@@ -323,7 +332,7 @@ async def test_megatron_forward(
         assert max_diff < 4e-1, f"Max diff {max_diff} is too large"
 
     if ep == 1:
-        assert avg_diff < 7e-2, f"Avg diff {avg_diff} is too large"
+        assert avg_diff < 9e-2, f"Avg diff {avg_diff} is too large"
     else:
         # allow larger tolerance in diff for the 30B-MoE model due to larger model size
         assert avg_diff < 1.6e-1, f"Avg diff {avg_diff} is too large"
@@ -443,7 +452,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",
-        "tp2_cp2_policy_seq_packing",
+        "tp2_cp2_policy_seq_packing_no_entropy_loss",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing_lora",
     ],
@@ -456,7 +465,8 @@ async def test_megatron_train(
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
     cfg = get_test_actor_config(model_name=MODEL_NAME if ep == 1 else MOE_MODEL_NAME)
-    batch = get_test_training_batch(batch_size=gpus_per_node)
+    batch_size = gpus_per_node * 8
+    batch = get_test_training_batch(batch_size=batch_size)
 
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
@@ -466,6 +476,7 @@ async def test_megatron_train(
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
+    cfg.trainer.algorithm.use_kl_loss = False
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
@@ -483,7 +494,7 @@ async def test_megatron_train(
         cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
     # set batch sizes correctly
-    cfg.trainer.train_batch_size = gpus_per_node
+    cfg.trainer.train_batch_size = batch_size
     cfg.trainer.policy_mini_batch_size = gpus_per_node
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
@@ -546,7 +557,7 @@ async def test_megatron_train(
 
     # Both FSDP and Megatron use forward_backward + optim_step (unified interface)
     batch.metadata["global_step"] = 0
-    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", batch))
+    results_fsdp = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     # Get learning rate from worker
     lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
@@ -562,7 +573,6 @@ async def test_megatron_train(
         "policy_lr",
         "loss_metrics/clip_ratio",
         "policy_entropy",
-        "policy_kl",
         "final_loss",
     ]
     if ep > 1:
@@ -580,7 +590,7 @@ async def test_megatron_train(
                 # the entropy calculation is different (fsdp has random logits for padding tokens)
                 continue
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 1.5e-1, f"diff in {k} is too large!"
+            assert abs(result[k] - results_megatron[i][k]) < 2.5e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio

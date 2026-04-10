@@ -21,15 +21,16 @@
 # limitations under the License.
 
 import gc
+
 import torch
 import torch.nn as nn
 from loguru import logger
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.transformer.module import Float16Module
-from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.module import Float16Module
+from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -370,6 +371,10 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
+            # Pad d to the aligned length so CP chunk indexing doesn't go out of bounds
+            # when sequences are shorter than align_size (e.g. masked/failed sequences).
+            if d.shape[0] < seqlen_padded_i:
+                d = torch.nn.functional.pad(d, (0, seqlen_padded_i - d.shape[0]))
             input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
                 half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
             ]

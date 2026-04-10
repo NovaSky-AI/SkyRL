@@ -5,9 +5,9 @@ set -exo pipefail
 # We thus disable flash attention as well as sample packing
 # We only support GPT-OSS training in BF16 precision and single-turn tasks at the moment, and are actively working on multi-turn support.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gptoss/run_gsm8k_gptoss.sh
+# bash examples/train/gptoss/run_gsm8k_gptoss.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 

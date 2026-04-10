@@ -1,39 +1,48 @@
-import fastapi
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, ClassVar
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
-from contextlib import asynccontextmanager, suppress
-from sqlmodel import SQLModel, select, func
-from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import os
-import psutil
-import signal
 import random
+import signal
 import threading
 import time
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
+from uuid import uuid4
+
+import fastapi
+import psutil
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
+from pydantic import (
+    Base64Bytes,
+    BaseModel,
+    Discriminator,
+    Field,
+    Tag,
+    model_validator,
+)
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import SQLModel, func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
 from skyrl.tinker.db_models import (
     CheckpointDB,
-    ModelDB,
-    FutureDB,
-    RequestStatus,
     CheckpointStatus,
-    SessionDB,
+    FutureDB,
+    ModelDB,
+    RequestStatus,
     SamplingSessionDB,
-    get_async_database_url,
+    SessionDB,
     enable_sqlite_wal,
+    get_async_database_url,
 )
 from skyrl.tinker.extra import ExternalInferenceClient
+from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
-from skyrl.utils.log import logger, get_uvicorn_log_config
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -190,7 +199,7 @@ async def create_future(
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data.model_dump(),
+        request_data=request_data.model_dump(mode="json"),
         status=RequestStatus.PENDING,
     )
     session.add(future_db)
@@ -293,11 +302,69 @@ class TrainingRun(BaseModel):
     user_metadata: dict[str, str] | None = None
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
+    type: Literal["encoded_text"] = "encoded_text"
     tokens: list[int]
 
-    def to_types(self) -> types.ModelInputChunk:
-        return types.ModelInputChunk(tokens=self.tokens)
+    def to_types(self) -> types.EncodedTextChunk:
+        return types.EncodedTextChunk(tokens=self.tokens)
+
+
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: Base64Bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+    def to_types(self) -> types.ImageChunk:
+        return types.ImageChunk.model_construct(
+            data=self.data,
+            format=self.format,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str = Field(min_length=1)
+    expected_tokens: int | None = None
+
+    def to_types(self) -> types.ImageAssetPointerChunk:
+        return types.ImageAssetPointerChunk(
+            format=self.format,
+            location=self.location,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+def _get_model_chunk_type(v: Any) -> str:
+    if isinstance(v, dict):
+        if "type" in v:
+            return v["type"]
+        is_encoded_text = "tokens" in v
+        is_image_asset_pointer = "location" in v
+        is_image = "data" in v
+
+        if sum([is_encoded_text, is_image_asset_pointer, is_image]) > 1:
+            raise ValueError(
+                "Ambiguous model chunk type: must be exactly one of 'encoded_text', 'image_asset_pointer', or 'image'"
+            )
+        if is_encoded_text:
+            return "encoded_text"
+        if is_image_asset_pointer:
+            return "image_asset_pointer"
+        if is_image:
+            return "image"
+    return getattr(v, "type", "encoded_text")
+
+
+ModelInputChunk = Annotated[
+    Annotated[EncodedTextChunk, Tag("encoded_text")]
+    | Annotated[ImageAssetPointerChunk, Tag("image_asset_pointer")]
+    | Annotated[ImageChunk, Tag("image")],
+    Discriminator(_get_model_chunk_type),
+]
 
 
 class ModelInput(BaseModel):
@@ -1240,6 +1307,7 @@ async def root():
 
 if __name__ == "__main__":
     import argparse
+
     import uvicorn
 
     # Parse command-line arguments

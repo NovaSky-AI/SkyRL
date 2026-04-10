@@ -1,11 +1,15 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
 from datasets import Dataset
+
 from skyrl.train.dataset import PromptDataset
 
 
 class SimpleTokenizer:
-    def apply_chat_template(self, x, add_generation_prompt=False):
+    name_or_path = "simple-tokenizer"
+
+    def apply_chat_template(self, x, add_generation_prompt=False, **kwargs):
         return x
 
 

@@ -4,18 +4,33 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from flash_attn.bert_padding import pad_input, unpad_input
 from loguru import logger
+from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
-import transformers
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
-import numpy as np
-from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
-from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
-from packaging.version import Version
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    BitsAndBytesConfig,
+)
+
+from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
+    gather_outputs_and_unpad,
+    ulysses_pad_and_slice_inputs,
+)
+from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.torch_utils import (
+    chunked_entropy_from_logits,
+    logprobs_from_logits,
+)
 
 
 class HFModelWrapper(nn.Module):
@@ -63,14 +78,15 @@ class HFModelWrapper(nn.Module):
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
         model_config_kwargs: dict = {},
+        meta_init: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
-        # packing samples using Flash Attention 2
+        self.is_vlm = False
         if use_sample_packing:
             assert (
                 self.attn_implementation == "flash_attention_2"
@@ -97,22 +113,35 @@ class HFModelWrapper(nn.Module):
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
-            rope_scaling_kwargs = {}
-            if rope_scaling:
-                rope_scaling_kwargs["rope_scaling"] = rope_scaling
-            if rope_theta:
-                rope_scaling_kwargs["rope_theta"] = rope_theta
+            self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+            if self.is_vlm:
+                logger.info(
+                    f"[VLM] Config {type(model_config).__name__} has a vision config, "
+                    "using AutoModelForImageTextToText"
+                )
+                # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
+                model_class = AutoModelForImageTextToText
 
-            self.model = model_class.from_pretrained(
-                pretrain_or_model,
-                config=model_config,
-                trust_remote_code=True,
-                attn_implementation=self.attn_implementation,
-                quantization_config=nf4_config,
-                torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-                device_map=device_map,
-                **rope_scaling_kwargs,
-            )
+            if rope_scaling:
+                model_config.rope_scaling = rope_scaling
+            if rope_theta:
+                model_config.rope_theta = rope_theta
+            model_config._attn_implementation = self.attn_implementation
+
+            if meta_init:
+                with torch.device("meta"):
+                    self.model = model_class.from_config(model_config, trust_remote_code=True)
+                self.model.to(torch.bfloat16 if bf16 else torch.float32)
+            else:
+                self.model = model_class.from_pretrained(
+                    pretrain_or_model,
+                    config=model_config,
+                    trust_remote_code=True,
+                    attn_implementation=self.attn_implementation,
+                    quantization_config=nf4_config,
+                    torch_dtype=torch.bfloat16 if bf16 else torch.float32,
+                    device_map=device_map,
+                )
 
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):
@@ -120,12 +149,13 @@ class HFModelWrapper(nn.Module):
 
                 if isinstance(self.model.config, GptOssConfig):
                     # patch attention with Unsloth's flex attn
+                    from transformers import AttentionInterface, AttentionMaskInterface
+
                     from skyrl.backends.skyrl_train.patches.gptoss.patch_transformers import (
                         custom_attention,
                         custom_attention_mask,
                         patch_GptOssAttention,
                     )
-                    from transformers import AttentionInterface, AttentionMaskInterface
 
                     AttentionInterface.register("custom_flex", custom_attention)
                     AttentionMaskInterface.register("custom_flex", custom_attention_mask)
@@ -165,8 +195,16 @@ class HFModelWrapper(nn.Module):
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
             if "output_router_logits" in model_config:
-                logger.info("[MoE] set output_router_logits as True")
-                self.model.config.output_router_logits = True
+                # Skip for granitemoehybrid: its decoder layers don't return router
+                # logits, so enabling this flag causes an IndexError in
+                # load_balancing_loss_func when it tries to access empty gate_logits.
+                if model_config.get("model_type") == "granitemoehybrid":
+                    logger.info(
+                        "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+                    )
+                else:
+                    logger.info("[MoE] set output_router_logits as True")
+                    self.model.config.output_router_logits = True
 
             # https://github.com/huggingface/transformers/issues/26877
             # Use `model.generate(use_cache=True)` instead.`
@@ -267,8 +305,24 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        pixel_values: Optional[TensorList] = None,
+        image_grid_thw: Optional[TensorList] = None,
+        mm_token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if self.is_vlm:
+            # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
+            # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
+            # model specific logic to compute.
+            assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
+            assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
+
+            # Convert TensorList -> concatenated tensors for the HF model
+            if isinstance(pixel_values, TensorList):
+                pixel_values = torch.cat(pixel_values.tensors, dim=0)
+            if isinstance(image_grid_thw, TensorList):
+                image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -302,8 +356,21 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
+        if self.is_vlm:
+            vlm_kwargs = dict(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+            if mm_token_type_ids is not None:
+                vlm_kwargs["mm_token_type_ids"] = mm_token_type_ids
+            output = self.model(
+                sequences_fwd,
+                attention_mask=attention_mask_fwd,
+                position_ids=None,
+                **vlm_kwargs,
+            )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
@@ -423,6 +490,8 @@ def _get_critic_model(
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
 
+            self.post_init()
+
         def forward(
             self,
             input_ids: torch.LongTensor = None,
@@ -522,6 +591,7 @@ def get_llm_for_sequence_regression(
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
     model_config_kwargs: dict = {},
+    meta_init: bool = False,
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -538,7 +608,7 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, **model_config_kwargs)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
@@ -561,15 +631,22 @@ def get_llm_for_sequence_regression(
     else:
         nf4_config = None
 
-    model = cls_class.from_pretrained(
-        model_name_or_path,
-        config=config,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-        quantization_config=nf4_config,
-        device_map=device_map,
-        **kwargs,
-    )
+    if meta_init:
+        from transformers.modeling_utils import no_init_weights
+
+        with no_init_weights(), torch.device("meta"):
+            model = cls_class(config)
+            model.to(dtype=torch.bfloat16 if bf16 else torch.float32)
+    else:
+        model = cls_class.from_pretrained(
+            model_name_or_path,
+            config=config,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16 if bf16 else torch.float32,
+            quantization_config=nf4_config,
+            device_map=device_map,
+            **kwargs,
+        )
 
     # LoRA
     if lora_rank > 0:
@@ -597,8 +674,13 @@ def get_llm_for_sequence_regression(
     # MoE - balancing loss
     model_config = model.config.to_dict()
     if "output_router_logits" in model_config:
-        logger.info("[MoE] set output_router_logits as True")
-        model.config.output_router_logits = True
+        if model_config.get("model_type") == "granitemoehybrid":
+            logger.info(
+                "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+            )
+        else:
+            logger.info("[MoE] set output_router_logits as True")
+            model.config.output_router_logits = True
 
     # https://github.com/huggingface/transformers/issues/26877
     model.config.use_cache = False

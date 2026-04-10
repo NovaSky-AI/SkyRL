@@ -8,18 +8,25 @@ These tests validate that WorkerDispatch correctly manages GPU memory when
 multiple models share the same GPU (colocate_all=True or colocate_policy_ref=True).
 """
 
-import ray
 import pytest
+import ray
 from ray.util.placement_group import placement_group
 
-from tests.backends.skyrl_train.gpu.utils import make_dummy_training_batch, get_rank_0_memory
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import validate_cfg
-from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
-from tests.backends.skyrl_train.gpu.utils import import_worker
-from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker, CriticWorker
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+    CriticWorker,
+    PolicyWorker,
+    RefWorker,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState, WorkerDispatch
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import ResolvedPlacementGroup, validate_cfg
+from tests.backends.skyrl_train.gpu.utils import (
+    get_rank_0_memory,
+    import_worker,
+    make_dummy_training_batch,
+)
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -73,8 +80,9 @@ async def test_colocate_all_only_one_model_on_gpu(ray_init_fixture):
 
     try:
         # Create shared placement group
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         # Initialize both actor groups on shared GPU
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
@@ -158,8 +166,9 @@ async def test_gpu_state_tracking_accuracy(ray_init_fixture):
     cfg = get_test_config()
 
     try:
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         ref_group = init_colocated_actor_group(RefWorker, pg, cfg)
@@ -217,8 +226,9 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
     cfg = get_test_config()
 
     try:
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         critic_group = init_colocated_actor_group(CriticWorker, pg, cfg)
@@ -305,8 +315,9 @@ async def test_dispatch_set_lr(ray_init_fixture, strategy):
 
     try:
         # Create placement group and policy actor
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
         ray.get(policy_group.async_init_model(MODEL_NAME))

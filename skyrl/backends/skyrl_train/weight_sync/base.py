@@ -1,9 +1,8 @@
 """Base data structures for weight synchronization."""
 
-from typing import Any, Dict
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
 from functools import cached_property
-from typing import List
+from typing import Any, Dict, List
 
 import torch
 
@@ -40,6 +39,7 @@ class WeightUpdateRequest:
         return cls(**data)
 
 
+@dataclass
 class LoraLoadRequest(WeightUpdateRequest):
     """Request to load LoRA weights from disk.
 
@@ -49,9 +49,10 @@ class LoraLoadRequest(WeightUpdateRequest):
     the inference engine to load LoRA from a path.
     """
 
-    def __init__(self, lora_path: str):
-        super().__init__(names=[], dtypes=[], shapes=[])
-        self.lora_path = lora_path
+    names: List[str] = field(default_factory=list)
+    dtypes: List[str] = field(default_factory=list)
+    shapes: List[List[int]] = field(default_factory=list)
+    lora_path: str = ""
 
 
 @dataclass

@@ -1,12 +1,19 @@
-from skyrl.train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+import io
+from typing import TYPE_CHECKING
+
 import ray
 import torch
 import torch.distributed
-from transformers import AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
-from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
-import io
-from typing import TYPE_CHECKING
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    FullyShardedDataParallel as FSDP,
+)
+from transformers import AutoConfig
+
+from skyrl.train.utils.trainer_utils import (
+    get_rope_scaling_config,
+    get_rope_theta_config,
+)
 
 try:
     # for torch 2.5+
@@ -14,18 +21,33 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl.train.utils.utils import str_to_torch_dtype
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
+from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+    fsdp_version,
+    should_use_meta_init,
+)
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
+from skyrl.backends.skyrl_train.weight_sync import (
+    LoraLoadRequest,
+    WeightChunk,
+    WeightExtractor,
+)
+from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
+    yield_module_grouped_chunks,
+)
+from skyrl.backends.skyrl_train.workers.model_wrapper import (
+    HFModelWrapper,
+    get_llm_for_sequence_regression,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
-    PolicyWorkerBase,
     CriticWorkerBase,
+    PolicyWorkerBase,
     RefWorkerBase,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk, LoraLoadRequest
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -143,37 +165,34 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._is_lora = self.cfg.policy.model.lora.rank > 0
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
-        with init_context():
 
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.policy.model.lora.rank,
-                lora_alpha=self.cfg.policy.model.lora.alpha,
-                lora_dropout=self.cfg.policy.model.lora.dropout,
-                lora_init_method=self.cfg.policy.model.lora.init_method,
-                target_modules=self.cfg.policy.model.lora.target_modules,
-                exclude_modules=self.cfg.policy.model.lora.exclude_modules,
-                sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                use_torch_compile=self.cfg.policy.use_torch_compile,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.policy.model_config_kwargs,
+        wrapped_model = HFModelWrapper(
+            model_path,
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=False,
+            lora_rank=self.cfg.policy.model.lora.rank,
+            lora_alpha=self.cfg.policy.model.lora.alpha,
+            lora_dropout=self.cfg.policy.model.lora.dropout,
+            lora_init_method=self.cfg.policy.model.lora.init_method,
+            target_modules=self.cfg.policy.model.lora.target_modules,
+            exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            use_torch_compile=self.cfg.policy.use_torch_compile,
+            rope_scaling=get_rope_scaling_config(self.cfg),
+            rope_theta=get_rope_theta_config(self.cfg),
+            model_config_kwargs=self.cfg.policy.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
+
+        if self.cfg.gradient_checkpointing:
+            wrapped_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
             )
-            # in-place patch
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
-
-            if self.cfg.gradient_checkpointing:
-                wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
-                )
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
@@ -202,11 +221,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
-        import os
         import json
+        import os
         from dataclasses import asdict
+
         from safetensors.torch import save_file
-        from skyrl.backends.skyrl_train.distributed.fsdp_utils import collect_lora_params
+
+        from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+            collect_lora_params,
+        )
 
         lora_params = collect_lora_params(module=self.model.model)
 
@@ -223,9 +246,16 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine
-            lora_request = LoraLoadRequest(lora_path=lora_sync_path)
-            await inference_engine_client.update_named_weights(lora_request)
+            # Send LoRA disk loading request to inference engine.
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                RemoteInferenceClient,
+            )
+
+            if isinstance(inference_engine_client, RemoteInferenceClient):
+                await inference_engine_client.update_lora_from_disk(lora_sync_path)
+            else:
+                lora_request = LoraLoadRequest(lora_path=lora_sync_path)
+                await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
 
@@ -248,15 +278,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # assume base model is already synced, sync LoRA adapters
             lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
-            return
-
-        # Extract and send weights using the sender created at init time
-        weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
-        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-        await self._weight_transfer_sender.send_chunks(
-            weight_iterator,
-            weight_metadata=weight_metadata,
-        )
+        else:
+            # Extract and send weights using the sender created at init time
+            weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+            await self._weight_transfer_sender.send_chunks(
+                weight_iterator,
+                weight_metadata=weight_metadata,
+            )
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -310,34 +339,33 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
-        with init_context():
-            critic = get_llm_for_sequence_regression(
-                model_path,
-                "critic",
-                use_flash_attention_2=self.cfg.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.critic.model.lora.rank,
-                lora_alpha=self.cfg.critic.model.lora.alpha,
-                lora_dropout=self.cfg.critic.model.lora.dropout,
-                target_modules=self.cfg.critic.model.lora.target_modules,
-                exclude_modules=self.cfg.critic.model.lora.exclude_modules,
-                value_head_prefix=self.cfg.algorithm.value_head_prefix,
-                init_value_head=self.cfg.policy.model.path == self.cfg.critic.model.path,
-                sequence_parallel_size=self.cfg.critic.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                model_config_kwargs=self.cfg.critic.model_config_kwargs,
-            )
-            self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
-            if self.cfg.gradient_checkpointing:
-                critic.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
-                )
+        critic = get_llm_for_sequence_regression(
+            model_path,
+            "critic",
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=False,
+            lora_rank=self.cfg.critic.model.lora.rank,
+            lora_alpha=self.cfg.critic.model.lora.alpha,
+            lora_dropout=self.cfg.critic.model.lora.dropout,
+            target_modules=self.cfg.critic.model.lora.target_modules,
+            exclude_modules=self.cfg.critic.model.lora.exclude_modules,
+            value_head_prefix=self.cfg.algorithm.value_head_prefix,
+            init_value_head=self.cfg.policy.model.path == self.cfg.critic.model.path,
+            sequence_parallel_size=self.cfg.critic.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            model_config_kwargs=self.cfg.critic.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
+
+        if self.cfg.gradient_checkpointing:
+            critic.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": self.cfg.gradient_checkpointing_use_reentrant}
+            )
 
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
@@ -380,22 +408,22 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.strategy = strategy
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
+        use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
 
-        with init_context():
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.flash_attn,
-                bf16=self.cfg.bf16,
-                sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
-                use_sample_packing=self.cfg.use_sample_packing,
-                rope_scaling=get_rope_scaling_config(self.cfg),
-                rope_theta=get_rope_theta_config(self.cfg),
-                model_config_kwargs=self.cfg.ref.model_config_kwargs,
-            )
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        wrapped_model = HFModelWrapper(
+            model_path,
+            use_flash_attention_2=self.cfg.flash_attn,
+            bf16=self.cfg.bf16,
+            sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
+            use_sample_packing=self.cfg.use_sample_packing,
+            rope_scaling=get_rope_scaling_config(self.cfg),
+            rope_theta=get_rope_theta_config(self.cfg),
+            model_config_kwargs=self.cfg.ref.model_config_kwargs,
+            meta_init=use_meta,
+        )
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
