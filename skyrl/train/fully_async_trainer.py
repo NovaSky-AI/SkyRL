@@ -382,7 +382,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 for _ in range(self.num_parallel_generation_workers)
             ]
 
-            for iter in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+            for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
@@ -442,7 +442,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self.all_metrics.update(eval_metrics)
 
                 # 7. Checkpointing. At interval and at the last step of each epoch.
-                is_epoch_end = iter == (1 + epoch) * self.num_steps_per_epoch
+                is_epoch_end = step_idx == (1 + epoch) * self.num_steps_per_epoch
                 if self.cfg.trainer.ckpt_interval > 0:
                     if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
