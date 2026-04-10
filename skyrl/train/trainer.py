@@ -289,7 +289,7 @@ class RayPPOTrainer:
                         status = self.train_critic_and_policy(training_input)
 
                     # 8. conditionally save checkpoints and hf model
-                    is_epoch_end = step_idx == len(self.train_dataloader) - 1
+                    is_epoch_end = self.global_step % len(self.train_dataloader) == 0
                     if self.cfg.trainer.ckpt_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
                             with Timer("save_checkpoints", self.all_timings):
@@ -343,6 +343,16 @@ class RayPPOTrainer:
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
+
+        # Safety net: always save final checkpoint at end of training.
+        if self.cfg.trainer.ckpt_interval > 0:
+            with Timer("save_checkpoints", self.all_timings):
+                self.save_checkpoints()
+                logger.info("Saved final checkpoint.")
+        if self.cfg.trainer.hf_save_interval > 0:
+            with Timer("save_hf_model", self.all_timings):
+                self.save_models()
+                logger.info("Saved final model.")
         self.tracker.finish()
         logger.info("Training done!")
 
