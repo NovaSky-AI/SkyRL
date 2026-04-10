@@ -43,17 +43,7 @@ class RenderedConversation(TypedDict):
 
 
 class SkyRLVLMGymGenerator(SkyRLGymGenerator):
-    """VLM generator that handles multi-modal (text + image) observations.
-
-    Simplifies the parent SkyRLGymGenerator by dropping support for:
-    - custom_chat_template / retokenize_chat_history
-    - step_wise_trajectories
-    - batched generation
-    - expert indices tracking
-
-    Inherits the parent's generate() method which dispatches to agent_loop()
-    in parallel via asyncio.
-    """
+    """VLM generator that handles multi-modal (text + image) observations."""
 
     def __init__(
         self,
@@ -96,9 +86,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         trajectory_id: Optional[TrajectoryID] = None,
     ) -> TrajectoryOutput:
         """Multi-turn VLM generation loop for a single trajectory.
-
-        Uses the conversation as the source of truth and re-tokenizes via
-        vLLM's render_chat_completion at each step (render delta approach).
+        The conversation is treated as the source of truth and re-tokenized each step.
         Generated tokens keep their original logprobs; observation tokens
         are obtained by slicing the re-render and masked out (loss_mask=0).
         """
