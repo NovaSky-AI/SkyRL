@@ -52,10 +52,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         inference_engine_client: RemoteInferenceClient,
         tokenizer,
     ):
-        # Parent stores as self.inference_engine_client and sets up
-        # generator_cfg, skyrl_gym_cfg, tokenizer, max_turns, env_executor, etc.
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
-        self.inference_client = inference_engine_client
         logger.info("Initialized SkyRLVLMGymGenerator (VLM multi-modal generator)")
 
     def _validate_cfg(self, generator_cfg: GeneratorConfig):
@@ -70,8 +67,8 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             )
 
     async def _render_conversation(self, conversation: ConversationType) -> RenderedConversation:
-        rendered = await self.inference_client.render_chat_completion(
-            {"json": {"model": self.inference_client.model_name, "messages": conversation}}
+        rendered = await self.inference_engine_client.render_chat_completion(
+            {"json": {"model": self.inference_engine_client.model_name, "messages": conversation}}
         )
         return RenderedConversation(prompt_ids=rendered["token_ids"], features=rendered.get("features", None))
 
@@ -156,7 +153,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=current_sampling_params,
                 mm_features=latest_features,
             )
-            engine_output = await self.inference_client.generate(engine_input)
+            engine_output = await self.inference_engine_client.generate(engine_input)
 
             gen_text = engine_output["responses"][0]
             gen_ids = engine_output["response_ids"][0]
@@ -194,8 +191,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         mm_kwargs = decode_mm_kwargs((latest_features or {}).get("kwargs_data"))
         pixel_values = mm_kwargs.pixel_values
         image_grid_thw = mm_kwargs.image_grid_thw
-
-        assert pixel_values is not None, "Expected pixel_values in output"
 
         # ── Cleanup ───────────────────────────────────────────────────
         env_metrics = env.get_metrics()
