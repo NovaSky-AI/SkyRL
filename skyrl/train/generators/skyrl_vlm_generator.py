@@ -175,7 +175,8 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             if rollout_logprobs is not None:
                 rollout_logprobs.extend(gen_logprobs if gen_logprobs else [0.0] * len(gen_ids))
 
-            per_step_rewards.append((step_reward, len(response_ids) - 1))
+            if gen_ids:
+                per_step_rewards.append((step_reward, len(response_ids) - 1))
 
             # 6. If episode continues, defer obs token extraction to next render
             if not done:
