@@ -965,6 +965,10 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("pixel_values") is not None:
+            fwd_keys.append("pixel_values")
+        if training_input.get("image_grid_thw") is not None:
+            fwd_keys.append("image_grid_thw")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None
