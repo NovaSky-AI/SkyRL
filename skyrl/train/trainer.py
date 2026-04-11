@@ -27,7 +27,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -612,6 +612,15 @@ class RayPPOTrainer:
             "rollout_expert_indices", None
         )
 
+        pixel_values = generator_output.get("pixel_values", None)
+        image_grid_thw = generator_output.get("image_grid_thw", None)
+        if pixel_values is not None:
+            assert len(pixel_values) == len(
+                image_grid_thw
+            ), "Number of pixel values should match number of image grid thw"
+            pixel_values = TensorList(pixel_values)
+            image_grid_thw = TensorList(image_grid_thw)
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -650,6 +659,8 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -899,18 +910,25 @@ class RayPPOTrainer:
             return training_input
         for key, tensor in training_input.items():
             if tensor is not None:
-                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-
-                if key == "is_last_step":
+                if isinstance(tensor, TensorList):
+                    n = len(tensor)
+                    pad_indices = [i % n for i in range(pad_size)]
+                    padding = TensorList([tensor[i].clone() for i in pad_indices])
+                    new_tensors[key] = TensorList.cat([tensor, padding])
+                elif key == "is_last_step":
+                    additional_dims = tensor.shape[1:]
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 elif key == "loss_mask":
                     # ensures that padding tensors don't count towards the loss
+                    additional_dims = tensor.shape[1:]
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
                     # `pad_size` is guaranteed to be smaller than batch_size
                     padding_tensor = tensor[:pad_size].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
