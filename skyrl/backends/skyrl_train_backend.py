@@ -434,20 +434,17 @@ class SkyRLTrainBackend(AbstractBackend):
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
 
-        pv_tensors = [
-            r.multi_modal_kwargs["pixel_values"]
-            for r in rendered_inputs
-            if r.multi_modal_kwargs is not None and r.multi_modal_kwargs.get("pixel_values") is not None
-        ]
-        thw_tensors = [
-            r.multi_modal_kwargs["image_grid_thw"]
-            for r in rendered_inputs
-            if r.multi_modal_kwargs is not None and r.multi_modal_kwargs.get("image_grid_thw") is not None
-        ]
-        if pv_tensors:
-            batch_dict["pixel_values"] = TensorList(pv_tensors)
-        if thw_tensors:
-            batch_dict["image_grid_thw"] = TensorList(thw_tensors)
+        # In mixed batches (some vision, some text-only), text-only samples
+        # get an empty tensor placeholder so the TensorList length matches the batch size.
+        # Empty tensors contribute zero rows when torch.cat'd downstream.
+        for mm_key in ("pixel_values", "image_grid_thw"):
+            values = [
+                r.multi_modal_kwargs.get(mm_key) if r.multi_modal_kwargs is not None else None for r in rendered_inputs
+            ]
+            ref = next((v for v in values if v is not None), None)
+            if ref is not None:
+                empty = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
+                batch_dict[mm_key] = TensorList([v if v is not None else empty for v in values])
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
