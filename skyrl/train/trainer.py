@@ -615,6 +615,9 @@ class RayPPOTrainer:
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
         if pixel_values is not None:
+            assert (
+                pixel_values is not None and image_grid_thw is not None
+            ), "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
             assert len(pixel_values) == len(
                 image_grid_thw
             ), "Number of pixel values should match number of image grid thw"
@@ -926,8 +929,9 @@ class RayPPOTrainer:
                     new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
+                    n = tensor.shape[0]
+                    pad_indices = torch.arange(pad_size, device=tensor.device) % n
+                    padding_tensor = tensor[pad_indices].clone()
                     new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
