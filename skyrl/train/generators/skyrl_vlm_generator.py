@@ -180,8 +180,8 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
         # ── Deserialize vision tensors from the most recent render ────
         mm_kwargs = decode_mm_kwargs((latest_features or {}).get("kwargs_data"))
-        pixel_values = mm_kwargs.pixel_values
-        image_grid_thw = mm_kwargs.image_grid_thw
+        pixel_values = mm_kwargs["pixel_values"]
+        image_grid_thw = mm_kwargs["image_grid_thw"]
 
         # ── Cleanup ───────────────────────────────────────────────────
         env_metrics = env.get_metrics()
