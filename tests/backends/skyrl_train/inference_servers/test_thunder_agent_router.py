@@ -28,6 +28,9 @@ MultiBackendRouter = importlib.import_module(
 ).MultiBackendRouter
 get_open_port = importlib.import_module("skyrl.backends.skyrl_train.inference_servers.common").get_open_port
 ThunderAgentRouter = importlib.import_module("examples.train.thunder_agent.thunder_agent_router").ThunderAgentRouter
+ThunderAgentRemoteInferenceClient = importlib.import_module(
+    "examples.train.thunder_agent.ta_remote_inference_client"
+).ThunderAgentRemoteInferenceClient
 
 
 def create_mock_server(server_id: int) -> FastAPI:
@@ -226,6 +229,19 @@ def test_program_id_in_body(env):
     assert "body-prog-42" in prog_resp.json()
 
 
+def test_session_id_header_fallback_used_as_program_id(env):
+    """X-Session-ID is used as the program identifier when the body omits program_id."""
+    session_id = "header-prog-7"
+    httpx.post(
+        f"{env}/inference/v1/generate",
+        json={"token_ids": [1, 2, 3], "sampling_params": {}, "model": "test"},
+        headers={"X-Session-ID": session_id},
+        timeout=10.0,
+    )
+    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
+    assert session_id in prog_resp.json()
+
+
 def test_programs_endpoint(env):
     """/programs returns ThunderAgent program state."""
     httpx.post(
@@ -314,6 +330,58 @@ def test_weight_sync_blocks_requests(env):
         result = future.result(timeout=5.0)
         assert result.status_code == 200
         assert "choices" in result.json()
+
+
+@pytest.mark.asyncio
+async def test_remote_client_release_program(env):
+    """ThunderAgentRemoteInferenceClient can explicitly release tracked programs."""
+    servers = httpx.get(f"{env}/servers", timeout=5.0).json()["servers"]
+    client = ThunderAgentRemoteInferenceClient(proxy_url=env, server_urls=servers, model_name="test")
+    program_id = "client-release-1"
+
+    await client.chat_completion(
+        {
+            "json": {
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "session_id": program_id,
+            }
+        }
+    )
+    assert program_id in httpx.get(f"{env}/programs", timeout=5.0).json()
+
+    await client.release_program(program_id)
+    assert program_id not in httpx.get(f"{env}/programs", timeout=5.0).json()
+    await client.teardown()
+
+
+@pytest.mark.asyncio
+async def test_remote_client_pause_resume_wraps_weight_sync(env):
+    """ThunderAgentRemoteInferenceClient pause/resume brackets ThunderAgent weight sync."""
+    servers = httpx.get(f"{env}/servers", timeout=5.0).json()["servers"]
+    client = ThunderAgentRemoteInferenceClient(proxy_url=env, server_urls=servers, model_name="test")
+
+    await client.pause_generation()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            httpx.post,
+            f"{env}/inference/v1/generate",
+            json={"token_ids": [1, 2, 3], "sampling_params": {}, "model": "test"},
+            headers={"X-Session-ID": "client-sync-test"},
+            timeout=10.0,
+        )
+
+        time.sleep(0.5)
+        assert not future.done(), "Request should be blocked while the client keeps ThunderAgent in weight sync"
+
+        await client.resume_generation()
+
+        result = future.result(timeout=5.0)
+        assert result.status_code == 200
+        assert "choices" in result.json()
+
+    await client.teardown()
 
 
 # --------------------------------------------------------------------------
