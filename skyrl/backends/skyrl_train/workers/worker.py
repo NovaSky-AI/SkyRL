@@ -940,14 +940,6 @@ class PolicyWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def zero_grad(self) -> None:
-        """Zero all parameter gradients without stepping the optimizer.
-
-        Used after evaluation forward_backward calls to prevent stale eval
-        gradients from leaking into the next training step.
-        """
-        self.optimizer.zero_grad()
-
     def get_lr(self) -> float:
         """
         Get current learning rate from optimizer.

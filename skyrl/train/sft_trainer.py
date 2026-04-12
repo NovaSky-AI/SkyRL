@@ -268,8 +268,8 @@ class SFTTrainer:
     # Data
     # ------------------------------------------------------------------ #
 
-    def _load_and_tokenize(self, dataset_name: str, dataset_split: str, max_samples: int = 0) -> list:
-        """Load and tokenize a dataset. Shared by train and eval.
+    def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
+        """Load and tokenize a dataset.
 
         Auto-detects the dataset format based on column names:
         - If a ``messages_key`` column exists, uses chat-format tokenization.
@@ -279,16 +279,12 @@ class SFTTrainer:
         Args:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
             dataset_split: Dataset split (e.g. ``"train[:100]"`` or ``"test"``).
-            max_samples: Maximum number of samples to use. 0 = use all.
 
         Returns a list of tokenized examples (dicts with ``input_ids``,
         ``attention_mask``, ``num_actions``).
         """
         logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}'...")
         dataset = load_dataset(dataset_name, split=dataset_split)
-
-        if max_samples > 0 and len(dataset) > max_samples:
-            dataset = dataset.select(range(max_samples))
 
         columns = dataset.column_names
         logger.info("Tokenizing dataset...")
@@ -316,20 +312,6 @@ class SFTTrainer:
     def load_dataset(self) -> list:
         """Load and tokenize the training dataset."""
         return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
-
-    def load_eval_dataset(self) -> list | None:
-        """Load and tokenize the eval dataset.
-
-        Returns tokenized examples list, or None if eval is not configured.
-        Uses the same tokenization pipeline as training (auto-detects chat vs
-        Alpaca format). When ``eval_dataset_name`` is empty, uses the same
-        dataset as training with ``eval_dataset_split``.
-        """
-        if self.sft_cfg.eval_steps <= 0:
-            return None
-
-        eval_name = self.sft_cfg.eval_dataset_name or self.sft_cfg.dataset_name
-        return self._load_and_tokenize(eval_name, self.sft_cfg.eval_dataset_split, self.sft_cfg.eval_samples)
 
     def collate_batch(self, examples: list) -> TrainingInputBatch:
         """Collate examples into a TrainingInputBatch with loss normalization.
@@ -373,46 +355,9 @@ class SFTTrainer:
             "timings": timings,
         }
 
-    def evaluate(self, eval_tokenized: list) -> dict:
-        """Compute eval loss over the eval dataset.
-
-        Iterates over the eval dataset in batches, calls ``forward_backward``
-        (without ``optim_step``) for each batch, and returns the average loss.
-        Gradients are zeroed after every eval batch to prevent them from
-        leaking into the next training step.
-
-        Args:
-            eval_tokenized: List of tokenized eval examples.
-
-        Returns:
-            Dict with ``eval/loss``.
-        """
-        total_loss = 0.0
-        num_batches = 0
-        batch_size = self.sft_cfg.batch_size
-
-        for start_idx in range(0, len(eval_tokenized), batch_size):
-            batch_examples = eval_tokenized[start_idx : start_idx + batch_size]
-            if len(batch_examples) == 0:
-                continue
-
-            batch = self.collate_batch(batch_examples)
-            metrics = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
-            # Zero gradients after each eval batch to prevent gradient
-            # accumulation from corrupting the next training step.
-            self.dispatch.zero_grad("policy")
-
-            loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
-            total_loss += loss_val
-            num_batches += 1
-
-        avg_loss = total_loss / max(num_batches, 1)
-        return {"eval/loss": avg_loss}
-
     def train(self):
         """Full training loop: load data, iterate, log, checkpoint."""
         tokenized = self.load_dataset()
-        eval_tokenized = self.load_eval_dataset()
 
         batch_size = self.sft_cfg.batch_size
         num_steps = self.sft_cfg.num_steps
@@ -459,18 +404,6 @@ class SFTTrainer:
                 with Timer("save_checkpoint", all_timings):
                     self.save_checkpoint(step)
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
-
-            # Evaluation
-            if (
-                eval_tokenized is not None
-                and self.sft_cfg.eval_steps > 0
-                and step > 0
-                and step % self.sft_cfg.eval_steps == 0
-            ):
-                with Timer("eval", all_timings):
-                    eval_metrics = self.evaluate(eval_tokenized)
-                log_dict.update(eval_metrics)
-                log_dict["timing/eval"] = all_timings["eval"]
 
             self.tracker.log(log_dict, step=step)
             self.global_step = step

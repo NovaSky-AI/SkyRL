@@ -108,12 +108,6 @@ class SFTConfig(BaseConfig):
     ckpt_path: str = ""  # empty string = no checkpointing
     ckpt_interval: int = 0
 
-    # ---- Eval fields ----
-    eval_dataset_name: str = ""  # HF dataset name for eval; empty = use same dataset as training
-    eval_dataset_split: str = "test"  # dataset split for eval
-    eval_steps: int = 0  # evaluate every N steps; 0 = eval disabled
-    eval_samples: int = 0  # max number of eval samples; 0 = use full split
-
 
 # ---------------------------------------------------------------------------
 # Bridge: SFTConfig -> SkyRLTrainConfig

@@ -276,14 +276,6 @@ class WorkerDispatch:
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
-    def zero_grad(self, model: str) -> None:
-        """Zero all parameter gradients without stepping the optimizer.
-
-        Used after evaluation forward_backward calls to prevent stale eval
-        gradients from corrupting the next training step.
-        """
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "zero_grad"))
-
     def set_lr(self, model: str, learning_rate: float) -> None:
         """Set learning rate for model's optimizer.
 
