@@ -385,6 +385,13 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
+    if ie_cfg.enable_pd:
+        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
+        assert (
+            ie_cfg.num_prefill < ie_cfg.num_engines
+        ), "num_prefill must be < num_engines (need at least one decode worker)"
+        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
+
     if not ie_cfg.run_engines_locally:
         assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
 
@@ -508,11 +515,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
-        )
-
-    if cfg.generator.inference_engine.enable_return_routed_experts:
-        raise ValueError(
-            "rollout router replay (r3) is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/815."
         )
 
 

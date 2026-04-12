@@ -14,6 +14,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): Remove the tests in Group B once we migrate all generation interactions to the router's HTTP API.
 
+import asyncio
 import json
 from http import HTTPStatus
 from typing import Any, Dict, List, Literal
@@ -598,6 +599,8 @@ def _build_sample_payload(
     num_samples: int = 1,
     sampling_params: Dict[str, Any] | None = None,
     session_id: str | None = None,
+    include_prompt_logprobs: bool = False,
+    topk_prompt_logprobs: int = 0,
 ) -> Dict[str, Any]:
     """Build a Tinker-format sample request payload."""
     body: Dict[str, Any] = {
@@ -607,6 +610,10 @@ def _build_sample_payload(
     }
     if session_id is not None:
         body["session_id"] = session_id
+    if include_prompt_logprobs:
+        body["include_prompt_logprobs"] = True
+    if topk_prompt_logprobs > 0:
+        body["topk_prompt_logprobs"] = topk_prompt_logprobs
     return {"json": body}
 
 
@@ -617,6 +624,7 @@ def _get_test_token_ids(model: str) -> List[int]:
     token_ids = tokenizer.apply_chat_template(
         conv,
         add_generation_prompt=True,
+        return_dict=False,
         tokenize=True,
     )
     return token_ids
@@ -625,10 +633,15 @@ def _get_test_token_ids(model: str) -> List[int]:
 @pytest.mark.vllm
 @pytest.mark.asyncio
 async def test_client_sample(vllm_server: InferenceEngineState):
-    """Test sample with n=1 returns correct Tinker response structure."""
+    """Test sample with n=1 returns correct Tinker response structure and prompt_logprobs."""
     client = vllm_server.client
     token_ids = _get_test_token_ids(MODEL_QWEN2_5)
-    payload = _build_sample_payload(token_ids, num_samples=1, sampling_params={"temperature": 0.7, "max_tokens": 64})
+    payload = _build_sample_payload(
+        token_ids,
+        num_samples=1,
+        sampling_params={"temperature": 0.7, "max_tokens": 64},
+        include_prompt_logprobs=True,
+    )
 
     result = await client.sample(payload)
 
@@ -642,14 +655,29 @@ async def test_client_sample(vllm_server: InferenceEngineState):
     assert all(isinstance(lp, float) for lp in seq["logprobs"])
     assert seq["stop_reason"] in ["stop", "length"]
 
+    # prompt_logprobs: one float per prompt token, position 0 is None
+    pl = result["prompt_logprobs"]
+    assert pl is not None
+    assert len(pl) == len(token_ids)
+    assert pl[0] is None
+    for lp in pl[1:]:
+        assert isinstance(lp, float)
+        assert lp <= 0.0
+    assert result["topk_prompt_logprobs"] is None
+
 
 @pytest.mark.vllm
 @pytest.mark.asyncio
 async def test_client_sample_multiple(vllm_server: InferenceEngineState):
-    """Test sample with n=3 returns three independent sequences."""
+    """Test sample with n=3 returns three independent sequences and prompt_logprobs."""
     client = vllm_server.client
     token_ids = _get_test_token_ids(MODEL_QWEN2_5)
-    payload = _build_sample_payload(token_ids, num_samples=3, sampling_params={"temperature": 1.0, "max_tokens": 64})
+    payload = _build_sample_payload(
+        token_ids,
+        num_samples=3,
+        sampling_params={"temperature": 1.0, "max_tokens": 64},
+        include_prompt_logprobs=True,
+    )
 
     result = await client.sample(payload)
 
@@ -665,6 +693,12 @@ async def test_client_sample_multiple(vllm_server: InferenceEngineState):
     all_tokens = [tuple(seq["tokens"]) for seq in result["sequences"]]
     assert len(set(all_tokens)) > 1, "All 3 sequences are identical at temperature=1.0"
 
+    # prompt_logprobs shared across choices
+    pl = result["prompt_logprobs"]
+    assert pl is not None
+    assert len(pl) == len(token_ids)
+    assert pl[0] is None
+
 
 @pytest.mark.vllm
 @pytest.mark.asyncio
@@ -678,3 +712,36 @@ async def test_client_sample_deterministic(vllm_server: InferenceEngineState):
     result2 = await client.sample(_build_sample_payload(token_ids, num_samples=1, sampling_params=params))
 
     assert result1["sequences"][0]["tokens"] == result2["sequences"][0]["tokens"]
+
+
+@pytest.mark.vllm
+def test_client_sample_topk_prompt_logprobs(vllm_server: InferenceEngineState):
+    """Test sample with topk_prompt_logprobs returns top-k (token_id, logprob) tuples."""
+    client = vllm_server.client
+    token_ids = _get_test_token_ids(MODEL_QWEN2_5)
+    payload = _build_sample_payload(
+        token_ids,
+        num_samples=1,
+        sampling_params={"temperature": 0.7, "max_tokens": 32},
+        include_prompt_logprobs=True,
+        topk_prompt_logprobs=3,
+    )
+
+    result = asyncio.run(client.sample(payload))
+
+    pl = result["prompt_logprobs"]
+    assert pl is not None
+    assert len(pl) == len(token_ids)
+
+    topk = result["topk_prompt_logprobs"]
+    assert topk is not None
+    assert len(topk) == len(token_ids)
+    assert topk[0] is None
+
+    for i in range(1, len(topk)):
+        assert topk[i] is not None
+        assert len(topk[i]) > 0
+        for token_id, logprob in topk[i]:
+            assert isinstance(token_id, int)
+            assert isinstance(logprob, float)
+            assert logprob <= 0.0

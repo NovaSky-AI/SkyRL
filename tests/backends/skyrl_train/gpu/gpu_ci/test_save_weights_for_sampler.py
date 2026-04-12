@@ -79,6 +79,11 @@ async def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocat
         sleep_level=2,  # Full sleep since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
+
+        # Sleep inference engine before initializing policy worker to avoid OOM on colocated GPU
+        if colocate_all:
+            await client.sleep()
+
         # Initialize policy worker
         policy_group = init_worker_with_type(
             "policy",
@@ -97,11 +102,6 @@ async def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocat
 
         # Initialize weight sync state
         dispatch.init_weight_sync_state(client)
-
-        # If colocate_all, sleep inference engine to free GPU memory for training
-        if colocate_all:
-            await client.sleep()
-            dispatch.mark_all_offloaded()
 
         # === Step 1: Do a training step ===
         dp_size = policy_group.actor_infos[0].rank.dp_size

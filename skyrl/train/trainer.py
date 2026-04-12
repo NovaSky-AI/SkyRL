@@ -206,7 +206,7 @@ class RayPPOTrainer:
         start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for iter, rand_prompts in enumerate(self.train_dataloader):
+            for _, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -289,21 +289,21 @@ class RayPPOTrainer:
                         status = self.train_critic_and_policy(training_input)
 
                     # 8. conditionally save checkpoints and hf model
-                    if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                        with Timer("save_checkpoints", self.all_timings):
-                            self.save_checkpoints()
-                    if (
-                        self.cfg.trainer.hf_save_interval > 0
-                        and self.global_step % self.cfg.trainer.hf_save_interval == 0
-                    ):
-                        with Timer("save_hf_model", self.all_timings):
-                            self.save_models()
+                    is_epoch_end = self.global_step % len(self.train_dataloader) == 0
+                    if self.cfg.trainer.ckpt_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                            with Timer("save_checkpoints", self.all_timings):
+                                self.save_checkpoints()
+                    if self.cfg.trainer.hf_save_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                            with Timer("save_hf_model", self.all_timings):
+                                self.save_models()
 
                     # 9. conditionally sync policy and ref at the end of the epoch
                     if (
                         self.cfg.trainer.update_ref_every_epoch
                         and self.ref_model is not None
-                        and iter == len(self.train_dataloader) - 1
+                        and is_epoch_end
                         and epoch != self.cfg.trainer.epochs - 1  # skip updating ref at the end of the last epoch
                     ):
                         with Timer("update_ref_with_policy", self.all_timings):
@@ -343,6 +343,8 @@ class RayPPOTrainer:
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
+
+        # Safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()

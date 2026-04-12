@@ -99,8 +99,6 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
         prompt_str = tokenizer.decode(prompt_token_ids)
 
         if use_custom_template:
-            # The custom template qwen3_acc_thinking.jinja2 will keep the thinking tokens.
             assert "<think>" in prompt_str and "</think>" in prompt_str
         else:
-            # Default template strips thinking tokens
             assert "<think>" not in prompt_str and "</think>" not in prompt_str
