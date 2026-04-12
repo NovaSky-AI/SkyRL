@@ -12,7 +12,7 @@ set -x
 # Example:
 #   bash examples/train/sft/run_sft_fsdp.sh num_steps=20 batch_size=8
 
-uv run --isolated --env-file /home/sumanthrh/SkyRL/.env.test --extra fsdp \
+uv run --isolated --extra fsdp \
     python -m skyrl.train.sft_trainer \
     strategy=fsdp2 \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \

@@ -12,7 +12,7 @@ set -x
 # Example:
 #   bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
 
-uv run --isolated --env-file /home/sumanthrh/SkyRL/.env.test --extra megatron \
+uv run --isolated --extra megatron \
     python -m skyrl.train.sft_trainer \
     strategy=megatron \
     placement.num_gpus_per_node=4 \

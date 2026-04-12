@@ -120,8 +120,14 @@ class SFTConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
+_VALID_STRATEGIES = ("megatron", "fsdp2")
+
+
 def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     """Map user-facing SFTConfig to the internal SkyRL backend config."""
+    if sft_cfg.strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"Unknown strategy '{sft_cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
+
     cfg = SkyRLTrainConfig()
 
     # Strategy

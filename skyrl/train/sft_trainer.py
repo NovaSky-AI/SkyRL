@@ -223,6 +223,10 @@ class SFTTrainer:
 
         Selects the correct PolicyWorker based on strategy.
         """
+        _VALID_STRATEGIES = ("megatron", "fsdp2")
+        if self.sft_cfg.strategy not in _VALID_STRATEGIES:
+            raise ValueError(f"Unknown strategy '{self.sft_cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
+
         if self.sft_cfg.strategy == "megatron":
             from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
                 PolicyWorker,
@@ -374,8 +378,8 @@ class SFTTrainer:
 
         Iterates over the eval dataset in batches, calls ``forward_backward``
         (without ``optim_step``) for each batch, and returns the average loss.
-        Gradients are computed but discarded -- the next training
-        ``forward_backward`` call zeros the grad buffers automatically.
+        Gradients are zeroed after every eval batch to prevent them from
+        leaking into the next training step.
 
         Args:
             eval_tokenized: List of tokenized eval examples.
@@ -394,6 +398,9 @@ class SFTTrainer:
 
             batch = self.collate_batch(batch_examples)
             metrics = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            # Zero gradients after each eval batch to prevent gradient
+            # accumulation from corrupting the next training step.
+            self.dispatch.zero_grad("policy")
 
             loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
             total_loss += loss_val

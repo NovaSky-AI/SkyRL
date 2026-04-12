@@ -772,6 +772,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
 
+    def zero_grad(self) -> None:
+        """Zero all gradient buffers without stepping the optimizer.
+
+        Used after evaluation forward_backward calls to prevent stale eval
+        gradients from leaking into the next training step.  For Megatron,
+        this clears the grad buffers on every model chunk.
+        """
+        for chunk in self.actor_module:
+            chunk.zero_grad_buffer()
+        self.optimizer.zero_grad()
+
     def get_lr(self) -> float:
         """
         Get current learning rate from optimizer.
