@@ -36,7 +36,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.train.sft_config import SFTConfig, build_skyrl_sft_config
+from skyrl.train.sft_config import SFTConfig, build_skyrl_config_for_sft
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
@@ -196,7 +196,7 @@ class SFTTrainer:
 
     def __init__(self, cfg: SFTConfig):
         self.sft_cfg = cfg
-        self.cfg = build_skyrl_sft_config(cfg)
+        self.cfg = build_skyrl_config_for_sft(cfg)
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None

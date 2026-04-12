@@ -2,7 +2,7 @@
 SFT (Supervised Fine-Tuning) configuration.
 
 Defines ``SFTConfig`` -- the user-facing config for SFT training -- and the
-bridge function ``build_skyrl_sft_config`` that maps it to the internal
+bridge function ``build_skyrl_config_for_sft`` that maps it to the internal
 ``SkyRLTrainConfig`` used by the SkyRL backend.
 """
 
@@ -149,7 +149,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
 
 
-def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
+def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     """Map user-facing SFTConfig to the internal SkyRL backend config."""
     validate_sft_cfg(sft_cfg)
 
