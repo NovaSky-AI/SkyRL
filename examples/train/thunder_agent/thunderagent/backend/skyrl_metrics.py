@@ -19,6 +19,7 @@ SkyRL /metrics response format:
   ]
 }
 """
+
 import asyncio
 import logging
 import time
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SkyRLCacheConfig:
     """Aggregate KV cache config across all SkyRL engines."""
+
     total_tokens_capacity: int = 0
     num_engines: int = 0
 
@@ -42,6 +44,7 @@ class SkyRLCacheConfig:
 @dataclass
 class SkyRLMetrics:
     """Aggregated metrics from SkyRL /metrics endpoint."""
+
     # Aggregate across all engines
     num_requests_running: int = 0
     num_requests_waiting: int = 0
@@ -98,7 +101,9 @@ class SkyRLMetricsClient(MetricsClient):
         cap = self.cache_config.total_tokens_capacity if self.cache_config else "unknown"
         logger.info(
             "Started SkyRL metrics monitoring for %s (interval: %ss, total_capacity: %s tokens)",
-            self.url, interval, cap,
+            self.url,
+            interval,
+            cap,
         )
 
     async def stop_monitoring(self):
@@ -164,7 +169,8 @@ class SkyRLMetricsClient(MetricsClient):
             )
             logger.info(
                 "SkyRL cache config: %d engines, estimated total_capacity=%d tokens",
-                num_engines, total_cap,
+                num_engines,
+                total_cap,
             )
             return True
         except Exception as e:
@@ -237,8 +243,7 @@ class SkyRLMetricsClient(MetricsClient):
             return 0
         # kv_cache_usage_perc is 0-100 scale
         vllm_actual_used = int(
-            (self.latest_metrics.kv_cache_usage_perc / 100.0)
-            * self.cache_config.total_tokens_capacity
+            (self.latest_metrics.kv_cache_usage_perc / 100.0) * self.cache_config.total_tokens_capacity
         )
         return max(0, reasoning_program_tokens - vllm_actual_used)
 

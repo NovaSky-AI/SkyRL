@@ -1,10 +1,9 @@
 """ThunderAgent FastAPI application entry point."""
 
 import logging
-import time
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .config import Config, get_config
@@ -12,7 +11,6 @@ from .scheduler import MultiBackendRouter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-access_logger = logging.getLogger("thunderagent.access")
 
 
 def get_program_id(payload: Dict[str, Any]) -> str:
@@ -48,7 +46,6 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         """Handle chat completions request with program-aware scheduling."""
-        start_time = time.perf_counter()
         try:
             payload = await request.json()
         except Exception as exc:
@@ -67,59 +64,22 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
 
         backend = ta_router.get_backend_for_program(program_id)
 
-        usage_received = False
-        is_streaming = payload.get("stream", False)
-
         async def on_usage(total_tokens: int, prompt_tokens: int, cached_tokens: int) -> None:
-            nonlocal usage_received
-            usage_received = True
             ta_router.update_program_after_request(program_id, program_state, total_tokens, prompt_tokens)
             if program_state.profile:
-                try:
-                    program_state.profile.on_request_end(prompt_tokens, cached_tokens)
-                except Exception:
-                    logger.exception("ThunderAgent profiling failed at request end for program_id=%s", program_id)
+                program_state.profile.on_request_end(prompt_tokens, cached_tokens)
 
         def on_token_progress(delta_tokens: int) -> None:
             ta_router.update_program_tokens_streaming(program_state, delta_tokens)
 
-        try:
-            result = await ta_router.proxy_request(
-                backend,
-                payload,
-                on_usage=on_usage,
-                on_first_token=program_state.profile.on_first_token if program_state.profile else None,
-                on_token=program_state.profile.on_token if program_state.profile else None,
-                on_token_progress=on_token_progress,
-            )
-        except Exception:
-            if not usage_received:
-                ta_router.update_program_after_request(program_id, program_state, 0, 0)
-            access_logger.exception(
-                "/v1/chat/completions program_id=%s backend=%s failed after %.1fms",
-                program_id,
-                backend.url,
-                (time.perf_counter() - start_time) * 1000.0,
-            )
-            raise
-
-        if is_streaming:
-            original_body_iterator = result.body_iterator
-
-            async def wrapped_iterator():
-                try:
-                    async for chunk in original_body_iterator:
-                        yield chunk
-                finally:
-                    if not usage_received:
-                        ta_router.update_program_after_request(program_id, program_state, 0, 0)
-
-            result.body_iterator = wrapped_iterator()
-        else:
-            if not usage_received:
-                ta_router.update_program_after_request(program_id, program_state, 0, 0)
-
-        return result
+        return await ta_router.proxy_request(
+            backend,
+            payload,
+            on_usage=on_usage,
+            on_first_token=program_state.profile.on_first_token if program_state.profile else None,
+            on_token=program_state.profile.on_token if program_state.profile else None,
+            on_token_progress=on_token_progress,
+        )
 
     @app.get("/programs")
     async def list_programs():
@@ -220,11 +180,6 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
                 },
             }
         )
-
-    @app.get("/router_state")
-    async def get_router_state(since_seq: int = Query(default=0, ge=0)):
-        """Return structured router state and recent lifecycle events."""
-        return JSONResponse(ta_router.get_observability_snapshot(since_seq=since_seq))
 
     # -- Weight sync coordination --
 

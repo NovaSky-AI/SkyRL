@@ -5,6 +5,7 @@ Provides a shared contract for:
 - Cache capacity
 - Metrics polling and serialization
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

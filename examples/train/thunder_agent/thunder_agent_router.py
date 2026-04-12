@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import itertools
 import logging
-import os
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -26,58 +25,46 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from examples.train.thunder_agent.thunderagent import (
+    Config,
+    MultiBackendRouter,
+    get_program_id,
+    register_routes,
+    set_config,
+)
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
-try:
-    from ThunderAgent import Config, MultiBackendRouter, get_program_id, register_routes, set_config
-
-    THUNDERAGENT_AVAILABLE = True
-except ImportError:
-    THUNDERAGENT_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
 
-_THUNDERAGENT_LOGGER_NAMES = (
-    "ThunderAgent",
-    "examples.train.thunder_agent",
-    "thunderagent.access",
-)
-_THUNDERAGENT_LOG_HANDLERS: dict[str, logging.Handler] = {}
 
-
-def _default_router_port() -> int:
-    raw_port = os.environ.get("SKYRL_INFERENCE_ROUTER_PORT", "8080")
-    try:
-        return int(raw_port)
-    except ValueError:
-        logger.warning("Invalid SKYRL_INFERENCE_ROUTER_PORT=%r; falling back to 8080", raw_port)
-        return 8080
-
-
-def _ensure_thunderagent_file_logging(log_file: Optional[str]) -> None:
+def _attach_thunderagent_file_handler(
+    log_file: Optional[str],
+) -> tuple[Optional[logging.Logger], Optional[logging.Handler]]:
     if not log_file:
-        return
+        return None, None
 
     log_path = Path(log_file).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    resolved_log_path = str(log_path.resolve())
-    if resolved_log_path in _THUNDERAGENT_LOG_HANDLERS:
-        return
 
-    handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"))
+    file_handler = logging.FileHandler(log_path.resolve(), encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s")
+    )
 
-    for logger_name in _THUNDERAGENT_LOGGER_NAMES:
-        target_logger = logging.getLogger(logger_name)
-        target_logger.setLevel(logging.INFO)
-        target_logger.addHandler(handler)
-        if logger_name == "thunderagent.access":
-            target_logger.propagate = False
+    file_logger = logging.getLogger("examples.train.thunder_agent")
+    file_logger.setLevel(logging.INFO)
+    file_logger.addHandler(file_handler)
 
-    _THUNDERAGENT_LOG_HANDLERS[resolved_log_path] = handler
-    logger.info(f"ThunderAgent file logging enabled at {resolved_log_path}")
+    logger.info("ThunderAgent file logging enabled at %s", log_path.resolve())
+    return file_logger, file_handler
+
+
+def _detach_file_handler(file_logger: Optional[logging.Logger], file_handler: Optional[logging.Handler]) -> None:
+    if file_logger and file_handler:
+        file_logger.removeHandler(file_handler)
+        file_handler.close()
 
 
 class ThunderAgentRouter:
@@ -99,7 +86,7 @@ class ThunderAgentRouter:
         server_urls: List[str],
         *,
         host: str = "0.0.0.0",
-        port: Optional[int] = None,
+        port: int = 8080,
         log_file: Optional[str] = None,
         router_mode: str = "tr",
         backend_type: str = "vllm",
@@ -110,15 +97,11 @@ class ThunderAgentRouter:
         metrics_enabled: bool = False,
         metrics_interval: float = 5.0,
     ):
-        if not THUNDERAGENT_AVAILABLE:
-            raise ImportError("ThunderAgent is not installed. Install with: cd ThunderAgent && pip install -e .")
-
         self._server_urls = server_urls
         self._host = host
-        self._port = _default_router_port() if port is None else port
+        self._port = port
         self._log_file = log_file
-        _ensure_thunderagent_file_logging(log_file)
-        self._access_logger = logging.getLogger("thunderagent.access")
+        self._file_logger, self._file_handler = _attach_thunderagent_file_handler(log_file)
 
         self._ta_config = Config(
             backends=list(server_urls),
@@ -144,8 +127,8 @@ class ThunderAgentRouter:
 
         logger.info(
             "ThunderAgentRouter configured with "
-            f"{len(server_urls)} servers, port={port}, mode={router_mode}, "
-            f"log_file={self._log_file}"
+            f"{len(server_urls)} servers, port={self._port}, mode={router_mode}, "
+            f"backend_type={backend_type}, log_file={self._log_file}"
         )
 
     # ------------------------------------------------------------------
@@ -202,7 +185,6 @@ class ThunderAgentRouter:
             {token_ids, sampling_params, model, program_id}. This is the main
             rollout traffic during training.
             """
-            start_time = time.perf_counter()
             try:
                 payload = await request.json()
             except Exception as exc:
@@ -241,18 +223,14 @@ class ThunderAgentRouter:
                         if _attempt == 0:
                             logger.warning(
                                 "/inference/v1/generate ReadError on %s (retry 1/1): %s",
-                                backend.url, exc,
+                                backend.url,
+                                exc,
                             )
                             continue
                         raise
             except Exception:
                 ta_router.update_program_after_request(program_id, program_state, 0, 0)
-                self._access_logger.exception(
-                    "/inference/v1/generate program_id=%s backend=%s failed after %.1fms",
-                    program_id,
-                    backend.url,
-                    (time.perf_counter() - start_time) * 1000.0,
-                )
+                logger.exception("/inference/v1/generate failed for program_id=%s backend=%s", program_id, backend.url)
                 raise
 
             # Estimate token count from the response for program state tracking
@@ -273,15 +251,9 @@ class ThunderAgentRouter:
                 try:
                     program_state.profile.on_request_end(prompt_tokens, 0)
                 except Exception:
-                    logger.exception("ThunderAgent profiling failed at generation request end for program_id=%s", program_id)
-
-            self._access_logger.info(
-                "/inference/v1/generate program_id=%s backend=%s status=%s latency_ms=%.1f",
-                program_id,
-                backend.url,
-                response.status_code,
-                (time.perf_counter() - start_time) * 1000.0,
-            )
+                    logger.exception(
+                        "ThunderAgent profiling failed at generation request end for program_id=%s", program_id
+                    )
             return Response(
                 content=response.content,
                 status_code=response.status_code,
@@ -404,3 +376,4 @@ class ThunderAgentRouter:
             self._server.should_exit = True
         if self._server_thread:
             self._server_thread.join(timeout=5)
+        _detach_file_handler(self._file_logger, self._file_handler)

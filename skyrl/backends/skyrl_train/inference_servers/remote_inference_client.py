@@ -264,8 +264,6 @@ class RemoteInferenceClient:
                 "model": self.model_name,
                 "token_ids": new_prompt_ids,
             }
-            if session_id:
-                payload["program_id"] = str(session_id)
 
             headers = {"Content-Type": "application/json"}
             if session_id:
@@ -314,8 +312,6 @@ class RemoteInferenceClient:
 
         # Extract session_id for routing (same as InferenceEngineClient)
         session_id = body.pop("session_id", None)
-        if session_id:
-            body["program_id"] = str(session_id)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -348,8 +344,6 @@ class RemoteInferenceClient:
 
         # Extract session_id for routing (same as InferenceEngineClient)
         session_id = body.pop("session_id", None)
-        if session_id:
-            body["program_id"] = str(session_id)
 
         headers = {"Content-Type": "application/json"}
         if session_id:

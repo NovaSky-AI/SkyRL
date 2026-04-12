@@ -5,6 +5,7 @@ Handles HTTP communication with vLLM backends, including:
 - SSE (Server-Sent Events) parsing
 - Usage info extraction from responses
 """
+
 import json
 import logging
 import math
@@ -22,7 +23,7 @@ _MAX_READ_ERROR_RETRIES = 2
 
 def extract_usage_info(payload: Any) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """Extract usage info from a vLLM response.
-    
+
     Returns:
         (total_tokens, prompt_tokens, cached_tokens)
         - cached_tokens is 0 if prompt_tokens_details is null or missing
@@ -33,28 +34,28 @@ def extract_usage_info(payload: Any) -> Tuple[Optional[int], Optional[int], Opti
     usage = payload.get("usage")
     if not isinstance(usage, dict):
         return None, None, None
-    
+
     total_tokens = None
     prompt_tokens = None
     cached_tokens = 0  # Default to 0 if not available
-    
+
     if "total_tokens" in usage:
         val = usage.get("total_tokens")
         if isinstance(val, (int, float)) and math.isfinite(val):
             total_tokens = int(val)
-    
+
     if "prompt_tokens" in usage:
         val = usage.get("prompt_tokens")
         if isinstance(val, (int, float)) and math.isfinite(val):
             prompt_tokens = int(val)
-    
+
     # Extract cached_tokens from prompt_tokens_details
     prompt_details = usage.get("prompt_tokens_details")
     if isinstance(prompt_details, dict):
         ct = prompt_details.get("cached_tokens")
         if isinstance(ct, (int, float)) and math.isfinite(ct):
             cached_tokens = int(ct)
-    
+
     return total_tokens, prompt_tokens, cached_tokens
 
 
@@ -66,7 +67,7 @@ def filtered_headers(headers: httpx.Headers) -> Dict[str, str]:
 
 def remove_program_id(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Remove program_id from payload before forwarding to vLLM.
-    
+
     vLLM doesn't recognize program_id, so we need to strip it.
     """
     payload = payload.copy()
@@ -95,14 +96,14 @@ async def forward_streaming_request(
     token_progress_interval: int = DEFAULT_TOKEN_PROGRESS_INTERVAL,
 ) -> StreamingResponse:
     """Forward a streaming request to vLLM and return a StreamingResponse.
-    
+
     This function handles:
     - SSE (Server-Sent Events) parsing
     - Usage info extraction from the stream
     - Token timing callbacks (on_first_token, on_token)
     - Token progress updates at regular intervals (on_token_progress)
     - Calling on_usage when stream ends
-    
+
     Args:
         client: httpx AsyncClient to use
         url: vLLM endpoint URL
@@ -112,13 +113,13 @@ async def forward_streaming_request(
         on_token: Called for each token received
         on_token_progress: Called with cumulative token count at regular intervals
         token_progress_interval: How often to call on_token_progress (default: 20 tokens)
-    
+
     Returns:
         FastAPI StreamingResponse that forwards the vLLM stream to client
     """
     # Remove program_id before forwarding
     payload = remove_program_id(payload)
-    
+
     # Add stream_options to get usage info in streaming response
     if on_usage is not None:
         stream_options = payload.get("stream_options")
@@ -135,7 +136,9 @@ async def forward_streaming_request(
             break
         except (httpcore.ReadError, httpx.ReadError) as exc:
             if attempt < _MAX_READ_ERROR_RETRIES - 1:
-                logger.warning("ReadError on stream POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                logger.warning(
+                    "ReadError on stream POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc
+                )
                 continue
             raise
     headers = filtered_headers(resp.headers)
@@ -162,7 +165,7 @@ async def forward_streaming_request(
                         data = line[5:].strip()
                         if not data or data == b"[DONE]":
                             continue
-                        
+
                         # Token timing callbacks
                         if not first_token_seen:
                             first_token_seen = True
@@ -170,7 +173,7 @@ async def forward_streaming_request(
                                 on_first_token()
                         if on_token is not None:
                             on_token()
-                        
+
                         # Track token count and report progress at intervals
                         token_count += 1
                         if on_token_progress is not None:
@@ -179,7 +182,7 @@ async def forward_streaming_request(
                                 delta = token_count - last_reported_count
                                 on_token_progress(delta)
                                 last_reported_count = token_count
-                        
+
                         # Extract usage info (only once)
                         if usage_extracted:
                             continue
@@ -215,13 +218,13 @@ async def forward_non_streaming_request(
     on_usage: Callable[[int, int, int], Awaitable[None]] | None = None,
 ) -> Response:
     """Forward a non-streaming request to vLLM and return a Response.
-    
+
     Args:
         client: httpx AsyncClient to use
         url: vLLM endpoint URL
         payload: Request payload (program_id will be removed)
         on_usage: Called with (total_tokens, prompt_tokens, cached_tokens) after response
-    
+
     Returns:
         FastAPI Response with vLLM response content
     """
@@ -235,10 +238,12 @@ async def forward_non_streaming_request(
             break
         except (httpcore.ReadError, httpx.ReadError) as exc:
             if attempt < _MAX_READ_ERROR_RETRIES - 1:
-                logger.warning("ReadError on POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                logger.warning(
+                    "ReadError on POST %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc
+                )
                 continue
             raise
-    
+
     # Extract usage info
     total_tokens: Optional[int] = None
     prompt_tokens: Optional[int] = None
@@ -252,11 +257,11 @@ async def forward_non_streaming_request(
         total_tokens = tt
         prompt_tokens = pt
         cached_tokens = ct
-    
+
     # Call usage callback
     if total_tokens is not None and on_usage is not None:
         await on_usage(total_tokens, prompt_tokens or 0, cached_tokens)
-    
+
     return Response(
         content=resp.content,
         status_code=resp.status_code,
@@ -267,11 +272,11 @@ async def forward_non_streaming_request(
 
 async def forward_get_request(client: httpx.AsyncClient, url: str) -> Response:
     """Forward a GET request to vLLM backend.
-    
+
     Args:
         client: httpx AsyncClient to use
         url: Full URL to request
-    
+
     Returns:
         FastAPI Response with vLLM response content
     """
@@ -281,7 +286,9 @@ async def forward_get_request(client: httpx.AsyncClient, url: str) -> Response:
             break
         except (httpcore.ReadError, httpx.ReadError) as exc:
             if attempt < _MAX_READ_ERROR_RETRIES - 1:
-                logger.warning("ReadError on GET %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc)
+                logger.warning(
+                    "ReadError on GET %s (attempt %d/%d): %s", url, attempt + 1, _MAX_READ_ERROR_RETRIES, exc
+                )
                 continue
             raise
     return Response(
@@ -290,4 +297,3 @@ async def forward_get_request(client: httpx.AsyncClient, url: str) -> Response:
         headers=filtered_headers(resp.headers),
         media_type=resp.headers.get("content-type"),
     )
-

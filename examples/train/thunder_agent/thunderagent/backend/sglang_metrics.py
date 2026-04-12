@@ -5,6 +5,7 @@ Handles HTTP communication with SGLang endpoints, including:
 - Prometheus metrics parsing
 - Metrics history management
 """
+
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -22,12 +23,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SGLangCacheConfig:
     """Static capacity configuration from SGLang server info."""
+
     total_tokens_capacity: int = 0
 
 
 @dataclass
 class SGLangMetrics:
     """Parsed metrics from SGLang /metrics endpoint."""
+
     # Request stats
     num_requests_running: int = 0
     num_requests_waiting: int = 0
@@ -114,15 +117,23 @@ class SGLangMetricsClient(MetricsClient):
         self._monitor_task: Optional[asyncio.Task] = None
         self._monitor_stop = False
 
+    @staticmethod
+    def _strip_v1(url: str) -> str:
+        """Strip /v1 suffix from URL since metrics/info are root-level endpoints."""
+        base = url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        return base
+
     @property
     def metrics_url(self) -> str:
-        """Prometheus metrics endpoint."""
-        return f"{self.url}/metrics"
+        """Prometheus metrics endpoint (root-level, not under /v1)."""
+        return f"{self._strip_v1(self.url)}/metrics"
 
     @property
     def server_info_url(self) -> str:
-        """SGLang server info endpoint (capacity information)."""
-        return f"{self.url}/get_server_info"
+        """SGLang server info endpoint (root-level, not under /v1)."""
+        return f"{self._strip_v1(self.url)}/get_server_info"
 
     @property
     def latest_metrics(self) -> Optional[SGLangMetrics]:

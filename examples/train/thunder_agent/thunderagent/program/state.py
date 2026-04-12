@@ -1,4 +1,5 @@
 """Program state management."""
+
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,21 +11,23 @@ if TYPE_CHECKING:
 
 class ProgramStatus(Enum):
     """What the program is currently doing.
-    
+
     REASONING: On GPU, running inference in vLLM
     ACTING: Off GPU, executing tool or waiting for next request
     """
+
     REASONING = "reasoning"
     ACTING = "acting"
 
 
 class ProgramState(Enum):
     """Lifecycle state of a program.
-    
+
     ACTIVE: Program is running normally
     PAUSED: Program is paused (waiting in queue)
     TERMINATED: Program has completed/been released
     """
+
     ACTIVE = "active"
     PAUSED = "paused"
     TERMINATED = "terminated"
@@ -33,6 +36,7 @@ class ProgramState(Enum):
 @dataclass
 class Program:
     """A single program (task) with its status and state."""
+
     program_id: str
     backend_url: Optional[str] = None  # Which backend this program is assigned to (None if paused/waiting)
     origin_backend: Optional[str] = None  # Backend URL before pause (for resume fallback)

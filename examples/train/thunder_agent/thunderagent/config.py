@@ -1,4 +1,5 @@
 """ThunderAgent configuration."""
+
 from dataclasses import dataclass, field
 from typing import List
 
@@ -6,23 +7,24 @@ from typing import List
 @dataclass
 class Config:
     """ThunderAgent configuration (set via command line args)."""
+
     # Backend configuration
     backends: List[str] = field(default_factory=lambda: ["http://localhost:8000"])
-    
+
     # Router mode: "default" (pure proxy) or "tr" (capacity scheduling)
     router_mode: str = "tr"
 
     # Backend type: "vllm", "sglang", or "skyrl"
     backend_type: str = "vllm"
-    
+
     # Profile configuration
     profile_enabled: bool = False
     profile_dir: str = "/tmp/thunderagent_profiles"
-    
+
     # Metrics monitoring configuration
     metrics_enabled: bool = False
     metrics_interval: float = 5.0  # seconds between metrics fetch
-    
+
     # Scheduler configuration
     scheduler_interval: float = 5.0  # seconds between scheduler checks
     acting_token_weight: float = 1.0  # weight for acting tokens in capacity calculation

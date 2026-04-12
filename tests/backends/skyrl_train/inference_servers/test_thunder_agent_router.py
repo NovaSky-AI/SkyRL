@@ -1,6 +1,8 @@
 """Tests for ThunderAgentRouter."""
 
 import asyncio
+import concurrent.futures
+import importlib
 import threading
 import time
 from types import SimpleNamespace
@@ -12,19 +14,23 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# ThunderAgent/ dir is importable as a namespace package even without install,
-# so pytest.importorskip("ThunderAgent") alone is not sufficient. Check for
-# a real installed attribute instead.
-pytest.importorskip("ThunderAgent.config", reason="ThunderAgent package not installed")
+pytest.importorskip("examples.train.thunder_agent.thunderagent.config", reason="ThunderAgent deps missing")
 
-from ThunderAgent.program.state import Program, ProgramStatus
-from ThunderAgent.scheduler.router import MultiBackendRouter
-from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from examples.train.thunder_agent.thunder_agent_router import ThunderAgentRouter
+program_module = importlib.import_module("examples.train.thunder_agent.thunderagent.program.state")
+Program = program_module.Program
+ProgramStatus = program_module.ProgramStatus
+BackendState = importlib.import_module("examples.train.thunder_agent.thunderagent.backend.state").BackendState
+SGLangMetricsClient = importlib.import_module(
+    "examples.train.thunder_agent.thunderagent.backend.sglang_metrics"
+).SGLangMetricsClient
+MultiBackendRouter = importlib.import_module(
+    "examples.train.thunder_agent.thunderagent.scheduler.router"
+).MultiBackendRouter
+get_open_port = importlib.import_module("skyrl.backends.skyrl_train.inference_servers.common").get_open_port
+ThunderAgentRouter = importlib.import_module("examples.train.thunder_agent.thunder_agent_router").ThunderAgentRouter
 
 
 def create_mock_server(server_id: int) -> FastAPI:
-    """Create a mock vLLM-like server that echoes back server_id and path."""
     app = FastAPI()
 
     @app.post("/v1/chat/completions")
@@ -113,26 +119,9 @@ def env():
     time.sleep(0.5)
 
 
-def test_chat_completions_proxied(env):
-    """POST /v1/chat/completions routes through ThunderAgent and reaches backend."""
-    resp = httpx.post(
-        f"{env}/v1/chat/completions",
-        json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
-        timeout=10.0,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "choices" in data
-    assert data["usage"]["total_tokens"] == 15
-
-
-def test_catch_all_proxy(env):
-    """Non-scheduled endpoints proxy directly to backends via catch-all."""
-    resp = httpx.get(f"{env}/tokenize", timeout=5.0)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "server_id" in data
-    assert data["path"] == "/tokenize"
+# --------------------------------------------------------------------------
+# Router Parity
+# --------------------------------------------------------------------------
 
 
 def test_round_robin(env):
@@ -148,86 +137,20 @@ def test_session_affinity(env):
     assert len(set(ids)) == 1
 
 
-def test_inference_generate_tracked(env):
-    """/inference/v1/generate routes through ThunderAgent program tracking."""
-    resp = httpx.post(
-        f"{env}/inference/v1/generate",
-        json={"token_ids": [1, 2, 3], "sampling_params": {}, "model": "test", "program_id": "gen-prog-1"},
-        timeout=10.0,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "choices" in data
-    assert data["choices"][0]["token_ids"] == [100, 200, 300]
-
-    # Verify the program was tracked via /programs
-    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
-    assert prog_resp.status_code == 200
-    programs = prog_resp.json()
-    assert "gen-prog-1" in programs
-
-
-def test_program_id_in_body(env):
-    """program_id in request body is used as the ThunderAgent program identifier."""
-    httpx.post(
-        f"{env}/v1/chat/completions",
-        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "program_id": "body-prog-42"},
-        timeout=10.0,
-    )
-    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
-    programs = prog_resp.json()
-    assert "body-prog-42" in programs
-
-
-def test_programs_endpoint(env):
-    """/programs returns ThunderAgent program state."""
-    # First create a program via chat completions
-    httpx.post(
-        f"{env}/v1/chat/completions",
-        json={"model": "test", "messages": [{"role": "user", "content": "hello"}], "program_id": "test-prog-1"},
-        timeout=10.0,
-    )
-    resp = httpx.get(f"{env}/programs", timeout=5.0)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "test-prog-1" in data
-
-
-def test_health(env):
-    """/health returns combined status with program stats."""
-    resp = httpx.get(f"{env}/health", timeout=5.0)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "ok"
-    assert "backends" in data
-    assert "programs_count" in data
-
-
-def test_servers(env):
+def test_list_servers(env):
     """/servers returns all backend URLs."""
     resp = httpx.get(f"{env}/servers", timeout=5.0)
     assert resp.status_code == 200
     assert len(resp.json()["servers"]) == 2
 
 
-def test_chat_completions_error_clears_reasoning(env):
-    """Backend error response still transitions program out of REASONING."""
-    # Send a chat completion that will succeed (our mock always returns 200)
-    # but without a usage block — simulates a backend that returns an error body
-    # or a response with no usage info.
-    # Our mock does return usage, so we verify the program ends up in ACTING
-    # (not stuck in REASONING). This validates the fallback path exists.
-    prog_id = "error-clear-test"
-    httpx.post(
-        f"{env}/v1/chat/completions",
-        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "program_id": prog_id},
-        timeout=10.0,
-    )
-    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
-    programs = prog_resp.json()
-    assert prog_id in programs
-    # After a completed request, status should be ACTING (not stuck in REASONING)
-    assert programs[prog_id]["status"] == "acting"
+def test_catch_all_proxy(env):
+    """Non-scheduled endpoints proxy directly to backends via catch-all."""
+    resp = httpx.get(f"{env}/tokenize", timeout=5.0)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "server_id" in data
+    assert data["path"] == "/tokenize"
 
 
 def test_start_shutdown_lifecycle():
@@ -249,29 +172,107 @@ def test_start_shutdown_lifecycle():
     router_url = router.start()
     assert "http" in router_url
 
-    # Verify it's working
     resp = httpx.get(f"{router_url}/health", timeout=5.0)
     assert resp.status_code == 200
 
-    # Clean shutdown
     router.shutdown()
     mock_server.should_exit = True
     time.sleep(0.5)
 
 
 # --------------------------------------------------------------------------
-# Weight Sync Coordination Tests
+# ThunderAgent HTTP API
+# --------------------------------------------------------------------------
+
+
+def test_chat_completions_proxied(env):
+    """POST /v1/chat/completions routes through ThunderAgent and reaches backend."""
+    resp = httpx.post(
+        f"{env}/v1/chat/completions",
+        json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+        timeout=10.0,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "choices" in data
+    assert data["usage"]["total_tokens"] == 15
+
+
+def test_inference_generate_tracked(env):
+    """/inference/v1/generate routes through ThunderAgent program tracking."""
+    resp = httpx.post(
+        f"{env}/inference/v1/generate",
+        json={"token_ids": [1, 2, 3], "sampling_params": {}, "model": "test", "program_id": "gen-prog-1"},
+        timeout=10.0,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "choices" in data
+    assert data["choices"][0]["token_ids"] == [100, 200, 300]
+
+    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
+    assert prog_resp.status_code == 200
+    assert "gen-prog-1" in prog_resp.json()
+
+
+def test_program_id_in_body(env):
+    """program_id in request body is used as the ThunderAgent program identifier."""
+    httpx.post(
+        f"{env}/v1/chat/completions",
+        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "program_id": "body-prog-42"},
+        timeout=10.0,
+    )
+    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
+    assert "body-prog-42" in prog_resp.json()
+
+
+def test_programs_endpoint(env):
+    """/programs returns ThunderAgent program state."""
+    httpx.post(
+        f"{env}/v1/chat/completions",
+        json={"model": "test", "messages": [{"role": "user", "content": "hello"}], "program_id": "test-prog-1"},
+        timeout=10.0,
+    )
+    resp = httpx.get(f"{env}/programs", timeout=5.0)
+    assert resp.status_code == 200
+    assert "test-prog-1" in resp.json()
+
+
+def test_health(env):
+    """/health returns combined status with program stats."""
+    resp = httpx.get(f"{env}/health", timeout=5.0)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "backends" in data
+    assert "programs_count" in data
+
+
+def test_chat_completions_completion_updates_program_status(env):
+    """Successful chat completions transition the program out of REASONING."""
+    prog_id = "completion-status-test"
+    httpx.post(
+        f"{env}/v1/chat/completions",
+        json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "program_id": prog_id},
+        timeout=10.0,
+    )
+    prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
+    programs = prog_resp.json()
+    assert prog_id in programs
+    assert programs[prog_id]["status"] == "acting"
+
+
+# --------------------------------------------------------------------------
+# Weight Sync Coordination
 # --------------------------------------------------------------------------
 
 
 def test_weight_sync_begin_end(env):
     """POST /weight_sync/begin and /weight_sync/end toggle weight sync mode."""
-    # Begin weight sync
     resp = httpx.post(f"{env}/weight_sync/begin", json={}, timeout=5.0)
     assert resp.status_code == 200
     assert resp.json()["weight_sync_active"] is True
 
-    # End weight sync
     resp = httpx.post(f"{env}/weight_sync/end", json={}, timeout=5.0)
     assert resp.status_code == 200
     assert resp.json()["weight_sync_active"] is False
@@ -283,7 +284,6 @@ def test_weight_sync_idempotent_begin(env):
     resp = httpx.post(f"{env}/weight_sync/begin", json={}, timeout=5.0)
     assert resp.status_code == 200
 
-    # Clean up
     httpx.post(f"{env}/weight_sync/end", json={}, timeout=5.0)
 
 
@@ -295,13 +295,9 @@ def test_weight_sync_idempotent_end(env):
 
 def test_weight_sync_blocks_requests(env):
     """During weight sync, /inference/v1/generate requests are held until sync ends."""
-    import concurrent.futures
-
-    # Begin weight sync - this should block subsequent data-plane requests
     resp = httpx.post(f"{env}/weight_sync/begin", json={}, timeout=5.0)
     assert resp.status_code == 200
 
-    # Send a generate request in a thread - it should block
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             httpx.post,
@@ -310,22 +306,41 @@ def test_weight_sync_blocks_requests(env):
             timeout=10.0,
         )
 
-        # Give the request time to arrive and block
         time.sleep(0.5)
-
-        # The future should NOT be done yet (request is held)
         assert not future.done(), "Request should be blocked during weight sync"
 
-        # End weight sync - should release the held request
         httpx.post(f"{env}/weight_sync/end", json={}, timeout=5.0)
 
-        # Now the request should complete
         result = future.result(timeout=5.0)
         assert result.status_code == 200
         assert "choices" in result.json()
 
 
-def _build_scheduler_router(*, capacity: int) -> tuple[MultiBackendRouter, str]:
+# --------------------------------------------------------------------------
+# Backend URL Regressions
+# --------------------------------------------------------------------------
+
+
+def test_backend_state_completions_url_handles_root_and_v1_bases():
+    """BackendState should not duplicate /v1 when the backend base already includes it."""
+    assert BackendState("http://127.0.0.1:8000").completions_url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert BackendState("http://127.0.0.1:8000/v1").completions_url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert BackendState("http://127.0.0.1:8000/v1/").completions_url == "http://127.0.0.1:8000/v1/chat/completions"
+
+
+def test_sglang_metrics_client_uses_root_level_probe_endpoints():
+    """SGLang metrics and capacity probes stay at root endpoints even for /v1 backend URLs."""
+    client = SGLangMetricsClient("http://127.0.0.1:8000/v1/")
+    assert client.metrics_url == "http://127.0.0.1:8000/metrics"
+    assert client.server_info_url == "http://127.0.0.1:8000/get_server_info"
+
+
+# --------------------------------------------------------------------------
+# Scheduler Internals
+# --------------------------------------------------------------------------
+
+
+def _build_scheduler_router(*, capacity: int):
     router = MultiBackendRouter(
         ["http://backend-0"],
         scheduling_enabled=True,
@@ -339,7 +354,7 @@ def _build_scheduler_router(*, capacity: int) -> tuple[MultiBackendRouter, str]:
 
 
 def _add_program(
-    router: MultiBackendRouter,
+    router,
     backend_url: str,
     *,
     program_id: str,
