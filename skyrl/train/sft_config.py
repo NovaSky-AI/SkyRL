@@ -19,7 +19,6 @@ from skyrl.train.config import (
     OptimizerConfig,
     SkyRLTrainConfig,
 )
-from skyrl.train.utils.utils import validate_cfg
 
 # ---------------------------------------------------------------------------
 # SFT-specific config dataclasses
@@ -103,8 +102,8 @@ class SFTConfig(BaseConfig):
     batch_size: int = 4
     micro_train_batch_size_per_gpu: int = 2
     logger: str = "console"  # "console" or "wandb"
-    project_name: str = "megatron-sft"
-    run_name: str = ""
+    project_name: str = "skyrl_sft"
+    run_name: str = "skyrl_sft_run"
     ckpt_path: str = ""  # empty string = no checkpointing
     ckpt_interval: int = 0
 
@@ -115,6 +114,35 @@ class SFTConfig(BaseConfig):
 
 
 _VALID_STRATEGIES = ("megatron", "fsdp2")
+
+
+def validate_sft_cfg(cfg: SFTConfig) -> None:
+    """Validate SFT-specific configuration.
+
+    Only checks fields that are relevant to SFT training, unlike
+    ``validate_cfg`` which includes RL-specific validations.
+    """
+    if cfg.strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"Unknown strategy '{cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
+    if cfg.micro_train_batch_size_per_gpu <= 0:
+        raise ValueError(f"micro_train_batch_size_per_gpu must be > 0, got {cfg.micro_train_batch_size_per_gpu}")
+    if cfg.batch_size <= 0:
+        raise ValueError(f"batch_size must be > 0, got {cfg.batch_size}")
+    if cfg.num_steps <= 0:
+        raise ValueError(f"num_steps must be > 0, got {cfg.num_steps}")
+    if not cfg.model.path:
+        raise ValueError("model.path must be set")
+
+    # Parallelism check for megatron: TP * PP should equal num_gpus_per_node
+    if cfg.strategy == "megatron":
+        tp = cfg.megatron.tensor_model_parallel_size
+        pp = cfg.megatron.pipeline_model_parallel_size
+        num_gpus = cfg.placement.num_gpus_per_node
+        if tp * pp != num_gpus:
+            raise ValueError(
+                f"For megatron strategy, TP * PP must equal num_gpus_per_node. "
+                f"Got TP={tp}, PP={pp} (TP*PP={tp * pp}), num_gpus_per_node={num_gpus}."
+            )
 
 
 def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
@@ -160,5 +188,5 @@ def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
         cfg.trainer.ckpt_path = sft_cfg.ckpt_path
         cfg.trainer.ckpt_interval = sft_cfg.ckpt_interval
 
-    validate_cfg(cfg)
+    validate_sft_cfg(sft_cfg)
     return cfg

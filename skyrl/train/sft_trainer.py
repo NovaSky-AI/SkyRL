@@ -361,6 +361,19 @@ class SFTTrainer:
 
         batch_size = self.sft_cfg.batch_size
         num_steps = self.sft_cfg.num_steps
+
+        # Validate batch_size is divisible by data-parallel size
+        total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
+        if self.sft_cfg.strategy == "megatron":
+            tp = self.sft_cfg.megatron.tensor_model_parallel_size
+            pp = self.sft_cfg.megatron.pipeline_model_parallel_size
+            dp_size = total_gpus // (tp * pp)
+        else:
+            # FSDP: all GPUs are data-parallel
+            dp_size = total_gpus
+        if batch_size % dp_size != 0:
+            raise ValueError(f"batch_size ({batch_size}) must be divisible by data-parallel size ({dp_size})")
+
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
 
         for step in tqdm(range(num_steps)):
