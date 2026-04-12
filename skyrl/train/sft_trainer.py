@@ -32,6 +32,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.sft_config import SFTConfig, build_skyrl_sft_config
@@ -223,10 +224,6 @@ class SFTTrainer:
 
         Selects the correct PolicyWorker based on strategy.
         """
-        _VALID_STRATEGIES = ("megatron", "fsdp2")
-        if self.sft_cfg.strategy not in _VALID_STRATEGIES:
-            raise ValueError(f"Unknown strategy '{self.sft_cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
-
         if self.sft_cfg.strategy == "megatron":
             from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
                 PolicyWorker,
@@ -436,12 +433,12 @@ class SFTTrainer:
         """Save a checkpoint at the given step."""
         global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"global_step_{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
-        os.makedirs(global_step_folder, exist_ok=True)
+        io.makedirs(global_step_folder, exist_ok=True)
         logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
         # Write latest checkpoint marker
         latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
-        with open(latest_file, "w") as f:
+        with io.open_file(latest_file, "w") as f:
             f.write(str(step))
         logger.info(f"Checkpoint saved for global_step_{step}")
 

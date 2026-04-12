@@ -133,22 +133,23 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     if not cfg.model.path:
         raise ValueError("model.path must be set")
 
-    # Parallelism check for megatron: TP * PP should equal num_gpus_per_node
+    # Parallelism check for megatron: total world size must be divisible by TP * PP
     if cfg.strategy == "megatron":
         tp = cfg.megatron.tensor_model_parallel_size
         pp = cfg.megatron.pipeline_model_parallel_size
-        num_gpus = cfg.placement.num_gpus_per_node
-        if tp * pp != num_gpus:
+        total_world_size = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
+        if total_world_size % (tp * pp) != 0:
             raise ValueError(
-                f"For megatron strategy, TP * PP must equal num_gpus_per_node. "
-                f"Got TP={tp}, PP={pp} (TP*PP={tp * pp}), num_gpus_per_node={num_gpus}."
+                f"For megatron strategy, total_world_size must be divisible by TP * PP. "
+                f"Got TP={tp}, PP={pp} (TP*PP={tp * pp}), "
+                f"total_world_size={total_world_size} "
+                f"(num_nodes={cfg.placement.num_nodes} * num_gpus_per_node={cfg.placement.num_gpus_per_node})."
             )
 
 
 def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     """Map user-facing SFTConfig to the internal SkyRL backend config."""
-    if sft_cfg.strategy not in _VALID_STRATEGIES:
-        raise ValueError(f"Unknown strategy '{sft_cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
+    validate_sft_cfg(sft_cfg)
 
     cfg = SkyRLTrainConfig()
 
@@ -188,5 +189,4 @@ def build_skyrl_sft_config(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
         cfg.trainer.ckpt_path = sft_cfg.ckpt_path
         cfg.trainer.ckpt_interval = sft_cfg.ckpt_interval
 
-    validate_sft_cfg(sft_cfg)
     return cfg
