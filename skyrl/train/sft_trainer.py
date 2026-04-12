@@ -439,6 +439,13 @@ class SFTTrainer:
             dp_size = total_gpus
         if batch_size % dp_size != 0:
             raise ValueError(f"batch_size ({batch_size}) must be divisible by data-parallel size ({dp_size})")
+        per_dp_batch = batch_size // dp_size
+        micro_batch = self.sft_cfg.micro_train_batch_size_per_gpu
+        if per_dp_batch % micro_batch != 0:
+            raise ValueError(
+                f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
+                f"micro_train_batch_size_per_gpu ({micro_batch})"
+            )
 
         # Resume from checkpoint if configured
         start_step = self.load_checkpoint()
@@ -446,10 +453,12 @@ class SFTTrainer:
         # Shuffle data before training
         rng = random.Random(self.sft_cfg.seed)
         rng.shuffle(tokenized)
-        current_epoch = 0
 
-        # Advance start_idx for resumed training
-        start_idx = (start_step * batch_size) % len(tokenized)
+        # Replay epoch shuffles for reproducibility on resume
+        start_epoch = (start_step * batch_size) // len(tokenized)
+        for _ in range(start_epoch):
+            rng.shuffle(tokenized)
+        current_epoch = start_epoch
 
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
@@ -462,7 +471,8 @@ class SFTTrainer:
                 # Check for epoch boundary and reshuffle
                 epoch = (step * batch_size) // len(tokenized)
                 if epoch > current_epoch:
-                    rng.shuffle(tokenized)
+                    for _ in range(epoch - current_epoch):
+                        rng.shuffle(tokenized)
                     current_epoch = epoch
 
                 # Data loading with wrap-around
@@ -516,14 +526,18 @@ class SFTTrainer:
         # Save final checkpoint (if checkpointing is enabled)
         if self.sft_cfg.ckpt_path:
             final_step = num_steps - 1
-            logger.info(f"Saving final checkpoint at step {final_step}")
-            self.save_checkpoint(final_step)
+            already_saved = (
+                self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
+            )
+            if not already_saved:
+                logger.info(f"Saving final checkpoint at step {final_step}")
+                self.save_checkpoint(final_step)
 
         logger.info("SFT training complete!")
 
     def save_checkpoint(self, step: int):
         """Save a checkpoint at the given step."""
-        global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"global_step_{step}")
+        global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
         io.makedirs(global_step_folder, exist_ok=True)
         logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
