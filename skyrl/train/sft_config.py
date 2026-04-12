@@ -106,6 +106,8 @@ class SFTConfig(BaseConfig):
     run_name: str = "skyrl_sft_run"
     ckpt_path: str = ""  # empty string = no checkpointing
     ckpt_interval: int = 0
+    resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
+    seed: int = 42
 
 
 # ---------------------------------------------------------------------------

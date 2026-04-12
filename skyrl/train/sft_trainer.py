@@ -21,6 +21,7 @@ Or as a CLI entrypoint::
 """
 
 import os
+import random
 import sys
 
 import ray
@@ -38,6 +39,7 @@ from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.sft_config import SFTConfig, build_skyrl_sft_config
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
+from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer, initialize_ray
 
 # ---------------------------------------------------------------------------
@@ -245,11 +247,17 @@ class SFTTrainer:
             num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=0.75,
+            num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
         )
-        ray.get(actor_group.async_init_model(self.sft_cfg.model.path))
+        ray.get(
+            actor_group.async_init_model(
+                self.sft_cfg.model.path,
+                num_training_steps=self.sft_cfg.num_steps,
+            )
+        )
+        ray.get(actor_group.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
 
         self.dispatch = WorkerDispatch(self.cfg, policy_actor_group=actor_group)
 
@@ -326,6 +334,60 @@ class SFTTrainer:
         return batch
 
     # ------------------------------------------------------------------ #
+    # Checkpoint resume
+    # ------------------------------------------------------------------ #
+
+    def load_checkpoint(self) -> int:
+        """Load a checkpoint and return the step number to resume from.
+
+        Behaviour depends on ``sft_cfg.resume_from``:
+        - ``""`` (empty): no resume, return 0.
+        - ``"latest"``: read ``latest_ckpt_global_step.txt`` from ``ckpt_path``.
+        - otherwise: treat as a direct path to a ``global_step_N`` directory.
+
+        Returns:
+            The global step to resume from (0 if no checkpoint loaded).
+        """
+        resume_from = self.sft_cfg.resume_from
+        if not resume_from:
+            return 0
+
+        if resume_from == "latest":
+            if not self.sft_cfg.ckpt_path:
+                logger.info("resume_from='latest' but ckpt_path is empty, starting from scratch")
+                return 0
+            latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
+            if not io.exists(latest_file):
+                logger.info("No latest checkpoint marker found, starting from scratch")
+                return 0
+            with io.open_file(latest_file, "r") as f:
+                ckpt_step = int(f.read().strip())
+            checkpoint_path = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_step}")
+        else:
+            checkpoint_path = resume_from
+
+        if not io.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
+
+        global_step = extract_step_from_path(checkpoint_path)
+        if global_step == -1:
+            raise ValueError(
+                f"Cannot extract step number from checkpoint path: {checkpoint_path}. "
+                f"Expected a directory named '{GLOBAL_STEP_PREFIX}<N>'."
+            )
+
+        policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
+        logger.info(f"Loading checkpoint from {checkpoint_path} (step {global_step})")
+        self.dispatch.load_checkpoint(
+            "policy",
+            policy_ckpt_dir,
+            load_optimizer_states=True,
+            load_lr_scheduler_states=True,
+        )
+        logger.info(f"Successfully resumed from global_step_{global_step}")
+        return global_step
+
+    # ------------------------------------------------------------------ #
     # Training
     # ------------------------------------------------------------------ #
 
@@ -359,6 +421,13 @@ class SFTTrainer:
         batch_size = self.sft_cfg.batch_size
         num_steps = self.sft_cfg.num_steps
 
+        # Early validation: dataset must have at least batch_size examples
+        if len(tokenized) < batch_size:
+            raise ValueError(
+                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
+                f"Reduce batch_size or use more data."
+            )
+
         # Validate batch_size is divisible by data-parallel size
         total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
         if self.sft_cfg.strategy == "megatron":
@@ -371,34 +440,57 @@ class SFTTrainer:
         if batch_size % dp_size != 0:
             raise ValueError(f"batch_size ({batch_size}) must be divisible by data-parallel size ({dp_size})")
 
-        logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
+        # Resume from checkpoint if configured
+        start_step = self.load_checkpoint()
 
-        for step in tqdm(range(num_steps)):
+        # Shuffle data before training
+        rng = random.Random(self.sft_cfg.seed)
+        rng.shuffle(tokenized)
+        current_epoch = 0
+
+        # Advance start_idx for resumed training
+        start_idx = (start_step * batch_size) % len(tokenized)
+
+        logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
+        if start_step > 0:
+            logger.info(f"Resuming from step {start_step}")
+
+        for step in tqdm(range(start_step, num_steps)):
             all_timings: dict[str, float] = {}
 
             with Timer("step", all_timings):
-                # Data loading
+                # Check for epoch boundary and reshuffle
+                epoch = (step * batch_size) // len(tokenized)
+                if epoch > current_epoch:
+                    rng.shuffle(tokenized)
+                    current_epoch = epoch
+
+                # Data loading with wrap-around
                 with Timer("data_loading", all_timings):
                     start_idx = (step * batch_size) % len(tokenized)
-                    batch_examples = tokenized[start_idx : start_idx + batch_size]
-                    if len(batch_examples) < batch_size:
-                        batch_examples = tokenized[:batch_size]  # Wrap around
+                    end_idx = start_idx + batch_size
+                    if end_idx > len(tokenized):
+                        batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
+                    else:
+                        batch_examples = tokenized[start_idx:end_idx]
                     batch = self.collate_batch(batch_examples)
 
                 # Training step
                 step_result = self.train_step(batch, step)
                 all_timings.update(step_result["timings"])
 
-            # Compute throughput
+            # Compute throughput using actual (non-padding) tokens
             batch_num_seq = batch["sequences"].shape[0]
             batch_padded_seq_len = batch["sequences"].shape[1]
-            tokens_per_second = batch_num_seq * batch_padded_seq_len / all_timings["step"]
+            actual_num_tokens = batch["attention_mask"].sum().item()
+            tokens_per_second = actual_num_tokens / all_timings["step"]
 
             # Build log dict
             log_dict = {
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/actual_num_tokens": actual_num_tokens,
                 "train/batch_num_seq": batch_num_seq,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
             }
@@ -415,7 +507,7 @@ class SFTTrainer:
                     self.save_checkpoint(step)
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
 
-            self.tracker.log(log_dict, step=step)
+            self.tracker.log(log_dict, step=step, commit=True)
             self.global_step = step
 
             if step % 5 == 0:
