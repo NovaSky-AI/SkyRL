@@ -200,7 +200,6 @@ class SFTTrainer:
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
-        self.global_step: int = 0
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -518,7 +517,6 @@ class SFTTrainer:
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
 
             self.tracker.log(log_dict, step=step, commit=True)
-            self.global_step = step
 
             if step % 5 == 0:
                 logger.info(f"Step {step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}")
