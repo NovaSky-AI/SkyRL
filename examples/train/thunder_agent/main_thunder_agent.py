@@ -25,6 +25,16 @@ from .config import ThunderAgentConfig
 class ThunderAgentExp(BasePPOExp):
     """BasePPOExp subclass that uses ThunderAgentRouter for inference routing."""
 
+    def get_generator(self, cfg, tokenizer, inference_engine_client):
+        from .ta_generator import ThunderAgentSkyRLGymGenerator
+
+        return ThunderAgentSkyRLGymGenerator(
+            generator_cfg=cfg.generator,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+        )
+
     def get_inference_client(self) -> InferenceEngineInterface:
         if _SKYRL_USE_NEW_INFERENCE:
             return self._get_new_inference_client()
@@ -35,9 +45,10 @@ class ThunderAgentExp(BasePPOExp):
 
     def _get_new_inference_client(self):
         """Override to use ThunderAgentRouter instead of InferenceRouter."""
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
         from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
         from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+
+        from .ta_remote_inference_client import ThunderAgentRemoteInferenceClient
 
         ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
@@ -88,7 +99,7 @@ class ThunderAgentExp(BasePPOExp):
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
             )
 
-        return RemoteInferenceClient(
+        return ThunderAgentRemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,

@@ -1,7 +1,7 @@
 """ThunderAgent FastAPI application entry point."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -13,17 +13,22 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def get_program_id(payload: Dict[str, Any]) -> str:
+def get_program_id(payload: Dict[str, Any], headers: Optional[Mapping[str, str]] = None) -> str:
     """Extract program_id from the request payload.
 
     Checks payload["program_id"] first, then payload["extra_body"]["program_id"].
-    Returns "default" if neither is present.
+    Falls back to the X-Session-ID header so SkyRL session routing can act as
+    the ThunderAgent program identifier when no explicit program_id is sent.
     """
     if "program_id" in payload:
         return str(payload["program_id"])
     extra_body = payload.get("extra_body", {})
     if isinstance(extra_body, dict) and "program_id" in extra_body:
         return str(extra_body["program_id"])
+    if headers is not None:
+        session_id = headers.get("X-Session-ID") or headers.get("x-session-id")
+        if session_id:
+            return str(session_id)
     return "default"
 
 
@@ -51,7 +56,7 @@ def register_routes(app: FastAPI, ta_router: MultiBackendRouter, config: Optiona
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
-        program_id = get_program_id(payload)
+        program_id = get_program_id(payload, request.headers)
         program_state = ta_router.get_or_create_program(program_id)
 
         if program_state.profile:

@@ -190,7 +190,7 @@ class ThunderAgentRouter:
             except Exception as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
-            program_id = get_program_id(payload)
+            program_id = get_program_id(payload, request.headers)
             program_state = ta_router.get_or_create_program(program_id)
 
             if program_state.profile:
