@@ -798,14 +798,23 @@ class RayPPOTrainer:
         token_level_rewards = data["rewards"]
 
         if self.cfg.generator.step_wise_trajectories:
+            # Step-wise only supports outcome-based estimators (GRPO, RLOO, MAXRL); ensured by `validate_cfg`.
             is_last_step = data["is_last_step"].bool()
             index = np.array(data.metadata["uids"])
             values = data["values"]
-            # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
+            # Use the last step of each trajectory to compute advantages.
             # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
+            #
+            # We pass an all-ones mask here so the estimator returns the scalar advantage at every
+            # position (outcome-based estimators produce `scalar * mask`). The real per-step
+            # `response_mask` is re-applied on broadcast below — otherwise earlier steps would
+            # receive advantages at the *last step's* response-token positions (which usually don't
+            # overlap with the earlier step's own positions), silently zeroing out their training
+            # signal. See issue #1492.
+            last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards[is_last_step],
-                response_mask=data["response_mask"][is_last_step],
+                response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
                 index=index[is_last_step.cpu().numpy()],
                 adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
                 values=values[is_last_step] if values is not None else None,
@@ -814,16 +823,27 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
-            # Broadcast each trajectory's advantage and return to all steps of each trajectory.
+            # Broadcast each trajectory's advantage/return to all steps of that trajectory, then
+            # re-apply each step's own response_mask so values land at each step's own response
+            # tokens (rather than the last step's positions).
+            #
+            # Shapes:
+            #   traj_ids, (batch_size,):             trajectory id per step (cumsum of shifted is_last_step)
+            #   last_step_advantages/returns,
+            #       (num_traj, seqlen):              scalar advantage/return per trajectory at every position
+            #   last_step_advantages/returns[traj_ids],
+            #       (batch_size, seqlen):            broadcast to every step of the owning trajectory
+            #   response_mask_float, (batch_size, seqlen): per-step response mask
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
             )
-            num_groups = traj_ids[-1].item() + 1
-            assert num_groups == len(
+            num_traj = traj_ids[-1].item() + 1
+            assert num_traj == len(
                 last_step_advantages
-            ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
+            ), f"num_traj {num_traj} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
+            response_mask_float = data["response_mask"].to(last_step_advantages.dtype)
+            advantages = last_step_advantages[traj_ids] * response_mask_float
+            returns = last_step_returns[traj_ids] * response_mask_float
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,

@@ -183,6 +183,8 @@ for i, step_output in enumerate(trajectory_steps):
         rewards = [0.0] * len(step_output.response_ids)
 ```
 
+Note that SkyRL currently only supports trajectory-level reward for step-wise training. Therefore, the reward should be placed at the last step's last token, and all non-last-step rewards are ignored. We then use the last step's reward to estimate the advantage and broadcast it to previous turns. Because of this, you should only use outcome-based advantage estimators (`cfg.trainer.algorithm.advantage_estimator` in `grpo`, `rloo`, or `maxrl`); `reinforce++` and `gae` are rejected at config validation time.
+
 ### 4. Ensure Contiguous Ordering
 
 All steps of trajectory A must appear before any steps of trajectory B in the output lists:
