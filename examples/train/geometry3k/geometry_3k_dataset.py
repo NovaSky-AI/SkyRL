@@ -96,8 +96,6 @@ def make_map_fn(split):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/geometry_3k")
-    parser.add_argument("--dev_size", type=int, default=500, help="Size of the dev subset")
-
     args = parser.parse_args()
 
     args.output_dir = os.path.expanduser(args.output_dir)
@@ -127,16 +125,25 @@ if __name__ == "__main__":
     train_dataset.to_parquet(train_parquet_path)
     print(f"Saved full training set ({len(train_dataset)} examples) to {train_parquet_path}")
 
-    # Create a smaller dev subset for testing
-    dev_size = min(args.dev_size, len(train_dataset))
-    dev_dataset = train_dataset.select(range(dev_size))
-    dev_parquet_path = os.path.join(output_dir, "train-dev.parquet")
-    dev_dataset.to_parquet(dev_parquet_path)
-    print(f"Saved dev subset ({dev_size} examples) to {dev_parquet_path}")
+    # Process and save the val split
+    if "val" in dataset:
+        val_dataset = dataset["val"]
+        print(f"Loaded {len(val_dataset)} val examples")
+        val_dataset = val_dataset.map(
+            function=make_map_fn("val"),
+            with_indices=True,
+            num_proc=os.cpu_count(),
+            remove_columns=val_dataset.column_names,
+            desc="Processing val dataset",
+        )
+        val_parquet_path = os.path.join(output_dir, "val.parquet")
+        val_dataset.to_parquet(val_parquet_path)
+        print(f"Saved val set ({len(val_dataset)} examples) to {val_parquet_path}")
 
-    # If there's a test split, process it too
+    # Process and save the test split
     if "test" in dataset:
         test_dataset = dataset["test"]
+        print(f"Loaded {len(test_dataset)} test examples")
         test_dataset = test_dataset.map(
             function=make_map_fn("test"),
             with_indices=True,

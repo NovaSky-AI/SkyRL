@@ -11,24 +11,16 @@ The [Geometry-3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k) co
 
 ## Setup
 
-### 1. Prepare the dataset
-
-Convert the HuggingFace dataset to parquet format:
-
-```bash
-uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir ~/data/geometry_3k
-```
-
-This creates:
-- `train.parquet`: Full training set
-- `train-dev.parquet`: Smaller dev subset (500 examples by default)
-
-### 2. Run training
-
-**Full training run** (multi-GPU):
+Run training (the dataset is auto-generated on first run if not already present):
 
 ```bash
 NUM_GPUS=4 bash examples/train/geometry3k/run_geometry3k.sh
+```
+
+To generate the dataset separately:
+
+```bash
+uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir ~/data/geometry_3k
 ```
 
 ## Configuration Options

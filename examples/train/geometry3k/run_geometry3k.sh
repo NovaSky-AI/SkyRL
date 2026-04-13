@@ -8,6 +8,11 @@ set -x
 
 : "${DATA_DIR:="$HOME/data/geometry_3k"}"
 : "${NUM_GPUS:=8}"
+
+if [ ! -f "$DATA_DIR/train.parquet" ]; then
+  echo "=== Generating Geometry-3K dataset ==="
+  uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir "$DATA_DIR"
+fi
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm"}"
@@ -16,7 +21,7 @@ set -x
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/train-dev.parquet']" \
+  data.val_data="['$DATA_DIR/val.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.placement.colocate_all=true \
