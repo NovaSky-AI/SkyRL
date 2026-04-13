@@ -1064,6 +1064,8 @@ def compute_reinforce_plus_plus_outcome_advantage(
     Args:
         - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - return_raw_scores: bool — when True, skips response_mask multiplication
+          so raw [N, seqlen] advantages flow through for step-wise training.
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
@@ -1105,6 +1107,8 @@ def compute_rloo_outcome_advantage(
         - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
         - index: np.ndarray (batch_size)
+        - return_raw_scores: bool — when True, returns [N, seqlen] unmasked scores
+          (expanded from [N, 1]) for step-wise training.
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
@@ -1136,7 +1140,9 @@ def compute_rloo_outcome_advantage(
                 logger_.warning(f"Only one response for prompt index {index[i]}, setting advantage to 0")
                 scores[i] = 0.0
         scores = scores.unsqueeze(-1)
-        if not return_raw_scores:
+        if return_raw_scores:
+            scores = scores.expand_as(response_mask)
+        else:
             scores = scores * response_mask
 
     return scores, scores
@@ -1149,12 +1155,17 @@ def compute_gae_advantage_return(
     response_mask: Float[torch.Tensor, "batch_size seqlen"],
     gamma: float,
     lambd: float,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> Tuple[Float[torch.Tensor, "batch_size seqlen"], Float[torch.Tensor, "batch_size seqlen"]]:
     """
     Compute advantage and return for GAE.
 
     Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
     """
     with torch.no_grad():
         lastgaelam = 0
@@ -1170,6 +1181,8 @@ def compute_gae_advantage_return(
 
         returns = advantages + values
         advantages = masked_whiten(advantages, response_mask)
+        if not return_raw_scores:
+            advantages = advantages * response_mask
     return advantages, returns
 
 
@@ -1192,6 +1205,8 @@ def compute_grpo_outcome_advantage(
         - index: np.ndarray (batch_size)
         - epsilon: float
         - grpo_norm_by_std: bool
+        - return_raw_scores: bool — when True, returns [N, seqlen] unmasked scores
+          (expanded from [N, 1]) for step-wise training.
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
@@ -1223,7 +1238,9 @@ def compute_grpo_outcome_advantage(
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1)
-        if not return_raw_scores:
+        if return_raw_scores:
+            scores = scores.expand_as(response_mask)
+        else:
             scores = scores * response_mask
 
     return scores, scores
@@ -1238,7 +1255,20 @@ def compute_maxrl_advantage(
     return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute advantage for MAXRL using mean-normalized group-relative rewards."""
+    """Compute advantage for MAXRL using mean-normalized group-relative rewards.
+
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+        - epsilon: float
+        - return_raw_scores: bool — when True, returns [N, seqlen] unmasked scores
+          (expanded from [N, 1]) for step-wise training.
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
@@ -1261,7 +1291,9 @@ def compute_maxrl_advantage(
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1)
-        if not return_raw_scores:
+        if return_raw_scores:
+            scores = scores.expand_as(response_mask)
+        else:
             scores = scores * response_mask
 
     return scores, scores

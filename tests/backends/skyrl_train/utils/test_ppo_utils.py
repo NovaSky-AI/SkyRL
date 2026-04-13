@@ -672,3 +672,34 @@ class TestApplyLossReductionToAdvantagesMinibatch:
                 micro_batch_size=1,
                 max_seq_len=1,
             )
+
+
+@pytest.mark.parametrize(
+    "estimator",
+    ["grpo", "rloo", "maxrl", "reinforce++", "gae"],
+)
+def test_return_raw_scores_shape_is_n_seqlen(estimator):
+    """All estimators must return [N, seqlen] when return_raw_scores=True."""
+    batch_size, seqlen = 4, 8
+    token_level_rewards = torch.zeros(batch_size, seqlen)
+    # Place a reward at the last response token for each row
+    token_level_rewards[:, -1] = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    response_mask = torch.ones(batch_size, seqlen)
+    index = np.array([0, 0, 1, 1])
+
+    kwargs = dict(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        return_raw_scores=True,
+        gamma=1.0,
+        lambd=1.0,
+        config={},
+    )
+    if estimator == "gae":
+        kwargs["values"] = torch.ones(batch_size, seqlen) * 0.5
+
+    adv, ret = compute_advantages_and_returns(adv_estimator=estimator, **kwargs)
+
+    assert adv.shape == (batch_size, seqlen), f"{estimator}: adv shape {adv.shape} != ({batch_size}, {seqlen})"
+    assert ret.shape == (batch_size, seqlen), f"{estimator}: ret shape {ret.shape} != ({batch_size}, {seqlen})"

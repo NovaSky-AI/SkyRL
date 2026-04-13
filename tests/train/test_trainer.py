@@ -539,16 +539,31 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     validate_batch_sizes(cfg)
 
 
-def test_step_wise_advantage_uses_per_step_response_mask(dummy_config):
+@pytest.mark.parametrize(
+    "estimator",
+    ["grpo", "rloo", "maxrl", "reinforce++", "gae"],
+)
+def test_step_wise_advantage_uses_per_step_response_mask(dummy_config, estimator):
     """Verify that step-wise advantage computation respects each step's own response_mask.
 
     The current bug: advantages are computed using only the last step's response_mask,
     so earlier steps with longer responses get zeroed-out advantages at positions beyond
     the last step's response length.
+
+    Parametrized over all 5 advantage estimators.
+
+    Layout: 1 prompt ("p0") with 2 trajectories, each having 2 steps = 4 rows.
+    Having 2 trajectories per prompt ensures group-based estimators (GRPO, RLOO, MAXRL)
+    produce non-zero advantages.
+
+    Row 0: traj 0, earlier step, response positions 3-9 (7 tokens)
+    Row 1: traj 0, last step,    response positions 3-5 (3 tokens)
+    Row 2: traj 1, earlier step, response positions 2-7 (6 tokens)
+    Row 3: traj 1, last step,    response positions 2-3 (2 tokens)
     """
     cfg = dummy_config
     cfg.generator.step_wise_trajectories = True
-    cfg.trainer.algorithm.advantage_estimator = "grpo"
+    cfg.trainer.algorithm.advantage_estimator = estimator
     cfg.trainer.algorithm.grpo_norm_by_std = True
     # Disable KL-in-reward so we don't need base_action_log_probs etc.
     cfg.trainer.algorithm.use_kl_in_reward = False
@@ -563,14 +578,6 @@ def test_step_wise_advantage_uses_per_step_response_mask(dummy_config):
         generator=dummy_generator,
     )
 
-    # ------------------------------------------------------------------
-    # Build mock batch: 2 trajectories x 2 steps = 4 rows, seqlen=10
-    #
-    # Row 0: traj p0, earlier step, response positions 3-9 (7 tokens)
-    # Row 1: traj p0, last step,    response positions 3-5 (3 tokens)
-    # Row 2: traj p1, earlier step, response positions 2-7 (6 tokens)
-    # Row 3: traj p1, last step,    response positions 2-3 (2 tokens)
-    # ------------------------------------------------------------------
     seqlen = 10
     batch_size = 4
 
@@ -581,14 +588,20 @@ def test_step_wise_advantage_uses_per_step_response_mask(dummy_config):
     response_mask[3, 2:4] = 1  # 2 tokens
 
     rewards = torch.zeros(batch_size, seqlen, dtype=torch.float32)
-    # Place reward at last response token of each *last* step
-    rewards[1, 5] = 1.0  # last response token of row 1 (last step of p0)
-    rewards[3, 3] = 1.0  # last response token of row 3 (last step of p1)
+    # Place *different* rewards at each trajectory's last step so group-based
+    # estimators produce non-zero centered advantages.
+    rewards[1, 5] = 1.0  # last response token of row 1 (last step of traj 0)
+    rewards[3, 3] = 3.0  # last response token of row 3 (last step of traj 1)
 
     is_last_step = torch.tensor([False, True, False, True], dtype=torch.bool)
 
     sequences = torch.randint(0, 1000, (batch_size, seqlen))
 
+    # GAE needs values; other estimators do not.
+    values = torch.ones(batch_size, seqlen, dtype=torch.float32) * 0.5 if estimator == "gae" else None
+
+    # Both trajectories belong to the same prompt "p0" so group-based
+    # estimators (GRPO, RLOO, MAXRL) have >1 sample per group.
     data = TrainingInputBatch(
         {
             "sequences": sequences,
@@ -596,11 +609,11 @@ def test_step_wise_advantage_uses_per_step_response_mask(dummy_config):
             "loss_mask": response_mask.clone(),
             "rewards": rewards,
             "is_last_step": is_last_step,
-            "values": None,
+            "values": values,
         },
     )
     data.metadata = {
-        "uids": np.array(["p0", "p0", "p1", "p1"]),
+        "uids": np.array(["p0", "p0", "p0", "p0"]),
         "avg_response_length": float(response_mask.sum(dim=-1).float().mean().item()),
     }
 
@@ -610,21 +623,23 @@ def test_step_wise_advantage_uses_per_step_response_mask(dummy_config):
     data = trainer.compute_advantages_and_returns(data)
 
     # ------------------------------------------------------------------
-    # Assertions — these should FAIL on the current buggy code
+    # Assertions
     # ------------------------------------------------------------------
 
-    # Row 0 is step 0 of traj p0.  Its own response_mask has 1s at positions 3-9.
+    # Row 0 is step 0 of traj 0.  Its own response_mask has 1s at positions 3-9.
     # The bug: positions 6-9 will have advantage==0 because they were masked
     # by the last step's shorter mask (positions 3-5 only).
     step0_traj0_adv = data["advantages"][0]
     assert (
         step0_traj0_adv[6:10] != 0
-    ).all(), "Bug: earlier step tokens beyond last step's response have zero advantage"
+    ).all(), f"[{estimator}] Bug: earlier step tokens beyond last step's response have zero advantage"
 
     # Tokens outside step 0's own response must remain zero
     assert (step0_traj0_adv[0:3] == 0).all()
 
-    # Same check for traj p1: row 2 has response positions 2-7,
+    # Same check for traj 1: row 2 has response positions 2-7,
     # but last step only has 2-3
     step0_traj1_adv = data["advantages"][2]
-    assert (step0_traj1_adv[4:8] != 0).all(), "Bug: earlier step tokens beyond last step's response have zero advantage"
+    assert (
+        step0_traj1_adv[4:8] != 0
+    ).all(), f"[{estimator}] Bug: earlier step tokens beyond last step's response have zero advantage"
