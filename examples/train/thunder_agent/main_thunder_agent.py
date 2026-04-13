@@ -1,12 +1,14 @@
 """
-Main entrypoint for training with ThunderAgent program-aware scheduling.
+Main entrypoint for fully async training with ThunderAgent scheduling.
 
 Uses ThunderAgentRouter (instead of InferenceRouter) for the new HTTP inference
 layer. ThunderAgent intercepts /v1/chat/completions for program scheduling
 while routing SkyRL's token-based generation endpoint through the same router.
 """
 
+import asyncio
 import faulthandler
+import os
 import signal
 import sys
 from pathlib import Path
@@ -16,17 +18,18 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils import initialize_ray, validate_cfg
 
-from .config import ThunderAgentConfig
+from .training_config import ThunderAgentConfig
 
 
-class ThunderAgentExp(BasePPOExp):
-    """BasePPOExp subclass that uses ThunderAgentRouter for inference routing."""
+class FullyAsyncThunderAgentExp(BasePPOExp):
+    """Fully async BasePPOExp subclass that uses ThunderAgentRouter for inference."""
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
-        from .ta_generator import ThunderAgentSkyRLGymGenerator
+        from .skyrl_integration.generator import ThunderAgentSkyRLGymGenerator
 
         return ThunderAgentSkyRLGymGenerator(
             generator_cfg=cfg.generator,
@@ -34,6 +37,32 @@ class ThunderAgentExp(BasePPOExp):
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
+
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator,
+        colocate_pg,
+    ):
+        return FullyAsyncRayPPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
+
+    def run(self):
+        trainer = self._setup_trainer()
+        asyncio.run(trainer.train())
 
     def get_inference_client(self) -> InferenceEngineInterface:
         if _SKYRL_USE_NEW_INFERENCE:
@@ -48,7 +77,7 @@ class ThunderAgentExp(BasePPOExp):
         from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
         from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 
-        from .ta_remote_inference_client import ThunderAgentRemoteInferenceClient
+        from .skyrl_integration.remote_inference_client import ThunderAgentRemoteInferenceClient
 
         ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
@@ -106,11 +135,13 @@ class ThunderAgentExp(BasePPOExp):
         )
 
     def _create_thunder_agent_router(self, server_urls, ie_cfg):
-        from .thunder_agent_router import ThunderAgentRouter
+        from .skyrl_integration.router import ThunderAgentRouter
 
         thunderagent_log_file = str(Path(self.cfg.trainer.log_path) / "thunderagent.log")
+        thunderagent_port = int(os.environ.get("THUNDER_AGENT_ROUTER_PORT", "8080"))
         return ThunderAgentRouter(
             server_urls=server_urls,
+            port=thunderagent_port,
             log_file=thunderagent_log_file,
             router_mode=ie_cfg.thunder_agent_mode,
             backend_type=ie_cfg.backend,
@@ -128,7 +159,7 @@ def skyrl_entrypoint(cfg):
     faulthandler.enable(all_threads=True)
     if hasattr(signal, "SIGUSR1"):
         faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
-    exp = ThunderAgentExp(cfg)
+    exp = FullyAsyncThunderAgentExp(cfg)
     exp.run()
 
 

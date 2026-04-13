@@ -27,9 +27,11 @@ MultiBackendRouter = importlib.import_module(
     "examples.train.thunder_agent.thunderagent.scheduler.router"
 ).MultiBackendRouter
 get_open_port = importlib.import_module("skyrl.backends.skyrl_train.inference_servers.common").get_open_port
-ThunderAgentRouter = importlib.import_module("examples.train.thunder_agent.thunder_agent_router").ThunderAgentRouter
+ThunderAgentRouter = importlib.import_module(
+    "examples.train.thunder_agent.skyrl_integration.router"
+).ThunderAgentRouter
 ThunderAgentRemoteInferenceClient = importlib.import_module(
-    "examples.train.thunder_agent.ta_remote_inference_client"
+    "examples.train.thunder_agent.skyrl_integration.remote_inference_client"
 ).ThunderAgentRemoteInferenceClient
 
 

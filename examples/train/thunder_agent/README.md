@@ -1,9 +1,9 @@
 # ThunderAgent GSM8K Run
 
-This directory contains the ThunderAgent fully-async GSM8K training script:
+This directory contains the ThunderAgent GSM8K training script:
 
-- Baseline: [examples/train/fully_async/fully_async_run_gsm8k.sh](/home/ergt/SkyRL/examples/train/fully_async/fully_async_run_gsm8k.sh)
-- ThunderAgent: [examples/train/thunder_agent/fully_async_run_gsm8k.sh](/home/ergt/SkyRL/examples/train/thunder_agent/fully_async_run_gsm8k.sh)
+- Baseline: `examples/train/fully_async/fully_async_run_gsm8k.sh`
+- ThunderAgent: `examples/train/thunder_agent/run_thunder_agent_gsm8k.sh`
 
 ## Run
 
@@ -22,12 +22,12 @@ bash examples/train/fully_async/fully_async_run_gsm8k.sh
 Run the ThunderAgent version:
 
 ```bash
-bash examples/train/thunder_agent/fully_async_run_gsm8k.sh
+bash examples/train/thunder_agent/run_thunder_agent_gsm8k.sh
 ```
 
 The ThunderAgent script uses:
 
-- `examples.train.thunder_agent.main_fully_async_thunder_agent`
+- `examples.train.thunder_agent.main_thunder_agent`
 - the new HTTP inference layer (`_SKYRL_USE_NEW_INFERENCE=1`)
 - `generator.batched=false`
 - non-colocated training / inference workers
