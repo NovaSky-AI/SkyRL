@@ -45,6 +45,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             if cfg.generator.inference_engine.served_model_name
             else None
         ),
+        language_model_only=ie_cfg.language_model_only,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -55,9 +56,6 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
-
-    if ie_cfg.language_model_only:
-        args.language_model_only = True
 
     # Add any extra engine_init_kwargs
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)

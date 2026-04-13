@@ -42,10 +42,10 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.use_sample_packing=$USE_SAMPLE_PACKING \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=1024 \
-  trainer.policy_mini_batch_size=256 \
-  trainer.micro_forward_batch_size_per_gpu=16 \
-  trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.train_batch_size=128 \
+  trainer.policy_mini_batch_size=64 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -61,7 +61,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3.5-0.8b" \
-  trainer.run_name="qwen3.5-0.8b_test" \
+  trainer.run_name="qwen3.5-0.8b_fsdp" \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/ckpts/qwen3.5-0.8b_ckpt" \
