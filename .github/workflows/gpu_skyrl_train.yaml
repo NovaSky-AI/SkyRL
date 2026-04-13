@@ -31,13 +31,16 @@ jobs:
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
-        (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'run_train_gpu_ci') &&
         (
           github.event.pull_request.author_association == 'MEMBER' ||
           github.event.pull_request.author_association == 'OWNER' ||
           github.event.pull_request.author_association == 'COLLABORATOR'
+        ) &&
+        (
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name) ||
+          (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name)
         )
       )
     runs-on: ubuntu-latest
