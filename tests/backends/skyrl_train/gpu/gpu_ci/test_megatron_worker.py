@@ -40,7 +40,6 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
-SMALL_MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
@@ -125,7 +124,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
         pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
         pytest.param(MODEL_NAME, False, 2, 2, 1, 1, None, False, id="non_colocated"),
         pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
-        pytest.param(SMALL_MOE_MODEL_NAME, True, 4, 2, 2, 1, None, True, id="colocate_all_moe"),
+        pytest.param(MOE_MODEL_NAME, True, 4, 2, 2, 1, None, False, id="colocate_all_moe"),
     ],
 )
 @pytest.mark.asyncio
