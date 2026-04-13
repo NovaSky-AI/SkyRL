@@ -23,7 +23,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
-from skyrl_gym.envs import register
+from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -116,6 +116,12 @@ register(
     id="color_square_test_env",
     entry_point="tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_vlm_gym_generator:ColorSquareEnv",
 )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def deregister_color_square_env():
+    yield
+    deregister("color_square_test_env")
 
 
 # ---------------------------------------------------------------------------

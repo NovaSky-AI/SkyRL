@@ -18,6 +18,7 @@ __all__ = [
     "make",
     "spec",
     "register",
+    "deregister",
     "pprint_registry",
 ]
 
@@ -210,6 +211,23 @@ def register(
     )
     _check_spec_register(new_spec)
     registry[new_spec.id] = new_spec
+
+
+def deregister(id: str):
+    """Removes a registered environment from the registry.
+
+    Args:
+        id: The environment id to remove
+
+    Raises:
+        Error: If no environment with the given id is registered
+    """
+    global registry
+
+    if id not in registry:
+        raise error.Error(f"No registered env with id: {id}. Cannot deregister an environment that is not registered.")
+
+    del registry[id]
 
 
 def make(
