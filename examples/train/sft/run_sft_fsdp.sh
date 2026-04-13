@@ -16,5 +16,27 @@ uv run --isolated --extra fsdp \
     python -m skyrl.train.sft_trainer \
     strategy=fsdp2 \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    dataset_name=yahma/alpaca-cleaned \
+    dataset_split="train[:100]" \
+    messages_key=messages \
+    max_length=512 \
+    num_steps=10 \
+    batch_size=4 \
+    micro_train_batch_size_per_gpu=2 \
+    seed=42 \
+    optimizer.lr=1e-6 \
+    optimizer.weight_decay=1e-2 \
+    optimizer.max_grad_norm=1.0 \
+    optimizer.num_warmup_steps=0 \
+    optimizer.scheduler=constant_with_warmup \
+    placement.num_nodes=1 \
     placement.num_gpus_per_node=1 \
+    fsdp.cpu_offload=false \
+    fsdp.reshard_after_forward=true \
+    logger=console \
+    project_name=skyrl_sft \
+    run_name=skyrl_sft_fsdp_run \
+    ckpt_path="" \
+    ckpt_interval=0 \
+    resume_from="" \
     "$@"
