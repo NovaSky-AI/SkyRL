@@ -1,9 +1,4 @@
-# ThunderAgent GSM8K Run
-
-This directory contains the ThunderAgent GSM8K training script:
-
-- Baseline: `examples/train/fully_async/fully_async_run_gsm8k.sh`
-- ThunderAgent: `examples/train/thunder_agent/run_thunder_agent_gsm8k.sh`
+# ThunderAgent-SkyRL Integration
 
 ## Run
 
@@ -13,43 +8,21 @@ Prepare GSM8K first:
 uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 ```
 
-Run the baseline:
-
-```bash
-bash examples/train/fully_async/fully_async_run_gsm8k.sh
-```
-
-Run the ThunderAgent version:
+Run the fully async training script with Thunderagent:
 
 ```bash
 bash examples/train/thunder_agent/run_thunder_agent_gsm8k.sh
 ```
 
-The ThunderAgent script uses:
-
-- `examples.train.thunder_agent.main_thunder_agent`
-- the new HTTP inference layer (`_SKYRL_USE_NEW_INFERENCE=1`)
-- `generator.batched=false`
-- non-colocated training / inference workers
-
-With the default script values, it expects:
-
-- `NUM_POLICY_GPUS=2`
-- `NUM_INFERENCE_GPUS=2`
-
-That means 8 GPUs total:
-
-- 2 for policy
-- 2 for critic
-- 2 for ref
-- 2 for inference
-
 ## Rollout Speedup
 
-Use `examples/train/fully_async/fully_async_run_gsm8k.sh` as the baseline rollout path.
+### Settings
 
-ThunderAgent is meant to improve rollout throughput by routing requests through program-aware scheduling and by coordinating rollout blocking around weight sync. Fill in the measured result here once you have your final benchmark number:
+- Datasets: DCAgent/exp-rdb-r2egym.
+- Hardware: `4 x 8 H100` training nodes, `1 x 8 H100` rollout node.
+- Training strategy: fully-async GRPO with n_samples_per_prompt=4, train_batch_size=64(256 sampled trajectories per update).
+- 40 steps and 10 epochs.
 
-- Baseline rollout throughput: `<fill in>`
-- ThunderAgent rollout throughput: `<fill in>`
-- Speedup vs baseline rollout: `<fill in>x`
+### Speedup
+
+![TA vs no-TA stitched 40-step Harbor timeline](./docs/speedup.png)
