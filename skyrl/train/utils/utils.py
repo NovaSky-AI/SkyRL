@@ -253,8 +253,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
     if cfg.trainer.policy.language_model_only:
-        assert cfg.generator.inference_engine.language_model_only or cfg.generator.inference_engine.engine_init_kwargs.get(
-            "language_model_only", False
+        assert (
+            cfg.generator.inference_engine.language_model_only
         ), f"language_model_only should be set consistently between inference engine and policy but got {cfg.generator.inference_engine.language_model_only} for generator and {cfg.trainer.policy.language_model_only} for policy"
         if use_ref_model:
             assert cfg.trainer.ref.language_model_only
