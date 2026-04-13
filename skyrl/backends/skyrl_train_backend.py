@@ -905,12 +905,10 @@ def create_ray_wrapped_inference_engines_from_config(
         "max_num_seqs": cfg.generator.inference_engine.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": cfg.generator.inference_engine.backend,
-        "engine_init_kwargs": {
-            **cfg.generator.inference_engine.engine_init_kwargs,
-            **({"language_model_only": True} if cfg.generator.inference_engine.language_model_only else {}),
-        },
+        "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
         "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
+        "language_model_only": cfg.generator.inference_engine.language_model_only,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

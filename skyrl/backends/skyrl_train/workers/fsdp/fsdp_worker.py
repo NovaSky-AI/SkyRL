@@ -61,8 +61,8 @@ class FSDPWeightExtractor(WeightExtractor):
         group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
-            when syncing a CausalLM backbone to a vLLM instance running the full
-            multimodal model).
+            when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
+            multimodal model, even if vision encoder weights are not initialized).
     """
 
     def __init__(
