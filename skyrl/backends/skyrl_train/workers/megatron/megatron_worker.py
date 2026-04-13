@@ -98,6 +98,17 @@ class MegatronWeightExtractor(WeightExtractor):
         self.bucket_index_groups = None
         self._buckets_initialized = False
 
+    def _get_params_iterator(self):
+        """Single unified iterator that yields ALL HF params with conversion_tasks=None.
+
+        Used by both get_weight_metadata and extract_weights to avoid metadata/data
+        mismatches and unnecessary dtype conversions."""
+        return self.bridge.export_hf_weights(
+            self.actor_module,
+            show_progress=False,
+            conversion_tasks=None,
+        )
+
     def _init_param_buckets(self):
         """Compute bucket boundaries (index groups) from parameter sizes.
 
@@ -182,6 +193,9 @@ class MegatronWeightExtractor(WeightExtractor):
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
 
+        Uses _get_params_iterator() directly to collect names and shapes
+        without any dtype conversion or device transfer.
+
         TODO (sumanthrh): remove this once we move towards chunk-based update weights
         """
         if hasattr(self, "_weight_metadata_cache"):
@@ -191,13 +205,10 @@ class MegatronWeightExtractor(WeightExtractor):
         dtype_names = []
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
-        # Iterate via the same extract_weights generator to get all weights
-        # This ensures that the metadata matches exactly
-        for chunk in self.extract_weights(dtype):
-            for name, shape in zip(chunk.names, chunk.shapes):
-                names.append(name)
-                dtype_names.append(dtype_name)
-                shapes.append(shape)
+        for name, tensor in self._get_params_iterator():
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(tensor.shape))
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         return self._weight_metadata_cache
 
@@ -221,14 +232,9 @@ class MegatronWeightExtractor(WeightExtractor):
         self._ensure_buckets_initialized()
         device = torch.cuda.current_device()
 
-        # No bucketing: yield one chunk per parameter
-        # NOTE (sumanthrh): Always iterate with `conversation_tasks=None` to capture all parameters,
+        # NOTE (sumanthrh): Always iterate with `conversion_tasks=None` to capture all parameters,
         # even those without explicit Megatron-> HF conversion tasks like `router.expert_bias`
-        hf_params_generator = self.bridge.export_hf_weights(
-            self.actor_module,
-            show_progress=False,
-            conversion_tasks=None,
-        )
+        hf_params_generator = self._get_params_iterator()
 
         if not self.enable_bucketing:
 
