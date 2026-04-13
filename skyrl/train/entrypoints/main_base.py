@@ -6,7 +6,6 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -150,7 +149,9 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
 
         # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
-        self._server_group = None
+        self._server_groups = None
+        self._prefill_server_groups = None
+        self._decode_server_groups = None
         self._inference_router = None
 
     @staticmethod
@@ -320,8 +321,11 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.server_group import (
-            ServerGroup,
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            create_inference_servers,
+        )
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            build_router_args,
         )
         from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
             VLLMRouter,
@@ -354,7 +358,8 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(self.cfg.generator.inference_engine, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args, log_path=self.cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external "
@@ -364,23 +369,18 @@ class BasePPOExp:
         else:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
+            setup = create_inference_servers(
+                self.cfg.generator.inference_engine,
+                cli_args,
+                log_path=self.cfg.trainer.log_path,
                 placement_group=self.colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-            )
+            self._inference_router = setup.router
+            self._server_groups = setup.server_groups
+            self._prefill_server_groups = setup.prefill_server_groups
+            self._decode_server_groups = setup.decode_server_groups
+            proxy_url = setup.proxy_url
+            server_urls = setup.server_urls
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
@@ -394,25 +394,8 @@ class BasePPOExp:
         )
 
         if is_colocated:
-            # This method is called from both sync (BasePPOExp.run) and async
-            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
-            # event loop avoids the "cannot call asyncio.run() from a running
-            # event loop" error that occurs in the async case.
-            exc_holder = [None]
-
-            def _sleep_engines():
-                try:
-                    asyncio.run(client.sleep())
-                except Exception as e:
-                    exc_holder[0] = e
-
-            thread = threading.Thread(target=_sleep_engines)
-            thread.start()
-            thread.join()
-
-            if exc_holder[0] is not None:
-                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
-
+            # Callers must invoke get_inference_client() from a sync context (no running event loop).
+            asyncio.run(client.sleep())
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client

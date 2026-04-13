@@ -2,7 +2,7 @@
 Generic server actor pool.
 """
 
-from typing import Any, List
+from typing import Any, List, Union
 
 import ray
 
@@ -31,21 +31,37 @@ class ServerActorPool:
         """
         self._actors = actors
         self._server_infos: List[ServerInfo] = []
+        self._start_refs: List[ray.ObjectRef] = []
 
-    def start(self) -> List[ServerInfo]:
-        """Start all actors and collect their server infos."""
-        # Start all actors in parallel, wait for all to be ready
-        start_refs = [actor.start.remote() for actor in self._actors]
-        self._server_infos = ray.get(start_refs)
-        return self._server_infos
+    def start(self, blocking: bool = True) -> Union[List[ServerInfo], List[ray.ObjectRef]]:
+        """Start all actors and collect their server infos.
 
-    def get_server_infos(self) -> List[ServerInfo]:
-        """Get the list of server endpoints."""
+        Args:
+            blocking: If True (default), waits for all actors to be ready
+                and returns ``List[ServerInfo]``.  If False, returns the
+                ``List[ObjectRef]`` immediately without waiting.
+        """
+        self._start_refs = [actor.start.remote() for actor in self._actors]
+        if blocking:
+            self._server_infos = ray.get(self._start_refs)
+            return self._server_infos
+        return self._start_refs
+
+    @property
+    def server_infos(self) -> List[ServerInfo]:
+        """Lazily resolved server infos.
+
+        On first access (when ``_server_infos`` is empty), calls
+        ``ray.get`` on the stored start refs to block until all actors
+        are ready.
+        """
+        if not self._server_infos and self._start_refs:
+            self._server_infos = ray.get(self._start_refs)
         return self._server_infos
 
     def get_server_urls(self) -> List[str]:
         """Get the list of server URLs."""
-        return [info.url for info in self._server_infos]
+        return [info.url for info in self.server_infos]
 
     def get_actors(self) -> List[Any]:
         """Get the list of actor handles."""

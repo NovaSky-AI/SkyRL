@@ -479,6 +479,15 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
+    enable_pd: bool = False
+    """Enable prefill-decode disaggregation. Requires ``num_prefill > 0`` and ``num_engines >= 2``."""
+    num_prefill: int = 0
+    """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
+
+    NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
+    Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
 
 
 # ---------------------------------------------------------------------------

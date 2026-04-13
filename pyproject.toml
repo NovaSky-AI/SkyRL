@@ -96,12 +96,14 @@ skyrl-train = [
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
+    "nixl; sys_platform == 'linux'",
 ]
 
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.19.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
+    "nixl; sys_platform == 'linux'",
     # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
     # flash-attn wheels), drop the custom wheel URL
     "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
@@ -121,6 +123,7 @@ megatron = [
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "vllm==0.19.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
+    "nixl; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
