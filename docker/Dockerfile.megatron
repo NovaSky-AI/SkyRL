@@ -13,14 +13,6 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/12.8.0/local_install
 RUN curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh
 RUN echo "export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook" >> /home/ray/.bashrc
 
-# Repair openjdk-11-jre-headless from base image (missing /usr/share/binfmts)
-# JDK needs recommended packages (binfmt-support) to configure properly
-RUN sudo mkdir -p /usr/share/binfmts && \
-    sudo apt-get update -y && \
-    sudo apt-get install --fix-broken -y && \
-    sudo apt-get install -y default-jre-headless openjdk-8-jdk && \
-    sudo rm -rf /var/lib/apt/lists/*
-
 # Post-CUDA packages: networking, dev libs, and NCCL runtime
 RUN sudo apt-get update -y && \
     sudo apt-get install -y --no-install-recommends \
