@@ -444,9 +444,14 @@ class SFTTrainer:
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
         vocab_size = self.tokenizer.vocab_size
 
+        # num_actions is max_length - 1 because the autoregressive model
+        # produces log-probs for positions 1..T (predicting next token),
+        # so the first token has no corresponding log-prob.
+        num_actions = max_length - 1
+
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
         attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
-        loss_mask = torch.ones(batch_size, max_length, dtype=torch.float) / (micro_batch_size * max_length)
+        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) / (micro_batch_size * num_actions)
 
         batch = TrainingInputBatch(
             {
@@ -455,7 +460,7 @@ class SFTTrainer:
                 "loss_mask": loss_mask,
             }
         )
-        batch.metadata = {"response_length": max_length}
+        batch.metadata = {"response_length": num_actions}
         return batch
 
     def _train_dummy(self):
