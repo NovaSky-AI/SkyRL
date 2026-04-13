@@ -340,3 +340,109 @@ async def test_sample_api(ray_init_fixture, tp_size: int, dp_size: int):
         print(f"Generated {len(unique_responses)} unique responses from {num_samples} samples")
         for i, resp in enumerate(output["responses"]):
             print(f"Sample {i}: {resp[:100]}..." if len(resp) > 100 else f"Sample {i}: {resp}")
+
+
+@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="PD requires new inference pathway")
+def test_pd_generation(ray_init_fixture):
+    """Test generation with prefill-decode disaggregation (1P1D, 2 GPUs)."""
+    cfg = get_test_actor_config(MODEL)
+
+    prompts = get_test_prompts(MODEL, 3)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
+    )["input_ids"]
+
+    with InferenceEngineState.create(
+        cfg,
+        tp_size=1,
+        num_inference_engines=2,
+        sleep_level=1,
+        enable_pd=True,
+        num_prefill=1,
+        use_new_inference_servers=True,
+        engine_init_kwargs={
+            "kv_transfer_config": {
+                "kv_connector": "NixlConnector",
+            },
+        },
+    ) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
+
+        # Batch generation
+        batch_responses, batch_finish_reasons = asyncio.run(
+            run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
+        assert len(batch_responses) == len(prompts)
+        assert len(batch_finish_reasons) == len(prompts)
+
+        # Single generation
+        single_responses, single_finish_reasons = asyncio.run(
+            run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
+        assert len(single_responses) == len(prompts)
+
+
+@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="PD requires new inference pathway")
+@pytest.mark.parametrize(
+    "num_prefill,num_decode,colocate_all",
+    [
+        pytest.param(1, 1, False, id="1P1D_non_colocated"),
+    ],
+)
+def test_pd_generation_non_colocated(
+    ray_init_fixture,
+    num_prefill: int,
+    num_decode: int,
+    colocate_all: bool,
+):
+    """Test PD generation in non-colocated mode (separate placement groups).
+
+    Exercises the shared-PG creation path in create_inference_servers when
+    placement_group=None (non-colocated).
+    """
+    cfg = get_test_actor_config(MODEL)
+
+    prompts = get_test_prompts(MODEL, 3)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
+    )["input_ids"]
+
+    num_engines = num_prefill + num_decode
+
+    with InferenceEngineState.create(
+        cfg,
+        tp_size=1,
+        num_inference_engines=num_engines,
+        sleep_level=1,
+        enable_pd=True,
+        num_prefill=num_prefill,
+        colocate_all=colocate_all,
+        use_new_inference_servers=True,
+        engine_init_kwargs={
+            "kv_transfer_config": {
+                "kv_connector": "NixlConnector",
+            },
+        },
+    ) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
+
+        # Batch generation
+        batch_responses, batch_finish_reasons = asyncio.run(
+            run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
+        assert len(batch_responses) == len(prompts)
+        assert len(batch_finish_reasons) == len(prompts)
+
+        # Single generation
+        single_responses, single_finish_reasons = asyncio.run(
+            run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
+        assert len(single_responses) == len(prompts)

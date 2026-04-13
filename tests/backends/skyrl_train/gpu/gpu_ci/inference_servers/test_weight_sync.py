@@ -116,27 +116,60 @@ class Trainer:
             raise
 
 
-@pytest_asyncio.fixture(scope="class")
-async def weight_update_env(class_scoped_ray_init_fixture):
+@pytest_asyncio.fixture(
+    scope="class",
+    params=[
+        pytest.param({"enable_pd": False}, id="no_pd"),
+        pytest.param(
+            {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
+            id="pd_1P1D_non_colocated",
+        ),
+    ],
+)
+async def weight_update_env(class_scoped_ray_init_fixture, request):
     """
-    Create environment for weight update testing.
+    Create environment for weight update testing (non-colocated, NCCL broadcast).
 
-    Non-colocated setup with TP=2 for both trainer and inference server:
-    - Trainer on separate GPU(s), server (TP=2) on its own GPUs
-    - Uses NCCL broadcast for weight sync
+    - no_pd: TP=2 server on its own GPUs, trainer on separate GPU(s) (4 GPUs).
+    - pd_1P1D_non_colocated: 1P1D (2 engines, TP=1), trainer on separate GPU (3 GPUs).
+      Exercises non-colocated PD path in create_inference_servers with separate
+      prefill/decode placement groups.
     """
+    pd_cfg = request.param
+    enable_pd = pd_cfg["enable_pd"]
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    async with InferenceEngineState.create(
-        cfg,
-        model=MODEL,
-        tp_size=2,
-        colocate_all=False,
-        gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
-        engine_init_kwargs={"load_format": "dummy"},
-    ) as engines:
+    if enable_pd:
+        num_prefill = pd_cfg["num_prefill"]
+        num_decode = pd_cfg["num_decode"]
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            num_inference_engines=num_prefill + num_decode,
+            colocate_all=False,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={
+                "load_format": "dummy",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                },
+            },
+            enable_pd=True,
+            num_prefill=num_prefill,
+        )
+    else:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=2,
+            colocate_all=False,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={"load_format": "dummy"},
+        )
+
+    async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
         trainer = Trainer.options(num_gpus=1.0).remote(MODEL)
         ray.get(trainer.ready.remote())
 
@@ -326,27 +359,59 @@ class IpcTrainer:
         }
 
 
-@pytest_asyncio.fixture(scope="class")
-async def ipc_weight_update_env(class_scoped_ray_init_fixture):
+@pytest_asyncio.fixture(
+    scope="class",
+    params=[
+        pytest.param({"enable_pd": False}, id="no_pd"),
+        pytest.param(
+            {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
+            id="pd_1P1D_colocated",
+        ),
+    ],
+)
+async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
     """
     Create environment for colocated IPC weight update testing.
 
     Colocated setup with TP=1:
-    - Trainer and server share the same GPU via placement group
-    - Server uses CUDA IPC backend for weight sync
+    - no_pd: Trainer and server share the same GPU via placement group (1 GPU).
+    - pd_1P1D_colocated: 1P1D (2 engines, TP=1), both colocated (2 GPUs).
     """
+    pd_cfg = request.param
+    enable_pd = pd_cfg["enable_pd"]
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
-    async with InferenceEngineState.create(
-        cfg,
-        model=MODEL,
-        tp_size=1,
-        colocate_all=True,
-        gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
-        engine_init_kwargs={"load_format": "dummy"},
-    ) as engines:
+    if enable_pd:
+        num_prefill = pd_cfg["num_prefill"]
+        num_decode = pd_cfg["num_decode"]
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            num_inference_engines=num_prefill + num_decode,
+            colocate_all=True,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={
+                "load_format": "dummy",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                },
+            },
+            enable_pd=True,
+            num_prefill=num_prefill,
+        )
+    else:
+        create_kwargs = dict(
+            model=MODEL,
+            tp_size=1,
+            colocate_all=True,
+            gpu_memory_utilization=0.5,
+            use_new_inference_servers=True,
+            engine_init_kwargs={"load_format": "dummy"},
+        )
+
+    async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
         # Trainer on same PG bundle as server (colocated) with fractional GPU
         trainer = IpcTrainer.options(
             num_gpus=0.2,
