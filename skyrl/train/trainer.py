@@ -813,6 +813,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                return_raw_scores=True,
             )
             # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
@@ -824,6 +825,9 @@ class RayPPOTrainer:
             ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
             advantages = last_step_advantages[traj_ids]
             returns = last_step_returns[traj_ids]
+            # Apply each step's own response_mask to the propagated raw advantages/returns
+            advantages = advantages * data["response_mask"]
+            returns = returns * data["response_mask"]
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,

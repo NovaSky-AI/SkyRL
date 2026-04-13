@@ -1054,6 +1054,7 @@ def compute_reinforce_plus_plus_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     gamma: float,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1079,7 +1080,8 @@ def compute_reinforce_plus_plus_outcome_advantage(
             running_return = running_return * response_mask[:, t]
 
         advantages = masked_whiten(returns, response_mask)
-        advantages = advantages * response_mask
+        if not return_raw_scores:
+            advantages = advantages * response_mask
 
     return advantages, returns
 
@@ -1089,6 +1091,7 @@ def compute_rloo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1132,7 +1135,9 @@ def compute_rloo_outcome_advantage(
                 # if there's only one response, set the advantage to 0
                 logger_.warning(f"Only one response for prompt index {index[i]}, setting advantage to 0")
                 scores[i] = 0.0
-        scores = scores.unsqueeze(-1) * response_mask
+        scores = scores.unsqueeze(-1)
+        if not return_raw_scores:
+            scores = scores * response_mask
 
     return scores, scores
 
@@ -1175,6 +1180,7 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     grpo_norm_by_std: bool = True,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1216,7 +1222,9 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
-        scores = scores.unsqueeze(-1) * response_mask
+        scores = scores.unsqueeze(-1)
+        if not return_raw_scores:
+            scores = scores * response_mask
 
     return scores, scores
 
@@ -1227,6 +1235,7 @@ def compute_maxrl_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute advantage for MAXRL using mean-normalized group-relative rewards."""
@@ -1251,7 +1260,9 @@ def compute_maxrl_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2mean[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
-        scores = scores.unsqueeze(-1) * response_mask
+        scores = scores.unsqueeze(-1)
+        if not return_raw_scores:
+            scores = scores * response_mask
 
     return scores, scores
 
@@ -1271,6 +1282,7 @@ def compute_advantages_and_returns(
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
+    return_raw_scores: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
@@ -1284,5 +1296,6 @@ def compute_advantages_and_returns(
         gamma=gamma,
         lambd=lambd,
         config=config,
+        return_raw_scores=return_raw_scores,
         **kwargs,
     )
