@@ -40,6 +40,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+SMALL_MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
@@ -119,23 +120,24 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
+    ("model", "colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
-        pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(MODEL_NAME, False, 2, 2, 1, 1, None, False, id="non_colocated"),
+        pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(SMALL_MOE_MODEL_NAME, True, 4, 2, 2, 1, None, True, id="colocate_all_moe"),
     ],
 )
 @pytest.mark.asyncio
 @pytest.mark.megatron
 async def test_megatron_policy_weight_sync(
-    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture, model, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        cfg = get_test_actor_config(model_name=model)
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
@@ -153,7 +155,7 @@ async def test_megatron_policy_weight_sync(
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         async with InferenceEngineState.create(
             cfg=cfg,
-            model=MODEL_NAME,
+            model=model,
             use_local=True,
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
@@ -191,9 +193,9 @@ async def test_megatron_policy_weight_sync(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
             tokenizer = (
-                AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
+                AutoTokenizer.from_pretrained(model, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
             )
-            outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
+            outputs = await run_inference(client, get_test_prompts(model), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

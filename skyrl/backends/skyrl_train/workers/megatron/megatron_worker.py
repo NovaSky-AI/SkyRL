@@ -182,9 +182,7 @@ class MegatronWeightExtractor(WeightExtractor):
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
 
-        On first call, runs export_hf_weights to discover HF names and shapes
-        (tensors are discarded immediately). Result is cached for subsequent calls.
-        TODO (aaron): find a better way to get all metadata without materializing tensors.
+        TODO (sumanthrh): remove this once we move towards chunk-based update weights
         """
         if hasattr(self, "_weight_metadata_cache"):
             return self._weight_metadata_cache
@@ -193,17 +191,13 @@ class MegatronWeightExtractor(WeightExtractor):
         dtype_names = []
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
-        device = torch.cuda.current_device()
-        for name, tensor in self.bridge.export_hf_weights(
-            self.actor_module,
-            show_progress=False,
-            conversion_tasks=None,
-        ):
-            tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
-            names.append(name)
-            dtype_names.append(dtype_name)
-            shapes.append(list(tensor.shape))
-            del tensor
+        # Iterate via the same extract_weights generator to get all weights
+        # This ensures that the metadata matches exactly
+        for chunk in self.extract_weights(dtype):
+            for name, shape in zip(chunk.names, chunk.shapes):
+                names.append(name)
+                dtype_names.append(dtype_name)
+                shapes.append(shape)
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         return self._weight_metadata_cache
 
@@ -227,13 +221,16 @@ class MegatronWeightExtractor(WeightExtractor):
         self._ensure_buckets_initialized()
         device = torch.cuda.current_device()
 
+        # No bucketing: yield one chunk per parameter
+        # NOTE (sumanthrh): Always iterate with `conversation_tasks=None` to capture all parameters,
+        # even those without explicit Megatron-> HF conversion tasks like `router.expert_bias`
+        hf_params_generator = self.bridge.export_hf_weights(
+            self.actor_module,
+            show_progress=False,
+            conversion_tasks=None,
+        )
+
         if not self.enable_bucketing:
-            # No bucketing: yield one chunk per parameter
-            hf_params_generator = self.bridge.export_hf_weights(
-                self.actor_module,
-                show_progress=False,
-                conversion_tasks=None,
-            )
 
             for name, tensor in hf_params_generator:
                 tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
@@ -245,41 +242,42 @@ class MegatronWeightExtractor(WeightExtractor):
                     tensors=[tensor],
                 )
         else:
-            # Build fresh tasks each sync so mapping objects have clean
-            # PP-collective caches; reuse the pre-computed bucket structure.
-            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+            # Size-based bucketing: batch tensors up to bucket_size_threshold_GB
+            # into a single chunk so the packed broadcast sends larger payloads
+            # instead of one-per-tensor.
+            threshold_bytes = int(self.bucket_size_threshold_GB * 1024**3)
 
-            for index_group in self.bucket_index_groups:
-                bucket_tasks = [fresh_tasks[i] for i in index_group]
-                hf_params_generator = self.bridge.export_hf_weights(
-                    self.actor_module,
-                    show_progress=False,
-                    conversion_tasks=bucket_tasks,
-                )
+            names: list[str] = []
+            dtypes_list: list[str] = []
+            shapes: list[list[int]] = []
+            tensors: list[torch.Tensor] = []
+            cur_bytes = 0
 
-                # Collect all parameters in this bucket into one chunk
-                names = []
-                dtypes_list = []
-                shapes = []
-                tensors = []
+            for name, tensor in hf_params_generator:
+                tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+                names.append(name)
+                dtypes_list.append(str(dtype))
+                shapes.append(list(tensor.shape))
+                tensors.append(tensor)
+                cur_bytes += tensor.numel() * tensor.element_size()
 
-                for name, tensor in hf_params_generator:
-                    # Move to device and convert dtype
-                    tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
-
-                    names.append(name)
-                    dtypes_list.append(str(dtype))
-                    shapes.append(list(tensor.shape))
-                    tensors.append(tensor)
-
-                # Yield one chunk containing all parameters in this bucket
-                if tensors:
+                if cur_bytes >= threshold_bytes:
                     yield WeightChunk(
                         names=names,
                         dtypes=dtypes_list,
                         shapes=shapes,
                         tensors=tensors,
                     )
+                    names, dtypes_list, shapes, tensors = [], [], [], []
+                    cur_bytes = 0
+
+            if tensors:
+                yield WeightChunk(
+                    names=names,
+                    dtypes=dtypes_list,
+                    shapes=shapes,
+                    tensors=tensors,
+                )
 
 
 class MegatronWorker:
