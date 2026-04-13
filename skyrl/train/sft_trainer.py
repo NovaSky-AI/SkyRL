@@ -250,10 +250,13 @@ class SFTTrainer:
             colocate_all=False,
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
         )
+        num_training_steps = (
+            self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
+        )
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,
-                num_training_steps=self.sft_cfg.num_steps,
+                num_training_steps=num_training_steps,
             )
         )
         ray.get(actor_group.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
@@ -413,21 +416,9 @@ class SFTTrainer:
             "timings": timings,
         }
 
-    def train(self):
-        """Full training loop: load data, iterate, log, checkpoint."""
-        tokenized = self.load_dataset()
-
+    def _validate_batch_parallelism(self):
+        """Validate that batch_size is compatible with data-parallel and micro-batch sizes."""
         batch_size = self.sft_cfg.batch_size
-        num_steps = self.sft_cfg.num_steps
-
-        # Early validation: dataset must have at least batch_size examples
-        if len(tokenized) < batch_size:
-            raise ValueError(
-                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
-                f"Reduce batch_size or use more data."
-            )
-
-        # Validate batch_size is divisible by data-parallel size
         total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
         if self.sft_cfg.strategy == "megatron":
             tp = self.sft_cfg.megatron.tensor_model_parallel_size
@@ -445,6 +436,86 @@ class SFTTrainer:
                 f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
                 f"micro_train_batch_size_per_gpu ({micro_batch})"
             )
+
+    def _build_dummy_batch(self) -> TrainingInputBatch:
+        """Build a dummy batch of random full-context sequences for benchmarking."""
+        batch_size = self.sft_cfg.batch_size
+        max_length = self.sft_cfg.max_length
+        micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
+        vocab_size = self.tokenizer.vocab_size
+
+        sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
+        attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
+        loss_mask = torch.ones(batch_size, max_length, dtype=torch.float) / (micro_batch_size * max_length)
+
+        batch = TrainingInputBatch(
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "loss_mask": loss_mask,
+            }
+        )
+        batch.metadata = {"response_length": max_length}
+        return batch
+
+    def _train_dummy(self):
+        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume."""
+        self._validate_batch_parallelism()
+        batch = self._build_dummy_batch()
+        num_steps = self.sft_cfg.dummy_run_max_steps
+
+        logger.info(
+            f"Starting dummy SFT training for {num_steps} steps "
+            f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
+        )
+
+        for step in range(num_steps):
+            all_timings: dict[str, float] = {}
+
+            with Timer("step", all_timings):
+                step_result = self.train_step(batch, step)
+                all_timings.update(step_result["timings"])
+
+            actual_num_tokens = batch["attention_mask"].sum().item()
+            tokens_per_second = actual_num_tokens / all_timings["step"]
+
+            log_dict = {
+                "train/loss": step_result["loss"],
+                "train/grad_norm": step_result["grad_norm"],
+                "train/tokens_per_second": tokens_per_second,
+                "train/actual_num_tokens": actual_num_tokens,
+            }
+            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+
+            self.tracker.log(log_dict, step=step, commit=True)
+            logger.info(
+                f"Step {step}: loss={step_result['loss']:.4f}, "
+                f"grad_norm={step_result['grad_norm']}, "
+                f"tokens_per_second={tokens_per_second:.0f}"
+            )
+
+        logger.info("Dummy SFT training complete!")
+
+    def train(self):
+        """Full training loop: load data, iterate, log, checkpoint."""
+        if self.sft_cfg.dummy_run_full_ctx:
+            if self.sft_cfg.resume_from:
+                logger.warning("resume_from is ignored in dummy run mode")
+            return self._train_dummy()
+
+        tokenized = self.load_dataset()
+
+        batch_size = self.sft_cfg.batch_size
+        num_steps = self.sft_cfg.num_steps
+
+        # Early validation: dataset must have at least batch_size examples
+        if len(tokenized) < batch_size:
+            raise ValueError(
+                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
+                f"Reduce batch_size or use more data."
+            )
+
+        self._validate_batch_parallelism()
 
         # Resume from checkpoint if configured
         start_step = self.load_checkpoint()

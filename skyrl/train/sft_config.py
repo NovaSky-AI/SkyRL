@@ -109,6 +109,10 @@ class SFTConfig(BaseConfig):
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
     seed: int = 42
 
+    # ---- Dummy run / benchmarking ----
+    dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
+    dummy_run_max_steps: int = 5  # Number of steps to run in dummy mode
+
 
 # ---------------------------------------------------------------------------
 # Bridge: SFTConfig -> SkyRLTrainConfig
@@ -134,6 +138,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError(f"num_steps must be > 0, got {cfg.num_steps}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+    if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
+        raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
 
     # Parallelism check for megatron: total world size must be divisible by TP * PP
     if cfg.strategy == "megatron":
