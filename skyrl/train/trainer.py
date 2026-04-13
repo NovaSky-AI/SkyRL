@@ -798,19 +798,22 @@ class RayPPOTrainer:
         token_level_rewards = data["rewards"]
 
         if self.cfg.generator.step_wise_trajectories:
-            # Step-wise only supports outcome-based estimators (GRPO, RLOO, MAXRL); ensured by `validate_cfg`.
             is_last_step = data["is_last_step"].bool()
             index = np.array(data.metadata["uids"])
             values = data["values"]
-            # Use the last step of each trajectory to compute advantages.
-            # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
-            #
+            # Step-wise only supports outcome-based estimators (GRPO, RLOO, MAXRL); ensured by `validate_cfg`.
+            # We use the last step of each trajectory to compute advantages and broadcast them to
+            # all steps of that trajectory, so we ignore per-step rewards in step-wise training.
             # We pass an all-ones mask here so the estimator returns the scalar advantage at every
-            # position (outcome-based estimators produce `scalar * mask`). The real per-step
-            # `response_mask` is re-applied on broadcast below — otherwise earlier steps would
-            # receive advantages at the *last step's* response-token positions (which usually don't
-            # overlap with the earlier step's own positions), silently zeroing out their training
-            # signal. See issue #1492.
+            # position. The real per-step `response_mask` is re-applied on broadcast below. See issue #1492.
+            # Shapes:
+            #   traj_ids, (batch_size,):         trajectory id per step (cumsum of shifted is_last_step)
+            #   last_step_advantages/returns,
+            #       (num_traj, seqlen):          scalar advantage/return per trajectory at every position
+            #   last_step_advantages/returns[traj_ids],
+            #       (batch_size, seqlen):        broadcast to every step of the owning trajectory
+            #   response_mask_float,
+            #       (batch_size, seqlen):        per-step response mask
             last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards[is_last_step],
@@ -823,17 +826,6 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
-            # Broadcast each trajectory's advantage/return to all steps of that trajectory, then
-            # re-apply each step's own response_mask so values land at each step's own response
-            # tokens (rather than the last step's positions).
-            #
-            # Shapes:
-            #   traj_ids, (batch_size,):             trajectory id per step (cumsum of shifted is_last_step)
-            #   last_step_advantages/returns,
-            #       (num_traj, seqlen):              scalar advantage/return per trajectory at every position
-            #   last_step_advantages/returns[traj_ids],
-            #       (batch_size, seqlen):            broadcast to every step of the owning trajectory
-            #   response_mask_float, (batch_size, seqlen): per-step response mask
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
             )
