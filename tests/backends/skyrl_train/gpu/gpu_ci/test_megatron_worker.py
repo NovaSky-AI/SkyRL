@@ -124,7 +124,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
         pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
         pytest.param(MODEL_NAME, False, 2, 2, 1, 1, None, False, id="non_colocated"),
         pytest.param(MODEL_NAME, True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
-        pytest.param(MOE_MODEL_NAME, True, 4, 2, 2, 1, None, False, id="colocate_all_moe"),
+        pytest.param(MOE_MODEL_NAME, False, 2, 2, 1, 1, None, False, id="non_colocated_moe"),
     ],
 )
 @pytest.mark.asyncio
