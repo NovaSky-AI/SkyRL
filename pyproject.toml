@@ -96,6 +96,8 @@ skyrl-train = [
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
+    "flash-linear-attention",
+    "causal-conv1d"
 ]
 
 fsdp = [
@@ -214,8 +216,6 @@ no-build-isolation-package = [
 # unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
-    "mamba-ssm; sys_platform == 'never'",
-    "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",

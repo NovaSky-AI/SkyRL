@@ -242,6 +242,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
     if cfg.trainer.strategy in ("fsdp", "fsdp2"):
         assert not (
@@ -251,10 +252,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
-    if cfg.trainer.policy.language_model_only or cfg.trainer.ref.language_model_only:
+    if cfg.trainer.policy.language_model_only:
         assert cfg.generator.inference_engine.language_model_only or cfg.generator.inference_engine.engine_init_kwargs.get(
             "language_model_only", False
-        ), f"language_model_only should be set consistently between generator and policy/ref but got {cfg.generator.inference_engine.language_model_only} for generator, {cfg.trainer.policy.language_model_only} for policy and {cfg.trainer.ref.language_model_only} for ref"
+        ), f"language_model_only should be set consistently between inference engine and policy but got {cfg.generator.inference_engine.language_model_only} for generator and {cfg.trainer.policy.language_model_only} for policy"
+        if use_ref_model:
+            assert cfg.trainer.ref.language_model_only
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
@@ -354,7 +357,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "must be the same when colocating all models"
         )
     else:
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "
