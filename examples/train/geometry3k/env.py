@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Matches JSON payload between <tool_call> ... </tool_call> tags.
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-SUPPORTED_TOOL_NAMES = {"calc_score", "calc_geo3k_reward"}
+SUPPORTED_TOOL_NAMES = {"calc_score"}
 
 
 class Geometry3kEnv(BaseTextEnv):

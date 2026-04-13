@@ -16,6 +16,7 @@ Preprocess the Geometry-3K dataset to parquet format for multi-modal RL training
 
 Dataset source: hiyouga/geometry3k
 Fields: 'images' (list of PIL images), 'problem' (text with <image> placeholder), 'answer' (ground truth)
+Adapted from VeRL.
 """
 
 import argparse
@@ -148,24 +149,3 @@ if __name__ == "__main__":
         print(f"Saved test set ({len(test_dataset)} examples) to {test_parquet_path}")
 
     print(f"\nDataset preparation complete! Output directory: {output_dir}")
-
-    # Print a sample from the training set
-    print("\n" + "=" * 60)
-    print("SAMPLE ENTRY (index 0)")
-    print("=" * 60)
-    sample = train_dataset[0]
-    print(f"\n--- Prompt ---")
-    for msg in sample["prompt"]:
-        print(f"[{msg['role']}]")
-        for part in msg["content"]:
-            if part["type"] == "text":
-                print(part["text"])
-            elif part["type"] == "image":
-                uri = part["image"]
-                print(f"  <image: data URI, {len(uri)} chars>")
-    print(f"\n--- Reward Spec ---")
-    print(f"  method: {sample['reward_spec']['method']}")
-    print(f"  ground_truth: {sample['reward_spec']['ground_truth']}")
-    print(f"\n--- Extra Info ---")
-    for k, v in sample["extra_info"].items():
-        print(f"  {k}: {v}")

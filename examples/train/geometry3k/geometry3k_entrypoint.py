@@ -1,15 +1,3 @@
-"""
-Custom entrypoint for Geometry-3K VLM RL training.
-
-Registers the example-local Geometry-3K environment before starting the
-standard PPO experiment.
-
-Usage:
-    uv run --isolated --extra fsdp \
-        python examples/train/geometry3k/geometry3k_entrypoint.py \
-        generator.is_vlm=True [config overrides...]
-"""
-
 import multiprocessing as mp
 import sys
 
