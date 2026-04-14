@@ -18,14 +18,14 @@ config._name_or_path = source_model_id
 
 # All per-GPU values with TP=2 must be >= 64 for vLLM's fused MoE Triton
 # kernels (BLOCK_SIZE_K=64).
-config.hidden_size = 128              # 64 per GPU with TP=2
-config.intermediate_size = 256        # 128 per GPU with TP=2 (dense MLP)
-config.moe_intermediate_size = 128    # 64 per GPU with TP=2
+config.hidden_size = 128  # 64 per GPU with TP=2
+config.intermediate_size = 256  # 128 per GPU with TP=2 (dense MLP)
+config.moe_intermediate_size = 128  # 64 per GPU with TP=2
 config.head_dim = 32
-config.num_attention_heads = 4        # 2 per GPU with TP=2
-config.num_key_value_heads = 2        # 1 per GPU with TP=2
+config.num_attention_heads = 4  # 2 per GPU with TP=2
+config.num_key_value_heads = 2  # 1 per GPU with TP=2
 config.num_hidden_layers = 2
-config.decoder_sparse_step = 1        # all layers are MoE (matches Qwen3MoEBridge assumption)
+config.decoder_sparse_step = 1  # all layers are MoE (matches Qwen3MoEBridge assumption)
 config.num_experts = 8
 config.num_experts_per_tok = 2
 config.max_window_layers = 2
@@ -40,7 +40,8 @@ model = AutoModelForCausalLM.from_config(
 )
 
 model.generation_config = GenerationConfig.from_pretrained(
-    source_model_id, trust_remote_code=True,
+    source_model_id,
+    trust_remote_code=True,
 )
 model.generation_config.do_sample = True
 
