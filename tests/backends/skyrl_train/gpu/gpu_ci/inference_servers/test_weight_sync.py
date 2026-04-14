@@ -119,7 +119,7 @@ class Trainer:
 @pytest_asyncio.fixture(
     params=[
         pytest.param({"enable_pd": False}, id="no_pd"),
-        pytest.param( 
+        pytest.param(
             {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
             id="pd_1P1D_non_colocated",
         ),
