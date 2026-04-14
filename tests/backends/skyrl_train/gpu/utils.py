@@ -432,6 +432,7 @@ class InferenceEngineState:
         # internal attribute to track if the inference engines need a wake_up()
         # call before generation
         self._needs_wake_up = False
+        self._cleanup_pg = False
 
     def _close_common(self):
         """Shutdown router, server_group, and Ray actors (sync resources).
@@ -446,6 +447,13 @@ class InferenceEngineState:
             if group_list is not None:
                 for group in group_list:
                     group.shutdown()
+                if self._cleanup_pg:
+                    if len(group_list):
+                        group = group_list[0]
+                        try:
+                            ray.util.remove_placement_group(group._get_placement_group())
+                        except Exception as e:
+                            logger.info(f"Encountered error at pg cleanup: {e}")
 
         if isinstance(self.client, InferenceEngineClient):
             for engine in self.client.engines:
@@ -653,6 +661,7 @@ class InferenceEngineState:
             decode_server_groups=decode_server_groups,
         )
         state._needs_wake_up = needs_wake_up
+        state._cleanup_pg = not shared_pg
         return state
 
 
