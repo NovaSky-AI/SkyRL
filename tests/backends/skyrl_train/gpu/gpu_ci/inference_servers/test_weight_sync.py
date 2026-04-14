@@ -117,16 +117,15 @@ class Trainer:
 
 
 @pytest_asyncio.fixture(
-    scope="class",
     params=[
         pytest.param({"enable_pd": False}, id="no_pd"),
-        pytest.param(
+        pytest.param( 
             {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
             id="pd_1P1D_non_colocated",
         ),
     ],
 )
-async def weight_update_env(class_scoped_ray_init_fixture, request):
+async def weight_update_env(ray_init_fixture, request):
     """
     Create environment for weight update testing (non-colocated, NCCL broadcast).
 
@@ -181,12 +180,13 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
         }
 
         await engines.client.teardown()
+        ray.kill(trainer)
 
 
-@pytest.mark.asyncio(loop_scope="class")
 class TestWeightUpdateFlow:
     """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 
+    @pytest.mark.asyncio
     async def test_update_weights_flow(self, weight_update_env):
         """
         Full E2E weight sync test (non-colocated, NCCL broadcast):
@@ -360,7 +360,6 @@ class IpcTrainer:
 
 
 @pytest_asyncio.fixture(
-    scope="class",
     params=[
         pytest.param({"enable_pd": False}, id="no_pd"),
         pytest.param(
@@ -369,7 +368,7 @@ class IpcTrainer:
         ),
     ],
 )
-async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
+async def ipc_weight_update_env(ray_init_fixture, request):
     """
     Create environment for colocated IPC weight update testing.
 
@@ -431,12 +430,13 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
         }
 
         await engines.client.teardown()
+        ray.kill(trainer)
 
 
-@pytest.mark.asyncio(loop_scope="class")
 class TestColocatedIpcWeightUpdateFlow:
     """Tests for weight synchronization via CUDA IPC (colocated, TP=1)."""
 
+    @pytest.mark.asyncio
     async def test_update_weights_ipc(self, ipc_weight_update_env):
         """
         Full E2E weight sync test (colocated, CUDA IPC):
