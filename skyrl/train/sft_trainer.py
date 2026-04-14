@@ -426,8 +426,8 @@ class SFTTrainer:
         batch_size = self.sft_cfg.batch_size
         total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
         if self.sft_cfg.strategy == "megatron":
-            tp = self.sft_cfg.megatron.tensor_model_parallel_size
-            pp = self.sft_cfg.megatron.pipeline_model_parallel_size
+            tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
+            pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
             dp_size = total_gpus // (tp * pp)
         else:
             # FSDP: all GPUs are data-parallel

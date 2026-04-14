@@ -64,9 +64,9 @@ All SFT configuration is defined in [`skyrl/train/sft_config.py`](../../../skyrl
 | `num_steps` | `10` | Number of training steps |
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
-| `megatron.tensor_model_parallel_size` | `2` | Tensor parallelism degree (Megatron only) |
-| `megatron.pipeline_model_parallel_size` | `2` | Pipeline parallelism degree (Megatron only) |
-| `megatron.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |
+| `megatron_config.tensor_model_parallel_size` | `2` | Tensor parallelism degree (Megatron only) |
+| `megatron_config.pipeline_model_parallel_size` | `2` | Pipeline parallelism degree (Megatron only) |
+| `megatron_config.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |
 | `logger` | `console` | `console` or `wandb` |
 | `project_name` | `skyrl_sft` | W&B project name (when `logger=wandb`) |
 | `dummy_run_full_ctx` | `false` | Enable dummy/benchmarking mode |
@@ -77,7 +77,8 @@ All SFT configuration is defined in [`skyrl/train/sft_config.py`](../../../skyrl
 The SFT trainer is invoked as a module:
 
 ```bash
-python -m skyrl.train.sft_trainer [key=value overrides...]
+python -m skyrl.train.main_sft [key=value overrides...]
 ```
 
-See [`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.
+See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI entrypoint and
+[`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.

@@ -27,11 +27,7 @@ from skyrl.train.config import (
 
 @dataclass
 class SFTPlacementConfig(BaseConfig):
-    """Placement configuration for SFT training.
-
-    Simple alternative to the RL PlacementConfig -- SFT only has a single
-    model (no critic, no ref), so we only need node/GPU counts.
-    """
+    """Placement configuration for SFT training"""
 
     num_nodes: int = 1
     num_gpus_per_node: int = 4
@@ -41,15 +37,12 @@ class SFTPlacementConfig(BaseConfig):
 class SFTConfig(BaseConfig):
     """Configuration for SFT training.
 
-    Reuses SkyRL config objects for model, optimizer, and parallelism.
-    SFT-specific fields (dataset, training loop, logging) are flat.
-
     Usage::
 
         cfg = SFTConfig(
             strategy="megatron",
             placement=SFTPlacementConfig(num_gpus_per_node=4),
-            megatron=MegatronConfig(tensor_model_parallel_size=2,
+            megatron_config=MegatronConfig(tensor_model_parallel_size=2,
                                     pipeline_model_parallel_size=2),
         )
 
@@ -82,15 +75,15 @@ class SFTConfig(BaseConfig):
 
     # ---- Reused SkyRL config objects ----
     model: ModelConfig = field(default_factory=lambda: ModelConfig(path="Qwen/Qwen3-0.6B"))
-    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
     placement: SFTPlacementConfig = field(default_factory=SFTPlacementConfig)
-    megatron: MegatronConfig = field(
+    megatron_config: MegatronConfig = field(
         default_factory=lambda: MegatronConfig(
             tensor_model_parallel_size=2,
             pipeline_model_parallel_size=2,
         )
     )
-    fsdp: FSDPConfig = field(default_factory=FSDPConfig)
+    fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
 
     # ---- SFT-specific flat fields ----
     strategy: str = "megatron"  # "megatron" or "fsdp2"
@@ -143,8 +136,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
 
     # Parallelism check for megatron: total world size must be divisible by TP * PP
     if cfg.strategy == "megatron":
-        tp = cfg.megatron.tensor_model_parallel_size
-        pp = cfg.megatron.pipeline_model_parallel_size
+        tp = cfg.megatron_config.tensor_model_parallel_size
+        pp = cfg.megatron_config.pipeline_model_parallel_size
         total_world_size = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
         if total_world_size % (tp * pp) != 0:
             raise ValueError(
@@ -155,6 +148,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
 
 
+# NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend
+# on the RL configuration dataclass so we add this translation layer.
 def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     """Map user-facing SFTConfig to the internal SkyRL backend config."""
     validate_sft_cfg(sft_cfg)
@@ -168,7 +163,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     cfg.trainer.policy.model = sft_cfg.model
 
     # Optimizer -- direct assignment (same type: OptimizerConfig)
-    cfg.trainer.policy.optimizer_config = sft_cfg.optimizer
+    cfg.trainer.policy.optimizer_config = sft_cfg.optimizer_config
 
     # Placement -- map SFTPlacementConfig fields to PlacementConfig
     cfg.trainer.placement.policy_num_nodes = sft_cfg.placement.num_nodes
@@ -178,9 +173,9 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Parallelism configs -- direct assignment (same types)
     if sft_cfg.strategy == "megatron":
-        cfg.trainer.policy.megatron_config = sft_cfg.megatron
+        cfg.trainer.policy.megatron_config = sft_cfg.megatron_config
     if sft_cfg.strategy == "fsdp2":
-        cfg.trainer.policy.fsdp_config = sft_cfg.fsdp
+        cfg.trainer.policy.fsdp_config = sft_cfg.fsdp_config
 
     # SFT doesn't use KL/ref model
     cfg.trainer.algorithm.use_kl_loss = False

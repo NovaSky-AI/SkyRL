@@ -13,7 +13,7 @@ set -x
 #   bash examples/train/sft/run_sft_dummy_megatron.sh dummy_run_max_steps=10
 
 uv run --isolated --extra megatron \
-    python -m skyrl.train.sft_trainer \
+    python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen3-0.6B \
     max_length=2048 \
@@ -21,16 +21,16 @@ uv run --isolated --extra megatron \
     batch_size=4 \
     micro_train_batch_size_per_gpu=2 \
     seed=42 \
-    optimizer.lr=1e-6 \
-    optimizer.weight_decay=1e-2 \
-    optimizer.max_grad_norm=1.0 \
-    optimizer.num_warmup_steps=0 \
-    optimizer.scheduler=constant_with_warmup \
+    optimizer_config.lr=1e-6 \
+    optimizer_config.weight_decay=1e-2 \
+    optimizer_config.max_grad_norm=1.0 \
+    optimizer_config.num_warmup_steps=0 \
+    optimizer_config.scheduler=constant_with_warmup \
     placement.num_nodes=1 \
     placement.num_gpus_per_node=4 \
-    megatron.tensor_model_parallel_size=2 \
-    megatron.pipeline_model_parallel_size=2 \
-    megatron.context_parallel_size=1 \
+    megatron_config.tensor_model_parallel_size=2 \
+    megatron_config.pipeline_model_parallel_size=2 \
+    megatron_config.context_parallel_size=1 \
     logger=console \
     project_name=skyrl_sft_benchmark \
     run_name=sft_dummy_megatron \
