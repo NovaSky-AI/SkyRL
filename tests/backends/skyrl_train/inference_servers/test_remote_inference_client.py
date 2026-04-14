@@ -226,6 +226,7 @@ async def client(mock_servers):
     client = RemoteInferenceClient(
         proxy_url=mock_servers["proxy_url"],
         server_urls=mock_servers["server_urls"],
+        data_parallel_size=1,
     )
     yield client
     await client.teardown()
@@ -240,6 +241,7 @@ class TestRemoteInferenceClientInit:
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
             model_name="test-model",
+            data_parallel_size=1,
         )
 
         # Pickle and unpickle
@@ -645,6 +647,7 @@ class TestContextManager:
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
         )
 
         async with client:

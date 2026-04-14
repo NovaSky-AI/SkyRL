@@ -600,6 +600,7 @@ class InferenceEngineState:
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 active_lora_name=active_lora_name,
+                data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:

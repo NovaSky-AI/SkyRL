@@ -68,25 +68,34 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     # Also we need a new method (for_servers) to update the rank_offset for the native weight
     # sync, since this is done automatically in the legacy weight sync.
 
-    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["BroadcastInitInfo"]:
+    def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["BroadcastInitInfo"]:
         """Return one BroadcastInitInfo per server with rank_offset for each.
 
         Used when calling init_weight_update_communicator on the new inference path:
         expand the single init_info into a list (one per server), then pass
         [x.to_api_payload() for x in server_infos] to the client.
 
+        server_urls are ordered as [engine0_dp0, engine0_dp1, ..., engine1_dp0, ...].
+        All DP servers within one deployment share the same rank_offset because
+        vLLM's init_transfer_engine already accounts for dp_rank internally.
+        The offset only advances at deployment (num_engines) boundaries.
+
         Args:
             world_size_per_server: Number of workers per server (same for all servers).
-            num_servers: Number of servers.
+            num_servers: Total number of servers (num_engines * dp_size).
+            dp_size: Data parallel size. Servers are grouped into deployments
+                of dp_size servers each.
 
         Returns:
             List of BroadcastInitInfo, one per server, with cumulative rank_offset.
         """
         result: List[BroadcastInitInfo] = []
         rank_offset = self.rank_offset
-        for _ in range(num_servers):
+        for i in range(num_servers):
             result.append(replace(self, rank_offset=rank_offset))
-            rank_offset += world_size_per_server
+            # Advance rank_offset only at deployment boundaries (every dp_size servers)
+            if (i + 1) % dp_size == 0:
+                rank_offset += world_size_per_server
         return result
 
     def to_api_payload(self) -> Dict[str, Any]:

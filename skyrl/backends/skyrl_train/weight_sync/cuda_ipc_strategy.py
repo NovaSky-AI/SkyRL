@@ -54,7 +54,7 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
         """Return the strategy class for this init info type."""
         return CudaIpcTransferStrategy
 
-    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["CudaIpcInitInfo"]:
+    def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["CudaIpcInitInfo"]:
         """IPC init is a no-op, so return identical copies for each server."""
         return [copy.deepcopy(self) for _ in range(num_servers)]
 

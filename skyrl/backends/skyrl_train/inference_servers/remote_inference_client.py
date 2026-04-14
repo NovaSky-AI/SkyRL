@@ -36,6 +36,7 @@ Usage:
     client = RemoteInferenceClient(
         proxy_url="http://router:8080",  # Data plane (router)
         server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+        data_parallel_size=1,
     )
 
 Comparison with existing code:
@@ -173,6 +174,7 @@ class RemoteInferenceClient:
         client = RemoteInferenceClient(
             proxy_url="http://router:8080",  # Data plane (router)
             server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+            data_parallel_size=1, # data parallel size for deployments
         )
     """
 
@@ -181,6 +183,11 @@ class RemoteInferenceClient:
 
     server_urls: List[str]
     """Control plane URLs (list of backend servers for fan-out)."""
+
+    data_parallel_size: int
+    """Data parallel size. Used to compute total inference world size correctly:
+    server_urls contains num_engines * data_parallel_size entries, but vLLM already
+    reports the full DP world size per server, so we divide by num_deployments."""
 
     model_name: str = "default"
     """Model name for OpenAI-compatible API calls."""
@@ -865,7 +872,7 @@ class RemoteInferenceClient:
         """
         _, world_size_per_server = await self.get_world_size()
         num_servers = len(self.server_urls)
-        server_infos = init_info.for_servers(world_size_per_server, num_servers)
+        server_infos = init_info.for_servers(world_size_per_server, num_servers, dp_size=self.data_parallel_size)
         payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
         results = await asyncio.gather(
             *[
@@ -956,6 +963,11 @@ class RemoteInferenceClient:
         All servers are expected to have the same world size.
         Result is cached after first call.
 
+        When data_parallel_size > 1, server_urls contains num_engines * dp_size entries.
+        vLLM reports the full DP * TP world size per server, which already
+        covers all DP ranks in one deployment. To avoid double-counting,
+        total_world_size = per_server_ws * num_deployments (not num_servers).
+
         Returns:
             Tuple of (total_world_size, world_size_per_server).
         """
@@ -979,7 +991,12 @@ class RemoteInferenceClient:
             ws == per_server[0] for ws in per_server
         ), f"All servers must have the same world_size, got {per_server}"
 
-        self._world_size = (per_server[0] * len(self.server_urls), per_server[0])
+        # Each server is one DP rank. vLLM reports world_size = dp_size * tp_size * pp_size,
+        # which is the worker count across ALL DP ranks in one deployment.
+        # num_deployments = num_servers / dp_size (each deployment has dp_size servers).
+        # Total unique workers = per_server_ws * num_deployments.
+        num_deployments = len(self.server_urls) // self.data_parallel_size
+        self._world_size = (per_server[0] * num_deployments, per_server[0])
         return self._world_size
 
     # ---------------------------
