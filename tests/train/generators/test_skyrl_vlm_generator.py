@@ -56,7 +56,7 @@ def _register_test_env():
     try:
         register(
             id="cpu_vlm_test_env",
-            entry_point="tests.train.generators.test_skyrl_vlm_generator_thinking:CPUVLMTestEnv",
+            entry_point="tests.train.generators.test_skyrl_vlm_generator:CPUVLMTestEnv",
         )
     except Exception:
         pass
