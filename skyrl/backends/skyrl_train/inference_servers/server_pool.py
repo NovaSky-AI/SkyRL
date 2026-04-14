@@ -71,3 +71,5 @@ class ServerActorPool:
         """Shutdown all actors."""
         shutdown_refs = [actor.shutdown.remote() for actor in self._actors]
         ray.get(shutdown_refs)
+        for actor in self._actors:
+            ray.kill(actor)

@@ -431,7 +431,6 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
             "router_url": engines.client.proxy_url,
         }
 
-        print("Running cleanup")
         await engines.client.teardown()
         ray.kill(trainer)
 
