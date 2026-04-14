@@ -180,7 +180,6 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
             "router_url": engines.client.proxy_url,
         }
 
-        print("Entering clenaup right now")
         await engines.client.teardown()
         ray.kill(trainer)
 
