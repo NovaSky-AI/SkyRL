@@ -111,11 +111,10 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
         # ── Main loop ─────────────────────────────────────────────────
         # To avoid a second render call per turn, we defer obs-token
-        # extraction: after appending obs we just record the slice offset,
-        # then compute the actual obs tokens from the *next* turn's render
-        # (which produces identical token_ids since the conversation hasn't
-        # changed in between).
-        pending_obs_offset: Optional[int] = None
+        # extraction: after appending obs we record the previous turn's
+        # render length, then find the assistant message boundary in the
+        # next turn's render by scanning for the EOS token.
+        prev_render_len: Optional[int] = None
 
         while not done:
             # 1. Render full conversation for this turn's generation input
@@ -123,14 +122,25 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             input_ids = rendered_conversation["prompt_ids"]
             latest_features = rendered_conversation["features"]
 
-            # 1b. Flush pending obs tokens from the previous turn
-            if pending_obs_offset is not None:
-                obs_tokens = input_ids[pending_obs_offset:]
+            # 1b. Flush pending obs tokens from the previous turn.
+            # Find the end of the previous turn's assistant message by
+            # scanning for the first EOS token from prev_render_len.
+            if prev_render_len is not None:
+                obs_offset = None
+                for i in range(prev_render_len, len(input_ids)):
+                    if input_ids[i] == self.tokenizer.eos_token_id:
+                        obs_offset = i + 1
+                        break
+                if obs_offset is None:
+                    # If no EOS token found, assume no thinking tokens
+                    obs_offset = prev_render_len
+                    logger.warning("No EOS token found after prev_render_len; obs offset may be incorrect")
+                obs_tokens = input_ids[obs_offset:]
                 response_ids.extend(obs_tokens)
                 loss_mask.extend([0] * len(obs_tokens))
                 if rollout_logprobs is not None:
                     rollout_logprobs.extend([0.0] * len(obs_tokens))
-                pending_obs_offset = None
+                prev_render_len = None
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
@@ -171,7 +181,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             # 6. If episode continues, defer obs token extraction to next render
             if not done:
                 conversation.extend(new_obs)
-                pending_obs_offset = len(input_ids) + len(gen_ids)
+                prev_render_len = len(input_ids)
 
         # ── Build per-token rewards ───────────────────────────────────
         per_token_reward: List[float] = [0.0] * len(response_ids)
