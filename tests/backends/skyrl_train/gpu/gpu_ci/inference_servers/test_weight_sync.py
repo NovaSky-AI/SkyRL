@@ -182,6 +182,7 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
 
         await engines.client.teardown()
         ray.kill(trainer)
+    # cleanup manually in colocated case
     if engines.pg:
         ray.util.remove_placement_group(engines.pg)
 
