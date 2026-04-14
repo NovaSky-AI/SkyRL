@@ -39,7 +39,4 @@ uv run --isolated --extra fsdp \
     ckpt_path="" \
     ckpt_interval=0 \
     resume_from="" \
-    # Uncomment to run in dummy/benchmarking mode (skips real data):
-    # dummy_run_full_ctx=true \
-    # dummy_run_max_steps=5 \
     "$@"
