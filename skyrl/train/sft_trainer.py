@@ -17,12 +17,11 @@ Usage::
 
 Or as a CLI entrypoint::
 
-    python -m skyrl.train.sft_trainer strategy=megatron model.path=Qwen/Qwen3-0.6B
+    python -m skyrl.train.main_sft strategy=megatron model.path=Qwen/Qwen3-0.6B
 """
 
 import os
 import random
-import sys
 
 import ray
 import torch
@@ -40,12 +39,11 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.sft_config import (
     SFTConfig,
     build_skyrl_config_for_sft,
-    validate_sft_cfg,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
-from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer, initialize_ray
+from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
 
 # ---------------------------------------------------------------------------
 # Tokenization helpers
@@ -645,44 +643,3 @@ class SFTTrainer:
         """
         if self.tracker is not None:
             self.tracker.finish()
-
-
-# ---------------------------------------------------------------------------
-# CLI entrypoint
-# ---------------------------------------------------------------------------
-
-
-@ray.remote(num_cpus=1)
-def sft_entrypoint(cfg: SFTConfig):
-    """Run SFT training as a Ray task (off the head node).
-
-    Mirrors the ``skyrl_entrypoint`` pattern from ``main_base.py``:
-    the training loop runs inside a lightweight Ray task so that the
-    head-node process only handles config parsing and ``ray.init()``.
-    """
-    trainer = SFTTrainer(cfg)
-    trainer.setup()
-    trainer.train()
-    trainer.shutdown()
-
-
-def main():
-    """CLI entrypoint for SFT training.
-
-    Parses CLI arguments, validates the config, initializes Ray on the
-    head node, then dispatches training to a remote Ray task via
-    ``sft_entrypoint``.
-
-    Usage::
-
-        python -m skyrl.train.sft_trainer strategy=megatron model.path=Qwen/Qwen3-0.6B
-    """
-    cfg = SFTConfig.from_cli_overrides(sys.argv[1:])
-    validate_sft_cfg(cfg)
-    skyrl_cfg = build_skyrl_config_for_sft(cfg)
-    initialize_ray(skyrl_cfg)
-    ray.get(sft_entrypoint.remote(cfg))
-
-
-if __name__ == "__main__":
-    main()
