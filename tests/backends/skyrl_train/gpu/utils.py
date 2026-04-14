@@ -449,6 +449,10 @@ class InferenceEngineState:
                     group.shutdown()
                 if self._cleanup_pg:
                     if len(group_list):
+                        # TODO (sumanthrh): This is a bit hacky, this assumes pg is the same
+                        # for groups in the group list - which is true for creation in
+                        # `create_inference_servers`
+                        # we should have a better way for cleaning up pg state
                         group = group_list[0]
                         try:
                             ray.util.remove_placement_group(group._get_placement_group())
