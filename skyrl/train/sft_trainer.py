@@ -36,7 +36,12 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.train.sft_config import SFTConfig, build_skyrl_config_for_sft
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.sft_config import (
+    SFTConfig,
+    build_skyrl_config_for_sft,
+    validate_sft_cfg,
+)
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
@@ -206,14 +211,14 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
 
     def setup(self):
-        """Initialize Ray, tokenizer, workers, dispatch, and tracker."""
-        self._init_ray()
+        """Initialize tokenizer, workers, dispatch, and tracker.
+
+        Ray must already be initialized before calling this (either via
+        ``initialize_ray`` on the head node or inside a Ray task).
+        """
         self._init_tokenizer()
         self._init_workers()
         self._init_tracker()
-
-    def _init_ray(self):
-        initialize_ray(self.cfg)
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.sft_cfg.model.path)
@@ -237,7 +242,7 @@ class SFTTrainer:
             [{"GPU": num_gpus, "CPU": num_gpus}] * self.sft_cfg.placement.num_nodes,
             strategy="PACK",
         )
-        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         pg = ResolvedPlacementGroup(raw_pg)
 
         actor_group = PPORayActorGroup(
@@ -631,10 +636,15 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
 
     def shutdown(self):
-        """Finish tracking and shutdown Ray."""
+        """Finish tracking.
+
+        Does NOT call ``ray.shutdown()`` -- when running inside a Ray task
+        (the normal path via ``sft_entrypoint``), shutting down Ray from
+        within the task would be incorrect.  The head-node process owns
+        the Ray lifecycle.
+        """
         if self.tracker is not None:
             self.tracker.finish()
-        ray.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -642,21 +652,36 @@ class SFTTrainer:
 # ---------------------------------------------------------------------------
 
 
+@ray.remote(num_cpus=1)
+def sft_entrypoint(cfg: SFTConfig):
+    """Run SFT training as a Ray task (off the head node).
+
+    Mirrors the ``skyrl_entrypoint`` pattern from ``main_base.py``:
+    the training loop runs inside a lightweight Ray task so that the
+    head-node process only handles config parsing and ``ray.init()``.
+    """
+    trainer = SFTTrainer(cfg)
+    trainer.setup()
+    trainer.train()
+    trainer.shutdown()
+
+
 def main():
     """CLI entrypoint for SFT training.
 
-    Parses dotlist CLI arguments to build an ``SFTConfig``, then runs the
-    full training pipeline (setup, train, shutdown).
+    Parses CLI arguments, validates the config, initializes Ray on the
+    head node, then dispatches training to a remote Ray task via
+    ``sft_entrypoint``.
 
     Usage::
 
         python -m skyrl.train.sft_trainer strategy=megatron model.path=Qwen/Qwen3-0.6B
     """
     cfg = SFTConfig.from_cli_overrides(sys.argv[1:])
-    trainer = SFTTrainer(cfg)
-    trainer.setup()
-    trainer.train()
-    trainer.shutdown()
+    validate_sft_cfg(cfg)
+    skyrl_cfg = build_skyrl_config_for_sft(cfg)
+    initialize_ray(skyrl_cfg)
+    ray.get(sft_entrypoint.remote(cfg))
 
 
 if __name__ == "__main__":
