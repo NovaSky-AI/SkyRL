@@ -132,9 +132,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                         obs_offset = i + 1
                         break
                 if obs_offset is None:
-                    # If no EOS token found, assume no thinking tokens
-                    obs_offset = prev_render_len
-                    logger.warning("No EOS token found after prev_render_len; obs offset may be incorrect")
+                    raise ValueError("No EOS token found after prev_render_len; " "cannot determine obs offset")
                 obs_tokens = input_ids[obs_offset:]
                 response_ids.extend(obs_tokens)
                 loss_mask.extend([0] * len(obs_tokens))

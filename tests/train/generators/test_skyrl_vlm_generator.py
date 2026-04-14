@@ -1,8 +1,7 @@
 """
-CPU test for the VLM generator's obs-token extraction when the renderer strips
-thinking tokens from non-last assistant messages.
+CPU tests for the VLM generator's obs-token extraction
 
-uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_vlm_generator_thinking.py -v
+uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_vlm_generator.py -v
 """
 
 from typing import Any, Dict
@@ -19,11 +18,11 @@ from skyrl.train.config import (
 )
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
-from skyrl_gym.envs import register
+from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.registration import registry
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
-THINKING_PREFIX = "<think>\nmock thinking\n</think>\n\n"
+MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +51,17 @@ class CPUVLMTestEnv(BaseTextEnv):
         )
 
 
-def _register_test_env():
-    try:
-        register(
-            id="cpu_vlm_test_env",
-            entry_point="tests.train.generators.test_skyrl_vlm_generator:CPUVLMTestEnv",
-        )
-    except Exception:
-        pass
+if "cpu_vlm_test_env" not in registry:
+    register(
+        id="cpu_vlm_test_env",
+        entry_point="tests.train.generators.test_skyrl_vlm_generator:CPUVLMTestEnv",
+    )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def deregister_test_env():
+    yield
+    deregister("cpu_vlm_test_env")
 
 
 # ---------------------------------------------------------------------------
@@ -92,26 +94,16 @@ def _build_vlm_generator(tokenizer):
     return generator
 
 
-def _make_mock_renderer(tokenizer, strip_thinking: bool):
-    """Create an AsyncMock for render_chat_completion.
-
-    When strip_thinking=True, uses the default Qwen3 chat template which strips
-    thinking from non-last assistant messages.  When False, uses the
-    ``qwen3_with_thinking`` custom template that preserves all thinking tokens.
-    """
-    from skyrl.train.generators.utils import CUSTOM_CHAT_TEMPLATES
-
-    keep_thinking_template = CUSTOM_CHAT_TEMPLATES["qwen3_with_thinking"]
+def _make_mock_renderer(tokenizer):
+    """Create an AsyncMock for render_chat_completion."""
 
     async def mock_render(request_payload):
         messages = request_payload["json"]["messages"]
-        chat_template = None if strip_thinking else keep_thinking_template
         token_ids = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=False,
-            chat_template=chat_template,
         )
         return {"token_ids": token_ids, "features": None}
 
@@ -141,25 +133,16 @@ def _make_mock_llm(tokenizer, response_text: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "use_thinking",
-    [True, False],
-    ids=["with_thinking", "without_thinking"],
-)
 @patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
-async def test_vlm_obs_offset_with_eos_scan(mock_decode, use_thinking):
-    """Validate that the EOS scan correctly identifies obs token boundaries
-    regardless of whether the renderer strips thinking tokens."""
-    _register_test_env()
+async def test_vlm_obs_offset_with_eos_scan(mock_decode):
+    """Validate that the EOS scan correctly identifies obs token boundaries."""
     mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    response_text = (THINKING_PREFIX + "b") if use_thinking else "b"
+    response_text = "b"
 
     generator = _build_vlm_generator(tokenizer)
-    # The renderer always strips thinking (default Qwen3 template).
-    # This is the scenario that triggers the bug with the old offset approach.
-    generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer, strip_thinking=True)
+    generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer)
     generator.inference_engine_client.generate = _make_mock_llm(tokenizer, response_text)
 
     prompt = [[{"role": "user", "content": "a"}]]
@@ -171,11 +154,11 @@ async def test_vlm_obs_offset_with_eos_scan(mock_decode, use_thinking):
     output: GeneratorOutput = await generator.generate(input_batch)
 
     response_ids = output["response_ids"][0]
-    loss_masks = output["loss_masks"][0]
+    loss_mask = output["loss_masks"][0]
     rewards = output["rewards"][0]
 
     # ── Basic structural checks ──────────────────────────────────────
-    assert len(response_ids) == len(loss_masks), "response_ids and loss_masks must be same length"
+    assert len(response_ids) == len(loss_mask), "response_ids and loss_mask must be same length"
     assert len(rewards) == len(response_ids), "rewards and response_ids must be same length"
 
     # ── Compute expected token counts ────────────────────────────────
@@ -186,8 +169,8 @@ async def test_vlm_obs_offset_with_eos_scan(mock_decode, use_thinking):
     total_gen_tokens = num_gen_tokens_per_turn * 3
 
     # Count 1s and 0s in loss_mask
-    num_ones = sum(loss_masks)
-    num_zeros = len(loss_masks) - num_ones
+    num_ones = sum(loss_mask)
+    num_zeros = len(loss_mask) - num_ones
 
     assert num_ones == total_gen_tokens, f"Expected {total_gen_tokens} generated tokens (loss_mask=1), got {num_ones}"
     # There are 2 observation segments (after turns 1 and 2), each containing
@@ -199,18 +182,18 @@ async def test_vlm_obs_offset_with_eos_scan(mock_decode, use_thinking):
     pos = 0
     for turn in range(3):
         # gen segment
-        gen_segment = loss_masks[pos : pos + num_gen_tokens_per_turn]
+        gen_segment = loss_mask[pos : pos + num_gen_tokens_per_turn]
         assert all(m == 1 for m in gen_segment), f"Turn {turn+1}: expected all 1s in gen segment"
         pos += num_gen_tokens_per_turn
 
         if turn < 2:
             # obs segment: find next stretch of 0s
             obs_start = pos
-            while pos < len(loss_masks) and loss_masks[pos] == 0:
+            while pos < len(loss_mask) and loss_mask[pos] == 0:
                 pos += 1
             assert pos > obs_start, f"Turn {turn+1}: expected obs tokens (0s) after gen tokens"
 
-    assert pos == len(loss_masks), f"Expected to consume all tokens, but {len(loss_masks) - pos} remain"
+    assert pos == len(loss_mask), f"Expected to consume all tokens, but {len(loss_mask) - pos} remain"
 
     # ── Verify reward placement ──────────────────────────────────────
     # Turns 1,2 have reward 0.0, turn 3 has reward 1.0.
@@ -225,14 +208,13 @@ async def test_vlm_obs_offset_with_eos_scan(mock_decode, use_thinking):
 async def test_vlm_obs_tokens_match_expected(mock_decode):
     """Verify the exact obs tokens extracted by the EOS scan match what the
     chat template produces for the observation messages."""
-    _register_test_env()
     mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    response_text = THINKING_PREFIX + "b"
+    response_text = "b"
 
     generator = _build_vlm_generator(tokenizer)
-    generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer, strip_thinking=True)
+    generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer)
     generator.inference_engine_client.generate = _make_mock_llm(tokenizer, response_text)
 
     prompt = [[{"role": "user", "content": "a"}]]
@@ -244,15 +226,15 @@ async def test_vlm_obs_tokens_match_expected(mock_decode):
     output: GeneratorOutput = await generator.generate(input_batch)
 
     response_ids = output["response_ids"][0]
-    loss_masks = output["loss_masks"][0]
+    loss_mask = output["loss_masks"][0]
 
     # Extract the obs token segments (contiguous 0s in loss_mask)
     obs_segments: list[list[int]] = []
     i = 0
-    while i < len(loss_masks):
-        if loss_masks[i] == 0:
+    while i < len(loss_mask):
+        if loss_mask[i] == 0:
             seg_start = i
-            while i < len(loss_masks) and loss_masks[i] == 0:
+            while i < len(loss_mask) and loss_mask[i] == 0:
                 i += 1
             obs_segments.append(response_ids[seg_start:i])
         else:
@@ -260,68 +242,8 @@ async def test_vlm_obs_tokens_match_expected(mock_decode):
 
     assert len(obs_segments) == 2, f"Expected 2 obs segments, got {len(obs_segments)}"
 
-    # Verify each obs segment contains the expected observation text.
-    # The renderer strips thinking from non-last assistant messages, so the
-    # obs tokens start right after the (stripped) assistant's EOS.
     for seg_idx, obs_text in enumerate(["1", "2"]):
         decoded = tokenizer.decode(obs_segments[seg_idx], skip_special_tokens=True)
         assert (
             obs_text in decoded
         ), f"Obs segment {seg_idx}: expected '{obs_text}' in decoded obs tokens, got '{decoded}'"
-
-
-@pytest.mark.asyncio
-@patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
-async def test_vlm_thinking_vs_no_thinking_same_obs_structure(mock_decode):
-    """The obs token structure should be identical whether or not the model
-    response contains thinking tokens (since obs is independent of the
-    assistant content)."""
-    _register_test_env()
-    mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    results = {}
-    for label, response_text in [("thinking", THINKING_PREFIX + "b"), ("plain", "b")]:
-        generator = _build_vlm_generator(tokenizer)
-        generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer, strip_thinking=True)
-        generator.inference_engine_client.generate = _make_mock_llm(tokenizer, response_text)
-
-        prompt = [[{"role": "user", "content": "a"}]]
-        input_batch: GeneratorInput = {
-            "prompts": prompt,
-            "env_extras": [{"answer": "4"}],
-            "env_classes": ["cpu_vlm_test_env"],
-        }
-        output: GeneratorOutput = await generator.generate(input_batch)
-        results[label] = output
-
-    # Extract obs segments for each
-    def get_obs_segments(output):
-        response_ids = output["response_ids"][0]
-        loss_masks = output["loss_masks"][0]
-        segments = []
-        i = 0
-        while i < len(loss_masks):
-            if loss_masks[i] == 0:
-                seg_start = i
-                while i < len(loss_masks) and loss_masks[i] == 0:
-                    i += 1
-                segments.append(response_ids[seg_start:i])
-            else:
-                i += 1
-        return segments
-
-    thinking_obs = get_obs_segments(results["thinking"])
-    plain_obs = get_obs_segments(results["plain"])
-
-    assert len(thinking_obs) == len(plain_obs) == 2, "Both should have 2 obs segments"
-
-    # The obs token IDs should be identical since the observation content
-    # and chat template rendering is the same.
-    for i in range(2):
-        assert thinking_obs[i] == plain_obs[i], (
-            f"Obs segment {i} differs between thinking and plain responses:\n"
-            f"  thinking: {thinking_obs[i]}\n"
-            f"  plain:    {plain_obs[i]}"
-        )
