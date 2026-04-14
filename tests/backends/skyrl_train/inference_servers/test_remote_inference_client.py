@@ -432,10 +432,12 @@ class TestWeightSync:
         """Test init_weight_update_communicator expands init_info and fans out to all servers."""
 
         class MockInitInfo:
-            """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
+            """Lightweight mock satisfying the for_engine / to_api_payload protocol."""
 
-            def for_servers(self, world_size_per_server, num_servers):
-                return [self] * num_servers
+            dp_size = 1
+
+            def for_engine(self, engine_index, tp_size, pp_size, dp_size):
+                return self
 
             def to_api_payload(self):
                 return {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}

@@ -41,6 +41,7 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     group_name: str
     backend: str
     model_dtype_str: str
+    dp_size: int = 1
 
     @staticmethod
     def strategy_type() -> type:
@@ -61,33 +62,6 @@ class BroadcastInitInfo(WeightSyncInitInfo):
         """
         cumulative_offset = engine_index * tp_size * pp_size * dp_size
         return replace(self, rank_offset=self.rank_offset + cumulative_offset)
-
-    # TODO (Aaron): native weight sync only needs the following params:
-    #     master_address, master_port, rank_offset, world_size
-    # so we need a new method (to_api_payload) to return the payload for the native weight sync.
-    # Also we need a new method (for_servers) to update the rank_offset for the native weight
-    # sync, since this is done automatically in the legacy weight sync.
-
-    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["BroadcastInitInfo"]:
-        """Return one BroadcastInitInfo per server with rank_offset for each.
-
-        Used when calling init_weight_update_communicator on the new inference path:
-        expand the single init_info into a list (one per server), then pass
-        [x.to_api_payload() for x in server_infos] to the client.
-
-        Args:
-            world_size_per_server: Number of workers per server (same for all servers).
-            num_servers: Number of servers.
-
-        Returns:
-            List of BroadcastInitInfo, one per server, with cumulative rank_offset.
-        """
-        result: List[BroadcastInitInfo] = []
-        rank_offset = self.rank_offset
-        for _ in range(num_servers):
-            result.append(replace(self, rank_offset=rank_offset))
-            rank_offset += world_size_per_server
-        return result
 
     def to_api_payload(self) -> Dict[str, Any]:
         """Return JSON-serializable payload for the /init_weight_transfer_engine endpoint."""
@@ -369,6 +343,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             backend=ie_cfg.weight_sync_backend,
             model_dtype_str=ie_cfg.model_dtype,
             override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
+            dp_size=ie_cfg.data_parallel_size,
         )
 
     @staticmethod
