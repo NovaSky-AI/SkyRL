@@ -529,8 +529,13 @@ class SFTTrainer:
         rng = random.Random(self.sft_cfg.seed)
         rng.shuffle(tokenized)
 
+        # When resuming, start_step is the last *completed* step (checkpoint is
+        # saved AFTER the optimizer update), so we begin at start_step + 1 to
+        # avoid replaying that step.
+        resume_step = start_step + 1 if start_step > 0 else 0
+
         # Replay epoch shuffles for reproducibility on resume
-        start_epoch = (start_step * batch_size) // len(tokenized)
+        start_epoch = (resume_step * batch_size) // len(tokenized)
         for _ in range(start_epoch):
             rng.shuffle(tokenized)
         current_epoch = start_epoch
@@ -538,8 +543,7 @@ class SFTTrainer:
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
-
-        for step in tqdm(range(start_step, num_steps)):
+        for step in tqdm(range(resume_step, num_steps)):
             all_timings: dict[str, float] = {}
 
             with Timer("step", all_timings):
