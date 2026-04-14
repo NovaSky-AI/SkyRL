@@ -805,7 +805,7 @@ class RayPPOTrainer:
             # We use the last step of each trajectory to compute advantages and broadcast them to
             # all steps of that trajectory, so we ignore per-step rewards in step-wise training.
             # We pass an all-ones mask here so the estimator returns the scalar advantage at every
-            # position. The real per-step `response_mask` is re-applied on broadcast below. See issue #1492.
+            # position. The real per-step `response_mask` is re-applied on broadcast below.
             # Shapes:
             #   traj_ids, (batch_size,):         trajectory id per step (cumsum of shifted is_last_step)
             #   last_step_advantages/returns,

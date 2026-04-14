@@ -275,11 +275,9 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     )
 
     # Step-wise training collapses each trajectory to a single scalar advantage that is broadcast
-    # uniformly to every step's response tokens. This only makes sense for outcome-based estimators
-    # that return `scalar * response_mask`. Temporal estimators (GAE, REINFORCE++) produce per-token
-    # advantages via backward discounted returns, which the broadcast discards — and in step-wise
-    # mode they only see the last step's slice anyway, so there is no cross-step credit assignment
-    # to preserve. Reject the combination explicitly rather than silently producing wrong gradients.
+    # uniformly to every step's response tokens. This only makes sense for outcome-based estimators.
+    # Temporal estimators (GAE, REINFORCE++) produce per-token advantages, which the broadcast
+    # discards. Reject the combination explicitly.
     if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.advantage_estimator in ("gae", "reinforce++"):
         raise ValueError(
             f"advantage_estimator={cfg.trainer.algorithm.advantage_estimator!r} is not supported with "
