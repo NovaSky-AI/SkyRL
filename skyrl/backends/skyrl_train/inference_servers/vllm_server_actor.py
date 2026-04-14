@@ -112,7 +112,7 @@ class VLLMServerActor(ServerActorProtocol):
             dp_master_address: DP master address (for non-rank-0 servers)
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
             enable_pd: Enable prefill-decode disaggregation
-            nixl_side_channel_base: Base port for NIXL side channel
+            nixl_side_channel_base: Base port for NIXL side channel to start searching for a free port
             colocated_training: Whether the server is colocated with training workers
             distributed_executor_backend: vLLM distributed executor backend.
                 ``"ray"`` spawns TP/PP workers as Ray tasks (default).
@@ -145,8 +145,14 @@ class VLLMServerActor(ServerActorProtocol):
         self._cli_args.port = self._port
 
         # PD disaggregation: setup NIXL side channel for KV transfer
+        self._nixl_port_reservation = None
+        self._nixl_side_channel_base = None
         if enable_pd:
-            self._setup_nixl_side_channel(nixl_side_channel_base)
+            # use nixl_side_channel_base + server_idx as convention for the start port for this server
+            self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
+                nixl_side_channel_base + server_idx
+            )
+            self._setup_nixl_side_channel(self._nixl_side_channel_base)
 
         # Each engine needs to know its dp_rank and dp_size so DP process groups are formed
         if dp_size > 0:
@@ -208,7 +214,7 @@ class VLLMServerActor(ServerActorProtocol):
                 f"Server {self._server_idx}: mp backend, " f"cleared CUDA_VISIBLE_DEVICES (single-GPU or auto-detect)"
             )
 
-    def _setup_nixl_side_channel(self, base_port: int) -> None:
+    def _setup_nixl_side_channel(self, side_channel_port: int) -> None:
         """
         Setup NIXL side channel for PD disaggregation.
 
@@ -216,22 +222,24 @@ class VLLMServerActor(ServerActorProtocol):
         """
         import json
 
-        side_channel_port = base_port + self._server_idx
         os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel_port)
         os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = self._ip
 
         engine_id = f"server-{self._server_idx}-{self._ip}-{side_channel_port}"
 
         if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
-            try:
-                kv_config = json.loads(self._cli_args.kv_transfer_config)
-            except (json.JSONDecodeError, TypeError) as e:
-                raise ValueError(
-                    f"Invalid kv_transfer_config: expected valid JSON string, "
-                    f"got {type(self._cli_args.kv_transfer_config).__name__}: {e}"
-                ) from e
+            kv_config = self._cli_args.kv_transfer_config
+            # Handle both dict and JSON string formats
+            if isinstance(kv_config, str):
+                try:
+                    kv_config = json.loads(kv_config)
+                except (json.JSONDecodeError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid kv_transfer_config: expected valid JSON string or dict, "
+                        f"got {type(self._cli_args.kv_transfer_config).__name__}: {e}"
+                    ) from e
             kv_config["engine_id"] = engine_id
-            self._cli_args.kv_transfer_config = json.dumps(kv_config)
+            self._cli_args.kv_transfer_config = kv_config
 
         logger.info(
             f"Server {self._server_idx}: NIXL side channel configured - "
@@ -294,6 +302,10 @@ class VLLMServerActor(ServerActorProtocol):
         if self._port_reservation is not None:
             self._port_reservation.close()
             self._port_reservation = None
+
+        if self._nixl_port_reservation is not None:
+            self._nixl_port_reservation.close()
+            self._nixl_port_reservation = None
 
         sock_addr = (self._cli_args.host, self._cli_args.port)
         sock = create_server_socket(sock_addr)

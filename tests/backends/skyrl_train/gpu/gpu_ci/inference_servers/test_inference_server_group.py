@@ -17,6 +17,7 @@ import time
 
 import httpx
 import pytest
+from vllm_router.router_args import RouterArgs
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -90,7 +91,13 @@ def server_group_and_router(class_scoped_ray_init_fixture):
         assert wait_for_url(url), f"Server {url} failed to start"
 
     # Create router
-    router = VLLMRouter(server_urls)
+    router_args = RouterArgs(
+        worker_urls=server_urls,
+        host="0.0.0.0",
+        port=get_open_port(),
+        policy="consistent_hash",
+    )
+    router = VLLMRouter(router_args)
     router_url = router.start()
     assert wait_for_url(router_url), "Router failed to start"
 

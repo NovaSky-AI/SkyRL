@@ -19,8 +19,8 @@ MEGATRON_TP=1
 MEGATRON_PP=1
 MEGATRON_CP=1
 
-NUM_INFERENCE_ENGINES=1
-INFERENCE_ENGINE_TP=4
+NUM_INFERENCE_ENGINES=4
+INFERENCE_ENGINE_TP=1
 
 # Qwen3.5 flags
 USE_SAMPLE_PACKING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
@@ -63,8 +63,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=5 \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_qwen3.5-0.8b" \
+  trainer.project_name="qwen3.5-0.8b" \
+  trainer.run_name="qwen3.5-0.8b_megatron" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@
