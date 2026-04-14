@@ -232,8 +232,6 @@ class MegatronWeightExtractor(WeightExtractor):
         self._ensure_buckets_initialized()
         device = torch.cuda.current_device()
 
-        # NOTE (sumanthrh): Always iterate with `conversion_tasks=None` to capture all parameters,
-        # even those without explicit Megatron-> HF conversion tasks like `router.expert_bias`
         hf_params_generator = self._get_params_iterator()
 
         if not self.enable_bucketing:
