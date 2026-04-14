@@ -164,6 +164,7 @@ def create_inference_servers(
                 cli_args=cli_args,
                 num_servers=ie_cfg.data_parallel_size,
                 placement_group=placement_group,
+                start_port=8000 + i * ie_cfg.data_parallel_size,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
