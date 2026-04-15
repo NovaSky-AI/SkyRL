@@ -57,8 +57,13 @@ from skyrl.utils.tok import get_tokenizer
 # ---------------------------------------------------------------------------
 
 
-def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512) -> dict | None:
-    """Tokenize a single SFT example (instruction + output).
+def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512, **tokenizer_kwargs) -> dict | None:
+    """Tokenize an Alpaca-format SFT example via ``apply_chat_template``.
+
+    Converts the instruction/input/output fields into a two-message chat
+    (user + assistant) and delegates to :func:`tokenize_chat_example`.
+    This ensures tokenization matches the HF / TRL convention (proper
+    special tokens, chat template formatting).
 
     Returns dict with input_ids, attention_mask, num_actions (response length),
     or None if the example was fully truncated.
@@ -67,30 +72,24 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512) -> dic
     input_text = example.get("input", "")
     output = example.get("output", "")
 
-    # Combine instruction and input
+    # Build user content: instruction + optional input
+    user_content = instruction
     if input_text:
-        prompt = f"{instruction}\n\n{input_text}"
-    else:
-        prompt = instruction
+        user_content = f"{instruction}\n\n{input_text}"
+    user_content = user_content.strip()
 
-    # Tokenize prompt and full sequence separately to find boundary
-    prompt_tokens = tokenizer(prompt, add_special_tokens=True, truncation=True, max_length=max_length)
-    full_text = f"{prompt}\n\n{output}"
-    full_tokens = tokenizer(full_text, add_special_tokens=True, truncation=True, max_length=max_length)
+    messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": output},
+    ]
 
-    prompt_len = len(prompt_tokens["input_ids"])
-    full_len = len(full_tokens["input_ids"])
-    num_actions = full_len - prompt_len
-
-    # Skip examples where response was fully truncated
-    if num_actions <= 0:
-        return None
-
-    return {
-        "input_ids": full_tokens["input_ids"],
-        "attention_mask": full_tokens["attention_mask"],
-        "num_actions": num_actions,
-    }
+    return tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=max_length,
+        messages_key="messages",
+        **tokenizer_kwargs,
+    )
 
 
 def tokenize_chat_example(
@@ -340,15 +339,21 @@ class SFTTrainer:
         """Collate examples into a TrainingInputBatch with loss normalization.
 
         Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
-        produces a properly averaged loss. Megatron sums over tokens within each
-        micro-batch and averages across micro-batches, so we scale by
-        ``1 / (micro_batch_size * max_sequence_length)`` to get a per-token mean.
+        produces a per-non-pad-token mean, matching HF's
+        ``CrossEntropyLoss(ignore_index=-100, reduction='mean')`` convention.
+
+        The scaling factor is ``batch_size / (micro_batch_size * total_nonpad)``
+        where ``total_nonpad`` is the count of non-masked (loss-contributing)
+        tokens in the full batch.  This accounts for the ``microbatch_weight``
+        (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
+        accumulation so that the effective gradient equals
+        ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
         """
         batch = collate_sft_batch(examples, self.tokenizer)
-        # Loss normalization
+        # Loss normalization: divide by non-pad token count (not padded seq length)
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
-        max_sequence_length = batch["sequences"].shape[-1]
-        batch["loss_mask"] = batch["loss_mask"].float() / (micro_batch_size * max_sequence_length)
+        total_nonpad = max(batch["loss_mask"].sum().item(), 1)
+        batch["loss_mask"] = batch["loss_mask"].float() * (self.sft_cfg.batch_size / (micro_batch_size * total_nonpad))
         return batch
 
     # ------------------------------------------------------------------ #
@@ -492,7 +497,13 @@ class SFTTrainer:
 
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
         attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
-        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) / (micro_batch_size * num_actions)
+        # All tokens are non-pad in the dummy batch, so total_nonpad = batch_size * num_actions.
+        # Scaling = batch_size / (micro_batch_size * total_nonpad)
+        #         = 1 / (micro_batch_size * num_actions)
+        total_nonpad = batch_size * num_actions
+        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) * (
+            batch_size / (micro_batch_size * total_nonpad)
+        )
 
         batch = TrainingInputBatch(
             {
