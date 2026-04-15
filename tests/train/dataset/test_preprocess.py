@@ -271,6 +271,54 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
 
 
 # ---------------------------------------------------------------------------
+# Process rewards padding tests
+# ---------------------------------------------------------------------------
+
+
+def test_process_rewards_right_aligned(tokenizer):
+    """process_rewards should be right-aligned just like regular rewards."""
+    prompts = [[1, 2], [3, 4, 5, 6]]
+    responses = [[10, 11, 12], [20, 21]]
+    rewards = [[0.0] * 3, [0.0] * 2]
+    loss_masks = [[1] * 3, [1] * 2]
+    process_rewards = [[-1.0, -0.2, 0.0], [-0.5, 0.0]]
+
+    *_, pr_tensor = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+        process_rewards=process_rewards,
+    )
+
+    assert pr_tensor is not None
+    # max_response = 3
+    assert pr_tensor.shape == (2, 3)
+    # Sample 0: response_len=3, no padding -> [-1.0, -0.2, 0.0]
+    assert pr_tensor[0].tolist() == pytest.approx([-1.0, -0.2, 0.0])
+    # Sample 1: response_len=2, right-aligned -> [0.0, -0.5, 0.0]
+    assert pr_tensor[1].tolist() == pytest.approx([0.0, -0.5, 0.0])
+
+
+def test_process_rewards_none_when_not_provided(tokenizer):
+    """When process_rewards is not provided, the returned tensor should be None."""
+    prompts = [[1, 2], [3, 4]]
+    responses = [[10], [20]]
+    rewards = [[0.0], [0.0]]
+    loss_masks = [[1], [1]]
+
+    *_, pr_tensor = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+    )
+    assert pr_tensor is None
+
+
+# ---------------------------------------------------------------------------
 # R3 (Router Replay) — rollout_expert_indices padding tests
 # ---------------------------------------------------------------------------
 

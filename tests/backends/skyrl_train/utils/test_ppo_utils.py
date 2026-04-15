@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     apply_loss_reduction_to_advantages_minibatch,
     compute_advantages_and_returns,
     compute_approx_kl,
+    compute_fold_grpo_advantage,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_maxrl_advantage,
@@ -174,6 +175,115 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_fold_grpo_advantage_fallback():
+    """Without process_rewards, FoldGRPO should produce identical output to standard GRPO."""
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
+            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
+            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1])
+
+    grpo_adv, grpo_ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+    )
+    fold_adv, fold_ret = compute_fold_grpo_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+    )
+
+    assert torch.allclose(fold_adv, grpo_adv, atol=1e-5), "FoldGRPO fallback should match GRPO"
+    assert torch.allclose(fold_ret, grpo_ret, atol=1e-5)
+
+
+def test_compute_fold_grpo_advantage_with_process_rewards():
+    """With process_rewards, advantages should be token-level: clip(R_i + Q_{i,t}) - mean(R)."""
+    # Two trajectories in one group: outcome rewards sum to 1.0 and 0.0
+    token_level_rewards = torch.tensor(
+        [
+            [0.0, 0.0, 1.0],  # sum = 1.0 (success)
+            [0.0, 0.0, 0.0],  # sum = 0.0 (failure)
+        ]
+    )
+    process_rewards = torch.tensor(
+        [
+            [0.0, -0.2, 0.0],  # out-of-scope penalty on token 1
+            [-1.0, 0.0, 0.0],  # unfolded token penalty on token 0
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0])
+
+    adv, ret = compute_fold_grpo_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+        process_rewards=process_rewards,
+    )
+
+    # R_0 = 1.0, R_1 = 0.0, mean = 0.5
+    # Traj 0: clip(1.0 + [0.0, -0.2, 0.0]) = [1.0, 0.8, 1.0], minus 0.5 = [0.5, 0.3, 0.5]
+    # Traj 1: clip(0.0 + [-1.0, 0.0, 0.0]) = [0.0, 0.0, 0.0], minus 0.5 = [-0.5, -0.5, -0.5]
+    expected = torch.tensor(
+        [
+            [0.5, 0.3, 0.5],
+            [-0.5, -0.5, -0.5],
+        ]
+    )
+
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+    assert torch.allclose(adv, ret, atol=1e-5), "Advantages and returns should be equal"
+
+
+def test_compute_fold_grpo_advantage_clipping():
+    """Process rewards that push combined reward outside [0, 1] should be clipped."""
+    token_level_rewards = torch.tensor([[0.0, 0.0, 1.0]])  # R = 1.0
+    process_rewards = torch.tensor([[0.5, -2.0, 0.0]])  # pushes above 1 and below 0
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0])
+
+    adv, _ = compute_fold_grpo_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        process_rewards=process_rewards,
+    )
+
+    # R = 1.0, single group so mean=0, std=1 (single sample defaults)
+    # combined = [1.5, -1.0, 1.0] -> clipped to [1.0, 0.0, 1.0]
+    # normalized with mean=0, std=1: [1.0, 0.0, 1.0]
+    expected = torch.tensor([[1.0, 0.0, 1.0]])
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_fold_grpo_advantage_masking():
+    """Masked positions should be zero regardless of process rewards."""
+    token_level_rewards = torch.tensor([[0.0, 0.0, 1.0]])
+    process_rewards = torch.tensor([[-0.5, -0.5, 0.0]])
+    response_mask = torch.tensor([[1.0, 0.0, 1.0]])
+    index = np.array([0])
+
+    adv, _ = compute_fold_grpo_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        process_rewards=process_rewards,
+    )
+
+    assert adv[0, 1].item() == 0.0, "Masked position should be zero"
 
 
 def test_compute_maxrl_advantage():
