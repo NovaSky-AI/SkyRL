@@ -426,7 +426,7 @@ class TestWeightSync:
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
 
-            def for_servers(self, world_size_per_server, num_servers):
+            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
                 return [self] * num_servers
 
             def to_api_payload(self):
