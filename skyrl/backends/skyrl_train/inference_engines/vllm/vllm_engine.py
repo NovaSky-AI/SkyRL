@@ -185,16 +185,17 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                 for i, pos_logprobs in enumerate(output.prompt_logprobs):
                     if pos_logprobs is None:
                         # First position has no prior context; skip it (matching JAX backend).
+                        # Only first position can be None
                         continue
                     else:
                         token_id = output.prompt_token_ids[i]
-                        if token_id in pos_logprobs:
-                            _prompt_logprobs.append(pos_logprobs[token_id].logprob)
-                        else:
-                            # vLLM should always include the actual token, but if not,
-                            # use -inf so downstream math (importance weights, KL) fails
-                            # loudly rather than silently corrupting with a fake value.
-                            _prompt_logprobs.append(float("-inf"))
+                        if token_id not in pos_logprobs:
+                            raise RuntimeError(
+                                f"vLLM prompt_logprobs missing actual token at position {i} "
+                                f"(token_id={token_id}). This violates vLLM's contract that "
+                                f"the actual prompt token is always returned regardless of rank."
+                            )
+                        _prompt_logprobs.append(pos_logprobs[token_id].logprob)
             prompt_logprobs_list.append(_prompt_logprobs)
 
             _routed_experts = None
@@ -209,9 +210,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             response_logprobs = None  # hack: assume uniform sampling params
 
         if len(prompt_logprobs_list) and prompt_logprobs_list[0] is None:
-            prompt_logprobs_out = None  # hack: assume uniform sampling params
-        else:
-            prompt_logprobs_out = prompt_logprobs_list
+            prompt_logprobs_list = None  # hack: assume uniform sampling params
 
         if len(rollout_expert_indices) > 0 and rollout_expert_indices[0] is None:
             rollout_expert_indices = None  # hack: assume uniform sampling params
@@ -221,7 +220,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
-            prompt_logprobs=prompt_logprobs_out,
+            prompt_logprobs=prompt_logprobs_list,
             rollout_expert_indices=rollout_expert_indices,
         )
 
