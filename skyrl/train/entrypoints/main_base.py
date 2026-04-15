@@ -391,6 +391,7 @@ class BasePPOExp:
             model_name=self.cfg.trainer.policy.model.path,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
+            data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self.tokenizer,
         )
 

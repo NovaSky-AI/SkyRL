@@ -106,6 +106,7 @@ def server_group_and_router(class_scoped_ray_init_fixture):
         proxy_url=router_url,
         server_urls=server_urls,
         model_name=MODEL,
+        data_parallel_size=1,
         tokenizer=get_tokenizer(MODEL),
     )
 

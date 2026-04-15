@@ -18,7 +18,10 @@ import httpx
 from vllm_router.launch_router import launch_router
 from vllm_router.router_args import RouterArgs
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    find_and_reserve_port,
+    get_node_ip,
+)
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,8 @@ class VLLMRouter:
         router.shutdown()
     """
 
+    _DEFAULT_PROMETHEUS_PORT = 29000
+
     def __init__(self, router_args: RouterArgs, log_path: Optional[str] = None):
         """
         Args:
@@ -72,6 +77,25 @@ class VLLMRouter:
         self._log_file: Optional[str] = None
         self._process: Optional[multiprocessing.Process] = None
 
+        # Reserve the router port and prometheus port to prevent race conditions
+        # between discovery and actual server startup.
+        reserved_port, self._port_reservation = find_and_reserve_port(self._router_args.port)
+        self._router_args.port = reserved_port
+
+        prometheus_start = self._router_args.prometheus_port or self._DEFAULT_PROMETHEUS_PORT
+        reserved_prom_port, self._prometheus_port_reservation = find_and_reserve_port(prometheus_start)
+        self._router_args.prometheus_port = reserved_prom_port
+
+        logger.info(f"VLLMRouter: port={self._router_args.port}, prometheus_port={self._router_args.prometheus_port}")
+
+    def _release_port_reservations(self) -> None:
+        """Close any held port reservation sockets."""
+        for attr in ("_port_reservation", "_prometheus_port_reservation"):
+            sock = getattr(self, attr, None)
+            if sock is not None:
+                sock.close()
+                setattr(self, attr, None)
+
     def start(self) -> str:
         """Spawn the router process and return the router URL once healthy.
 
@@ -84,6 +108,9 @@ class VLLMRouter:
         if self._log_path is not None:
             timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
             self._log_file = str(Path(self._log_path) / f"router-{timestamp}.log")
+
+        # Release port reservations right before the router rebinds.
+        self._release_port_reservations()
 
         self._process = multiprocessing.Process(
             target=_run_router_with_logging,
@@ -134,6 +161,9 @@ class VLLMRouter:
 
     def shutdown(self) -> None:
         """Terminate the router process."""
+        # release any port reservations if not already
+        self._release_port_reservations()
+        # check if router process is active and terminate if needed
         if self._process is None or not self._process.is_alive():
             return
         logger.info("Shutting down VLLMRouter...")

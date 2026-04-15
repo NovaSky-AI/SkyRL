@@ -278,6 +278,7 @@ class SkyRLTrainBackend(AbstractBackend):
             server_urls=server_urls,
             model_name=self._cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
+            data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self._tokenizer,
         )
 
