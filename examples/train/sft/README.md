@@ -64,7 +64,11 @@ All SFT configuration is defined in [`skyrl/train/sft_config.py`](../../../skyrl
 | `num_steps` | `10` | Number of training steps |
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
+| `seed` | `42` | Random seed for data shuffling and reproducibility |
 | `use_sample_packing` | `true` | Pack multiple sequences per batch (requires flash attention) |
+| `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
+| `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
+| `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
 | `megatron_config.tensor_model_parallel_size` | `2` | Tensor parallelism degree (Megatron only) |
 | `megatron_config.pipeline_model_parallel_size` | `2` | Pipeline parallelism degree (Megatron only) |
 | `megatron_config.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |

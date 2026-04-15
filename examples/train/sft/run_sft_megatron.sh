@@ -23,6 +23,7 @@ uv run --isolated --extra megatron \
     num_steps=10 \
     batch_size=4 \
     micro_train_batch_size_per_gpu=2 \
+    use_sample_packing=true \
     seed=42 \
     optimizer_config.lr=1e-6 \
     optimizer_config.weight_decay=1e-2 \

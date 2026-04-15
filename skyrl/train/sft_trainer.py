@@ -36,6 +36,7 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.sft_config import (
     SFTConfig,
     build_skyrl_config_for_sft,
@@ -200,9 +201,11 @@ class SFTTrainer:
         trainer.shutdown()
     """
 
-    def __init__(self, cfg: SFTConfig):
+    def __init__(self, cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig | None = None):
         self.sft_cfg = cfg
-        self.cfg = build_skyrl_config_for_sft(cfg)
+        # Accept a pre-built bridge config to avoid redundant rebuilds.
+        # When not provided (e.g. standalone usage), build it here.
+        self.cfg = skyrl_cfg if skyrl_cfg is not None else build_skyrl_config_for_sft(cfg)
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
