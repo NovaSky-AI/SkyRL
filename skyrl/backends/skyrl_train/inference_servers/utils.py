@@ -60,7 +60,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         setattr(args, key, value)
 
     # Add LoRA params if enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.policy.strategy != "megatron":
         args.enable_lora = True
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1
