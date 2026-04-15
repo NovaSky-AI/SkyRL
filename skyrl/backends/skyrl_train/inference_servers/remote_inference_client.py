@@ -858,29 +858,22 @@ class RemoteInferenceClient:
         init_info: "WeightSyncInitInfo",
     ) -> Dict[str, Any]:
         """
-                Initialize weight sync via vLLM native /init_weight_transfer_engine.
+        Initialize weight sync via vLLM native /init_weight_transfer_engine.
 
-                Fetches per-server world sizes, expands init_info into per-server
-                payloads (with correct NCCL rank offsets), and fans out to all servers.
+        Fetches per-server world sizes, expands init_info into per-server
+        payloads (with correct NCCL rank offsets), and fans out to all servers.
 
-        s
-                Args:
-                    init_info: A WeightSyncInitInfo (e.g. BroadcastInitInfo) that supports
-                        for_engine() and to_api_payload().
+        Args:
+            init_info: A WeightSyncInitInfo (e.g. BroadcastInitInfo) that supports
+                for_servers() and to_api_payload().
 
-                Returns:
-                    Dict mapping server_url to response.
+        Returns:
+            Dict mapping server_url to response.
         """
         _, world_size_per_server = await self.get_world_size()
         num_servers = len(self.server_urls)
-        dp_size = getattr(init_info, "dp_size", 1)
-
-        payloads = []
-        for i in range(num_servers):
-            engine_idx = i // dp_size
-            engine_init_info = init_info.for_engine(engine_idx, world_size_per_server, 1, dp_size)
-            payloads.append({"init_info": engine_init_info.to_api_payload()})
-
+        server_infos = init_info.for_servers(world_size_per_server, num_servers)
+        payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
         results = await asyncio.gather(
             *[
                 self._call_server(url, "/init_weight_transfer_engine", payload)
@@ -1048,7 +1041,7 @@ class RemoteInferenceClient:
         if self._world_size is not None:
             return self._world_size
 
-        results = await self._call_all_servers("/get_world_size", method="GET", params={"include_dp": "false"})
+        results = await self._call_all_servers("/get_world_size", {}, method="GET")
 
         per_server = []
         for server_url in self.server_urls:
