@@ -26,7 +26,15 @@ bash examples/train/sft/run_sft_megatron.sh
 
 Trains `Qwen/Qwen3-0.6B` on 4 GPUs with Megatron (TP=2, PP=2). Key defaults: max length 512, batch size 4, 10 training steps.
 
-Both scripts accept extra overrides as positional arguments:
+### LoRA (FSDP, single GPU)
+
+```bash
+bash examples/train/sft/run_sft_lora.sh
+```
+
+Trains `Qwen/Qwen2.5-0.5B-Instruct` with LoRA adapters (rank 32, alpha 16) on 1 GPU using FSDP. Only adapter parameters are trainable, significantly reducing memory usage. Key defaults: max length 512, batch size 4, 10 training steps, sample packing enabled. Override LoRA settings with e.g. `model.lora.rank=64 model.lora.alpha=32`.
+
+All scripts accept extra overrides as positional arguments:
 
 ```bash
 bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
@@ -91,7 +99,6 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 ## Limitations
 
 - **No evaluation support.** : Currently we do not support using an evaluation dataset.
-- **No LoRA / PEFT support.** The SFT trainer does not wire up LoRA configuration. The RL trainer supports LoRA for both FSDP and Megatron backends.
 - **Last assistant message only**: The current SFT trainer only supports training on the last assistant message.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.

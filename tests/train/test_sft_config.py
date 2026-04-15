@@ -81,6 +81,28 @@ class TestOptimizerConfigOverrides:
         assert actual == expected
 
 
+class TestLoraConfigOverrides:
+    """LoRA config overrides propagate through model.lora → policy.model.lora."""
+
+    def test_lora_rank_and_alpha_propagate(self):
+        cfg = _sft_cfg_from_overrides(["model.path=test/my-model", "model.lora.rank=32", "model.lora.alpha=64"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.rank == 32
+        assert skyrl_cfg.trainer.policy.model.lora.alpha == 64
+
+    def test_lora_target_modules_propagate(self):
+        cfg = _sft_cfg_from_overrides(
+            ["model.path=test/my-model", "model.lora.rank=16", "model.lora.target_modules=all-linear"]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.target_modules == "all-linear"
+
+    def test_lora_disabled_by_default(self):
+        cfg = _sft_cfg_from_overrides([])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.rank == 0
+
+
 class TestFSDPConfigOverrides:
     """FSDP config overrides propagate when strategy=fsdp2."""
 
