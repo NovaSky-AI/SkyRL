@@ -628,6 +628,8 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    log_example_interval: int = 1
+    """Log an example prompt every N training steps, ``-1`` to disable"""
 
     def __post_init__(self):
         # ref model defaults to the policy model
