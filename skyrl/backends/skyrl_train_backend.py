@@ -798,11 +798,11 @@ class SkyRLTrainBackend(AbstractBackend):
                 # All samples for a request share the same prompt, so use the first sample's
                 # prompt logprobs (parity with JAX backend).
                 first_output = sample_outputs[start_idx]
-                prompt_logprobs = (
-                    (first_output.get("prompt_logprobs") or [None])[0]
-                    if prompt_logprobs_requested
-                    else None
-                )
+                prompt_logprobs = None
+                if prompt_logprobs_requested:
+                    all_prompt_logprobs = first_output.get("prompt_logprobs")
+                    if all_prompt_logprobs and len(all_prompt_logprobs) > 0:
+                        prompt_logprobs = all_prompt_logprobs[0]
 
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
