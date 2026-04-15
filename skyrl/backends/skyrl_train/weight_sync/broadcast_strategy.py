@@ -41,7 +41,6 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     group_name: str
     backend: str
     model_dtype_str: str
-    dp_size: int = 1
 
     @staticmethod
     def strategy_type() -> type:
