@@ -372,6 +372,7 @@ def test_generator_output_concatenation():
         "rollout_metrics",
         "rollout_logprobs",
         "rollout_expert_indices",
+        "process_rewards",
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",

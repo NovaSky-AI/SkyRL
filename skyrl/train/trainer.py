@@ -611,6 +611,7 @@ class RayPPOTrainer:
         rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
             "rollout_expert_indices", None
         )
+        process_rewards: Optional[List[List[float]]] = generator_output.get("process_rewards", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -632,6 +633,7 @@ class RayPPOTrainer:
             loss_masks_tensor,
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
+            process_rewards_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -641,6 +643,7 @@ class RayPPOTrainer:
             logprobs,
             rollout_expert_indices,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+            process_rewards=process_rewards,
         )
 
         # sanity check for off_policy_correction
@@ -659,6 +662,7 @@ class RayPPOTrainer:
                 "attention_mask": attention_masks_tensor,
                 "response_mask": response_masks_tensor,
                 "rewards": rewards_tensor,
+                "process_rewards": process_rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
@@ -851,6 +855,9 @@ class RayPPOTrainer:
             advantages = last_step_advantages[traj_ids] * response_mask_float
             returns = last_step_returns[traj_ids] * response_mask_float
         else:
+            extra_kwargs = {}
+            if data.get("process_rewards") is not None:
+                extra_kwargs["process_rewards"] = data["process_rewards"]
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
@@ -861,6 +868,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                **extra_kwargs,
             )
         data["returns"] = returns
         data["advantages"] = advantages

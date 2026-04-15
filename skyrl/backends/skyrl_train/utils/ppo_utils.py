@@ -403,6 +403,7 @@ class BaseFunctionRegistry:
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
+    FOLD_GRPO = "fold_grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
     MAXRL = "maxrl"
@@ -429,6 +430,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
         ae_avail = set(cls.list_available())
         ae_types = {
             "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
+            "fold_grpo": [AdvantageEstimator.FOLD_GRPO, compute_fold_grpo_advantage],
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
@@ -1219,6 +1221,91 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.FOLD_GRPO)
+def compute_fold_grpo_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    grpo_norm_by_std: bool = True,
+    config: Optional[AlgorithmConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for FoldGRPO (Context-Folding GRPO).
+    Based on https://arxiv.org/abs/2510.11967
+
+    GRPO with token-level process rewards. The group baseline is computed from
+    outcome rewards only: Â_{i,t} = (clip(R_i + Q_{i,t}) - mean({R_j})) / std({R_j}).
+
+    Expects process_rewards (Float[torch.Tensor, "batch_size seqlen"]) via kwargs.
+    Falls back to standard GRPO when process_rewards is not provided.
+
+    Expects:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"] (outcome rewards)
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    process_rewards: Optional[torch.Tensor] = kwargs.get("process_rewards", None)
+
+    if config is not None and hasattr(config, "fold_grpo"):
+        clip_low = config.fold_grpo.reward_clip_low
+        clip_high = config.fold_grpo.reward_clip_high
+    else:
+        clip_low = 0.0
+        clip_high = 1.0
+
+    with torch.no_grad():
+        # outcome reward R_i: response-level scalar per trajectory
+        scores = token_level_rewards.sum(dim=-1)
+
+        bsz = scores.shape[0]
+        id2score = defaultdict(list)
+        id2mean = {}
+        id2std = {}
+
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+
+        if process_rewards is not None:
+            # full FoldGRPO: clip(R_i + Q_{i,t}) then group-normalize
+            combined = scores.unsqueeze(-1) + process_rewards
+            combined = combined.clamp(min=clip_low, max=clip_high)
+
+            advantages = torch.zeros_like(combined)
+            for i in range(bsz):
+                if grpo_norm_by_std:
+                    advantages[i] = (combined[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                else:
+                    advantages[i] = combined[i] - id2mean[index[i]]
+            advantages = advantages * response_mask
+        else:
+            # fallback: response-level advantage (same as standard GRPO)
+            for i in range(bsz):
+                if grpo_norm_by_std:
+                    scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                else:
+                    scores[i] = scores[i] - id2mean[index[i]]
+            advantages = scores.unsqueeze(-1) * response_mask
+
+        returns = advantages.clone()
+
+    return advantages, returns
 
 
 @register_advantage_estimator(AdvantageEstimator.MAXRL)

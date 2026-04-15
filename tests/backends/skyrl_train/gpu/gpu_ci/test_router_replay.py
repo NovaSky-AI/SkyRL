@@ -77,12 +77,14 @@ def build_training_input_from_text_samples(
         rewards.append([0.0] * len(response_ids))
         loss_masks.append([1] * len(response_ids))
 
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
-        prompts=prompts,
-        responses=responses,
-        rewards=rewards,
-        loss_masks=loss_masks,
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _, _ = (
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer=tokenizer,
+            prompts=prompts,
+            responses=responses,
+            rewards=rewards,
+            loss_masks=loss_masks,
+        )
     )
 
     num_actions = response_mask.shape[1]
@@ -187,7 +189,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
             rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-        (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor) = (
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor, _ = (
             convert_prompts_responses_to_batch_tensors(
                 tokenizer=tokenizer,
                 prompts=generator_output["prompt_token_ids"],
@@ -313,7 +315,7 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
             rewards.append([1.0] * len(response_ids))
             loss_masks.append([1] * len(response_ids))
 
-        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _, _ = (
             convert_prompts_responses_to_batch_tensors(
                 tokenizer=tokenizer,
                 prompts=prompts,
