@@ -1272,15 +1272,14 @@ def compute_fold_grpo_advantage(
 
         for i in range(bsz):
             id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+        for idx, group_scores_list in id2score.items():
+            if len(group_scores_list) == 1:
+                id2mean[idx] = torch.zeros((), device=scores.device)
+                id2std[idx] = torch.ones((), device=scores.device)
             else:
-                raise ValueError(f"no score in prompt index: {idx}")
+                group_scores = torch.stack(group_scores_list)
+                id2mean[idx] = group_scores.mean()
+                id2std[idx] = group_scores.std()
 
         if process_rewards is not None:
             # full FoldGRPO: clip(R_i + Q_{i,t}) then group-normalize
