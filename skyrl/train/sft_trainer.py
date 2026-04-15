@@ -91,6 +91,7 @@ def tokenize_chat_example(
     tokenizer,
     max_length: int = 512,
     messages_key: str = "messages",
+    **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a chat-format example. Loss on last assistant message only.
 
@@ -114,6 +115,7 @@ def tokenize_chat_example(
         truncation=True,
         max_length=max_length,
         return_dict=False,
+        **tokenizer_kwargs,
     )
 
     # Tokenize full conversation
@@ -124,6 +126,7 @@ def tokenize_chat_example(
         truncation=True,
         max_length=max_length,
         return_dict=False,
+        **tokenizer_kwargs,
     )
 
     num_actions = len(full_ids) - len(prompt_ids)

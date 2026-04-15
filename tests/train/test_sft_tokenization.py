@@ -1,7 +1,7 @@
 """
 CPU tests for SFT tokenization and collation helpers.
 
-uv run --isolated --extra dev pytest tests/train/test_sft_tokenization.py -v
+uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_tokenization.py -v
 """
 
 import pytest
@@ -45,7 +45,7 @@ def test_chat_basic(tokenizer):
     assert result["num_actions"] < len(result["input_ids"])
 
 
-def test_chat_multi_turn(tokenizer):
+def test_chat_multi_turn_no_thinking(tokenizer):
     """Multi-turn conversation: only last assistant turn counted in num_actions."""
     messages = [
         {"role": "system", "content": "You are helpful."},
@@ -54,15 +54,31 @@ def test_chat_multi_turn(tokenizer):
         {"role": "user", "content": "And 3+3?"},
         {"role": "assistant", "content": "6"},
     ]
-    result = tokenize_chat_example({"messages": messages}, tokenizer)
+    # with enable_thinking=False - <think></think> are expected to be included at the end of the user message directly
+    expected_assistant_sequence = "6<|im_end|>\n"
+    result = tokenize_chat_example({"messages": messages}, tokenizer, enable_thinking=False)
+    assert result is not None
+    assert result["num_actions"] > 0
+
+    assert result["num_actions"] == len(tokenizer.encode(expected_assistant_sequence))
+
+
+def test_chat_multi_turn_thinking(tokenizer):
+    """Multi-turn conversation: only last assistant turn counted in num_actions."""
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "<think>\nThat's a tough one\n</think>\n\n4"},
+        {"role": "user", "content": "And 3+3?"},
+        {"role": "assistant", "content": "<think>\nThat's a tough one\n</think>\n\n6"},
+    ]
+    expected_assistant_sequence = "<think>\nThat's a tough one\n</think>\n\n6<|im_end|>\n"
+    result = tokenize_chat_example({"messages": messages}, tokenizer, max_length=10000)
 
     assert result is not None
     assert result["num_actions"] > 0
 
-    # Only the last assistant message ("6") should be in num_actions.
-    # num_actions should be much less than the full sequence since it only
-    # covers the final assistant turn (plus template tokens like <|im_end|>).
-    assert result["num_actions"] < len(result["input_ids"]) // 2
+    assert result["num_actions"] == len(tokenizer.encode(expected_assistant_sequence))
 
 
 def test_chat_last_not_assistant(tokenizer):
