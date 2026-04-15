@@ -102,6 +102,9 @@ class SFTConfig(BaseConfig):
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
     seed: int = 42
 
+    # ---- Packing ----
+    use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)
+
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
     dummy_run_max_steps: int = 5  # Number of steps to run in dummy mode
@@ -183,6 +186,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
+    cfg.trainer.use_sample_packing = sft_cfg.use_sample_packing
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger
