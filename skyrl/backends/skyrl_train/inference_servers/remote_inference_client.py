@@ -209,6 +209,15 @@ class RemoteInferenceClient:
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
+    def __post_init__(self):
+        if self.data_parallel_size <= 0:
+            raise ValueError(f"Expected `data_parallel_size` >=0, got {self.data_parallel_size}")
+
+        if len(self.server_urls) % self.data_parallel_size != 0:
+            raise ValueError(
+                f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
+            )
+
     # ---------------------------
     # Session Management
     # ---------------------------
