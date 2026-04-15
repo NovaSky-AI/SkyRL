@@ -85,6 +85,19 @@ class SFTConfig(BaseConfig):
     )
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
 
+    # Ulysses sequence parallelism
+    sequence_parallel_size: int = 1
+    """Ulysses sequence parallelism size"""
+
+    model_config_kwargs: dict = field(default_factory=dict)
+    """Pass-through kwargs for the HuggingFace model config (FSDP backends).
+    For Megatron, use ``megatron_config.transformer_config_kwargs`` instead."""
+    use_torch_compile: bool = False
+    """Apply torch.compile to logits calculation."""
+    record_memory: bool = False
+    """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
+    Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
+
     # ---- SFT-specific flat fields ----
     strategy: str = "megatron"  # "megatron" or "fsdp2"
     dataset_name: str = "yahma/alpaca-cleaned"
@@ -179,6 +192,11 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
         cfg.trainer.policy.megatron_config = sft_cfg.megatron_config
     if sft_cfg.strategy == "fsdp2":
         cfg.trainer.policy.fsdp_config = sft_cfg.fsdp_config
+
+    cfg.trainer.policy.sequence_parallel_size = sft_cfg.sequence_parallel_size
+    cfg.trainer.policy.model_config_kwargs = sft_cfg.model_config_kwargs
+    cfg.trainer.policy.use_torch_compile = sft_cfg.use_torch_compile
+    cfg.trainer.policy.record_memory = sft_cfg.record_memory
 
     # SFT doesn't use KL/ref model
     cfg.trainer.algorithm.use_kl_loss = False

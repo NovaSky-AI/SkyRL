@@ -29,7 +29,6 @@ from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
@@ -45,6 +44,7 @@ from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
+from skyrl.utils.tok import get_tokenizer
 
 # ---------------------------------------------------------------------------
 # Tokenization helpers
@@ -220,14 +220,14 @@ class SFTTrainer:
         Ray must already be initialized before calling this (either via
         ``initialize_ray`` on the head node or inside a Ray task).
         """
-        self._init_tokenizer()
+        self.tokenizer = get_tokenizer(
+            self.cfg.trainer.policy.model.path,
+            trust_remote_code=True,
+            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+            padding_side="left",
+        )
         self._init_workers()
         self._init_tracker()
-
-    def _init_tokenizer(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.sft_cfg.model.path)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def _init_workers(self):
         """Create PPORayActorGroup and WorkerDispatch.
