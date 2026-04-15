@@ -22,6 +22,7 @@ Or as a CLI entrypoint::
 
 import os
 import random
+from dataclasses import asdict
 
 import ray
 import torch
@@ -42,7 +43,12 @@ from skyrl.train.config.sft_config import (
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
-from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
+from skyrl.train.utils.trainer_utils import (
+    GLOBAL_STEP_PREFIX,
+    cleanup_old_checkpoints,
+    extract_step_from_path,
+    validate_consistency_for_latest_checkpoint,
+)
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
 from skyrl.utils.tok import get_tokenizer
 
@@ -258,6 +264,7 @@ class SFTTrainer:
             num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
+            record_memory=self.cfg.trainer.policy.record_memory,
         )
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
@@ -374,6 +381,14 @@ class SFTTrainer:
             with io.open_file(latest_file, "r") as f:
                 ckpt_step = int(f.read().strip())
             checkpoint_path = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_step}")
+            # Validate consistency: ensure no stale checkpoint folders from prior runs
+            validate_consistency_for_latest_checkpoint(
+                self.sft_cfg.ckpt_path,
+                ckpt_step,
+                checkpoint_path,
+                latest_file,
+                self.sft_cfg.ckpt_interval,
+            )
         else:
             checkpoint_path = resume_from
 
@@ -385,6 +400,23 @@ class SFTTrainer:
             raise ValueError(
                 f"Cannot extract step number from checkpoint path: {checkpoint_path}. "
                 f"Expected a directory named '{GLOBAL_STEP_PREFIX}<N>'."
+            )
+
+        # Load and validate trainer state if available
+        trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
+        if io.exists(trainer_state_path):
+            with io.open_file(trainer_state_path, "rb") as f:
+                trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+            saved_global_step = trainer_state.get("global_step", global_step)
+            logger.info("Successfully loaded trainer state")
+            if saved_global_step != global_step:
+                logger.warning(
+                    f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value."
+                )
+        else:
+            logger.warning(
+                f"No trainer_state.pt found at {trainer_state_path}. "
+                "This checkpoint was likely saved by an older version."
             )
 
         policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
@@ -629,11 +661,25 @@ class SFTTrainer:
         io.makedirs(global_step_folder, exist_ok=True)
         logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
-        # Write latest checkpoint marker
+
+        # Save trainer state for cross-validation on resume (mirrors PPO's trainer_state.pt)
+        trainer_state = {
+            "global_step": step,
+            "config": asdict(self.sft_cfg),
+        }
+        trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
+        with io.open_file(trainer_state_path, "wb") as f:
+            torch.save(trainer_state, f)
+        logger.info(f"Saved trainer state to {trainer_state_path}")
+
+        # Atomic tracking -- write this last after all saves succeed
         latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_file, "w") as f:
             f.write(str(step))
         logger.info(f"Checkpoint saved for global_step_{step}")
+
+        # Clean up old checkpoints after successful save
+        cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
 
     # ------------------------------------------------------------------ #
     # Lifecycle
