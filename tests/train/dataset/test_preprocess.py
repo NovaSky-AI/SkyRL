@@ -377,7 +377,7 @@ def test_rollout_expert_indices_none_when_not_provided(tokenizer):
     rewards = [[0.0], [0.0]]
     loss_masks = [[1], [1]]
 
-    *_, rei_tensor = convert_prompts_responses_to_batch_tensors(
+    *_, rei_tensor, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer,
         prompts,
         responses,
