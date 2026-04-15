@@ -4,22 +4,7 @@
 
 This example trains [NVIDIA-Nemotron-3-Nano-4B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16) on GSM8K using GRPO with the Megatron backend.
 
-Nemotron-3-Nano is a hybrid Mamba+Attention+MoE architecture (52 layers, 128 experts, SSM state). It requires specific dependency versions that differ from the default SkyRL configuration.
-
-### Required dependency changes
-
-A patch is provided that makes the necessary `pyproject.toml` changes. It was tested against SkyRL commit [`c69f2488`](https://github.com/NovaSky-AI/SkyRL/commit/c69f24881509f78dfc16d88e2f77392c4795c3ce).
-
-```bash
-git apply examples/train/nemotron_3/nemotron_support.patch
-uv lock
-```
-
-The patch makes two changes:
-
-1. **Enable Mamba dependencies** — Nemotron-3-Nano uses Mamba (SSM) layers. The default config disables `mamba-ssm` and `causal-conv1d` via `override-dependencies`; the patch enables them.
-
-2. **Switch Megatron-Bridge to `nano-v3` branch** — This branch includes `Nemotron3NanoProvider` which handles the HF-to-Megatron model conversion for this hybrid architecture.
+Nemotron-3-Nano is a hybrid Mamba+Attention+MoE architecture (52 layers, 128 experts, SSM state).
 
 ### Running
 
