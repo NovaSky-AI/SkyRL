@@ -161,6 +161,9 @@ class VLLMRouter:
 
     def shutdown(self) -> None:
         """Terminate the router process."""
+        # release any port reservations if not already
+        self._release_port_reservations()
+        # check if router process is active and terminate if needed
         if self._process is None or not self._process.is_alive():
             return
         logger.info("Shutting down VLLMRouter...")
