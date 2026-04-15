@@ -626,7 +626,7 @@ def _get_test_token_ids(model: str) -> List[int]:
         return_dict=False,
         tokenize=True,
     )
-    return token_ids["input_ids"]
+    return token_ids
 
 
 @pytest.mark.vllm
