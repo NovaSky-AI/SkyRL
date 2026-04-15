@@ -1,6 +1,6 @@
 # SFT (Supervised Fine-Tuning) Example
 
-This example demonstrates supervised fine-tuning using SkyRL's training infrastructure, with support for both FSDP and Megatron backends. The Megatron backend enables tensor and pipeline parallelism for large-scale training.
+This example demonstrates supervised fine-tuning using SkyRL, with support for both FSDP and Megatron backends.
 
 ## Dataset
 
@@ -90,8 +90,7 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 
 ## Limitations
 
-- **No evaluation support.** Eval was removed because it requires a `forward_loss` path in `WorkerDispatch`, which is not yet implemented. Re-adding eval is a follow-up.
-- **LR scheduler: Megatron only supports `constant_with_warmup`.** The `optimizer_config.scheduler` field exists and the FSDP backend accepts any scheduler supported by `transformers.get_scheduler` (cosine, linear, etc.), but the Megatron backend raises an error for anything other than `constant_with_warmup`.
+- **No evaluation support.** : Currently we do not support using an evaluation dataset.
 - **No LoRA / PEFT support.** The SFT trainer does not wire up LoRA configuration. The RL trainer supports LoRA for both FSDP and Megatron backends.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.
