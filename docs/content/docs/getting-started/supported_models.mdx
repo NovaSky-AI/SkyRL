@@ -2,56 +2,33 @@
 title: "Supported Models"
 ---
 
+SkyRL provides support for end to end training with the FSDP and Megatron training backends (both using vLLM for inference),
+as well as support for a JAX backend (for both trainig and inference) via a Tinker API server. 
+The following models are supported for each of the training backends
+
+## FSDP
+Any model that is supported via HuggingFace transformers + vLLM is supported via the FSDP backend. The FSDP backend also comes with support for Ulysses style sequence parallelism,
+making it a viable option for training on dense models with up to 32B parameters and 32K/64K context length.
+
+## Megatron
+The [Megatron backend](/docs/examples/megatron) comes with support for 5D parallelism (DP/TP/CP/PP/CP) and allows for efficient scaling for large MoE models (100B+)
+Support for mapping from Huggingface model definitions to Megatron GPTModels is done using NVIDIA's [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) library.
+
+The following models are supported in SkyRL's Megatron backend via Megatron-Bridge + vLLM
+- Qwen-3.5 (Dense: 0.8B/2B/4B/9B/27B, MoE: 35B-A3B/122B-A10B/397B-A17B)
+- Nemotron-3 (Dense: Nano-4B-BF16, MoE: Nano-30B-A3B-BF16)
+- GLM-4.7/GLM-4.7-Flash 
+- Qwen3 (Dense: 0.6B/1.7B/4B/8B/32B, MoE: 30B-A3B/235B-A22B)
+- Moonlight-16B-A3B 
+
+Support is pending for Kimi-K2.5, GLM 5/5.1, Gemma 4 models, and Nemotron-3-Super-120B-A10B-BF16.
+
+## JAX
+The JAX backend supports the following models:
+- Qwen-3.5 Dense
+- Deepseek-V3
+- Llama-3
+- Qwen3 Dense/MoE
 
 
-<style>{`
-  table.skytable {
-    border-collapse: collapse;
-    margin-bottom: 20px;
-  }
-  table.skytable th, table.skytable td {
-    border: 1px solid #ccc;
-    padding: 6px 10px;
-  }
-  table.skytable th {
-    background: #f2f2f2;
-  }
-  table.skytable tr:nth-child(even) {
-    background: #fafafa;
-  }
-`}</style>
 
-<table className="skytable">
-     <thead>
-       <tr>
-         <th>Backend</th>
-         <th>Model</th>
-         <th>Eval Accuracy</th>
-         <th>Hardware</th>
-         <th>Training Steps</th>
-         <th>Commit</th>
-         <th>WandB</th>
-       </tr>
-     </thead>
-     <tbody>
-       <tr>
-         <td>FSDP2</td>
-         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
-         <td>0.796</td>
-         <td>4xH100</td>
-         <td>140</td>
-         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
-       </tr>
-       <tr>
-         <td>DeepSpeed</td>
-         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
-         <td>0.791</td>
-         <td>4xH100</td>
-         <td>140</td>
-         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
-       </tr>
-     </tbody>
-   </table>
-  
