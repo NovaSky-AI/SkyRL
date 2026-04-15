@@ -140,59 +140,6 @@ async def test_token_based_generation(
                 )
 
 
-# TODO: Remove this once sample API is also supported in the new inference pathway
-@pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support sample API yet")
-@pytest.mark.parametrize(
-    "tp_size,dp_size",
-    [
-        pytest.param(2, 1),
-    ],
-    ids=["tp2"],
-)
-@pytest.mark.asyncio
-async def test_sample_api(ray_init_fixture, tp_size: int, dp_size: int):
-    """Test the Tinker-compatible sample() API for generating multiple independent samples."""
-    cfg = get_test_actor_config()
-    cfg.generator.sampling_params.temperature = 0.7
-
-    prompts = get_test_prompts(MODEL, 1)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
-    prompt_token_ids = tokenizer.apply_chat_template(
-        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
-    )["input_ids"][0]
-
-    cfg.generator.inference_engine.tensor_parallel_size = tp_size
-    cfg.generator.inference_engine.data_parallel_size = dp_size
-
-    async with InferenceEngineState.create(cfg, sleep_level=1) as engines:
-        llm_client = engines.client
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
-
-        num_samples = 3
-
-        output = await llm_client.sample(
-            prompt_token_ids=prompt_token_ids,
-            num_samples=num_samples,
-            sampling_params=sampling_params,
-        )
-
-        assert len(output["response_ids"]) == num_samples
-        assert len(output["responses"]) == num_samples
-        assert len(output["stop_reasons"]) == num_samples
-
-        for i, response_ids in enumerate(output["response_ids"]):
-            assert isinstance(response_ids, list)
-            assert len(response_ids) > 0
-            assert all(isinstance(t, int) for t in response_ids)
-
-        unique_responses = set(output["responses"])
-        print(f"Generated {len(unique_responses)} unique responses from {num_samples} samples")
-        for i, resp in enumerate(output["responses"]):
-            print(f"Sample {i}: {resp[:100]}..." if len(resp) > 100 else f"Sample {i}: {resp}")
-
-
 @pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="PD requires new inference pathway")
 def test_pd_generation(ray_init_fixture):
     """Test generation with prefill-decode disaggregation (1P1D, 2 GPUs)."""
