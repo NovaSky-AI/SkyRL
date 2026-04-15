@@ -211,7 +211,7 @@ class RemoteInferenceClient:
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
-            raise ValueError(f"Expected `data_parallel_size` >=0, got {self.data_parallel_size}")
+            raise ValueError(f"Expected `data_parallel_size` >0, got {self.data_parallel_size}")
 
         if len(self.server_urls) % self.data_parallel_size != 0:
             raise ValueError(
