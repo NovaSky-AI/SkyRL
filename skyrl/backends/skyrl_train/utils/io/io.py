@@ -102,6 +102,27 @@ def remove(path: str) -> None:
         fs.rm(path)
 
 
+def download_file(cloud_path: str, local_path: str) -> None:
+    """Download a single file from cloud storage to local storage.
+
+    Args:
+        cloud_path: Source file path in cloud storage (s3://, gs://, gcs://).
+        local_path: Destination path on the local filesystem.
+    """
+    if not is_cloud_path(cloud_path):
+        raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
+
+    parent = os.path.dirname(os.path.abspath(local_path))
+    os.makedirs(parent, exist_ok=True)
+
+    fs = _get_filesystem(cloud_path)
+    remote = fs._strip_protocol(cloud_path)
+    if cloud_path.startswith("s3://"):
+        call_with_s3_retry(fs, fs.get_file, remote, local_path)
+    else:
+        fs.get_file(cloud_path, local_path)
+
+
 def upload_directory(local_path: str, cloud_path: str) -> None:
     """Upload a local directory to cloud storage."""
     if not is_cloud_path(cloud_path):

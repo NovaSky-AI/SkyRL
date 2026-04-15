@@ -168,23 +168,94 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     )
 
 
+def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
+    """Regression test for the step-wise advantage broadcast across trajectories.
+
+    See https://github.com/NovaSky-AI/SkyRL/issues/1492.
+    """
+    dummy_config.generator.step_wise_trajectories = True
+    dummy_config.trainer.algorithm.advantage_estimator = "grpo"
+    dummy_config.trainer.algorithm.grpo_norm_by_std = False
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    # Two trajectories (A, B), each with two steps (one intermediate, one last).
+    # Response-level tensors are right-aligned within (batch, max_response) — see
+    # ``convert_prompts_responses_to_batch_tensors`` in ``skyrl/train/dataset/preprocess.py``.
+    # Intermediate and last steps have different response lengths so their mask tails live at
+    # different positions; this is what exposes the broadcast bug.
+    #
+    #   row  traj  step        resp_len  response_mask
+    #   ───  ────  ──────────  ────────  ──────────────────
+    #    0    A    intermed.       4     [0, 0, 1, 1, 1, 1]
+    #    1    A    last            1     [0, 0, 0, 0, 0, 1]
+    #    2    B    intermed.       3     [0, 0, 0, 1, 1, 1]
+    #    3    B    last            2     [0, 0, 0, 0, 1, 1]
+    batch_size, seqlen = 4, 6
+    response_mask = torch.tensor(
+        [
+            [0, 0, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 0, 1, 1],
+        ],
+        dtype=torch.int32,
+    )
+    # Reward lives at the last token of each trajectory's last step — i.e., at the tail
+    # position where that step's response_mask is 1. Traj A -> 2.0, Traj B -> 0.0.
+    rewards = torch.zeros(batch_size, seqlen)
+    rewards[1, -1] = 2.0
+    is_last_step = torch.tensor([False, True, False, True])
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch_size, seqlen, dtype=torch.long),
+            "attention_mask": torch.ones(batch_size, seqlen, dtype=torch.int32),
+            "loss_mask": response_mask.clone(),
+            "response_mask": response_mask,
+            "rewards": rewards,
+            "values": torch.zeros(batch_size, seqlen),
+            "is_last_step": is_last_step,
+        },
+    )
+    # Both trajectories share a GRPO group so the group has the 2 samples needed to produce a mean.
+    data.metadata = {
+        "uids": np.array(["grp0", "grp0", "grp0", "grp0"]),
+        "response_length": seqlen,
+        "avg_response_length": (4 + 1 + 3 + 2) / 4,
+    }
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    # GRPO without std normalization: group mean = (2.0 + 0.0) / 2 = 1.0, so
+    # scalar_A = 2.0 - 1.0 =  1.0 and scalar_B = 0.0 - 1.0 = -1.0.
+    # Each step's advantages must equal `scalar * response_mask` for THAT step, so the
+    # full advantage tensor is the row-wise product of the per-trajectory scalar and the
+    # right-aligned per-step response mask. Returns equal advantages for GRPO.
+    expected_advantages = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, -1.0, -1.0, -1.0],
+            [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        ]
+    )
+    assert torch.allclose(data["advantages"], expected_advantages)
+    assert torch.allclose(data["returns"], expected_advantages)
+
+
 def test_micro_batches_accumulated_initialized():
     """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
 
     # Create minimal worker instances for testing
-    class TestPolicyWorker(PolicyWorkerBase):
-        def init_model(self, *args, **kwargs):
-            pass
-
-        def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-            pass
-
-        def backload_to_gpu(self, non_blocking=True):
-            pass
-
-        def _forward_micro_batch(self, micro_batch):
-            pass
-
     class TestCriticWorker(CriticWorkerBase):
         def init_model(self, *args, **kwargs):
             pass
@@ -200,19 +271,6 @@ def test_micro_batches_accumulated_initialized():
 
     cfg = SkyRLTrainConfig()
     cfg.trainer.algorithm.policy_loss_type = "regular"
-
-    # PolicyWorker has _micro_batches_accumulated initialized at construction
-    policy_worker = TestPolicyWorker(
-        cfg=cfg.trainer,
-        world_size=4,
-        rank=0,
-        local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
-        sequence_parallel_size=1,
-    )
-    assert hasattr(policy_worker, "_micro_batches_accumulated")
-    assert policy_worker._micro_batches_accumulated == 0
 
     # CriticWorker has _micro_batches_accumulated initialized at construction
     critic_worker = TestCriticWorker(
@@ -447,7 +505,11 @@ def test_forward_backward_batch_calculations():
         # Mock dependencies
         worker.strategy = MagicMock()
         worker.strategy.is_rank_0.return_value = False  # Disable progress bars
-        worker.strategy.all_reduce.return_value = {"loss": 0.5, "lr": 1e-4}
+        worker.strategy.all_reduce.side_effect = lambda d, op, group=None: d  # Return input dict unchanged
+
+        # Mock device_mesh for DP group access
+        worker.device_mesh = MagicMock()
+        worker.device_mesh.get_group.return_value = None  # No actual process group in tests
 
         # Always set model for all worker types
         worker.model = MagicMock()
@@ -457,13 +519,10 @@ def test_forward_backward_batch_calculations():
     # Test PolicyWorkerBase
     policy_worker = create_test_worker(PolicyWorkerBase)
 
-    # Reset _micro_batches_accumulated (initialized in __init__, reset here for test isolation)
-    policy_worker._micro_batches_accumulated = 0
-
     # Mock _forward_backward_micro to track calls
     policy_forward_backward_micro_calls = []
 
-    def mock_policy_forward_backward_micro(experience, loss_fn=None, loss_fn_config=None):
+    def mock_policy_forward_backward_micro(experience, microbatch_weight, loss_fn=None, loss_fn_config=None):
         policy_forward_backward_micro_calls.append(experience)
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
 
@@ -484,9 +543,6 @@ def test_forward_backward_batch_calculations():
     assert (
         len(policy_forward_backward_micro_calls) == expected_micro_batches
     ), f"PolicyWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(policy_forward_backward_micro_calls)}"
-
-    # Verify _micro_batches_accumulated is set correctly
-    assert policy_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure
     assert isinstance(result, dict)

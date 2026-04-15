@@ -29,7 +29,6 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
@@ -383,7 +382,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 for _ in range(self.num_parallel_generation_workers)
             ]
 
-            for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+            for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
@@ -432,8 +431,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_metrics = {}
                 pbar.update(1)
 
-                # 6. Eval and checkpointing if needed.
-                # NOTE(Charlie): eval does not overlap with training, but can overlap with generation. Is it fine?
+                # 6. Eval. At interval and at the last step.
+                # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
@@ -441,17 +440,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
-                if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await asyncio.to_thread(self.save_checkpoints)
-                if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer("save_hf_model", self.all_timings):
-                        await asyncio.to_thread(self.save_models)
+
+                # 7. Checkpointing. At interval and at the last step of each epoch.
+                is_epoch_end = step_idx == (1 + epoch) * self.num_steps_per_epoch
+                if self.cfg.trainer.ckpt_interval > 0:
+                    if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                        with Timer("save_checkpoints", self.all_timings):
+                            await asyncio.to_thread(self.save_checkpoints)
+                if self.cfg.trainer.hf_save_interval > 0:
+                    if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                        with Timer("save_hf_model", self.all_timings):
+                            await asyncio.to_thread(self.save_models)
+
                 self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
                 self.all_timings = {}
                 self.global_step += 1
 
-                # 7. Notify generation workers that the capacity has increased, unblocking them.
+                # 8. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
                 steps_completed_in_epoch = (self.global_step - 1) % self.num_steps_per_epoch
                 if steps_completed_in_epoch == 0:
@@ -464,7 +469,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
                 )
 
-            # 8. Per-epoch epilogue.
+            # 9. Per-epoch epilogue.
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
                 with Timer("update_ref_with_policy", self.all_timings):
                     await asyncio.to_thread(self.update_ref_with_policy)
@@ -489,6 +494,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # End of an epoch.
         pbar.close()
+
+        # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 await asyncio.to_thread(self.save_checkpoints)
@@ -497,6 +504,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
+
         self.tracker.finish()
         logger.info("Training done!")
 
@@ -518,9 +526,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for key in ["rewards"]:
                 training_input.pop(key)
             training_input.metadata.pop("uids")
-
-            if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                training_input = normalize_advantages_dict(training_input)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file

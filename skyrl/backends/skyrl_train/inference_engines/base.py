@@ -11,12 +11,24 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
 
+class MMPlaceholderRangeInfo(TypedDict):
+    offset: int
+    length: int
+
+
+class MultiModalFeatures(TypedDict):
+    mm_hashes: dict[str, list[str]]
+    mm_placeholders: dict[str, list[MMPlaceholderRangeInfo]]
+    kwargs_data: Optional[dict[str, list[str | None]]]
+
+
 class InferenceEngineInput(TypedDict):
     # Either prompts or prompt_token_ids must be provided, but not both.
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
+    mm_features: Optional[List[MultiModalFeatures]]
 
 
 class InferenceEngineOutput(TypedDict):

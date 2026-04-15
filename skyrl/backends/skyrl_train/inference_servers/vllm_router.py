@@ -1,138 +1,142 @@
 """
-VLLMRouter - Subprocess wrapper for vllm-router (data plane only).
+VLLMRouter - Process wrapper around vllm_router.Router.
 
-Spawns the vllm-router binary as a subprocess with consistent_hash policy,
-providing session-aware routing via consistent hashing.
+Spawns the router in a child process from a ``RouterArgs`` dataclass,
+providing ``start()`` / ``shutdown()`` lifecycle methods.
 """
 
 import logging
+import multiprocessing
 import os
-import shutil
-import subprocess
-import threading
+import sys
 import time
-from typing import List, Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 import httpx
+from vllm_router.launch_router import launch_router
+from vllm_router.router_args import RouterArgs
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    find_and_reserve_port,
+    get_node_ip,
+)
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
 
+def _run_router_with_logging(router_args: RouterArgs, log_file: Optional[str]) -> None:
+    """Target for the router child process.
+
+    Redirects stdout/stderr to *log_file* (when provided) so that the
+    Rust router's output is captured instead of lost in the daemon
+    process.  Falls back to normal stdout/stderr when *log_file* is
+    ``None``.
+    """
+    if log_file is not None:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(fd, sys.stdout.fileno())
+        os.dup2(fd, sys.stderr.fileno())
+        os.close(fd)
+    launch_router(router_args)
+
+
 class VLLMRouter:
     """
-    Subprocess wrapper for vllm-router (data plane only).
+    Process wrapper around ``vllm_router.Router``.
 
-    Spawns ``vllm-router`` as a child process with configurable routing policy.
-    The default ``consistent_hash`` policy routes requests with the same
-    ``X-Session-ID`` header to the same backend, matching SkyRL's session
-    routing semantics.
+    ``Router.start()`` blocks and exposes no ``stop()`` method, so we run it
+    in a child process that can be terminated on ``shutdown()``.
 
-    Usage:
-        router = VLLMRouter(server_urls, host="0.0.0.0", port=8080)
+    Usage::
+
+        from skyrl.backends.skyrl_train.inference_servers.utils import build_router_args
+
+        router_args = build_router_args(ie_cfg, server_urls=urls)
+        router = VLLMRouter(router_args)
         router_url = router.start()
-        # ... use router_url for inference ...
+        # ... use router_url ...
         router.shutdown()
     """
 
-    def __init__(
-        self,
-        server_urls: List[str],
-        host: str = "0.0.0.0",
-        port: int = 8080,
-        policy: str = "consistent_hash",
-        health_check_interval_secs: Optional[int] = None,
-        max_concurrent_requests: Optional[int] = None,
-        request_timeout_secs: Optional[int] = None,
-    ):
-        self._server_urls = server_urls
-        self._host = host
-        self._port = port
-        self._policy = policy
-        self._health_check_interval_secs = health_check_interval_secs
-        self._max_concurrent_requests = max_concurrent_requests
-        self._request_timeout_secs = request_timeout_secs
-        self._process: Optional[subprocess.Popen] = None
+    _DEFAULT_PROMETHEUS_PORT = 29000
 
-        logger.info(f"VLLMRouter: {len(server_urls)} servers, port={port}, policy={policy}")
+    def __init__(self, router_args: RouterArgs, log_path: Optional[str] = None):
+        """
+        Args:
+            router_args: Configuration for the vllm-router.
+            log_path: Directory for router log files.  When set, a file
+                ``router-YYMMDD_HHMMSS.log`` is created under this path
+                and the child process's stdout/stderr are redirected there.
+        """
+        self._router_args = router_args
+        self._log_path = log_path
+        self._log_file: Optional[str] = None
+        self._process: Optional[multiprocessing.Process] = None
 
-    def _build_cmd(self) -> List[str]:
-        """Build the vllm-router CLI command."""
-        cmd = [
-            "vllm-router",
-            "--host",
-            self._host,
-            "--port",
-            str(self._port),
-            "--policy",
-            self._policy,
-            "--worker-urls",
-            *self._server_urls,
-        ]
-        if self._health_check_interval_secs is not None:
-            cmd.extend(["--health-check-interval-secs", str(self._health_check_interval_secs)])
-        if self._max_concurrent_requests is not None:
-            cmd.extend(["--max-concurrent-requests", str(self._max_concurrent_requests)])
-        if self._request_timeout_secs is not None:
-            cmd.extend(["--request-timeout-secs", str(self._request_timeout_secs)])
-        return cmd
+        # Reserve the router port and prometheus port to prevent race conditions
+        # between discovery and actual server startup.
+        reserved_port, self._port_reservation = find_and_reserve_port(self._router_args.port)
+        self._router_args.port = reserved_port
 
-    @staticmethod
-    def _drain_stream(stream, log_fn):
-        """Read lines from a subprocess stream and forward to logger."""
-        for line in iter(stream.readline, b""):
-            log_fn(f"[vllm-router] {line.decode('utf-8', errors='replace').rstrip()}")
-        stream.close()
+        prometheus_start = self._router_args.prometheus_port or self._DEFAULT_PROMETHEUS_PORT
+        reserved_prom_port, self._prometheus_port_reservation = find_and_reserve_port(prometheus_start)
+        self._router_args.prometheus_port = reserved_prom_port
+
+        logger.info(f"VLLMRouter: port={self._router_args.port}, prometheus_port={self._router_args.prometheus_port}")
+
+    def _release_port_reservations(self) -> None:
+        """Close any held port reservation sockets."""
+        for attr in ("_port_reservation", "_prometheus_port_reservation"):
+            sock = getattr(self, attr, None)
+            if sock is not None:
+                sock.close()
+                setattr(self, attr, None)
 
     def start(self) -> str:
-        """
-        Start the vllm-router subprocess.
+        """Spawn the router process and return the router URL once healthy.
 
         Returns:
-            Router URL (e.g., "http://192.168.1.1:8080")
+            Router URL, e.g. ``"http://10.0.0.1:30000"``.
 
         Raises:
-            ImportError: If ``vllm-router`` binary is not found on PATH.
-            RuntimeError: If the router fails to become healthy within the timeout.
+            RuntimeError: If the router process crashes before becoming healthy.
         """
-        if not self._server_urls:
-            raise ValueError("No servers available")
+        if self._log_path is not None:
+            timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+            self._log_file = str(Path(self._log_path) / f"router-{timestamp}.log")
 
-        if shutil.which("vllm-router") is None:
-            raise ImportError("vllm-router binary not found on PATH. " "Install it with: pip install vllm-router")
+        # Release port reservations right before the router rebinds.
+        self._release_port_reservations()
 
-        cmd = self._build_cmd()
-        logger.info(f"Starting vllm-router: {' '.join(cmd)}")
-
-        env = os.environ.copy()
-        env.setdefault("RUST_LOG", "warn")
-
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
+        self._process = multiprocessing.Process(
+            target=_run_router_with_logging,
+            args=(self._router_args, self._log_file),
+            daemon=True,
+            name="vllm-router",
         )
-
-        # Drain subprocess output to prevent pipe buffer blocking
-        threading.Thread(
-            target=self._drain_stream,
-            args=(self._process.stdout, logger.info),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._drain_stream,
-            args=(self._process.stderr, logger.warning),
-            daemon=True,
-        ).start()
+        self._process.start()
 
         ip = get_node_ip()
-        router_url = f"http://{ip}:{self._port}"
+        router_url = f"http://{ip}:{self._router_args.port}"
         self._wait_until_healthy(router_url)
 
-        logger.info(f"VLLMRouter started at {router_url}")
+        is_pd = self._router_args.vllm_pd_disaggregation or self._router_args.pd_disaggregation
+        if is_pd:
+            logger.info(
+                f"VLLMRouter (PD) started at {router_url}: "
+                f"{len(self._router_args.prefill_urls)} prefill, "
+                f"{len(self._router_args.decode_urls)} decode"
+            )
+        else:
+            logger.info(f"VLLMRouter started at {router_url}: " f"{len(self._router_args.worker_urls)} workers")
+
+        if self._log_file:
+            logger.info(f"VLLMRouter logs: {self._log_file}")
+
         return router_url
 
     def _wait_until_healthy(
@@ -140,30 +144,32 @@ class VLLMRouter:
         router_url: str,
         timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
     ) -> None:
-        """Poll health endpoint until the router is ready."""
+        """Poll the ``/health`` endpoint until the router is ready."""
         health_url = f"{router_url}/health"
         start_time = time.time()
         while time.time() - start_time < timeout:
-            # Fail fast if the process exited
-            if self._process.poll() is not None:
-                raise RuntimeError(f"vllm-router process exited with code {self._process.returncode}")
+            # Fail fast if the process died
+            if not self._process.is_alive():
+                raise RuntimeError(f"VLLMRouter process exited with code {self._process.exitcode}")
             try:
                 with httpx.Client() as client:
                     if client.get(health_url, timeout=1).status_code == 200:
                         return
             except httpx.RequestError:
                 time.sleep(0.1)
-        raise RuntimeError(f"vllm-router failed to start within {timeout}s")
+        raise RuntimeError(f"VLLMRouter failed to become healthy within {timeout}s")
 
     def shutdown(self) -> None:
-        """Shutdown the vllm-router subprocess."""
-        if self._process is None or self._process.poll() is not None:
+        """Terminate the router process."""
+        # release any port reservations if not already
+        self._release_port_reservations()
+        # check if router process is active and terminate if needed
+        if self._process is None or not self._process.is_alive():
             return
-        logger.info("Shutting down vllm-router...")
+        logger.info("Shutting down VLLMRouter...")
         self._process.terminate()
-        try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            logger.warning("vllm-router did not exit after SIGTERM, sending SIGKILL")
+        self._process.join(timeout=5)
+        if self._process.is_alive():
+            logger.warning("VLLMRouter did not exit after SIGTERM, sending SIGKILL")
             self._process.kill()
-            self._process.wait()
+            self._process.join()

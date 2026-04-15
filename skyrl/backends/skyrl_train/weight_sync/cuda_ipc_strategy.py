@@ -54,7 +54,7 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
         """Return the strategy class for this init info type."""
         return CudaIpcTransferStrategy
 
-    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["CudaIpcInitInfo"]:
+    def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["CudaIpcInitInfo"]:
         """IPC init is a no-op, so return identical copies for each server."""
         return [copy.deepcopy(self) for _ in range(num_servers)]
 
@@ -260,7 +260,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             offset = 0
             for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
                 size = tensor.numel()
-                packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                packed_tensor[offset : offset + size].copy_(tensor.detach().reshape(-1))
                 offset += size
                 names.append(name)
                 dtypes.append(self._init_info.model_dtype_str)

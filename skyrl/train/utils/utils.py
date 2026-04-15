@@ -242,6 +242,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
     if cfg.trainer.strategy in ("fsdp", "fsdp2"):
         assert not (
@@ -251,6 +252,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
+    if cfg.trainer.policy.language_model_only:
+        assert (
+            cfg.generator.inference_engine.language_model_only
+        ), f"language_model_only should be set consistently between inference engine and policy but got {cfg.generator.inference_engine.language_model_only} for generator and {cfg.trainer.policy.language_model_only} for policy"
+        if use_ref_model:
+            assert cfg.trainer.ref.language_model_only
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
@@ -274,8 +281,23 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"Must be one of {available_advantage_estimators}"
     )
 
+    # Step-wise training collapses each trajectory to a single scalar advantage that is broadcast
+    # uniformly to every step's response tokens. This only makes sense for outcome-based estimators.
+    # Temporal estimators (GAE, REINFORCE++) produce per-token advantages, which the broadcast
+    # discards. Reject the combination explicitly.
+    if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.advantage_estimator in ("gae", "reinforce++"):
+        raise ValueError(
+            f"advantage_estimator={cfg.trainer.algorithm.advantage_estimator!r} is not supported with "
+            f"step_wise_trajectories=True. The step-wise branch collapses each trajectory to a single "
+            f"scalar advantage, which discards the per-token temporal structure these estimators produce, "
+            f"and the estimator only sees the last step's slice — there is no cross-step temporal "
+            f"connection. Use an outcome-based estimator (grpo, rloo, maxrl) or disable "
+            f"step_wise_trajectories."
+        )
+
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
+        "token_mean_legacy",
         "sequence_mean",
         "seq_mean_token_sum_norm",
     ), (
@@ -349,7 +371,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "must be the same when colocating all models"
         )
     else:
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "
@@ -383,6 +404,13 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
+
+    if ie_cfg.enable_pd:
+        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
+        assert (
+            ie_cfg.num_prefill < ie_cfg.num_engines
+        ), "num_prefill must be < num_engines (need at least one decode worker)"
+        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
     if not ie_cfg.run_engines_locally:
         assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
@@ -507,11 +535,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
-        )
-
-    if cfg.generator.inference_engine.enable_return_routed_experts:
-        raise ValueError(
-            "rollout router replay (r3) is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/815."
         )
 
 
@@ -660,6 +683,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+
+    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
+        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
     return env_vars
 

@@ -119,7 +119,9 @@ class DeepseekV3Attention(nnx.Module):
             rngs=rngs,
         )
 
-        self.rotary_emb, mscale = get_rope(self.qk_rope_head_dim, config.rope_theta, config.rope_scaling)
+        self.rotary_emb, mscale = get_rope(
+            self.qk_rope_head_dim, config.rope_parameters["rope_theta"], config.rope_parameters
+        )
         self.scaling = self.qk_head_dim ** (-0.5) * mscale * mscale
 
     def __call__(
