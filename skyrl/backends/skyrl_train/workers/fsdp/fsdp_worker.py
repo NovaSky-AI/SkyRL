@@ -161,7 +161,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
-    def init_model(self, model_path, num_training_steps: int = None, freeze_vision_encoder: bool = False):
+    def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.policy.fsdp_config,
