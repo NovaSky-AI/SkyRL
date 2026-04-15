@@ -172,6 +172,117 @@ def compute_metrics_multipaper(
 
 
 # ---------------------------------------------------------------------------
+# Child RLM aggregate metrics (logged under environment/ on wandb)
+# ---------------------------------------------------------------------------
+
+def _parse_answer_substrings(final_answer: str) -> List[str]:
+    """Parse a final answer (usually a Python list literal) into text substrings."""
+    import ast
+    try:
+        substrings = ast.literal_eval(final_answer)
+        if isinstance(substrings, str):
+            substrings = [substrings]
+        elif isinstance(substrings, (list, tuple)):
+            substrings = [s if isinstance(s, str) else str(s) for s in substrings]
+        else:
+            substrings = [str(substrings)]
+    except (ValueError, SyntaxError):
+        substrings = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
+    return substrings
+
+
+def compute_child_rlm_metrics(
+    child_call_records: List[Dict[str, Any]],
+    evidence: List[Dict[str, Any]],
+    parent_context: Dict[str, str],
+) -> Dict[str, float]:
+    """Compute per-trajectory child RLM metrics for wandb ``environment/`` logging.
+
+    Args:
+        child_call_records: one entry per child dispatch with keys
+            ``paper_id`` (str | None), ``final_answer`` (str | None),
+            ``had_final_answer`` (bool).
+        evidence: ground-truth evidence list from ``reward_spec`` —
+            ``[{paperId, selections: [{text}]}]``.
+        parent_context: the parent's context dict ``{paper_id: paper_text}``.
+
+    Returns:
+        Dict with ``child_submission_rate``, ``paper_selection_f1``, and
+        ``child_evidence_char_f1``.
+    """
+    if not child_call_records:
+        return {
+            "child_submission_rate": 0.0,
+            "paper_selection_f1": 0.0,
+            "child_evidence_char_f1": 0.0,
+        }
+
+    # --- 1. Child submission rate ---
+    n_submitted = sum(1 for r in child_call_records if r["had_final_answer"])
+    child_submission_rate = n_submitted / len(child_call_records)
+
+    # --- 2. Paper selection F1 (set-level over paper IDs) ---
+    gt_paper_ids: set = set()
+    paper_evidence_map: Dict[str, List[str]] = {}
+    for ev in (evidence or []):
+        pid = ev.get("paperId", "")
+        texts = [s.get("text", "").strip() for s in ev.get("selections", []) if s.get("text", "").strip()]
+        if texts and pid:
+            gt_paper_ids.add(pid)
+            paper_evidence_map.setdefault(pid, []).extend(texts)
+
+    selected_paper_ids = {r["paper_id"] for r in child_call_records if r["paper_id"] is not None}
+
+    if gt_paper_ids or selected_paper_ids:
+        intersection = gt_paper_ids & selected_paper_ids
+        precision = len(intersection) / len(selected_paper_ids) if selected_paper_ids else 0.0
+        recall = len(intersection) / len(gt_paper_ids) if gt_paper_ids else 0.0
+        paper_selection_f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    else:
+        paper_selection_f1 = 0.0
+
+    # --- 3. Child evidence char-level F1 (only children on GT papers) ---
+    f1_scores: List[float] = []
+    for record in child_call_records:
+        pid = record["paper_id"]
+        if pid is None or pid not in paper_evidence_map:
+            continue
+
+        if not record["had_final_answer"] or not record["final_answer"]:
+            f1_scores.append(0.0)
+            continue
+
+        paper_text = parent_context.get(pid, "")
+        evidence_intervals: List[Tuple[int, int]] = []
+        for ev_text in paper_evidence_map[pid]:
+            idx = paper_text.find(ev_text)
+            if idx != -1:
+                evidence_intervals.append((idx, idx + len(ev_text)))
+
+        if not evidence_intervals:
+            f1_scores.append(0.0)
+            continue
+
+        substrings = _parse_answer_substrings(record["final_answer"])
+        retrieved_intervals: List[Tuple[int, int]] = []
+        for s in substrings:
+            idx = paper_text.find(s)
+            if idx != -1:
+                retrieved_intervals.append((idx, idx + len(s)))
+
+        metrics = compute_metrics(retrieved_intervals, evidence_intervals)
+        f1_scores.append(metrics["f1"])
+
+    child_evidence_char_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+
+    return {
+        "child_submission_rate": child_submission_rate,
+        "paper_selection_f1": paper_selection_f1,
+        "child_evidence_char_f1": child_evidence_char_f1,
+    }
+
+
+# ---------------------------------------------------------------------------
 # REPL tool factory
 # ---------------------------------------------------------------------------
 
@@ -195,12 +306,16 @@ def make_tools() -> Dict[str, Any]:
             titles.append(title)
         return titles
 
-    def _search_text(text: str, keyword: str, window: int) -> list:
+    def _search_text(text: str, keyword: str, window: int, bidirectional: bool = True) -> list:
         results = []
         pattern = re.compile(re.escape(keyword), re.IGNORECASE)
         for m in pattern.finditer(text):
-            left = max(0, m.start() - window // 2)
-            right = min(len(text), m.end() + window // 2)
+            if bidirectional:
+                left = max(0, m.start() - window // 2)
+                right = min(len(text), m.end() + window // 2)
+            else:
+                left = m.start()
+                right = min(len(text), m.start() + window)
             while left > 0 and text[left - 1] not in ".!?\n":
                 left -= 1
                 if m.start() - left > window:
@@ -212,22 +327,19 @@ def make_tools() -> Dict[str, Any]:
             if right < len(text) and text[right] in ".!?\n":
                 right += 1
             snippet = text[left:right]
-            start_line = text[:left].count("\n") + 1
-            snippet_lines = snippet.split("\n")
-            numbered_lines = [f"L{start_line + i}: {line}" for i, line in enumerate(snippet_lines)]
             idx = len(results)
-            print(f"--- snippet {idx} (L{start_line}) ---")
-            print("\n".join(numbered_lines))
+            print(f"--- snippet {idx} ---")
+            print(snippet)
             results.append(snippet)
         return results
 
-    def search(text, keyword: str, window: int = 300) -> list:
+    def search(text, keyword: str, window: int = 300, bidirectional: bool = True) -> list:
         """Keyword search within a text string or across all papers in a dict."""
         if isinstance(text, dict):
             results = []
             for paper_id, paper_text in text.items():
                 title_line = paper_text.split("\n")[0].replace("### PAPER: ", "")
-                paper_results = _search_text(paper_text, keyword, window)
+                paper_results = _search_text(paper_text, keyword, window, bidirectional)
                 if paper_results:
                     print(f"\n=== Paper: {paper_id} — {title_line} ===")
                     results.extend(paper_results)
@@ -235,24 +347,21 @@ def make_tools() -> Dict[str, Any]:
                 print(f"(no hits for {keyword!r} in any paper)")
             return results
         else:
-            results = _search_text(text, keyword, window)
+            results = _search_text(text, keyword, window, bidirectional)
             if not results:
                 print(f"(no hits for {keyword!r})")
             return results
 
-    def extract_lines(text: str, start_line: int, end_line: int) -> str:
-        """Extract lines from start_line to end_line (inclusive, 1-indexed) from a text string."""
-        all_lines = text.split("\n")
-        s = max(0, start_line - 1)
-        e = min(len(all_lines), end_line)
-        if s >= len(all_lines):
-            print(f"ERROR: start_line {start_line} is beyond end of text ({len(all_lines)} lines)")
-            return ""
-        result = "\n".join(all_lines[s:e])
-        if len(result) > 2000:
-            print(f"WARNING: extraction is {len(result)} chars (limit 2000). Truncating. Use a tighter line range.")
-            result = result[:2000]
-        print(f"extract_lines({start_line}, {end_line}):")
+    def extract_section(snippet: str, start_phrase: str, end_phrase: str) -> str:
+        """Extract a substring from snippet starting at start_phrase and ending at end_phrase (inclusive)."""
+        si = snippet.lower().find(start_phrase.lower())
+        if si == -1:
+            si = 0
+        ei = snippet.lower().find(end_phrase.lower(), si)
+        if ei == -1:
+            result = snippet[si:]
+        else:
+            result = snippet[si: ei + len(end_phrase)]
         print(result)
         return result
 
@@ -268,6 +377,6 @@ def make_tools() -> Dict[str, Any]:
     return {
         "list_papers": list_papers,
         "search": search,
-        "extract_lines": extract_lines,
+        "extract_section": extract_section,
         "get_paper_abstract": get_paper_abstract,
     }

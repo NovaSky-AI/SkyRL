@@ -67,11 +67,11 @@ class DistributedStrategy(ABC):
         """Get current process rank"""
         return dist.get_rank()
 
-    def all_reduce(self, data: DataT, op="mean") -> DataT:
-        """Perform all_reduce across all processes"""
+    def all_reduce(self, data: DataT, op="mean", group=None) -> DataT:
+        """Perform all_reduce across all processes (or within a process group)."""
         assert op in ("mean", "max", "sum", "min")
         if isinstance(data, dict):
-            return {k: self.all_reduce(v, op) for k, v in data.items()}
+            return {k: self.all_reduce(v, op, group=group) for k, v in data.items()}
         else:
             is_tensor = True
             if not isinstance(data, torch.Tensor):
@@ -82,14 +82,15 @@ class DistributedStrategy(ABC):
             if is_cpu_tensor:
                 data = data.to(torch.cuda.current_device())
             if op == "mean":
-                data /= self.world_size
-                dist.all_reduce(data, op=dist.ReduceOp.SUM)
+                group_size = dist.get_world_size(group) if group is not None else self.world_size
+                data /= group_size
+                dist.all_reduce(data, op=dist.ReduceOp.SUM, group=group)
             elif op == "max":
-                dist.all_reduce(data, op=dist.ReduceOp.MAX)
+                dist.all_reduce(data, op=dist.ReduceOp.MAX, group=group)
             elif op == "min":
-                dist.all_reduce(data, op=dist.ReduceOp.MIN)
+                dist.all_reduce(data, op=dist.ReduceOp.MIN, group=group)
             elif op == "sum":
-                dist.all_reduce(data, op=dist.ReduceOp.SUM)
+                dist.all_reduce(data, op=dist.ReduceOp.SUM, group=group)
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data

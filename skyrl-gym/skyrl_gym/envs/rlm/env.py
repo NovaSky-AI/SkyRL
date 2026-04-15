@@ -52,7 +52,7 @@ The context is a DICTIONARY where each key is a paper ID (like "2205.05212") and
 REPL tools:
 - `context`: a dictionary where keys are paper IDs and values are full paper texts.
 - `list_papers(context)` — list all paper IDs with the first 1000 characters of their content.
-- `search(text, keyword, window=300)` — keyword search. Pass `context` to search ALL papers at once (results are grouped by paper ID and title), or pass `context[paper_id]` to search a single paper. Every line in each snippet is prefixed with its line number (e.g. `L42: ...`).
+- `search(text, keyword, window=300)` — keyword search. Pass `context` to search ALL papers at once (results are grouped by paper ID and title), or pass `context[paper_id]` to search a single paper. Returns plain text snippets (no line-number prefixes).
 - `get_paper_abstract(context, paper_id)` — return a formatted string with the paper ID, title, and abstract for the given paper.
 - `rlm_query_batched(prompts, context_list=None)` — dispatch child agents. Each child gets the paper text you provide. Returns list of results (each a Python list of extracted strings).
 - `FINAL_VAR(variable_name)` — return your final answer.
@@ -138,15 +138,15 @@ RULES:
 
 MULTIPAPER_CHILD_SYSTEM_PROMPT = textwrap.dedent(
     """\
-You are a PRECISE evidence extraction worker. You have a single paper in `context` and a query. Find the BEST verbatim passage(s) (at most 2) that directly answer the query.
+You are a PRECISE evidence extraction worker. You have a single paper in `context` and a query. Find ALL verbatim passages that directly and precisely answer the query — only include a passage if it clearly and specifically addresses the question.
 
 REPL tools:
 - `context`: full text of your paper.
-- `search(text, keyword, window=300)` — keyword search. Always pass `context` as first arg. \
-Every line in each snippet is prefixed with its line number (e.g. `L42: ...`). If no exact match is found, fuzzy matching is used automatically.
-- `extract_lines(text, start_line, end_line)` — extract lines from `start_line` to `end_line` (inclusive, 1-indexed). \
-Always pass `context` as first arg. Returns the verbatim text (without line number prefixes). \
-Extractions over 2000 chars are truncated with a warning — if this happens, use a tighter line range.
+- `search(text, keyword, window=300, bidirectional=True)` — keyword search. Always pass `context` as first arg. \
+Returns a list of plain text snippets (no line-number prefixes). If no exact match is found, fuzzy matching is used automatically.
+- `extract_section(snippet, start_phrase, end_phrase)` — extract a substring from a snippet. \
+Pass the snippet (e.g. an element from a search result), a short phrase from the START of the target text, \
+and a short phrase from the END of the target text (inclusive). Both phrases are matched case-insensitively.
 - `FINAL_VAR(variable_name)` — return your final answer.
 
 RULES:
@@ -154,14 +154,14 @@ RULES:
 - CRITICAL: Each response you give must contain EXACTLY ONE ```repl block. Never two, never zero. \
 You will be called multiple times. Each call = one block.
 - You can only see the output of a block AFTER you submit it. \
-So you CANNOT call extract_lines() based on search() results in the same response — you haven't seen the line numbers yet.
-- NEVER call FINAL_VAR in the same block as extract_lines. You must first extract, READ the output \
+So you CANNOT call extract_section() based on search() results in the same response — you haven't seen the snippets yet.
+- NEVER call FINAL_VAR in the same block as extract_section. You must first extract, READ the output \
 to verify it looks correct, and ONLY THEN call FINAL_VAR in the next block.
 - Your final answer MUST be FINAL_VAR(list_of_strings) where each string is an exact slice of `context`.
-- Each evidence string should be exactly ONE complete paragraph — not a single sentence, but not \
-multiple paragraphs either. Include the full paragraph that contains the key fact (topic sentence \
-through final sentence). Never return isolated sentences, but also never return more than one \
-paragraph per extraction. Be precise.
+- Each evidence string should be the MINIMUM contiguous span that contains the evidence — the key \
+sentences plus just enough surrounding context to make them interpretable. Do NOT include setup \
+text, section headers, or surrounding sentences that don't add to the answer. Tighter is better: \
+a few precise sentences is preferable to a whole paragraph of padding.
 - If you put two ```repl blocks in one response, the second block will be SILENTLY DROPPED. You will lose that work.
 - Do NOT answer the question. Return the evidence substrings, nothing else.
 - No `#` comments in REPL code.
@@ -178,26 +178,28 @@ and you can find the paragraph that REFERENCES the table but not the table data 
 referencing paragraph — do not keep searching for the numeric values.
 - To expand a snippet, call search() on the snippet itself with a larger window \
 and bidirectional=False. This re-finds the same location and returns more surrounding context. \
-NOTE: you do not actually need to re-write out the snippet, it should be saved in an array/variable \
-that you can just index. i.e. search(context, s1[0], window=1000, bidirectional=False). When specifically trying to expand, we encourage \
-window sizes of 1000+ characters (in line count, that's roughly 30+ lines).
-- NEVER include section headers (like "4.1. Method") as part of your extraction — start from the first sentence of the paragraph.
-- AT MOST 2 passages in your final answer. Prefer 1 if one passage covers the query.
+NOTE: snippets are stored in variables so you can index them directly: search(context, s1[0], window=1200, bidirectional=False). \
+When expanding, use window sizes of 1000+ characters.
+- NEVER include section headers (like "4.1. Method") as part of your extraction — use a start_phrase from the first sentence of the paragraph.
+- Return ALL passages that directly and precisely answer the query. Do not include tangentially related text — every passage must clearly address the question. Do not artificially limit the count, but also do not cast a wide net; quality over quantity.
 - If this paper has no content relevant to the query, return an empty list.
 - Final answer = list of VERBATIM substrings from `context`.
 - No narration, no explanation, no text outside code blocks.
 
 BE THOROUGH: Do NOT rush to extract after seeing the first promising snippet. Papers discuss the same \
-concept in multiple places (abstract, introduction, methods, experiments, conclusion). \
-Your job is to find the MOST detailed and informative passage, which is usually in the methods or \
-experiments section — not the abstract. The abstract gives a summary; the body gives the real evidence. \
+concept in multiple places (abstract, introduction, methods, experiments, conclusion). Search all \
+of them. Prioritize methods/experiments for DETAILED evidence (mechanisms, specifics), but if the \
+abstract or introduction contains the specific answer (e.g. a precise number, a direct conclusion), \
+extract it too — it is valid evidence. If the same key fact (e.g. a specific speedup number) \
+appears in multiple sections, extract EACH occurrence separately — they are all valid evidence. \
 Always search with at least 2-3 different keyword sets before deciding which passages to extract.
 
-search() prints every snippet with line numbers prefixed on each line. Read the line numbers carefully. \
-After searching, identify ALL snippets that could be relevant — evidence is often spread across multiple sections \
-of a paper (e.g. intro, methods, experiments may all contain relevant details). Expand each promising snippet generously. \
-Then in the NEXT response (after you have read the expanded text), use extract_lines with the start and end \
-line numbers to return the full paragraph that contains the evidence. Prefer returning too much over too little.
+search() prints every snippet as plain text. After searching, identify ALL snippets that could be \
+relevant — evidence is often spread across multiple sections of a paper (e.g. abstract, intro, \
+methods, experiments may all contain relevant details). Expand each promising snippet. \
+Then in the NEXT response (after you have read the expanded text), use extract_section with the \
+tightest span that captures just the evidence sentences. Prefer precision over breadth — do not \
+include sentences that are not part of the answer.
 
 Here is the expected procedure (5-7 responses, NEVER fewer than 5 unless the paper is clearly irrelevant):
 
@@ -226,10 +228,10 @@ e3 = search(context, s3[1], window=1200, bidirectional=False)
 
 *(code runs, you receive the output)*
 
-Turn 4 — now you have full context; extract the best paragraph(s) by line number:
+Turn 4 — extract the best paragraph(s) using start/end phrases:
 ```repl
-p1 = extract_lines(context, 142, 155)
-p2 = extract_lines(context, 310, 322)
+p1 = extract_section(e1[0], "first few words of target span", "last few words of target span.")
+p2 = extract_section(e2[0], "first few words of target span", "last few words of target span.")
 ```
 
 *(code runs, you receive the output)*
@@ -443,6 +445,8 @@ class RLMEnv(BaseTextEnv):
         self.lm_callback = extras.get("lm_callback", None)
         self.subcall_fn = extras.get("subcall_fn", None)
 
+        self.step_wise = extras.get("step_wise", True)
+
         self.repl: Optional[PersistentREPL] = None
         self._final_answer: Optional[str] = None
         self._turn_index = 0  # iteration counter for build_user_prompt
@@ -467,10 +471,13 @@ class RLMEnv(BaseTextEnv):
                 pass
         self._root_prompt = root_prompt
 
-        # Build per-context REPL tools (search, extract_lines, etc.) and optionally
+        # Build per-context REPL tools (search, extract_section, etc.) and optionally
         # an evidence-based reward function from the serializable reward_spec data.
+        # If judge_reward_fn was injected via extras it takes precedence over F1.
         reward_spec = self.extras.get("reward_spec", {})
-        if self.reward_fn is None and reward_spec.get("evidence") is not None:
+        if self.extras.get("judge_reward_fn") is not None:
+            self.reward_fn = self.extras["judge_reward_fn"]
+        elif self.reward_fn is None and reward_spec.get("evidence") is not None:
             evidence = reward_spec["evidence"]
             if isinstance(context_payload, dict):
                 from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn_multipaper
@@ -512,7 +519,13 @@ class RLMEnv(BaseTextEnv):
             {"role": "system", "content": system_content},
             {"role": "user", "content": metadata_text},
         ]
-        return init_messages, {"next_user_message": turn0_prompt}
+
+        if self.step_wise:
+            return init_messages, {"next_user_message": turn0_prompt}
+        else:
+            init_messages.append(turn0_prompt)
+        
+        return init_messages, {}
 
     def _build_system_prompt(self) -> str:
         prompt_key = self.rlm_config.custom_system_prompt
@@ -551,13 +564,23 @@ class RLMEnv(BaseTextEnv):
             obs_text = "[No ```repl``` code block found. Wrap your code in ```repl\\n...\\n``` blocks.]"
             if not done:
                 next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-                return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": obs_text}],
-                    next_user_message=next_prompt,
-                    reward=self._get_reward(done, None),
-                    done=done,
-                    metadata={},
-                )
+                if self.step_wise:
+                    return BaseTextEnvStepOutput(
+                        observations=[{"role": "user", "content": obs_text}],
+                        next_user_message=next_prompt,
+                        reward=self._get_reward(done, None),
+                        done=done,
+                        metadata={},
+                    )
+                else: 
+                    return BaseTextEnvStepOutput(
+                        observations=[{"role": "user", "content": obs_text}, next_prompt],
+                        next_user_message=None,
+                        reward=self._get_reward(done, None),
+                        done=done,
+                        metadata={},
+                    )
+
             return BaseTextEnvStepOutput(
                 observations=[], next_user_message=None, reward=self._get_reward(done, None), done=done, metadata={}
             )
@@ -588,13 +611,23 @@ class RLMEnv(BaseTextEnv):
         repl_obs_text = f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result_str}"
 
         next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-        return BaseTextEnvStepOutput(
-            observations=[{"role": "user", "content": repl_obs_text}],
-            next_user_message=next_prompt,
-            reward=reward,
-            done=False,
-            metadata=self._build_metadata(),
-        )
+        if self.step_wise:
+            return BaseTextEnvStepOutput(
+                observations=[{"role": "user", "content": repl_obs_text}],
+                next_user_message=next_prompt,
+                reward=reward,
+                done=False,
+                metadata=self._build_metadata(),
+            )
+        else:
+            return BaseTextEnvStepOutput(
+                observations=[{"role": "user", "content": repl_obs_text}, next_prompt],
+                next_user_message=None,
+                reward=reward,
+                done=False,
+                metadata=self._build_metadata(),
+            )
+
 
     def _extract_prompt_text(self, prompt: ConversationType) -> str:
         parts = [msg["content"] for msg in prompt if msg.get("content")]

@@ -382,6 +382,9 @@ generator:
 
   step_wise_trajectories: false
   train_child_trajectories: false
+  enable_child_agents: true
+  judge_reward_model: null
+  judge_reward_base_url: "https://api.openai.com/v1"
   child_openrouter_model: null
   child_openrouter_base_url: "https://openrouter.ai/api/v1"
 

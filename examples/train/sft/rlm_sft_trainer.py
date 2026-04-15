@@ -41,8 +41,8 @@ from skyrl.train.utils.utils import initialize_ray, validate_cfg, ResolvedPlacem
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
 
-MODEL_PATH = "Qwen/Qwen3.5-9B"
-DATASET_NAME = "alphaXiv/multi-paper-selection"
+MODEL_PATH = "Qwen/Qwen3.5-0.8B"
+DATASET_NAME = "alphaXiv/sft-traces-qasper-arxivqa"
 WORKSPACE_ROOT = Path(__file__).parents[3]
 EVAL_MD_PATH = WORKSPACE_ROOT / "EVAL.md"
 
@@ -153,7 +153,7 @@ def main():
     learning_rate = float(os.environ.get("LEARNING_RATE", "1e-5"))
     log_interval = int(os.environ.get("LOG_INTERVAL", "10"))
     sample_interval = int(os.environ.get("SAMPLE_INTERVAL", "50"))
-    checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "250"))
+    checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "50"))
     max_checkpoints = int(os.environ.get("MAX_CHECKPOINTS", "2"))
     checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / ".neer" / "artifacts")))
 

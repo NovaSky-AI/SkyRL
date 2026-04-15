@@ -18,7 +18,7 @@ def _mock_lm_callback(prompts):
     return [f"response:{p}" for p in prompts]
 
 
-def _mock_subcall_fn(prompt):
+def _mock_subcall_fn(prompt, context=None):
     """Simulate a child RLM: returns a fixed string based on the prompt."""
     return f"child_result:{prompt}"
 
@@ -130,7 +130,7 @@ class TestRLMQuery:
 
         call_order = []
 
-        def ordered_subcall(prompt):
+        def ordered_subcall(prompt, context=None):
             call_order.append(prompt)
             # Introduce artificial delay for first prompt to expose ordering bugs
             if prompt == "first":
@@ -156,7 +156,7 @@ class TestRLMQuery:
         """A failing subcall for one prompt should not crash the others."""
         call_count = {"n": 0}
 
-        def flaky_subcall(prompt):
+        def flaky_subcall(prompt, context=None):
             call_count["n"] += 1
             if prompt == "bad":
                 raise ValueError("intentional failure")
@@ -172,7 +172,7 @@ class TestRLMQuery:
         assert "ok:also_good" in result.stdout
 
     def test_rlm_query_error_handling(self):
-        def bad_subcall(prompt):
+        def bad_subcall(prompt, context=None):
             raise RuntimeError("subcall exploded")
 
         repl = PersistentREPL(lm_callback=_mock_lm_callback, subcall_fn=bad_subcall)

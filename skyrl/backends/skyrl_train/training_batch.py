@@ -1,5 +1,6 @@
 """Defines interfaces for training data."""
 
+import copy
 import io
 import pickle
 from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
@@ -483,3 +484,49 @@ class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
     """Training output data"""
 
     pass
+
+
+def pad_batch(old_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
+    """Pad the batch so its batch_size becomes `batch.batch_size + pad_size`.
+
+    Returns:
+        A physically new `TrainingInputBatch` object with the padded data.
+    """
+    assert pad_size > 0, "pad_size must be greater than 0"
+
+    new_tensors = {}
+    for key, tensor in old_batch.items():
+        if tensor is not None:
+            additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
+            if key == "is_last_step":
+                padding = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+            elif key == "loss_mask":
+                # ensures that padding tensors don't count towards the loss
+                padding = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+            else:
+                # Repeat row 0 `pad_size` times so this works even when pad_size > mb_size
+                # (e.g. mb_size=1, dp_size=4). loss_mask=0 on these rows means they do
+                # not affect the loss, so the values themselves don't matter, they just
+                # need to be a valid shape/dtype.
+                repeats = [pad_size] + [1] * (tensor.ndim - 1)
+                padding = tensor[:1].repeat(*repeats)
+            new_tensors[key] = torch.cat([tensor, padding], dim=0)
+        else:
+            new_tensors[key] = None
+    padded_batch = TrainingInputBatch(new_tensors)
+
+    # Copy over the metadata from the old batch
+    padded_batch.metadata = {}
+    padded_batch.metadata["uids"] = old_batch.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
+    if "trajectory_ids" in old_batch.metadata:
+        padded_batch.metadata["trajectory_ids"] = old_batch.metadata["trajectory_ids"] + [
+            f"pad{i}" for i in range(pad_size)
+        ]
+    for key, value in old_batch.metadata.items():
+        if key not in ["uids", "trajectory_ids"]:
+            padded_batch.metadata[key] = copy.deepcopy(value)
+
+    # Record padding size
+    padded_batch.metadata["pad_size"] = pad_size
+
+    return padded_batch
