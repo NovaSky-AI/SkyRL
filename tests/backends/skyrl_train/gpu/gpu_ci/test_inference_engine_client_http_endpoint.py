@@ -45,12 +45,10 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
-    init_remote_inference_servers,
-)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
+    init_remote_inference_servers,
     init_worker_with_type,
 )
 
