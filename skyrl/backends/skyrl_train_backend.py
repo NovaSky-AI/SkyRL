@@ -475,11 +475,13 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         metrics: dict[str, float] = {}
 
-        # SFT path returns 'loss'; RL path returns 'final_loss' / 'policy_loss'
-        if "loss" in data:
-            metrics["total_loss:sum"] = float(data["loss"])
+        # SFT path returns 'sft_loss'; RL path returns 'final_loss' / 'policy_loss'
+        if "sft_loss" in data:
+            metrics["total_loss:sum"] = float(data["sft_loss"])
         elif "final_loss" in data:
             metrics["total_loss:sum"] = float(data["final_loss"])
+        elif "loss" in data:
+            metrics["total_loss:sum"] = float(data["loss"])
 
         if "policy_loss" in data:
             metrics["pg_loss:sum"] = float(data["policy_loss"])

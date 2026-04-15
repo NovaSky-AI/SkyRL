@@ -701,7 +701,7 @@ class PolicyWorkerBase(Worker):
         micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
-        total_tokens = data.loss_mask.sum().item()
+        total_tokens = data.loss_mask.sum().clamp(min=1).item()
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
             microbatch_weight = micro_batch_size / len(data)
@@ -865,7 +865,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": loss.item(),
+                "sft_loss": (unscaled_loss / total_tokens).item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,

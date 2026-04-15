@@ -268,7 +268,7 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
         all_loss_fn_outputs = []
         for result in results:
             assert isinstance(result, dict)
-            assert "loss" in result
+            assert "sft_loss" in result
             assert "loss_fn_outputs" in result, "SFT path should return loss_fn_outputs"
 
             loss_fn_outputs = result["loss_fn_outputs"]
