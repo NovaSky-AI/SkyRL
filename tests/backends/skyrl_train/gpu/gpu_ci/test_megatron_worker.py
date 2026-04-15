@@ -121,9 +121,9 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(True, 4, 2, 2, 1, None, False, id="colocate_all"),
         pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(True, 4, 2, 2, 1, None, True, id="colocate_all_lora"),
     ],
 )
 @pytest.mark.asyncio
