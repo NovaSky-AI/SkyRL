@@ -118,6 +118,7 @@ def test_deepseek_connector_identity_expansion_rate():
         norm_topk_prob=True,
         routed_scaling_factor=1.0,
         tie_word_embeddings=False,
+        rope_theta=10000.0,
     )
     config_e1 = DeepseekV3Config(base_config, max_lora_adapters=4, max_lora_rank=8, shard_attention_heads=True)
     config_e4 = DeepseekV3Config(base_config, max_lora_adapters=4, max_lora_rank=8, shard_attention_heads=True)

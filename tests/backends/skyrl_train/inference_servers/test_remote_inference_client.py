@@ -22,10 +22,15 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 def create_mock_vllm_server(server_id: int) -> FastAPI:
     """Create a mock vLLM server with standard endpoints."""
     app = FastAPI()
+    app.state.last_generate_features = None
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/test/last_generate_features")
+    async def get_last_generate_features():
+        return {"features": app.state.last_generate_features}
 
     @app.get("/get_world_size")
     async def get_world_size():
@@ -43,17 +48,64 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             ]
         }
 
+    @app.post("/skyrl/v1/generate")
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
         body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
+        sp = body.get("sampling_params", {})
+        input_token_ids = body.get("token_ids", [])
+        n = sp.get("n", 1)
+        # If logprobs is explicitly set (sample path), use n for num_choices.
+        # Otherwise (generate path), use len(token_ids) for per-prompt responses.
+        if "logprobs" in sp:
+            num_choices = n
+        else:
+            num_choices = 1
 
-        return {
+        response: dict = {
             "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
+                {
+                    "request_id": "dummy",
+                    "token_ids": [i, i + 1, i + 2],
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"logprob": -0.1 * (i + 1)}]},
+                }
+                for i in range(num_choices)
             ]
         }
+
+        features = body.get("features")
+        app.state.last_generate_features = features
+        if features is not None:
+            response["features"] = features
+
+        # Mock prompt_logprobs when requested via sampling_params
+        pl = sp.get("prompt_logprobs")
+        # vLLM returns k or k+1 logprobs per position (extra entry when
+        # the prompt token falls outside the top-k).
+        if pl is not None and input_token_ids:
+            prompt_logprobs = [None]  # position 0: no prior context
+            for idx in range(1, len(input_token_ids)):
+                position_dict = {
+                    str(input_token_ids[idx]): {
+                        "logprob": -0.5 * idx,
+                        "rank": 1,
+                        "decoded_token": None,
+                    }
+                }
+                # If topk > 0, add extra entries
+                if pl > 0:
+                    for extra in range(pl):
+                        fake_token_id = 9000 + idx * 10 + extra
+                        position_dict[str(fake_token_id)] = {
+                            "logprob": -1.0 * idx - 0.1 * extra,
+                            "rank": extra + 2,
+                            "decoded_token": None,
+                        }
+                prompt_logprobs.append(position_dict)
+            response["prompt_logprobs"] = prompt_logprobs
+
+        return response
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -184,6 +236,7 @@ async def client(mock_servers):
     client = RemoteInferenceClient(
         proxy_url=mock_servers["proxy_url"],
         server_urls=mock_servers["server_urls"],
+        data_parallel_size=1,
     )
     yield client
     await client.teardown()
@@ -198,6 +251,7 @@ class TestRemoteInferenceClientInit:
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
             model_name="test-model",
+            data_parallel_size=1,
         )
 
         # Pickle and unpickle
@@ -382,7 +436,7 @@ class TestWeightSync:
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
 
-            def for_servers(self, world_size_per_server, num_servers):
+            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
                 return [self] * num_servers
 
             def to_api_payload(self):
@@ -419,6 +473,115 @@ class TestServerInfo:
         # Second call returns cached value
         total_world_size2, _ = await client.get_world_size()
         assert total_world_size2 == 4
+
+
+class TestSample:
+    """Test sample() method (Tinker API)."""
+
+    @pytest.mark.asyncio
+    async def test_sample(self, client):
+        """Test sample with n=1 returns correct structure and prompt_logprobs."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert seq["tokens"] == [0, 1, 2]
+        assert seq["logprobs"] == [-0.1]
+        assert seq["stop_reason"] == "stop"
+
+        # prompt_logprobs: one float per prompt token, position 0 is None
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+        # topk not requested
+        assert result["topk_prompt_logprobs"] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_n2(self, client):
+        """Test sample with n=2 returns two sequences and prompt_logprobs."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
+                "num_samples": 2,
+                "sampling_params": {"temperature": 1.0, "max_tokens": 32},
+                "include_prompt_logprobs": True,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert len(result["sequences"]) == 2
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][1]["tokens"] == [1, 2, 3]
+        assert result["sequences"][0]["logprobs"] == [-0.1]
+        assert result["sequences"][1]["logprobs"] == [-0.2]
+
+        # prompt_logprobs shared across choices
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_prompt_logprobs(self, client):
+        """Test topk_prompt_logprobs returns both prompt_logprobs and topk tuples."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "include_prompt_logprobs": True,
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        pl = result["prompt_logprobs"]
+        assert pl is not None
+        assert len(pl) == 3
+        assert pl[0] is None
+        assert pl[1] == pytest.approx(-0.5)
+        assert pl[2] == pytest.approx(-1.0)
+
+        topk = result["topk_prompt_logprobs"]
+        assert topk is not None
+        assert len(topk) == 3
+        assert topk[0] is None
+        # Exactly top-k (2) entries per position, sorted by logprob descending
+        assert len(topk[1]) == 2
+        assert len(topk[2]) == 2
+        # Position 1: top-2 are token 20 at -0.5 and 9010 at -1.0 (9011 at -1.1 is dropped)
+        topk1 = dict(topk[1])
+        assert topk1[20] == pytest.approx(-0.5)
+        assert topk1[9010] == pytest.approx(-1.0)
+
+    @pytest.mark.asyncio
+    async def test_sample_topk_without_include_returns_none(self, client):
+        """topk_prompt_logprobs alone does not return prompt logprobs when include_prompt_logprobs is False."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+                "topk_prompt_logprobs": 2,
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
 
 
 class TestRenderChatCompletion:
@@ -484,6 +647,33 @@ class TestRenderChatCompletion:
         }
 
 
+class TestMultiModalGeneration:
+    """Test that mm_features are correctly forwarded through generate()."""
+
+    @pytest.mark.asyncio
+    async def test_generate_with_mm_features(self, client, mock_servers):
+        """Passing mm_features in InferenceEngineInput sends features in the HTTP payload."""
+        mm_features = {
+            "mm_hashes": {"image": ["abc123hash"]},
+            "mm_placeholders": {"image": [{"offset": 0, "length": 10}]},
+        }
+        input_batch = {
+            "prompt_token_ids": [[1, 2, 3]],
+            "sampling_params": {"max_tokens": 50},
+            "mm_features": [mm_features],
+        }
+        result = await client.generate(input_batch)
+
+        assert len(result["responses"]) == 1
+        assert len(result["response_ids"]) == 1
+        assert result["stop_reasons"][0] == "stop"
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(f"{mock_servers['proxy_url']}/test/last_generate_features")
+            captured = resp.json()
+        assert captured["features"] == mm_features
+
+
 class TestContextManager:
     """Test async context manager."""
 
@@ -494,6 +684,7 @@ class TestContextManager:
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
         )
 
         async with client:

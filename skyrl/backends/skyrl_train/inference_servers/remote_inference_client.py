@@ -36,6 +36,7 @@ Usage:
     client = RemoteInferenceClient(
         proxy_url="http://router:8080",  # Data plane (router)
         server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+        data_parallel_size=1,
     )
 
 Comparison with existing code:
@@ -50,13 +51,25 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Required,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
+    MultiModalFeatures,
 )
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -64,6 +77,16 @@ from skyrl.env_vars import (
 )
 
 _DATA_PLANE_RETRIES = 30
+
+_TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
+    "temperature": "temperature",
+    "max_tokens": "max_tokens",
+    "seed": "seed",
+    "top_k": "top_k",
+    "top_p": "top_p",
+    "stop_strings": "stop",
+    "stop_tokens": "stop_token_ids",
+}
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -108,6 +131,33 @@ class PauseMode(Enum):
     WAIT = "wait"
 
 
+class SampleRequestBody(TypedDict, total=False):
+    """Tinker-style sample request body, mirroring tinker SamplingClient.sample"""
+
+    prompt: Required[Dict[str, Any]]
+    num_samples: int
+    sampling_params: Dict[str, Any]
+    session_id: str
+    include_prompt_logprobs: bool
+    prompt_logprobs: bool
+    topk_prompt_logprobs: int
+
+
+class SampleRequestPayload(TypedDict):
+    """Wrapper for sample request (matches the {"json": ...} convention)."""
+
+    json: SampleRequestBody
+
+
+class SampleResponse(TypedDict):
+    """Return value of RemoteInferenceClient.sample(), mirrors tinker SampleResponse"""
+
+    type: Literal["sample"]
+    sequences: List[Dict[str, Any]]
+    prompt_logprobs: Optional[List[Optional[float]]]
+    topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]]
+
+
 @dataclass
 class RemoteInferenceClient:
     """
@@ -125,6 +175,7 @@ class RemoteInferenceClient:
         client = RemoteInferenceClient(
             proxy_url="http://router:8080",  # Data plane (router)
             server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+            data_parallel_size=1, # data parallel size for deployments
         )
     """
 
@@ -134,8 +185,16 @@ class RemoteInferenceClient:
     server_urls: List[str]
     """Control plane URLs (list of backend servers for fan-out)."""
 
+    data_parallel_size: int
+    """Data parallel size. Used to compute total inference world size correctly:
+    server_urls contains num_engines * data_parallel_size entries, but vLLM already
+    reports the full DP world size per server, so we divide by num_deployments."""
+
     model_name: str = "default"
     """Model name for OpenAI-compatible API calls."""
+
+    enable_return_routed_experts: bool = False
+    """Whether to return routed expert indices (R3 / rollout router replay)."""
 
     active_lora_name: Optional[str] = None
     """Name of the active LoRA adapter. If set, generation requests use this adapter instead of the base model."""
@@ -149,6 +208,15 @@ class RemoteInferenceClient:
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if self.data_parallel_size <= 0:
+            raise ValueError(f"Expected `data_parallel_size` >0, got {self.data_parallel_size}")
+
+        if len(self.server_urls) % self.data_parallel_size != 0:
+            raise ValueError(
+                f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
+            )
 
     # ---------------------------
     # Session Management
@@ -185,8 +253,6 @@ class RemoteInferenceClient:
         current_loop = asyncio.get_running_loop()
         if self._session is not None and not self._session.closed and self._session.loop != current_loop:
             # Event loop changed - the old session is unusable (bound to a dead loop).
-            # Force-close the connector to release socket FDs immediately.
-            _force_close_connector(self._session.connector)
             self._session = None
         if self._session is None or self._session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive
@@ -216,6 +282,17 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
+                        if 400 <= resp.status < 500:
+                            # Non-JSON client error (e.g. plain text 422 from vllm-router).
+                            # Raise immediately — client errors won't succeed on retry.
+                            text = await resp.text()
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info,
+                                resp.history,
+                                status=resp.status,
+                                message=text or resp.reason,
+                                headers=resp.headers,
+                            )
                         last_exc = e
                         logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
                         await asyncio.sleep(1)
@@ -265,6 +342,7 @@ class RemoteInferenceClient:
             raise ValueError("n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead.")
 
         session_ids = input_batch.get("session_ids")
+        mm_features = input_batch.get("mm_features")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -287,12 +365,14 @@ class RemoteInferenceClient:
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
             async with gen_sem:
                 return await self._generate_single(
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
@@ -304,11 +384,15 @@ class RemoteInferenceClient:
         raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
         responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
+        rollout_expert_indices = [r.get("routed_experts") for r in raw_results]
+        has_routed_experts = any(x is not None for x in rollout_expert_indices)
+
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
+            rollout_expert_indices=rollout_expert_indices if has_routed_experts else None,
         )
 
     async def _generate_single(
@@ -316,6 +400,7 @@ class RemoteInferenceClient:
         prompt_token_ids: List[int],
         sampling_params: Dict[str, Any],
         session_id: Optional[Any],
+        mm_features: Optional[MultiModalFeatures] = None,
     ) -> Dict[str, Any]:
         """
         Generate completion for a single prompt.
@@ -327,16 +412,22 @@ class RemoteInferenceClient:
         Returns:
             Dict with keys: stop_reason, response_ids, response_logprobs
         """
-        url = f"{self.proxy_url}/inference/v1/generate"
+        url = (
+            f"{self.proxy_url}/skyrl/v1/generate"
+            if self.enable_return_routed_experts
+            else f"{self.proxy_url}/inference/v1/generate"
+        )
 
         # Use LoRA adapter name if one is active, otherwise use base model name
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
-        payload = {
+        payload: dict[str, Any] = {
             "sampling_params": sampling_params,
             "model": effective_model,
             "token_ids": prompt_token_ids,
         }
+        if mm_features:
+            payload["features"] = mm_features
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -355,10 +446,132 @@ class RemoteInferenceClient:
             if logprobs_content:
                 response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
+        routed_experts = choice.get("routed_experts")
+
         return {
             "stop_reason": stop_reason,
             "response_ids": token_ids,
             "response_logprobs": response_logprobs,
+            "routed_experts": routed_experts,
+        }
+
+    async def sample(self, request_payload: SampleRequestPayload) -> SampleResponse:
+        """
+        Sample completions via /inference/v1/generate (Tinker API).
+
+        Maps Tinker-style sample requests to the vLLM generate endpoint.
+        Uses self._post() for automatic retry + backoff on transient errors.
+
+        Args:
+            request_payload: SampleRequestPayload with {"json": <request-body>}.
+                Expected keys in json: prompt, num_samples, sampling_params, session_id,
+                include_prompt_logprobs (bool), topk_prompt_logprobs (int).
+
+        Returns:
+            SampleResponse with type="sample", sequences list, prompt_logprobs, and topk_prompt_logprobs.
+        """
+        session_id, body = _extract_session_id_and_body(request_payload)
+
+        prompt = body.get("prompt", {})
+        num_samples = body.get("num_samples", 1)
+        tinker_params = body.get("sampling_params", {})
+
+        # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
+        # SamplingClient.sample() uses "include_prompt_logprobs".
+        include_prompt_logprobs = body.get("include_prompt_logprobs", body.get("prompt_logprobs", False))
+        topk_prompt_logprobs_k = body.get("topk_prompt_logprobs", 0)
+
+        # vLLM prompt logprob mapping
+        prompt_logprobs_sp = None
+        if include_prompt_logprobs:
+            prompt_logprobs_sp = topk_prompt_logprobs_k if topk_prompt_logprobs_k > 0 else 0
+
+        # Flatten prompt chunks → token IDs
+        token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
+
+        # Map Tinker SamplingParams → vLLM format
+        sampling_params: Dict[str, Any] = {
+            "n": num_samples,
+            "logprobs": 0,
+            "output_kind": 2,
+            "prompt_logprobs": prompt_logprobs_sp,
+        }
+
+        for tinker_key, vllm_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
+            val = tinker_params.get(tinker_key)
+            if val is not None:
+                sampling_params[vllm_key] = val
+
+        effective_model = self.active_lora_name if self.active_lora_name else self.model_name
+
+        payload = {
+            "sampling_params": sampling_params,
+            "model": effective_model,
+            "token_ids": token_ids,
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        url = f"{self.proxy_url}/inference/v1/generate"
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            response = await self._post(url, json=payload, headers=headers)
+        else:
+            async with gen_sem:
+                response = await self._post(url, json=payload, headers=headers)
+
+        # vLLM returns: list[dict[str(token_id) → {"logprob": float, ...}] | None]
+        result_prompt_logprobs: Optional[List[Optional[float]]] = None
+        result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
+
+        raw_prompt_logprobs = response.get("prompt_logprobs")
+        if raw_prompt_logprobs is not None and include_prompt_logprobs:
+            result_prompt_logprobs = [
+                (pos_dict.get(str(tid)) or {}).get("logprob") if pos_dict is not None else None
+                for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
+            ]
+            if topk_prompt_logprobs_k > 0:
+                # vLLM returns k or k+1 logprobs per position (the extra entry is the
+                # prompt token when it falls outside the top-k). Tinker always returns
+                # exactly top-k, so we sort and truncate below.
+                result_topk_prompt_logprobs = [
+                    (
+                        sorted(
+                            [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()],
+                            key=lambda x: x[1],
+                            reverse=True,
+                        )[:topk_prompt_logprobs_k]
+                        if pos_dict is not None
+                        else None
+                    )
+                    for _, pos_dict in zip(token_ids, raw_prompt_logprobs)
+                ]
+
+        # Transform response choices → sequences
+        sequences = []
+        for choice in response.get("choices", []):
+            seq_logprobs: Optional[List[float]] = None
+            logprobs_data = choice.get("logprobs")
+            if logprobs_data is not None:
+                logprobs_content = logprobs_data.get("content", [])
+                if logprobs_content:
+                    seq_logprobs = [lp["logprob"] for lp in logprobs_content]
+
+            sequences.append(
+                {
+                    "tokens": choice["token_ids"],
+                    "logprobs": seq_logprobs,
+                    "stop_reason": choice.get("finish_reason"),
+                }
+            )
+
+        return {
+            "type": "sample",
+            "sequences": sequences,
+            "prompt_logprobs": result_prompt_logprobs,
+            "topk_prompt_logprobs": result_topk_prompt_logprobs,
         }
 
     async def chat_completion(
@@ -383,7 +596,12 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/chat/completions"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def render_chat_completion(
         self,
@@ -407,7 +625,12 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/chat/completions/render"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def completion(
         self,
@@ -431,7 +654,12 @@ class RemoteInferenceClient:
             headers["X-Session-ID"] = str(session_id)
 
         url = f"{self.proxy_url}/v1/completions"
-        return await self._post(url, json=body, headers=headers)
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        else:
+            async with gen_sem:
+                return await self._post(url, json=body, headers=headers)
 
     async def tokenize(
         self,
@@ -660,7 +888,7 @@ class RemoteInferenceClient:
         """
         _, world_size_per_server = await self.get_world_size()
         num_servers = len(self.server_urls)
-        server_infos = init_info.for_servers(world_size_per_server, num_servers)
+        server_infos = init_info.for_servers(world_size_per_server, num_servers, dp_size=self.data_parallel_size)
         payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
         results = await asyncio.gather(
             *[
@@ -751,6 +979,11 @@ class RemoteInferenceClient:
         All servers are expected to have the same world size.
         Result is cached after first call.
 
+        When data_parallel_size > 1, server_urls contains num_engines * dp_size entries.
+        vLLM reports the full DP * TP world size per server, which already
+        covers all DP ranks in one deployment. To avoid double-counting,
+        total_world_size = per_server_ws * num_deployments (not num_servers).
+
         Returns:
             Tuple of (total_world_size, world_size_per_server).
         """
@@ -774,7 +1007,12 @@ class RemoteInferenceClient:
             ws == per_server[0] for ws in per_server
         ), f"All servers must have the same world_size, got {per_server}"
 
-        self._world_size = (per_server[0] * len(self.server_urls), per_server[0])
+        # Each server is one DP rank. vLLM reports world_size = dp_size * tp_size * pp_size,
+        # which is the worker count across ALL DP ranks in one deployment.
+        # num_deployments = num_servers / dp_size (each deployment has dp_size servers).
+        # Total unique workers = per_server_ws * num_deployments.
+        num_deployments = len(self.server_urls) // self.data_parallel_size
+        self._world_size = (per_server[0] * num_deployments, per_server[0])
         return self._world_size
 
     # ---------------------------
@@ -816,41 +1054,14 @@ class RemoteInferenceClient:
         self._detok_sem = None
         self._sem_loop = None
 
-
-def _force_close_connector(connector: Optional[aiohttp.TCPConnector]) -> None:
-    """Release socket FDs held by a connector whose event loop is already closed.
-
-    asyncio's normal transport.close() schedules a connection_lost() callback
-    on the loop, which raises RuntimeError when the loop is closed. We instead
-    close the raw file descriptors via os.close(fileno()) and then manually
-    clear aiohttp's internal connection pools.
-
-    Note: this uses aiohttp internals (_conns, _acquired, _closed). These are
-    stable across aiohttp 3.x but may change in 4.x.
-    """
-    if connector is None or connector.closed:
-        return
-
-    def _release(proto: aiohttp.client_proto.ResponseHandler) -> None:
-        if proto.transport is not None:
-            tsock = proto.transport.get_extra_info("socket")
-            if tsock is not None:
-                fd = tsock.fileno()
-                if fd != -1:
-                    try:
-                        tsock.close()
-                    except OSError:
-                        pass
-
-    for proto_list in connector._conns.values():
-        for proto, _ in proto_list:
-            _release(proto)
-    for proto in list(connector._acquired):
-        _release(proto)
-
-    connector._conns.clear()
-    connector._acquired.clear()
-    connector._closed = True
+    async def aclose(self):
+        if self._session is not None:
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning(f"Encountered exception {e} while closing client session")
+                pass
+            self._session = None
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

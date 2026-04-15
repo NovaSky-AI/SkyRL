@@ -26,7 +26,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, pad_batch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch, pad_batch
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -627,6 +627,18 @@ class RayPPOTrainer:
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
         is_stepwise = self.cfg.generator.step_wise_trajectories
 
+        pixel_values = generator_output.get("pixel_values", None)
+        image_grid_thw = generator_output.get("image_grid_thw", None)
+        if pixel_values is not None:
+            assert (
+                pixel_values is not None and image_grid_thw is not None
+            ), "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
+            assert len(pixel_values) == len(
+                image_grid_thw
+            ), "Number of pixel values should match number of image grid thw"
+            pixel_values = TensorList(pixel_values)
+            image_grid_thw = TensorList(image_grid_thw)
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -665,6 +677,8 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -929,6 +943,51 @@ class RayPPOTrainer:
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
 
+    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        """Pad the batch to be divisible by dp size"""
+        import math
+
+        dp_size = self.dispatch.get_lcm_dp_size()
+        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
+        new_tensors = {}
+        training_input.metadata["pad_size"] = pad_size
+        if pad_size == 0:
+            return training_input
+        for key, tensor in training_input.items():
+            if tensor is not None:
+                if isinstance(tensor, TensorList):
+                    n = len(tensor)
+                    pad_indices = [i % n for i in range(pad_size)]
+                    padding = TensorList([tensor[i].clone() for i in pad_indices])
+                    new_tensors[key] = TensorList.cat([tensor, padding])
+                elif key == "is_last_step":
+                    additional_dims = tensor.shape[1:]
+                    padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                elif key == "loss_mask":
+                    # ensures that padding tensors don't count towards the loss
+                    additional_dims = tensor.shape[1:]
+                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                else:
+                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
+                    n = tensor.shape[0]
+                    pad_indices = torch.arange(pad_size, device=tensor.device) % n
+                    padding_tensor = tensor[pad_indices].clone()
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+
+        new_training_input = TrainingInputBatch(new_tensors)
+        new_training_input.metadata = {}
+        new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
+        if "trajectory_ids" in training_input.metadata:
+            new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
+                f"pad{i}" for i in range(pad_size)
+            ]
+        for key, value in training_input.metadata.items():
+            if key not in ["uids", "trajectory_ids"]:
+                new_training_input.metadata[key] = copy.deepcopy(value)
+        return new_training_input
+
     @torch.no_grad()
     def fwd_logprobs_values_reward(
         self,
@@ -952,6 +1011,10 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("pixel_values") is not None:
+            fwd_keys.append("pixel_values")
+        if training_input.get("image_grid_thw") is not None:
+            fwd_keys.append("image_grid_thw")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None
@@ -1062,11 +1125,7 @@ class RayPPOTrainer:
         return data
 
     @torch.no_grad()
-    def _normalize_advantages(
-        self,
-        data: TrainingInputBatch,
-        mini_batch_boundaries: List[Tuple[int, int]],
-    ) -> TrainingInputBatch:
+    def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
         advantages = data["advantages"]
         response_mask = data["response_mask"]
 
@@ -1079,8 +1138,11 @@ class RayPPOTrainer:
             data["advantages"] = (advantages - mean) * rstd
 
         # Step 2: Loss reduction normalization per mini-batch
+        num_mini_batches = len(data) // mini_batch_size
         normalized_advantages = torch.zeros_like(advantages)
-        for start_idx, end_idx in mini_batch_boundaries:
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
             mini_batch = data[start_idx:end_idx]
             normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
                 advantages=mini_batch["advantages"],
@@ -1111,10 +1173,13 @@ class RayPPOTrainer:
             Dict of reduced metrics from training
         """
         boundaries = data.metadata[f"{model}_mini_batch_boundaries"]
-
+        n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
+            mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
             # Normalize advantages for policy training; critic training does not need this
-            data = self._normalize_advantages(data, boundaries)
+            data = self._normalize_advantages(data, mini_batch_size)
+        else:
+            mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 

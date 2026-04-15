@@ -1,5 +1,9 @@
+import hashlib
 import os
 import random
+import re
+import shutil
+import tempfile
 from datetime import timedelta
 from typing import List, Optional, Union
 
@@ -128,6 +132,7 @@ class MegatronStrategy(DistributedStrategy):
         optimizer_config=None,
         seed: int = 42,
         is_lora: bool = False,
+        node_local_rank: int = 0,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
@@ -135,6 +140,7 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         self.is_lora = is_lora
+        self.node_local_rank = node_local_rank
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
@@ -373,15 +379,18 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            # Load the checkpoint in parallel.
-            load_strategy = get_default_load_sharded_strategy(read_dir)
+        if io.is_cloud_path(ckpt_dir):
+            state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
+        else:
+            # Load from local filesystem with full parallel strategy.
+            load_strategy = get_default_load_sharded_strategy(ckpt_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
             state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
+                sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
             )
+
         if not self.is_lora:
             # Load the model, optimizer, and scheduler state dicts.
             assert (
@@ -411,6 +420,80 @@ class MegatronStrategy(DistributedStrategy):
             self.load_rng_state(state_dict["rng"])
 
         return ckpt_dir, {}
+
+    _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
+
+    def _load_dist_checkpoint_from_cloud(self, ckpt_dir: str, sharded_state_dict: dict) -> dict:
+        """Download checkpoint shards from cloud storage with per-rank parallelism.
+
+        All ranks on the same node share a single local directory. Each rank
+        downloads only its own shard file(s) into the shared dir, so the total
+        download per node equals one full copy of the checkpoint (instead of one
+        copy per rank).
+
+        Local rank 0 creates the directory and downloads common metadata files.
+        After a barrier, all shard files are present and every rank can load.
+
+        Does not currently support flexible trainer resharding.
+        """
+        global_rank = dist.get_rank()
+        node_local_rank = self.node_local_rank
+
+        dir_hash = hashlib.md5(ckpt_dir.encode()).hexdigest()[:12]
+        local_dir = os.path.join(tempfile.gettempdir(), f"skyrl_ckpt_load_{dir_hash}")
+
+        try:
+            all_entries = io.list_dir(ckpt_dir)
+
+            # Local rank 0: create dir and download common/metadata files.
+            if node_local_rank == 0:
+                if os.path.exists(local_dir):
+                    shutil.rmtree(local_dir)
+                os.makedirs(local_dir)
+
+                for entry in all_entries:
+                    name = entry.rstrip("/").split("/")[-1]
+                    if not name:
+                        continue
+                    if self._SHARD_FILE_PATTERN.search(name):
+                        continue
+                    cloud_entry = ckpt_dir.rstrip("/") + "/" + name
+                    if io.isdir(cloud_entry):
+                        continue
+                    io.download_file(cloud_entry, os.path.join(local_dir, name))
+
+            # Wait for the directory and common files to be ready.
+            dist.barrier()
+
+            # Each rank downloads its own shard file(s) into the shared dir.
+            for entry in all_entries:
+                name = entry.rstrip("/").split("/")[-1]
+                if not name:
+                    continue
+                match = self._SHARD_FILE_PATTERN.search(name)
+                if match and int(match.group(1)) == global_rank:
+                    cloud_path = ckpt_dir.rstrip("/") + "/" + name
+                    local_path = os.path.join(local_dir, name)
+                    io.download_file(cloud_path, local_path)
+
+            # Wait for all ranks to finish downloading their shards.
+            dist.barrier()
+
+            self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir}")
+
+            load_strategy = get_default_load_sharded_strategy(local_dir)
+            load_strategy = FullyParallelLoadStrategyWrapper(
+                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+            )
+            return dist_checkpointing.load(
+                sharded_state_dict=sharded_state_dict,
+                checkpoint_dir=local_dir,
+                sharded_strategy=load_strategy,
+            )
+        finally:
+            dist.barrier()
+            if node_local_rank == 0:
+                shutil.rmtree(local_dir, ignore_errors=True)
 
     def _load_lora_adapters(self, model, ckpt_dir):
         """Load LoRA adapters from checkpoint."""

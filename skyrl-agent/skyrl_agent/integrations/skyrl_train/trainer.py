@@ -39,7 +39,6 @@ from skyrl.train.generators.utils import prepare_generator_input, get_metrics_fr
 from skyrl.train.utils import Timer
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     get_kl_controller,
-    normalize_advantages_dict,
 )
 from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
@@ -381,9 +380,6 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                         for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file

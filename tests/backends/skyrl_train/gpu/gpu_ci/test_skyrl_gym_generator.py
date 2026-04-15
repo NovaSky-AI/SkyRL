@@ -141,7 +141,7 @@ async def run_generator_end_to_end(
     )
 
     # Use InferenceEngineState to support both legacy and new inference backends
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         model=model,
         use_local=True,

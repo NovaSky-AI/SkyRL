@@ -3,8 +3,6 @@
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
 """
 
-import asyncio
-
 import pytest
 import ray
 
@@ -59,7 +57,8 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
         "colocate_nccl_fsdp2",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
+@pytest.mark.asyncio
+async def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -70,7 +69,7 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
-    with InferenceEngineState.create(
+    async with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
@@ -82,6 +81,8 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     ) as engines:
         client, pg = engines.client, engines.pg
 
+        await client.sleep(level=1)
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -92,16 +93,20 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
+        await client.wake_up(tags=["weights"])
+
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
         )
-        asyncio.run(client.reset_prefix_cache())
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
+        policy.offload_to_cpu()
+        await client.wake_up(tags=["kv_cache"])
+        await client.reset_prefix_cache()
+        outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params)
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
