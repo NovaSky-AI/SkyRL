@@ -1286,20 +1286,23 @@ def compute_fold_grpo_advantage(
             combined = scores.unsqueeze(-1) + process_rewards
             combined = combined.clamp(min=clip_low, max=clip_high)
 
-            advantages = torch.zeros_like(combined)
-            for i in range(bsz):
-                if grpo_norm_by_std:
-                    advantages[i] = (combined[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-                else:
-                    advantages[i] = combined[i] - id2mean[index[i]]
+            # Vectorized group normalization
+            batch_means = torch.stack([id2mean[idx] for idx in index]).unsqueeze(-1)
+            batch_stds = torch.stack([id2std[idx] for idx in index]).unsqueeze(-1)
+
+            if grpo_norm_by_std:
+                advantages = (combined - batch_means) / (batch_stds + epsilon)
+            else:
+                advantages = combined - batch_means
             advantages = advantages * response_mask
         else:
             # fallback: response-level advantage (same as standard GRPO)
-            for i in range(bsz):
-                if grpo_norm_by_std:
-                    scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-                else:
-                    scores[i] = scores[i] - id2mean[index[i]]
+            batch_means = torch.stack([id2mean[idx] for idx in index])
+            batch_stds = torch.stack([id2std[idx] for idx in index])
+            if grpo_norm_by_std:
+                scores = (scores - batch_means) / (batch_stds + epsilon)
+            else:
+                scores = scores - batch_means
             advantages = scores.unsqueeze(-1) * response_mask
 
         returns = advantages.clone()
