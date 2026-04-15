@@ -7,6 +7,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_tokenizat
 import pytest
 from transformers import AutoTokenizer
 
+from skyrl.train.config.sft_config import TrainOnWhat
 from skyrl.train.sft_trainer import (
     collate_sft_batch,
     tokenize_chat_example,
@@ -261,3 +262,186 @@ def test_collate_metadata(tokenizer):
     batch = collate_sft_batch(examples, tokenizer)
 
     assert batch.metadata["response_length"] == 3
+
+
+def test_collate_explicit_loss_mask(tokenizer):
+    """Collation uses explicit per-token loss_mask when present."""
+    examples = [
+        {
+            "input_ids": [1, 2, 3, 4, 5],
+            "attention_mask": [1, 1, 1, 1, 1],
+            "num_actions": 4,
+            "loss_mask": [1, 0, 0, 1],  # assistant, user, user, assistant
+        },
+        _make_example([10, 20, 30], 2),  # no explicit loss_mask -> all 1s
+    ]
+    batch = collate_sft_batch(examples, tokenizer)
+
+    # max_num_actions = 4
+    assert batch["loss_mask"].shape == (2, 4)
+    # Example 0: explicit mask, no action padding needed
+    assert batch["loss_mask"][0].tolist() == [1, 0, 0, 1]
+    # Example 1: 2 actions, padded to 4 -> [0, 0, 1, 1]
+    assert batch["loss_mask"][1].tolist() == [0, 0, 1, 1]
+
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat: LAST_ASSISTANT_MESSAGE tests
+# ---------------------------------------------------------------------------
+
+
+def test_train_on_what_single_turn_last_assistant(tokenizer):
+    """Single-turn with LAST_ASSISTANT_MESSAGE: behavior unchanged."""
+    example = {
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+    result = tokenize_chat_example(
+        example,
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    )
+    assert result is not None
+    assert result["num_actions"] > 0
+    # LAST_ASSISTANT_MESSAGE does not produce a loss_mask key
+    assert "loss_mask" not in result
+
+
+def test_train_on_what_multi_turn_last_assistant_only(tokenizer):
+    """Multi-turn with LAST_ASSISTANT_MESSAGE: only last assistant counted."""
+    messages = [
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "4"},
+        {"role": "user", "content": "And 3+3?"},
+        {"role": "assistant", "content": "6"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        enable_thinking=False,
+    )
+    assert result is not None
+
+    # Only the last assistant's tokens should be counted
+    expected_last = "6<|im_end|>\n"
+    assert result["num_actions"] == len(tokenizer.encode(expected_last))
+    assert "loss_mask" not in result
+
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat: ALL_ASSISTANT_MESSAGES tests
+# ---------------------------------------------------------------------------
+
+
+def test_train_on_what_multi_turn_all_assistants(tokenizer):
+    """Multi-turn with ALL_ASSISTANT_MESSAGES: both assistant msgs get loss=1, user tokens masked."""
+    messages = [
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "4"},
+        {"role": "user", "content": "And 3+3?"},
+        {"role": "assistant", "content": "6"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    assert result is not None
+    assert "loss_mask" in result
+    assert len(result["loss_mask"]) == result["num_actions"]
+
+    loss_mask = result["loss_mask"]
+    # There must be some 1s (assistant tokens)
+    assert sum(loss_mask) > 0
+    # There must be some 0s (user tokens between the two assistant turns)
+    assert 0 in loss_mask
+    # The mask should have a non-contiguous pattern: 1s, then 0s, then 1s
+    # Find the transition points
+    first_zero_after_one = None
+    second_one_after_zero = None
+    for i in range(1, len(loss_mask)):
+        if loss_mask[i] == 0 and loss_mask[i - 1] == 1 and first_zero_after_one is None:
+            first_zero_after_one = i
+        if (
+            loss_mask[i] == 1
+            and loss_mask[i - 1] == 0
+            and first_zero_after_one is not None
+            and second_one_after_zero is None
+        ):
+            second_one_after_zero = i
+    assert first_zero_after_one is not None, "Expected 0s between assistant turns"
+    assert second_one_after_zero is not None, "Expected 1s for second assistant turn"
+
+
+def test_train_on_what_non_contiguous_assistants(tokenizer):
+    """assistant->user->assistant with ALL_ASSISTANT_MESSAGES: interior user masked out."""
+    messages = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there"},
+        {"role": "user", "content": "Tell me a joke"},
+        {"role": "assistant", "content": "Why did the chicken cross the road?"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    assert result is not None
+    loss_mask = result["loss_mask"]
+
+    # The num_actions window starts at the first assistant token
+    # and extends to the end. Within it, user/system tokens are 0.
+    total_ones = sum(loss_mask)
+    total_zeros = len(loss_mask) - total_ones
+    assert total_ones > 0, "Must have assistant tokens"
+    assert total_zeros > 0, "Must have masked user tokens between assistant turns"
+
+    # First element must be 1 (start of first assistant turn)
+    assert loss_mask[0] == 1
+    # Last element must be 1 (end of last assistant turn)
+    assert loss_mask[-1] == 1
+
+
+def test_train_on_what_all_assistants_truncation(tokenizer):
+    """Truncation cutting into assistant turns with ALL_ASSISTANT_MESSAGES."""
+    messages = [
+        {"role": "user", "content": "Short question"},
+        {"role": "assistant", "content": "First answer " + "word " * 50},
+        {"role": "user", "content": "Another question"},
+        {"role": "assistant", "content": "Second answer " + "word " * 50},
+    ]
+    # Use a small max_length to force truncation
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=64,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    if result is not None:
+        assert len(result["input_ids"]) <= 64
+        assert result["num_actions"] > 0
+        assert len(result["loss_mask"]) == result["num_actions"]
+        # All loss_mask values should be 0 or 1
+        assert all(v in (0, 1) for v in result["loss_mask"])
+
+
+def test_train_on_what_unsupported_raises(tokenizer):
+    """Passing an unsupported TrainOnWhat value raises NotImplementedError."""
+    example = {
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+    with pytest.raises(NotImplementedError, match="not yet supported"):
+        tokenize_chat_example(
+            example,
+            tokenizer,
+            train_on_what=TrainOnWhat.ALL_TOKENS,
+        )

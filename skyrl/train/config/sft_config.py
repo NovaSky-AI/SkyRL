@@ -7,6 +7,7 @@ bridge function ``build_skyrl_config_for_sft`` that maps it to the internal
 """
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import List, Union
 
 from omegaconf import OmegaConf
@@ -19,6 +20,34 @@ from skyrl.train.config import (
     OptimizerConfig,
     SkyRLTrainConfig,
 )
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat enum
+# ---------------------------------------------------------------------------
+
+
+class TrainOnWhat(StrEnum):
+    """Enum controlling which parts of the sequence to compute loss on.
+
+    Members:
+        LAST_ASSISTANT_MESSAGE: Train only on the final assistant message.
+        LAST_ASSISTANT_TURN: Train on the last assistant turn (including any
+            tool calls and tool responses leading to the final assistant reply).
+        ALL_ASSISTANT_MESSAGES: Train on every assistant message in the conversation.
+        ALL_MESSAGES: Train on all messages regardless of role.
+        ALL_TOKENS: Train on every token in the sequence (including special tokens).
+        ALL_USER_AND_SYSTEM_MESSAGES: Train on user and system messages only.
+        CUSTOMIZED: Use per-message ``train`` flags from the dataset.
+    """
+
+    LAST_ASSISTANT_MESSAGE = "last_assistant_message"
+    LAST_ASSISTANT_TURN = "last_assistant_turn"
+    ALL_ASSISTANT_MESSAGES = "all_assistant_messages"
+    ALL_MESSAGES = "all_messages"
+    ALL_TOKENS = "all_tokens"
+    ALL_USER_AND_SYSTEM_MESSAGES = "all_user_and_system_messages"
+    CUSTOMIZED = "customized"
+
 
 # ---------------------------------------------------------------------------
 # SFT-specific config dataclasses
@@ -114,6 +143,12 @@ class SFTConfig(BaseConfig):
     ckpt_interval: int = 0
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
     seed: int = 42
+
+    # ---- Training target ----
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
+    """Which tokens to compute loss on. See :class:`TrainOnWhat` for options.
+    Currently only ``LAST_ASSISTANT_MESSAGE`` (default) and
+    ``ALL_ASSISTANT_MESSAGES`` are implemented."""
 
     # ---- Packing ----
     use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)

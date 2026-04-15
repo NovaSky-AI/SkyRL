@@ -38,6 +38,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
     SFTConfig,
+    TrainOnWhat,
     build_skyrl_config_for_sft,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
@@ -92,22 +93,56 @@ def tokenize_chat_example(
     tokenizer,
     max_length: int = 512,
     messages_key: str = "messages",
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     **tokenizer_kwargs,
 ) -> dict | None:
-    """Tokenize a chat-format example. Loss on last assistant message only.
+    """Tokenize a chat-format example with configurable loss targets.
 
-    Uses apply_chat_template to tokenize prompt (all messages except the last)
-    and full conversation, then computes num_actions from the difference.
+    Uses ``apply_chat_template`` to tokenize the conversation and determine
+    which tokens to train on based on ``train_on_what``.
 
-    Returns dict with input_ids, attention_mask, num_actions -- same format as
-    tokenize_sft_example(), so collate_sft_batch() works unchanged.
+    Args:
+        example: Dict containing a ``messages_key`` column with chat messages.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Maximum sequence length (truncation boundary).
+        messages_key: Key in *example* that holds the messages list.
+        train_on_what: Which tokens to compute loss on.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``
+            (e.g. ``enable_thinking``).
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        optionally ``loss_mask`` (a per-token list of 0/1 within the action
+        window).  Returns ``None`` when the example should be skipped.
     """
+    # Validate supported modes
+    _SUPPORTED = {TrainOnWhat.LAST_ASSISTANT_MESSAGE, TrainOnWhat.ALL_ASSISTANT_MESSAGES}
+    if train_on_what not in _SUPPORTED:
+        raise NotImplementedError(
+            f"train_on_what={train_on_what!r} is not yet supported. "
+            f"Supported values: {sorted(v.value for v in _SUPPORTED)}"
+        )
+
     messages = example[messages_key]
 
     # Validate: last message must be from assistant
     if not messages or messages[-1]["role"] != "assistant":
         return None
 
+    if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
+        return _tokenize_chat_last_assistant(messages, tokenizer, max_length, **tokenizer_kwargs)
+    else:
+        # ALL_ASSISTANT_MESSAGES
+        return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+
+
+def _tokenize_chat_last_assistant(
+    messages: list[dict],
+    tokenizer,
+    max_length: int,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Original behavior: loss on last assistant message only."""
     # Tokenize prompt (everything except last assistant message)
     prompt_ids = tokenizer.apply_chat_template(
         messages[:-1],
@@ -141,6 +176,87 @@ def tokenize_chat_example(
     }
 
 
+def _tokenize_chat_all_assistants(
+    messages: list[dict],
+    tokenizer,
+    max_length: int,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Loss on every assistant message in the conversation.
+
+    Builds a per-token loss mask by incrementally calling
+    ``apply_chat_template`` to discover each message's token boundaries.
+    ``num_actions`` spans from the first assistant token to the end, with
+    interior 0s masking out user/system tokens between assistant turns.
+    """
+    # Tokenize full conversation
+    full_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=False,
+        tokenize=True,
+        truncation=True,
+        max_length=max_length,
+        return_dict=False,
+        **tokenizer_kwargs,
+    )
+    full_len = len(full_ids)
+
+    # Build per-token role mask by incremental template application.
+    # For each prefix messages[:i+1], the diff vs messages[:i] gives
+    # the token span for message i.
+    per_token_is_assistant = [0] * full_len
+    prev_len = 0
+
+    for i, msg in enumerate(messages):
+        prefix = messages[: i + 1]
+        # For intermediate messages use add_generation_prompt=False;
+        # the final tokenization already used add_generation_prompt=False.
+        prefix_ids = tokenizer.apply_chat_template(
+            prefix,
+            add_generation_prompt=False,
+            tokenize=True,
+            truncation=True,
+            max_length=max_length,
+            return_dict=False,
+            **tokenizer_kwargs,
+        )
+        cur_len = len(prefix_ids)
+
+        if msg["role"] == "assistant" and cur_len > prev_len:
+            # Mark assistant tokens with 1
+            # Clamp to full_len in case of truncation differences
+            start = min(prev_len, full_len)
+            end = min(cur_len, full_len)
+            for j in range(start, end):
+                per_token_is_assistant[j] = 1
+
+        prev_len = cur_len
+
+    # Find first assistant token
+    first_asst = -1
+    for idx, v in enumerate(per_token_is_assistant):
+        if v == 1:
+            first_asst = idx
+            break
+
+    if first_asst < 0:
+        return None  # No assistant tokens survived truncation
+
+    # num_actions = distance from first assistant token to end
+    num_actions = full_len - first_asst
+    # loss_mask within the action window
+    loss_mask = per_token_is_assistant[first_asst:]
+
+    assert len(loss_mask) == num_actions
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * full_len,
+        "num_actions": num_actions,
+        "loss_mask": loss_mask,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Collation
 # ---------------------------------------------------------------------------
@@ -153,6 +269,10 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     - sequences: [batch_size, seq_len] - token IDs (left-padded)
     - attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
     - loss_mask: [batch_size, num_actions] - 1 for tokens to compute loss on
+
+    When an example contains a ``loss_mask`` key (e.g. from
+    ``ALL_ASSISTANT_MESSAGES`` tokenization), that per-token mask is used
+    directly instead of generating an all-1s mask.
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
@@ -166,9 +286,13 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         # Left-pad sequences (SkyRL convention)
         sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
         attention_masks.append([0] * pad_len + ex["attention_mask"])
-        # Per-example loss_mask: 0s for padding, 1s only for this example's response tokens
+
+        # Per-example loss_mask: use explicit mask if provided, else all-1s
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + [1] * ex["num_actions"])
+        if "loss_mask" in ex:
+            loss_masks.append([0] * action_pad + ex["loss_mask"])
+        else:
+            loss_masks.append([0] * action_pad + [1] * ex["num_actions"])
 
     batch = TrainingInputBatch(
         {
@@ -308,7 +432,13 @@ class SFTTrainer:
         if self.sft_cfg.messages_key in columns:
             # Chat format
             tokenized = [
-                tokenize_chat_example(ex, self.tokenizer, self.sft_cfg.max_length, self.sft_cfg.messages_key)
+                tokenize_chat_example(
+                    ex,
+                    self.tokenizer,
+                    self.sft_cfg.max_length,
+                    self.sft_cfg.messages_key,
+                    train_on_what=self.sft_cfg.train_on_what,
+                )
                 for ex in dataset
             ]
         elif "instruction" in columns and "output" in columns:
