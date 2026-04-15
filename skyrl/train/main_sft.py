@@ -14,7 +14,7 @@ import sys
 import ray
 
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.sft_config import (
+from skyrl.train.config.sft_config import (
     SFTConfig,
     build_skyrl_config_for_sft,
     validate_sft_cfg,

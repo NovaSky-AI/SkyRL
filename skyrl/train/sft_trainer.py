@@ -6,7 +6,7 @@ The backend is selected dynamically based on ``SFTConfig.strategy``.
 
 Usage::
 
-    from skyrl.train.sft_config import SFTConfig, SFTPlacementConfig
+    from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
     from skyrl.train.sft_trainer import SFTTrainer
 
     cfg = SFTConfig(strategy="megatron")
@@ -36,7 +36,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.sft_config import (
+from skyrl.train.config.sft_config import (
     SFTConfig,
     build_skyrl_config_for_sft,
 )

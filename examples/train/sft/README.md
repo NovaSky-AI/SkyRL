@@ -52,7 +52,7 @@ bash examples/train/sft/run_sft_dummy_megatron.sh dummy_run_max_steps=10
 
 ## Configuration Reference
 
-All SFT configuration is defined in [`skyrl/train/sft_config.py`](../../../skyrl/train/sft_config.py). Key knobs:
+All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../../skyrl/train/config/sft_config.py). Key knobs:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
