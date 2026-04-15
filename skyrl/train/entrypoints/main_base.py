@@ -79,6 +79,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "max_num_seqs": ie_cfg.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": ie_cfg.backend,
+        "language_model_only": ie_cfg.language_model_only,
         "engine_init_kwargs": ie_cfg.engine_init_kwargs,
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,

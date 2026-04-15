@@ -53,6 +53,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             if cfg.generator.inference_engine.served_model_name
             else None
         ),
+        language_model_only=ie_cfg.language_model_only,
+        mm_processor_cache_gb=0,
     )
     for key, value in overrides.items():
         setattr(args, key, value)

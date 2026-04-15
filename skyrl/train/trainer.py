@@ -27,7 +27,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -612,6 +612,18 @@ class RayPPOTrainer:
             "rollout_expert_indices", None
         )
 
+        pixel_values = generator_output.get("pixel_values", None)
+        image_grid_thw = generator_output.get("image_grid_thw", None)
+        if pixel_values is not None:
+            assert (
+                pixel_values is not None and image_grid_thw is not None
+            ), "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
+            assert len(pixel_values) == len(
+                image_grid_thw
+            ), "Number of pixel values should match number of image grid thw"
+            pixel_values = TensorList(pixel_values)
+            image_grid_thw = TensorList(image_grid_thw)
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -650,6 +662,8 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -801,11 +815,23 @@ class RayPPOTrainer:
             is_last_step = data["is_last_step"].bool()
             index = np.array(data.metadata["uids"])
             values = data["values"]
-            # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
-            # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
+            # Step-wise only supports outcome-based estimators (GRPO, RLOO, MAXRL); ensured by `validate_cfg`.
+            # We use the last step of each trajectory to compute advantages and broadcast them to
+            # all steps of that trajectory, so we ignore per-step rewards in step-wise training.
+            # We pass an all-ones mask here so the estimator returns the scalar advantage at every
+            # position. The real per-step `response_mask` is re-applied on broadcast below.
+            # Shapes:
+            #   traj_ids, (batch_size,):         trajectory id per step (cumsum of shifted is_last_step)
+            #   last_step_advantages/returns,
+            #       (num_traj, seqlen):          scalar advantage/return per trajectory at every position
+            #   last_step_advantages/returns[traj_ids],
+            #       (batch_size, seqlen):        broadcast to every step of the owning trajectory
+            #   response_mask_float,
+            #       (batch_size, seqlen):        per-step response mask
+            last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards[is_last_step],
-                response_mask=data["response_mask"][is_last_step],
+                response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
                 index=index[is_last_step.cpu().numpy()],
                 adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
                 values=values[is_last_step] if values is not None else None,
@@ -814,16 +840,16 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
-            # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
             )
-            num_groups = traj_ids[-1].item() + 1
-            assert num_groups == len(
+            num_traj = traj_ids[-1].item() + 1
+            assert num_traj == len(
                 last_step_advantages
-            ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
+            ), f"num_traj {num_traj} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
+            response_mask_float = data["response_mask"].to(last_step_advantages.dtype)
+            advantages = last_step_advantages[traj_ids] * response_mask_float
+            returns = last_step_returns[traj_ids] * response_mask_float
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
@@ -899,18 +925,26 @@ class RayPPOTrainer:
             return training_input
         for key, tensor in training_input.items():
             if tensor is not None:
-                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-
-                if key == "is_last_step":
+                if isinstance(tensor, TensorList):
+                    n = len(tensor)
+                    pad_indices = [i % n for i in range(pad_size)]
+                    padding = TensorList([tensor[i].clone() for i in pad_indices])
+                    new_tensors[key] = TensorList.cat([tensor, padding])
+                elif key == "is_last_step":
+                    additional_dims = tensor.shape[1:]
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 elif key == "loss_mask":
                     # ensures that padding tensors don't count towards the loss
+                    additional_dims = tensor.shape[1:]
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                    n = tensor.shape[0]
+                    pad_indices = torch.arange(pad_size, device=tensor.device) % n
+                    padding_tensor = tensor[pad_indices].clone()
+                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
@@ -947,6 +981,10 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("pixel_values") is not None:
+            fwd_keys.append("pixel_values")
+        if training_input.get("image_grid_thw") is not None:
+            fwd_keys.append("image_grid_thw")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None

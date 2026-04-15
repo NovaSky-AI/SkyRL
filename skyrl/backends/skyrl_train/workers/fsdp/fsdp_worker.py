@@ -60,12 +60,22 @@ class FSDPWeightExtractor(WeightExtractor):
         model: FSDP model to extract weights from
         group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
+        weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
+            when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
+            multimodal model, even if vision encoder weights are not initialized).
     """
 
-    def __init__(self, model: torch.nn.Module, group_by_module: bool = False, batch_size_threshold_gb: float = 0.0):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        group_by_module: bool = False,
+        batch_size_threshold_gb: float = 0.0,
+        weight_prefix: str = "",
+    ):
         self.model = model
         self.group_by_module = group_by_module
         self.batch_size_threshold_gb = batch_size_threshold_gb
+        self.weight_prefix = weight_prefix
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.
@@ -86,6 +96,9 @@ class FSDPWeightExtractor(WeightExtractor):
 
         # Get state dict (handles FSDP sharding)
         params = self.model.state_dict()
+
+        if self.weight_prefix:
+            params = {f"{self.weight_prefix}{k}": v for k, v in params.items()}
 
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
@@ -127,7 +140,7 @@ class FSDPWeightExtractor(WeightExtractor):
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
         for name, param in self.model.state_dict().items():
-            names.append(name)
+            names.append(f"{self.weight_prefix}{name}" if self.weight_prefix else name)
             dtype_names.append(dtype_name)
             shapes.append(list(param.shape))
         return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
@@ -165,6 +178,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._is_lora = self.cfg.policy.model.lora.rank > 0
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
+        self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
         use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -186,6 +201,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
+            language_model_only=self.cfg.policy.language_model_only,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
@@ -211,12 +227,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
 
         group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             group_by_module=group_by_module,
             batch_size_threshold_gb=(
                 inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
             ),
+            weight_prefix=weight_prefix,
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
@@ -422,6 +440,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
             rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
             meta_init=use_meta,
+            language_model_only=self.cfg.ref.language_model_only,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

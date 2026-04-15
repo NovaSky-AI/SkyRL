@@ -22,10 +22,15 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 def create_mock_vllm_server(server_id: int) -> FastAPI:
     """Create a mock vLLM server with standard endpoints."""
     app = FastAPI()
+    app.state.last_generate_features = None
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/test/last_generate_features")
+    async def get_last_generate_features():
+        return {"features": app.state.last_generate_features}
 
     @app.get("/get_world_size")
     async def get_world_size():
@@ -68,6 +73,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
+
+        features = body.get("features")
+        app.state.last_generate_features = features
+        if features is not None:
+            response["features"] = features
 
         # Mock prompt_logprobs when requested via sampling_params
         pl = sp.get("prompt_logprobs")
@@ -635,6 +645,33 @@ class TestRenderChatCompletion:
             "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
             "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
         }
+
+
+class TestMultiModalGeneration:
+    """Test that mm_features are correctly forwarded through generate()."""
+
+    @pytest.mark.asyncio
+    async def test_generate_with_mm_features(self, client, mock_servers):
+        """Passing mm_features in InferenceEngineInput sends features in the HTTP payload."""
+        mm_features = {
+            "mm_hashes": {"image": ["abc123hash"]},
+            "mm_placeholders": {"image": [{"offset": 0, "length": 10}]},
+        }
+        input_batch = {
+            "prompt_token_ids": [[1, 2, 3]],
+            "sampling_params": {"max_tokens": 50},
+            "mm_features": [mm_features],
+        }
+        result = await client.generate(input_batch)
+
+        assert len(result["responses"]) == 1
+        assert len(result["response_ids"]) == 1
+        assert result["stop_reasons"][0] == "stop"
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(f"{mock_servers['proxy_url']}/test/last_generate_features")
+            captured = resp.json()
+        assert captured["features"] == mm_features
 
 
 class TestContextManager:

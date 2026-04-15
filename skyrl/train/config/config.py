@@ -212,6 +212,9 @@ class PolicyConfig(BaseConfig):
     model_config_kwargs: dict = field(default_factory=dict)
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).
     For Megatron, use ``policy.megatron_config.transformer_config_kwargs`` instead."""
+    language_model_only: bool = False
+    """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
+    Loads only the language model backbone using AutoModelForCausalLM."""
 
 
 @dataclass
@@ -231,6 +234,9 @@ class RefConfig(BaseConfig):
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
     model_config_kwargs: dict = field(default_factory=dict)
+    language_model_only: bool = False
+    """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
+    Loads only the language model backbone using AutoModelForCausalLM."""
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +477,9 @@ class InferenceEngineConfig(BaseConfig):
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
     or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
     placement groups are created when ``"mp"`` is used."""
+    language_model_only: bool = False
+    """When True, pass ``language_model_only=True`` to the vLLM engine so that
+    multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"

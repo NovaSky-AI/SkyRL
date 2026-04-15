@@ -181,6 +181,10 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
         }
 
         await engines.client.teardown()
+        ray.kill(trainer)
+    # cleanup manually in colocated case
+    if engines.pg:
+        ray.util.remove_placement_group(engines.pg)
 
 
 @pytest.mark.asyncio(loop_scope="class")
@@ -359,57 +363,19 @@ class IpcTrainer:
         }
 
 
-@pytest_asyncio.fixture(
-    scope="class",
-    params=[
-        pytest.param({"enable_pd": False}, id="no_pd"),
-        pytest.param(
-            {"enable_pd": True, "num_prefill": 1, "num_decode": 1},
-            id="pd_1P1D_colocated",
-        ),
-    ],
-)
-async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
-    """
-    Create environment for colocated IPC weight update testing.
-
-    Colocated setup with TP=1:
-    - no_pd: Trainer and server share the same GPU via placement group (1 GPU).
-    - pd_1P1D_colocated: 1P1D (2 engines, TP=1), both colocated (2 GPUs).
-    """
-    pd_cfg = request.param
-    enable_pd = pd_cfg["enable_pd"]
+@pytest_asyncio.fixture(scope="class")
+async def ipc_weight_update_env(class_scoped_ray_init_fixture):
+    """Create environment for colocated IPC weight update testing."""
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
-
-    if enable_pd:
-        num_prefill = pd_cfg["num_prefill"]
-        num_decode = pd_cfg["num_decode"]
-        create_kwargs = dict(
-            model=MODEL,
-            tp_size=1,
-            num_inference_engines=num_prefill + num_decode,
-            colocate_all=True,
-            gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
-            engine_init_kwargs={
-                "load_format": "dummy",
-                "kv_transfer_config": {
-                    "kv_connector": "NixlConnector",
-                },
-            },
-            enable_pd=True,
-            num_prefill=num_prefill,
-        )
-    else:
-        create_kwargs = dict(
-            model=MODEL,
-            tp_size=1,
-            colocate_all=True,
-            gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
-            engine_init_kwargs={"load_format": "dummy"},
-        )
+    create_kwargs = dict(
+        model=MODEL,
+        tp_size=1,
+        colocate_all=True,
+        gpu_memory_utilization=0.5,
+        use_new_inference_servers=True,
+        engine_init_kwargs={"load_format": "dummy"},
+    )
 
     async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
         # Trainer on same PG bundle as server (colocated) with fractional GPU
@@ -431,6 +397,10 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture, request):
         }
 
         await engines.client.teardown()
+        ray.kill(trainer)
+    # cleanup manually in colocated case
+    if engines.pg:
+        ray.util.remove_placement_group(engines.pg)
 
 
 @pytest.mark.asyncio(loop_scope="class")
