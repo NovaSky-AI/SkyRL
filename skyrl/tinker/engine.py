@@ -155,12 +155,18 @@ def prepare_model_pass_batch(
     )
 
 
-def get_backend_classes(backend_name: str):
+def get_backend_classes(backend_name: str, use_ray: bool = False):
     """Lazy import backends to avoid importing unused backend dependencies (e.g., JAX, Ray)."""
     if backend_name == "jax":
-        from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+        if use_ray:
+            from skyrl.backends.jax import JaxBackendConfig
+            from skyrl.backends.ray_jax import RayJaxBackend
 
-        return JaxBackend, JaxBackendConfig
+            return RayJaxBackend, JaxBackendConfig
+        else:
+            from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+
+            return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
         from skyrl.backends.skyrl_train_backend import (
             FSDPBackendOverrides,
@@ -175,14 +181,9 @@ def get_backend_classes(backend_name: str):
         )
 
         return SkyRLTrainBackend, MegatronBackendOverrides
-    elif backend_name == "ray-jax":
-        from skyrl.backends.jax import JaxBackendConfig
-        from skyrl.backends.ray_jax import RayJaxBackend
-
-        return RayJaxBackend, JaxBackendConfig
     else:
         raise ValueError(
-            f"Unknown backend: {backend_name}. Available backends: jax, ray_jax, fsdp, megatron. "
+            f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
             f"Make sure the backend's dependencies are installed (e.g., pip install skyrl[jax])"
         )
 
@@ -241,7 +242,8 @@ class TinkerEngine:
         enable_sqlite_wal(self.db_engine)
 
         # Initialize the backend (handles model state, computation, and adapter management)
-        backend_class, backend_config_class = get_backend_classes(config.backend)
+        use_ray = config.backend_config.get("use_ray", False)
+        backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 

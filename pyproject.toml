@@ -44,7 +44,7 @@ tinker = [
     "psycopg2-binary",
 ]
 
-ray-jax = [
+ray = [
     "ray[default]==2.51.1",
 ]
 

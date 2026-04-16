@@ -1,3 +1,5 @@
+import socket
+
 import ray
 from cloudpathlib import AnyPath
 
@@ -5,6 +7,12 @@ from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.jax import JaxBackendConfig, JaxBackendImpl
 from skyrl.tinker import types
 from skyrl.utils.log import logger
+
+
+def _get_random_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 @ray.remote
@@ -22,7 +30,7 @@ class RayJaxBackendImpl:
 
         if process_id == 0:
             self.node_ip = ray.util.get_node_ip_address()
-            self.port = 7777
+            self.port = _get_random_port()
             self.coordinator_address = f"{self.node_ip}:{self.port}"
         else:
             self.coordinator_address = None
@@ -90,8 +98,9 @@ class RayJaxBackend(AbstractBackend):
         self.base_model = base_model
         self.config = config.model_copy()
 
-        num_processes = self.config.num_processes or 1
-        self.config.num_processes = num_processes
+        if not self.config.num_processes:
+            raise ValueError("num_processes must be specified and > 0 when using Ray JAX backend")
+        num_processes = self.config.num_processes
 
         logger.info(f"Initializing RayJaxBackend with num_processes={num_processes}")
 
