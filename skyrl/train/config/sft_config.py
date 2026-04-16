@@ -165,7 +165,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
                 f"total_world_size={total_world_size} "
                 f"(num_nodes={cfg.placement.num_nodes} * num_gpus_per_node={cfg.placement.num_gpus_per_node})."
             )
-        # context, expert, and expert tensor parallel are not yet supported for megatron
+        # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
             assert cfg.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
