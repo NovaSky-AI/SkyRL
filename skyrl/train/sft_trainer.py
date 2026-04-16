@@ -621,7 +621,6 @@ class SFTTrainer:
                 all_timings.update(step_result["timings"])
 
             # Compute throughput using actual (non-padding) tokens
-            batch_num_seq = batch["sequences"].shape[0]
             batch_padded_seq_len = batch["sequences"].shape[1]
             actual_num_tokens = batch["attention_mask"].sum().item()
             tokens_per_second = actual_num_tokens / all_timings["step"]
@@ -632,7 +631,6 @@ class SFTTrainer:
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
                 "train/actual_num_tokens": actual_num_tokens,
-                "train/batch_num_seq": batch_num_seq,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
