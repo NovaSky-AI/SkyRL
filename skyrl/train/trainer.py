@@ -277,7 +277,7 @@ class RayPPOTrainer:
                         for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
-                        training_input.metadata.pop("is_last_step")
+                        training_input.metadata.pop("is_last_step", None)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
@@ -667,7 +667,10 @@ class RayPPOTrainer:
                 "image_grid_thw": image_grid_thw,
             },
         )
-        training_input.metadata = {"uids": uids, "is_last_step": generator_output.get("is_last_step", None)}
+        training_input.metadata = {"uids": uids}
+        if generator_output.get("is_last_step", None) is not None:
+            training_input.metadata["is_last_step"] = generator_output["is_last_step"]
+
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
