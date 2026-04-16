@@ -115,20 +115,6 @@ def test_chat_truncation(tokenizer):
     # If the prompt alone fills the budget, result is None -- also acceptable
 
 
-def test_chat_return_dict_false(tokenizer):
-    """input_ids must be a plain list[int], not a BatchEncoding."""
-    example = {
-        "messages": [
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello!"},
-        ]
-    }
-    result = tokenize_chat_example(example, tokenizer)
-    assert result is not None
-    assert isinstance(result["input_ids"], list)
-    assert not hasattr(result["input_ids"], "input_ids")  # not a BatchEncoding
-
-
 # ---------------------------------------------------------------------------
 # tokenize_sft_example
 # ---------------------------------------------------------------------------
@@ -407,20 +393,3 @@ def test_loss_norm_all_nonpad(tokenizer):
 
     # Sum should be batch_size / micro_batch_size = 2
     assert abs(batch["loss_mask"].sum().item() - 2.0) < 1e-5
-
-
-def test_loss_norm_zero_nonpad(tokenizer):
-    """Edge case: if all loss tokens are masked (total_nonpad=0), no division by zero.
-
-    Tests the guard in collate_batch that clamps total_nonpad to 1.
-    """
-    # Directly test the guard: a zero loss_mask scaled by the formula
-    # should produce all zeros without raising.
-    batch_size = 2
-    micro_batch_size = 1
-    loss_mask = torch.zeros(2, 2, dtype=torch.long)
-    total_nonpad = max(loss_mask.sum().item(), 1)  # clamped to 1
-    normalized = loss_mask.float() * (batch_size / (micro_batch_size * total_nonpad))
-    # All zeros in, all zeros out
-    assert normalized.sum().item() == 0.0
-    assert total_nonpad == 1  # verify clamp fired

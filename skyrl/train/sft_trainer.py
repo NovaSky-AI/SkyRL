@@ -339,10 +339,9 @@ class SFTTrainer:
         """Collate examples into a TrainingInputBatch with loss normalization.
 
         Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
-        produces a per-non-pad-token mean, matching HF's
-        ``CrossEntropyLoss(ignore_index=-100, reduction='mean')`` convention.
+        produces a per-non-pad-token mean, matching the standard convention.
 
-        The scaling factor is ``batch_size / (micro_batch_size * total_nonpad)``
+        NOTE: The scaling factor is ``batch_size / (micro_batch_size * total_nonpad)``
         where ``total_nonpad`` is the count of non-masked (loss-contributing)
         tokens in the full batch.  This accounts for the ``microbatch_weight``
         (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
@@ -351,6 +350,8 @@ class SFTTrainer:
         """
         batch = collate_sft_batch(examples, self.tokenizer)
         # Loss normalization: divide by non-pad token count (not padded seq length)
+        # NOTE (sumanthrh): This specific scaling factor is because SkyRL's workers internally normalize
+        # by number of micro batches, but aggregate otherwise
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
         total_nonpad = max(batch["loss_mask"].sum().item(), 1)
         batch["loss_mask"] = batch["loss_mask"].float() * (self.sft_cfg.batch_size / (micro_batch_size * total_nonpad))
@@ -493,8 +494,6 @@ class SFTTrainer:
         # num_actions is max_length - 1 because the autoregressive model
         # produces log-probs for positions 1..T (predicting next token),
         # so the first token has no corresponding log-prob.
-        # NOTE (sumanthrh): This can also be calculated as all tokens from the first
-        # assistant response - but for SFT this doesn't matter
         num_actions = max_length - 1
 
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
