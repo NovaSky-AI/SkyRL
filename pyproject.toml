@@ -45,7 +45,7 @@ tinker = [
 ]
 
 ray = [
-    "ray[default]==2.51.1",
+    "ray[default]==2.54.1",
 ]
 
 aws = [
