@@ -686,9 +686,6 @@ class RayPPOTrainer:
             assert (
                 "trajectory_ids" in generator_output
             ), "Expected `trajectory_ids` in generator output for step wise training"
-            training_input.metadata["trajectory_ids"] = [
-                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
-            ]
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
@@ -948,13 +945,12 @@ class RayPPOTrainer:
 
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
-        new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
-        if "trajectory_ids" in training_input.metadata:
-            new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
-                f"pad{i}" for i in range(pad_size)
-            ]
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
+            if key == "uids":
+                new_training_input.metadata["uids"] = training_input.metadata["uids"] + [
+                    f"pad{i}" for i in range(pad_size)
+                ]
+            else:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
