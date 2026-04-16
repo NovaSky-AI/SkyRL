@@ -12,7 +12,7 @@ set -x
 #   bash examples/train/sft/run_sft_megatron.sh [extra overrides...]
 #
 # Example:
-#   bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=16
+#   bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
 
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
@@ -23,7 +23,7 @@ uv run --isolated --extra megatron \
     messages_key=messages \
     max_length=512 \
     num_steps=10 \
-    batch_size=8 \
+    batch_size=4 \
     micro_train_batch_size_per_gpu=2 \
     use_sample_packing=true \
     seed=42 \

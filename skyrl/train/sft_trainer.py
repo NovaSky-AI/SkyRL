@@ -493,6 +493,8 @@ class SFTTrainer:
         # num_actions is max_length - 1 because the autoregressive model
         # produces log-probs for positions 1..T (predicting next token),
         # so the first token has no corresponding log-prob.
+        # NOTE (sumanthrh): This can also be calculated as all tokens from the first
+        # assistant response - but for SFT this doesn't matter
         num_actions = max_length - 1
 
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
