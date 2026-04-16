@@ -29,7 +29,6 @@ import torch
 from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
-from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
@@ -214,6 +213,7 @@ class SFTTrainer:
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
+        self.global_step = 0
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -585,31 +585,27 @@ class SFTTrainer:
         # When resuming, start_step is the last *completed* step (checkpoint is
         # saved AFTER the optimizer update), so we begin at start_step + 1 to
         # avoid replaying that step.
-        resume_step = start_step + 1 if start_step > 0 else 0
 
         # Replay epoch shuffles for reproducibility on resume
-        start_epoch = (resume_step * batch_size) // len(tokenized)
+        start_epoch = (start_step * batch_size) // len(tokenized)
         for _ in range(start_epoch):
             rng.shuffle(tokenized)
         current_epoch = start_epoch
 
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
+
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
-        for step in tqdm(range(resume_step, num_steps)):
+        while self.global_step <= num_steps:
             all_timings: dict[str, float] = {}
 
             with Timer("step", all_timings):
-                # Check for epoch boundary and reshuffle
-                epoch = (step * batch_size) // len(tokenized)
-                if epoch > current_epoch:
-                    for _ in range(epoch - current_epoch):
-                        rng.shuffle(tokenized)
-                    current_epoch = epoch
 
                 # Data loading with wrap-around
                 with Timer("data_loading", all_timings):
-                    start_idx = (step * batch_size) % len(tokenized)
+                    start_idx = (self.global_step * batch_size) % len(tokenized)
                     end_idx = start_idx + batch_size
                     if end_idx > len(tokenized):
                         batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
@@ -618,7 +614,7 @@ class SFTTrainer:
                     batch = self.collate_batch(batch_examples)
 
                 # Training step
-                step_result = self.train_step(batch, step)
+                step_result = self.train_step(batch, self.global_step)
                 all_timings.update(step_result["timings"])
 
             # Compute throughput using actual (non-padding) tokens
@@ -640,32 +636,45 @@ class SFTTrainer:
             if (
                 self.sft_cfg.ckpt_path
                 and self.sft_cfg.ckpt_interval > 0
-                and step > 0
-                and step % self.sft_cfg.ckpt_interval == 0
+                and self.global_step > 0
+                and self.global_step % self.sft_cfg.ckpt_interval == 0
             ):
                 with Timer("save_checkpoint", all_timings):
-                    self.save_checkpoint(step)
+                    self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
 
-            self.tracker.log(log_dict, step=step, commit=True)
+            self.tracker.log(log_dict, step=self.global_step, commit=True)
 
-            if step % 5 == 0:
-                logger.info(f"Step {step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}")
+            if self.global_step % 5 == 0:
+                logger.info(
+                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
+                )
+
+            # Check for epoch boundary and reshuffle
+            epoch = (self.global_step * batch_size) // len(tokenized)
+            if epoch > current_epoch:
+                for _ in range(epoch - current_epoch):
+                    rng.shuffle(tokenized)
+                current_epoch = epoch
+
+            self.global_step += 1
+        self.global_step = min(self.global_step, num_steps)
 
         # Save final checkpoint (if checkpointing is enabled)
         if self.sft_cfg.ckpt_path:
-            final_step = num_steps - 1
+            final_step = num_steps
             already_saved = (
                 self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
             )
             if not already_saved:
                 logger.info(f"Saving final checkpoint at step {final_step}")
-                self.save_checkpoint(final_step)
+                self.save_checkpoint()
 
         logger.info("SFT training complete!")
 
-    def save_checkpoint(self, step: int):
+    def save_checkpoint(self):
         """Save a checkpoint at the given step."""
+        step = self.global_step
         global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
         io.makedirs(global_step_folder, exist_ok=True)

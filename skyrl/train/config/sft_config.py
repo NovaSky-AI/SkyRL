@@ -161,7 +161,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         if total_world_size % (tp * pp * cp) != 0:
             raise ValueError(
                 f"For megatron strategy, total_world_size must be divisible by TP * PP * CP. "
-                f"Got TP={tp}, PP={pp}, CP={cp}, (TP*PP={tp * pp * cp}), "
+                f"Got TP={tp}, PP={pp}, CP={cp}, (TP*PP*CP={tp * pp * cp}), "
                 f"total_world_size={total_world_size} "
                 f"(num_nodes={cfg.placement.num_nodes} * num_gpus_per_node={cfg.placement.num_gpus_per_node})."
             )
