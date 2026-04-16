@@ -283,7 +283,7 @@ class SFTTrainer:
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
             backends=self.cfg.trainer.logger,
-            config=self.cfg,
+            config=self.sft_cfg,
         )
 
     # ------------------------------------------------------------------ #
