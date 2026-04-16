@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-# SFT training with Megatron backend for Qwen3-0.6B
+# SFT training with Megatron backend for Qwen2.5-0.5B-Instruct
 #
 # This script runs supervised fine-tuning using Megatron's tensor and pipeline
 # parallelism (TP=2, PP=2) on 4 GPUs with the Alpaca dataset.
@@ -15,7 +15,7 @@ set -x
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
     strategy=megatron \
-    model.path=Qwen/Qwen3-0.6B \
+    model.path=Qwen/Qwen2.5-0.5B-Instruct \
     dataset_name=yahma/alpaca-cleaned \
     dataset_split="train[:100]" \
     messages_key=messages \
