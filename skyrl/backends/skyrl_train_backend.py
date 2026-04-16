@@ -278,6 +278,7 @@ class SkyRLTrainBackend(AbstractBackend):
             server_urls=server_urls,
             model_name=self._cfg.trainer.policy.model.path,
             active_lora_name=active_lora_name,
+            data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self._tokenizer,
         )
 
@@ -908,6 +909,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
         "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
+        "language_model_only": cfg.generator.inference_engine.language_model_only,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

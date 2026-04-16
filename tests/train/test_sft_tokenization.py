@@ -253,27 +253,6 @@ def test_collate_metadata(tokenizer):
     assert batch.metadata["response_length"] == 3
 
 
-def test_collate_explicit_loss_mask(tokenizer):
-    """Collation uses explicit per-token loss_mask when present."""
-    examples = [
-        {
-            "input_ids": [1, 2, 3, 4, 5],
-            "attention_mask": [1, 1, 1, 1, 1],
-            "num_actions": 4,
-            "loss_mask": [1, 0, 0, 1],  # assistant, user, user, assistant
-        },
-        _make_example([10, 20, 30], 2),  # no explicit loss_mask -> all 1s
-    ]
-    batch = collate_sft_batch(examples, tokenizer)
-
-    # max_num_actions = 4
-    assert batch["loss_mask"].shape == (2, 4)
-    # Example 0: explicit mask, no action padding needed
-    assert batch["loss_mask"][0].tolist() == [1, 0, 0, 1]
-    # Example 1: 2 actions, padded to 4 -> [0, 0, 1, 1]
-    assert batch["loss_mask"][1].tolist() == [0, 0, 1, 1]
-
-
 # ---------------------------------------------------------------------------
 # tokenize_sft_example uses chat template (Fix 2 verification)
 # ---------------------------------------------------------------------------
@@ -415,6 +394,32 @@ def test_loss_norm_all_nonpad(tokenizer):
 
     # Sum should be batch_size / micro_batch_size = 2
     assert abs(batch["loss_mask"].sum().item() - 2.0) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Explicit loss_mask in collation (ALL_ASSISTANT_MESSAGES support)
+# ---------------------------------------------------------------------------
+
+
+def test_collate_explicit_loss_mask(tokenizer):
+    """Collation uses explicit per-token loss_mask when present."""
+    examples = [
+        {
+            "input_ids": [1, 2, 3, 4, 5],
+            "attention_mask": [1, 1, 1, 1, 1],
+            "num_actions": 4,
+            "loss_mask": [1, 0, 0, 1],  # assistant, user, user, assistant
+        },
+        _make_example([10, 20, 30], 2),  # no explicit loss_mask -> all 1s
+    ]
+    batch = collate_sft_batch(examples, tokenizer)
+
+    # max_num_actions = 4
+    assert batch["loss_mask"].shape == (2, 4)
+    # Example 0: explicit mask, no action padding needed
+    assert batch["loss_mask"][0].tolist() == [1, 0, 0, 1]
+    # Example 1: 2 actions, padded to 4 -> [0, 0, 1, 1]
+    assert batch["loss_mask"][1].tolist() == [0, 0, 1, 1]
 
 
 # ---------------------------------------------------------------------------

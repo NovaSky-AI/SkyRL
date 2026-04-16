@@ -54,7 +54,7 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
         """Return the strategy class for this init info type."""
         return CudaIpcTransferStrategy
 
-    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["CudaIpcInitInfo"]:
+    def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["CudaIpcInitInfo"]:
         """IPC init is a no-op, so return identical copies for each server."""
         return [copy.deepcopy(self) for _ in range(num_servers)]
 
@@ -175,28 +175,37 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
     ) -> None:
-        """Send all weights via vLLM native IPC (new inference path).
+        """Send weights chunk-by-chunk via vLLM native IPC (new inference path).
 
-        All ranks iterate chunks (weight extraction may use collective ops),
-        create per-tensor IPC handles, and all-gather them so rank 0 has
-        handles for every GPU. Rank 0 then sends the merged handles to
-        vLLM via /update_weights with pickled IPC handles.
+        Uses the start/update/finish lifecycle to enable chunked transfers:
+        each chunk creates IPC handles for only its parameters, sends them,
+        and frees them before the next chunk. This bounds peak memory to one
+        chunk's worth of IPC handles rather than all parameters at once.
 
-        Names, dtypes, and shapes are derived from the chunks themselves
-        (not from weight_metadata) to guarantee they stay aligned with the
-        IPC handles. FSDP state_dict() can return parameters in different
-        orders across separate calls.
+        All ranks iterate chunks (weight extraction may use collective ops).
+        Per chunk, each rank creates IPC handles, they are all-gathered so
+        rank 0 has handles for every GPU, and rank 0 sends them via
+        update_weights_chunk.
+
+        TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands,
+        replace update_weights_chunk with the native /update_weights endpoint
+        and start/finish with /start_weight_update and /finish_weight_update.
         """
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
 
-        names: List[str] = []
-        dtype_names: List[str] = []
-        shapes: List[List[int]] = []
-        tensor_refs: List[torch.Tensor] = []
-        per_param_handles: List[Dict[str, IpcHandle]] = []
+        if rank == 0:
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+        torch.distributed.barrier()
+
         for chunk in chunks:
+            names: List[str] = []
+            dtype_names: List[str] = []
+            shapes: List[List[int]] = []
+            tensor_refs: List[torch.Tensor] = []
+            per_param_handles: List[Dict[str, IpcHandle]] = []
+
             for name, tensor in zip(chunk.names, chunk.tensors):
                 weight = tensor.detach().contiguous()
                 tensor_refs.append(weight)
@@ -206,35 +215,36 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 dtype_names.append(str(weight.dtype).split(".")[-1])
                 shapes.append(list(weight.shape))
 
-        # All-gather handles from every training rank
-        gathered: List[Optional[List[Dict[str, IpcHandle]]]] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, per_param_handles)
+            gathered: List[Optional[List[Dict[str, IpcHandle]]]] = [None] * world_size
+            torch.distributed.all_gather_object(gathered, per_param_handles)
 
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
+            torch.distributed.barrier()
+            torch.cuda.synchronize()
+
+            if rank == 0:
+                merged_handles: List[Dict[str, IpcHandle]] = []
+                for param_idx in range(len(per_param_handles)):
+                    merged: Dict[str, IpcHandle] = {}
+                    for rank_handles in gathered:
+                        merged.update(rank_handles[param_idx])  # type: ignore[union-attr]
+                    merged_handles.append(merged)
+
+                pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
+                chunk_update_info: Dict[str, Any] = {
+                    "names": names,
+                    "dtype_names": dtype_names,
+                    "shapes": shapes,
+                    "ipc_handles_pickled": pickled,
+                }
+                await self._inference_client.update_weights_chunk(chunk_update_info)
+
+            torch.distributed.barrier()
+            torch.cuda.ipc_collect()
+            torch.cuda.synchronize()
 
         if rank == 0:
-            # Merge per-parameter handle dicts across ranks so each
-            # parameter's dict maps every GPU UUID to its handle.
-            merged_handles: List[Dict[str, IpcHandle]] = []
-            for param_idx in range(len(per_param_handles)):
-                merged: Dict[str, IpcHandle] = {}
-                for rank_handles in gathered:
-                    merged.update(rank_handles[param_idx])  # type: ignore[union-attr]
-                merged_handles.append(merged)
-
-            pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
-            update_info: Dict[str, Any] = {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "ipc_handles_pickled": pickled,
-            }
-            await self._inference_client.update_named_weights(update_info)
-
+            await self._inference_client.finish_weight_update()
         torch.distributed.barrier()
-        torch.cuda.ipc_collect()
-        torch.cuda.synchronize()
 
     async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:
         """Per-chunk CUDA IPC with packed tensors (legacy path)."""

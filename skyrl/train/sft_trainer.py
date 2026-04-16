@@ -126,7 +126,6 @@ def tokenize_chat_example(
             f"train_on_what={train_on_what!r} is not yet supported. "
             f"Supported values: {sorted(v.value for v in _SUPPORTED)}"
         )
-
     messages = example[messages_key]
 
     # Validate: last message must be from assistant

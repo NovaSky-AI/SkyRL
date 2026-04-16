@@ -100,7 +100,6 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 ## Limitations
 
 - **No evaluation support.** : Currently we do not support using an evaluation dataset.
-- **No LoRA / PEFT support.** The SFT trainer does not wire up LoRA configuration. The RL trainer supports LoRA for both FSDP and Megatron backends.
 - **Limited `train_on_what` options**: Only `last_assistant_message` and `all_assistant_messages` are currently implemented. Other `TrainOnWhat` values are defined for API stability but raise `NotImplementedError` if used.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.
