@@ -141,6 +141,8 @@ class SFTConfig(BaseConfig):
     run_name: str = "skyrl_sft_run"
     ckpt_path: str = ""  # empty string = no checkpointing
     ckpt_interval: int = 0
+    max_ckpts_to_keep: int = -1
+    """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
     seed: int = 42
 
@@ -185,18 +187,27 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
 
-    # Parallelism check for megatron: total world size must be divisible by TP * PP
+    #  checks for megatron
     if cfg.strategy == "megatron":
         tp = cfg.megatron_config.tensor_model_parallel_size
         pp = cfg.megatron_config.pipeline_model_parallel_size
+        cp = cfg.megatron_config.context_parallel_size
         total_world_size = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
-        if total_world_size % (tp * pp) != 0:
+        if total_world_size % (tp * pp * cp) != 0:
             raise ValueError(
-                f"For megatron strategy, total_world_size must be divisible by TP * PP. "
-                f"Got TP={tp}, PP={pp} (TP*PP={tp * pp}), "
+                f"For megatron strategy, total_world_size must be divisible by TP * PP * CP. "
+                f"Got TP={tp}, PP={pp}, CP={cp}, (TP*PP*CP={tp * pp * cp}), "
                 f"total_world_size={total_world_size} "
                 f"(num_nodes={cfg.placement.num_nodes} * num_gpus_per_node={cfg.placement.num_gpus_per_node})."
             )
+        # context parallel are not yet supported for megatron
+        if cfg.megatron_config.context_parallel_size > 1:
+            assert cfg.use_sample_packing, "context parallel is only supported with sample packing"
+        # check that sequence parallel is not configured outside of megatron
+        assert cfg.sequence_parallel_size == 1, (
+            f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
+            f"parallel is not supported for megatron"
+        )
 
 
 # NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend

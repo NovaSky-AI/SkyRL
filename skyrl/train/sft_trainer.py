@@ -22,13 +22,13 @@ Or as a CLI entrypoint::
 
 import os
 import random
+from dataclasses import asdict
 
 import ray
 import torch
 from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
-from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
@@ -43,7 +43,12 @@ from skyrl.train.config.sft_config import (
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
-from skyrl.train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path
+from skyrl.train.utils.trainer_utils import (
+    GLOBAL_STEP_PREFIX,
+    cleanup_old_checkpoints,
+    extract_step_from_path,
+    validate_consistency_for_latest_checkpoint,
+)
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
 from skyrl.utils.tok import get_tokenizer
 
@@ -52,8 +57,13 @@ from skyrl.utils.tok import get_tokenizer
 # ---------------------------------------------------------------------------
 
 
-def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512) -> dict | None:
-    """Tokenize a single SFT example (instruction + output).
+def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512, **tokenizer_kwargs) -> dict | None:
+    """Tokenize an Alpaca-format SFT example via ``apply_chat_template``.
+
+    Converts the instruction/input/output fields into a two-message chat
+    (user + assistant) and delegates to :func:`tokenize_chat_example`.
+    This ensures tokenization matches the HF / TRL convention (proper
+    special tokens, chat template formatting).
 
     Returns dict with input_ids, attention_mask, num_actions (response length),
     or None if the example was fully truncated.
@@ -62,30 +72,24 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512) -> dic
     input_text = example.get("input", "")
     output = example.get("output", "")
 
-    # Combine instruction and input
+    # Build user content: instruction + optional input
+    user_content = instruction
     if input_text:
-        prompt = f"{instruction}\n\n{input_text}"
-    else:
-        prompt = instruction
+        user_content = f"{instruction}\n\n{input_text}"
+    user_content = user_content.strip()
 
-    # Tokenize prompt and full sequence separately to find boundary
-    prompt_tokens = tokenizer(prompt, add_special_tokens=True, truncation=True, max_length=max_length)
-    full_text = f"{prompt}\n\n{output}"
-    full_tokens = tokenizer(full_text, add_special_tokens=True, truncation=True, max_length=max_length)
+    messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": output},
+    ]
 
-    prompt_len = len(prompt_tokens["input_ids"])
-    full_len = len(full_tokens["input_ids"])
-    num_actions = full_len - prompt_len
-
-    # Skip examples where response was fully truncated
-    if num_actions <= 0:
-        return None
-
-    return {
-        "input_ids": full_tokens["input_ids"],
-        "attention_mask": full_tokens["attention_mask"],
-        "num_actions": num_actions,
-    }
+    return tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=max_length,
+        messages_key="messages",
+        **tokenizer_kwargs,
+    )
 
 
 def tokenize_chat_example(
@@ -333,6 +337,7 @@ class SFTTrainer:
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
+        self.global_step = 0
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -382,6 +387,7 @@ class SFTTrainer:
             num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
+            record_memory=self.cfg.trainer.policy.record_memory,
         )
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
@@ -401,7 +407,7 @@ class SFTTrainer:
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
             backends=self.cfg.trainer.logger,
-            config=self.cfg,
+            config=self.sft_cfg,
         )
 
     # ------------------------------------------------------------------ #
@@ -463,15 +469,22 @@ class SFTTrainer:
         """Collate examples into a TrainingInputBatch with loss normalization.
 
         Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
-        produces a properly averaged loss. Megatron sums over tokens within each
-        micro-batch and averages across micro-batches, so we scale by
-        ``1 / (micro_batch_size * max_sequence_length)`` to get a per-token mean.
+        produces a per-non-pad-token mean, matching the standard convention.
+
+        NOTE: The scaling factor is ``batch_size / (micro_batch_size * total_nonpad)``
+        where ``total_nonpad`` is the count of non-masked (loss-contributing)
+        tokens in the full batch.  This accounts for the ``microbatch_weight``
+        (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
+        accumulation so that the effective gradient equals
+        ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
         """
         batch = collate_sft_batch(examples, self.tokenizer)
-        # Loss normalization
+        # Loss normalization: divide by non-pad token count (not padded seq length)
+        # NOTE (sumanthrh): This specific scaling factor is because SkyRL's workers internally normalize
+        # by number of micro batches, but aggregate otherwise
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
-        max_sequence_length = batch["sequences"].shape[-1]
-        batch["loss_mask"] = batch["loss_mask"].float() / (micro_batch_size * max_sequence_length)
+        total_nonpad = max(batch["loss_mask"].sum().item(), 1)
+        batch["loss_mask"] = batch["loss_mask"].float() * (self.sft_cfg.batch_size / (micro_batch_size * total_nonpad))
         return batch
 
     # ------------------------------------------------------------------ #
@@ -504,6 +517,14 @@ class SFTTrainer:
             with io.open_file(latest_file, "r") as f:
                 ckpt_step = int(f.read().strip())
             checkpoint_path = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_step}")
+            # Validate consistency: ensure no stale checkpoint folders from prior runs
+            validate_consistency_for_latest_checkpoint(
+                self.sft_cfg.ckpt_path,
+                ckpt_step,
+                checkpoint_path,
+                latest_file,
+                self.sft_cfg.ckpt_interval,
+            )
         else:
             checkpoint_path = resume_from
 
@@ -515,6 +536,23 @@ class SFTTrainer:
             raise ValueError(
                 f"Cannot extract step number from checkpoint path: {checkpoint_path}. "
                 f"Expected a directory named '{GLOBAL_STEP_PREFIX}<N>'."
+            )
+
+        # Load and validate trainer state if available
+        trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
+        if io.exists(trainer_state_path):
+            with io.open_file(trainer_state_path, "rb") as f:
+                trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+            saved_global_step = trainer_state.get("global_step", global_step)
+            logger.info("Successfully loaded trainer state")
+            if saved_global_step != global_step:
+                logger.warning(
+                    f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value."
+                )
+        else:
+            logger.warning(
+                f"No trainer_state.pt found at {trainer_state_path}. "
+                "This checkpoint was likely saved by an older version."
             )
 
         policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
@@ -590,7 +628,13 @@ class SFTTrainer:
 
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
         attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
-        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) / (micro_batch_size * num_actions)
+        # All tokens are non-pad in the dummy batch, so total_nonpad = batch_size * num_actions.
+        # Scaling = batch_size / (micro_batch_size * total_nonpad)
+        #         = 1 / (micro_batch_size * num_actions)
+        total_nonpad = batch_size * num_actions
+        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) * (
+            batch_size / (micro_batch_size * total_nonpad)
+        )
 
         batch = TrainingInputBatch(
             {
@@ -671,31 +715,27 @@ class SFTTrainer:
         # When resuming, start_step is the last *completed* step (checkpoint is
         # saved AFTER the optimizer update), so we begin at start_step + 1 to
         # avoid replaying that step.
-        resume_step = start_step + 1 if start_step > 0 else 0
 
         # Replay epoch shuffles for reproducibility on resume
-        start_epoch = (resume_step * batch_size) // len(tokenized)
+        start_epoch = (start_step * batch_size) // len(tokenized)
         for _ in range(start_epoch):
             rng.shuffle(tokenized)
         current_epoch = start_epoch
 
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
+
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
-        for step in tqdm(range(resume_step, num_steps)):
+        while self.global_step <= num_steps:
             all_timings: dict[str, float] = {}
 
             with Timer("step", all_timings):
-                # Check for epoch boundary and reshuffle
-                epoch = (step * batch_size) // len(tokenized)
-                if epoch > current_epoch:
-                    for _ in range(epoch - current_epoch):
-                        rng.shuffle(tokenized)
-                    current_epoch = epoch
 
                 # Data loading with wrap-around
                 with Timer("data_loading", all_timings):
-                    start_idx = (step * batch_size) % len(tokenized)
+                    start_idx = (self.global_step * batch_size) % len(tokenized)
                     end_idx = start_idx + batch_size
                     if end_idx > len(tokenized):
                         batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
@@ -704,11 +744,10 @@ class SFTTrainer:
                     batch = self.collate_batch(batch_examples)
 
                 # Training step
-                step_result = self.train_step(batch, step)
+                step_result = self.train_step(batch, self.global_step)
                 all_timings.update(step_result["timings"])
 
             # Compute throughput using actual (non-padding) tokens
-            batch_num_seq = batch["sequences"].shape[0]
             batch_padded_seq_len = batch["sequences"].shape[1]
             actual_num_tokens = batch["attention_mask"].sum().item()
             tokens_per_second = actual_num_tokens / all_timings["step"]
@@ -719,7 +758,6 @@ class SFTTrainer:
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
                 "train/actual_num_tokens": actual_num_tokens,
-                "train/batch_num_seq": batch_num_seq,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
@@ -728,42 +766,69 @@ class SFTTrainer:
             if (
                 self.sft_cfg.ckpt_path
                 and self.sft_cfg.ckpt_interval > 0
-                and step > 0
-                and step % self.sft_cfg.ckpt_interval == 0
+                and self.global_step > 0
+                and self.global_step % self.sft_cfg.ckpt_interval == 0
             ):
                 with Timer("save_checkpoint", all_timings):
-                    self.save_checkpoint(step)
+                    self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
 
-            self.tracker.log(log_dict, step=step, commit=True)
+            self.tracker.log(log_dict, step=self.global_step, commit=True)
 
-            if step % 5 == 0:
-                logger.info(f"Step {step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}")
+            if self.global_step % 5 == 0:
+                logger.info(
+                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
+                )
+
+            # Check for epoch boundary and reshuffle
+            epoch = (self.global_step * batch_size) // len(tokenized)
+            if epoch > current_epoch:
+                for _ in range(epoch - current_epoch):
+                    rng.shuffle(tokenized)
+                current_epoch = epoch
+
+            self.global_step += 1
+        self.global_step = min(self.global_step, num_steps)
 
         # Save final checkpoint (if checkpointing is enabled)
         if self.sft_cfg.ckpt_path:
-            final_step = num_steps - 1
+            final_step = num_steps
             already_saved = (
                 self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
             )
             if not already_saved:
                 logger.info(f"Saving final checkpoint at step {final_step}")
-                self.save_checkpoint(final_step)
+                self.save_checkpoint()
 
         logger.info("SFT training complete!")
 
-    def save_checkpoint(self, step: int):
+    def save_checkpoint(self):
         """Save a checkpoint at the given step."""
+        step = self.global_step
         global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
         io.makedirs(global_step_folder, exist_ok=True)
         logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
-        # Write latest checkpoint marker
+
+        # Save trainer state for cross-validation on resume (mirrors PPO's trainer_state.pt)
+        trainer_state = {
+            "global_step": step,
+            "config": asdict(self.sft_cfg),
+        }
+        trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
+        with io.open_file(trainer_state_path, "wb") as f:
+            torch.save(trainer_state, f)
+        logger.info(f"Saved trainer state to {trainer_state_path}")
+
+        # Atomic tracking -- write this last after all saves succeed
         latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_file, "w") as f:
             f.write(str(step))
         logger.info(f"Checkpoint saved for global_step_{step}")
+
+        # Clean up old checkpoints after successful save
+        cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
 
     # ------------------------------------------------------------------ #
     # Lifecycle
