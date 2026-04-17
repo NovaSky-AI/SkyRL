@@ -134,8 +134,8 @@ def _make_mock_llm(tokenizer, response_text: str):
 
 @pytest.mark.asyncio
 @patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
-async def test_vlm_obs_offset_with_eos_scan(mock_decode):
-    """Validate that the EOS scan correctly identifies obs token boundaries."""
+async def test_vlm_obs_offset(mock_decode):
+    """Validate that obs token boundaries are correctly identified."""
     mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -206,8 +206,8 @@ async def test_vlm_obs_offset_with_eos_scan(mock_decode):
 @pytest.mark.asyncio
 @patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
 async def test_vlm_obs_tokens_match_expected(mock_decode):
-    """Verify the exact obs tokens extracted by the EOS scan match what the
-    chat template produces for the observation messages."""
+    """Verify the exact obs tokens extracted match what the chat template
+    produces for the observation messages."""
     mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
