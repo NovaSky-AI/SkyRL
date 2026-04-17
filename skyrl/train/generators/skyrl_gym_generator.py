@@ -31,11 +31,11 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
+    append_rollout_expert_indices,
     apply_overlong_filtering,
     get_custom_chat_template,
     get_generation_prompt_ids,
     get_rollout_metrics,
-    append_rollout_expert_indices,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
@@ -990,13 +990,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # overwrite the existing rollout inference indices, since the inference engine should
                 # return the expert indices for the entire sequence including each turn's input
                 # and the final response should not have an observation appended to it
-                
+
                 ## TODO(Dev): Fix comments above – prior-turn routings for positions the
                 # prior turn already decoded, append the new turn's routings for
-                # any new positions 
-                
+                # any new positions
+
                 agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
-                    agent_loop_state.rollout_expert_indices, rollout_expert_indices_for_turn)
+                    agent_loop_state.rollout_expert_indices, rollout_expert_indices_for_turn
+                )
 
         return agent_loop_state
 
@@ -1077,6 +1078,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # TODO(Dev): append here for single-turn?
             agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
-                agent_loop_state.rollout_expert_indices, turn_output.rollout_expert_indices)
+                agent_loop_state.rollout_expert_indices, turn_output.rollout_expert_indices
+            )
 
         return agent_loop_state

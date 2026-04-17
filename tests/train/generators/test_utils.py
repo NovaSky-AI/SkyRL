@@ -8,7 +8,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from skyrl.train.generators.utils import (
-    append_rollout_expert_indices,
     apply_overlong_filtering,
     encode_messages_subset,
     get_generation_prompt_ids,

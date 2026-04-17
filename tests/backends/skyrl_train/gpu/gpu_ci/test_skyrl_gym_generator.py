@@ -520,7 +520,6 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture, use_co
     assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
     assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer
 
-   
     for i in range(total_batch_size):
         prompt_len = len(prompt_token_ids[i])
         response_len = len(response_ids[i])
