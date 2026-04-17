@@ -118,11 +118,7 @@ def build_training_input_from_text_samples(
     "max_turns,env_class",
     [
         pytest.param(1, "gsm8k", id="single_turn"),
-        # Multi-turn variant exercises the append-only R3 merge path: turn 2's
-        # vLLM call re-prefills turn 1's tokens, but our merge keeps turn 1's
-        # routings for those positions. With correct append semantics the
-        # logprob diff vs vLLM should still drop when routing replay is on.
-        pytest.param(2, "gsm8k_multi_turn", id="multi_turn_append_only"),
+        pytest.param(2, "gsm8k_multi_turn", id="multi_turn"),
     ],
 )
 async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs, max_turns, env_class):
@@ -141,9 +137,6 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs, 
         )
         cfg.generator.batched = False
         cfg.generator.max_turns = max_turns
-        # The multi-turn case must use conversation-style multi-turn so that
-        # `_update_agent_loop_state_with_multiturn_chat_template` is exercised
-        # and the append-only merge runs across turns.
         cfg.generator.use_conversation_multi_turn = True
 
         tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)

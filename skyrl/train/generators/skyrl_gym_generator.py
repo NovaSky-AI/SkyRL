@@ -969,7 +969,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         # use the raw rollout expert indices without any appending of observation tokens
         # this will be overwritten each turn, so we don't need to append observation tokens to it
 
-        # TODO(Dev): append?
         rollout_expert_indices_for_turn = turn_output.rollout_expert_indices
 
         if self.generator_cfg.step_wise_trajectories:
@@ -992,7 +991,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # return the expert indices for the entire sequence including each turn's input
                 # and the final response should not have an observation appended to it
                 
-                ## append, not overwrite 
+                ## TODO(Dev): Fix comments above – prior-turn routings for positions the
+                # prior turn already decoded, append the new turn's routings for
+                # any new positions 
+                
                 agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
                     agent_loop_state.rollout_expert_indices, rollout_expert_indices_for_turn)
 
