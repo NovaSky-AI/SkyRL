@@ -446,10 +446,14 @@ class SkyRLTrainBackend(AbstractBackend):
             values = [
                 r.multi_modal_kwargs.get(mm_key) if r.multi_modal_kwargs is not None else None for r in rendered_inputs
             ]
+            # Iterate through to get the first non-none value.
+            # We use the reference shape to make sure subsequent stack / cat calls
+            # don't run into shape errors.
             ref = next((v for v in values if v is not None), None)
+            # If ref is None, then all of the values empty and we don't need to add placeholder tensors.
             if ref is not None:
-                empty = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
-                batch_dict[mm_key] = TensorList([v if v is not None else empty for v in values])
+                placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
+                batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
