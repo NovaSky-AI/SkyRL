@@ -99,6 +99,11 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
 
     validate_cfg(cfg)
+    if cfg.trainer.algorithm.max_seq_len is None:
+        raise ValueError(
+            "trainer.algorithm.max_seq_len must be explicitly set for Harbor generation; "
+            "it is required to truncate responses to the maximum allowed length."
+        )
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

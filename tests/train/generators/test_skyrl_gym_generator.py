@@ -375,6 +375,8 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",
+        "pixel_values",
+        "image_grid_thw",
     ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "

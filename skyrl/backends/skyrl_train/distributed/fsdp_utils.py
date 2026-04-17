@@ -23,6 +23,7 @@ from typing import Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from loguru import logger
 from omegaconf import DictConfig
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
@@ -124,9 +125,18 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                logger.warning(
+                    f"Could not find transformer layer class '{layer_class}' in the model, skipping. "
+                    "This is expected when using language_model_only=True with multimodal models."
+                )
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+
+        if len(transformer_cls_to_wrap) == 0:
+            raise Exception(
+                f"Could not find any transformer layer class to wrap in the model. "
+                f"Searched for: {list(fsdp_transformer_layer_cls_to_wrap)}"
+            )
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,

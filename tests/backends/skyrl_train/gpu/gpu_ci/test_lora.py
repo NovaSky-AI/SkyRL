@@ -81,6 +81,8 @@ async def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_s
     ) as engines:
         client, pg = engines.client, engines.pg
 
+        await client.sleep(level=1)
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -91,16 +93,20 @@ async def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_s
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
+        await client.wake_up(tags=["weights"])
+
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
             )
         )
-        await client.reset_prefix_cache()
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
+        policy.offload_to_cpu()
+        await client.wake_up(tags=["kv_cache"])
+        await client.reset_prefix_cache()
         outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params)
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

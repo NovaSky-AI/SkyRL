@@ -623,6 +623,12 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "loss_masks",
             "rewards",
             "rollout_logprobs",
+            "stop_reasons",
+            "trajectory_ids",
+            "rollout_expert_indices",
+            "is_last_step",
+            "pixel_values",
+            "image_grid_thw",
         ]:
             assert len(generator_output[key]) == len(generator_output["response_ids"]), (
                 f"Generator output {key} length must be equal to response_ids length, "

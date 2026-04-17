@@ -79,6 +79,7 @@ class HFModelWrapper(nn.Module):
         rope_theta: float | None = None,
         model_config_kwargs: dict = {},
         meta_init: bool = False,
+        language_model_only: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -113,14 +114,19 @@ class HFModelWrapper(nn.Module):
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
-            self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
-            if self.is_vlm:
-                logger.info(
-                    f"[VLM] Config {type(model_config).__name__} has a vision config, "
-                    "using AutoModelForImageTextToText"
+            if language_model_only:
+                logger.info("[VLM] language_model_only=True, skipping vision encoder initialization")
+            else:
+                self.is_vlm = (
+                    hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
                 )
-                # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
-                model_class = AutoModelForImageTextToText
+                if self.is_vlm:
+                    logger.info(
+                        f"[VLM] Config {type(model_config).__name__} has a vision config, "
+                        "using AutoModelForImageTextToText"
+                    )
+                    # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
+                    model_class = AutoModelForImageTextToText
 
             if rope_scaling:
                 model_config.rope_scaling = rope_scaling
@@ -310,6 +316,7 @@ class HFModelWrapper(nn.Module):
         mm_token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        has_image_inputs = pixel_values is not None or image_grid_thw is not None
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
@@ -317,11 +324,12 @@ class HFModelWrapper(nn.Module):
             assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
-            # Convert TensorList -> concatenated tensors for the HF model
-            if isinstance(pixel_values, TensorList):
-                pixel_values = torch.cat(pixel_values.tensors, dim=0)
-            if isinstance(image_grid_thw, TensorList):
-                image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+            if has_image_inputs:
+                # Convert TensorList -> concatenated tensors for the HF model
+                if isinstance(pixel_values, TensorList):
+                    pixel_values = torch.cat(pixel_values.tensors, dim=0)
+                if isinstance(image_grid_thw, TensorList):
+                    image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)

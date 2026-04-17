@@ -79,6 +79,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "max_num_seqs": ie_cfg.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": ie_cfg.backend,
+        "language_model_only": ie_cfg.language_model_only,
         "engine_init_kwargs": ie_cfg.engine_init_kwargs,
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
@@ -149,7 +150,9 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
 
         # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
-        self._server_group = None
+        self._server_groups = None
+        self._prefill_server_groups = None
+        self._decode_server_groups = None
         self._inference_router = None
 
     @staticmethod
@@ -319,8 +322,11 @@ class BasePPOExp:
         from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
             RemoteInferenceClient,
         )
-        from skyrl.backends.skyrl_train.inference_servers.server_group import (
-            ServerGroup,
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            create_inference_servers,
+        )
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            build_router_args,
         )
         from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
             VLLMRouter,
@@ -353,7 +359,8 @@ class BasePPOExp:
         elif has_external_servers and not has_external_proxy:
             # Case: Servers only - create internal router over them
             server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(self.cfg.generator.inference_engine, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args, log_path=self.cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external "
@@ -363,23 +370,18 @@ class BasePPOExp:
         else:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
+            setup = create_inference_servers(
+                self.cfg.generator.inference_engine,
+                cli_args,
+                log_path=self.cfg.trainer.log_path,
                 placement_group=self.colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-            )
+            self._inference_router = setup.router
+            self._server_groups = setup.server_groups
+            self._prefill_server_groups = setup.prefill_server_groups
+            self._decode_server_groups = setup.decode_server_groups
+            proxy_url = setup.proxy_url
+            server_urls = setup.server_urls
 
         lora_cfg = self.cfg.trainer.policy.model.lora
         active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
@@ -389,6 +391,7 @@ class BasePPOExp:
             model_name=self.cfg.trainer.policy.model.path,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
+            data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self.tokenizer,
         )
 

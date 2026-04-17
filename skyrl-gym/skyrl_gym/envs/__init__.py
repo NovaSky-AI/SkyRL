@@ -1,6 +1,6 @@
 """Registers the internal gym envs."""
 
-from skyrl_gym.envs.registration import register
+from skyrl_gym.envs.registration import deregister, register
 
 register(
     id="aime",
@@ -36,3 +36,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+__all__ = [
+    "deregister",
+    "register",
+]
