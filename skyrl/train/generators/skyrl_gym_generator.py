@@ -31,6 +31,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
+    append_rollout_expert_indices,
     apply_overlong_filtering,
     get_custom_chat_template,
     get_generation_prompt_ids,
@@ -967,6 +968,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # use the raw rollout expert indices without any appending of observation tokens
         # this will be overwritten each turn, so we don't need to append observation tokens to it
+
         rollout_expert_indices_for_turn = turn_output.rollout_expert_indices
 
         if self.generator_cfg.step_wise_trajectories:
@@ -988,7 +990,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # overwrite the existing rollout inference indices, since the inference engine should
                 # return the expert indices for the entire sequence including each turn's input
                 # and the final response should not have an observation appended to it
-                agent_loop_state.rollout_expert_indices = rollout_expert_indices_for_turn
+
+                ## TODO(Dev): Fix comments above – prior-turn routings for positions the
+                # prior turn already decoded, append the new turn's routings for
+                # any new positions
+
+                agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
+                    agent_loop_state.rollout_expert_indices, rollout_expert_indices_for_turn
+                )
 
         return agent_loop_state
 
@@ -1066,6 +1075,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             # overwrite the existing rollout inference indices, since the inference engine should
             # return the expert indices for the entire sequence including each turn's input and observation tokens
             # and the final response should not have an observation appended to it
-            agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
+
+            # TODO(Dev): append here for single-turn?
+            agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
+                agent_loop_state.rollout_expert_indices, turn_output.rollout_expert_indices
+            )
 
         return agent_loop_state
