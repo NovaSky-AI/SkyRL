@@ -4,35 +4,38 @@ from typing import Any, Dict, List, Tuple
 import gymnasium
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from examples.train.visgym_relaxed.utils import extract_relaxed_action, make_image_message, VALID_ACTIONS
+from examples.train.visgym.utils import extract_action, make_image_message
 
-_TASK_REWARD_COEFF = 1
-_FORMAT_REWARD_COEFF = 0
+_TASK_REWARD_COEFF = 0.8
+_FORMAT_REWARD_COEFF = 0.2
 
-_ACTION_TAG_RE = re.compile(r"<action>\s*(\w+)\s*</action>", re.IGNORECASE)
+_XML_TAG_RE = {
+    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in ("observation", "justification", "action")
+}
 
 
 def _has_valid_format(text: str) -> bool:
-    """True if an <action> tag is present with a valid keyword."""
-    match = _ACTION_TAG_RE.search(text)
-    if not match:
-        return False
-    return match.group(1).lower() in VALID_ACTIONS
+    """True if all three XML tags are present with non-empty content."""
+    for pattern in _XML_TAG_RE.values():
+        match = pattern.search(text)
+        if not match or not match.group(1).strip():
+            return False
+    return True
 
 
 _FORMAT_INSTRUCTION = (
-    "\n\nIMPORTANT: You must end your response with your chosen action "
-    "in this exact format: <action>ACTION</action> "
-    "where ACTION is one of: left, right, up, down, stop."
+    "\n\nIMPORTANT: Respond with exactly one action as a Python tuple, "
+    "e.g. ('move', 0) or ('stop', 'stop'). "
+    "Do not wrap the action in backticks, code blocks, or other formatting."
 )
 
 
 class VisGymEnv(BaseTextEnv):
-    """Relaxed VisGym wrapper that uses keyword actions instead of tuples.
+    """Wraps a VisGym environment as a BaseTextEnv for use with SkyRLGymGenerator.
 
-    The model can generate free-form reasoning, then must end with
-    ``<action>keyword</action>`` where keyword is one of:
-    left, right, up, down, stop.
+    Bridges VisGym's gymnasium.Env interface (image observations, tuple-string actions,
+    binary rewards) to SkyRL-Gym's BaseTextEnv interface (OpenAI message format, raw text
+    actions, float rewards).
 
     Configuration via extras dict:
         visgym_env_id (str): VisGym environment ID, e.g. "maze_2d/easy"
@@ -49,23 +52,31 @@ class VisGymEnv(BaseTextEnv):
         self.seed_value = extras.get("seed", None)
         self.max_turns = extras.get("max_turns", 10)
         visgym_kwargs = extras.get("visgym_kwargs", {})
-        visgym_kwargs["relaxed"] = True
 
         self.visgym_env = gymnasium.make(self.visgym_env_id, **visgym_kwargs)
 
-        # Tracking
         self.step_count = 0
         self.parse_failures = 0
         self.format_successes = 0
 
-    def _build_parse_error(self) -> str:
-        """Build a concise error message for parse failures."""
-        valid = ", ".join(sorted(VALID_ACTIONS))
-        return (
-            "Action parsing failed. Could not find a valid action in your response.\n"
-            f"Please end your response with <action>ACTION</action> "
-            f"where ACTION is one of: {valid}"
-        )
+    def _get_available_actions(self) -> List[str]:
+        """Return the action names this environment supports, if available."""
+        try:
+            return list(self.visgym_env.action_space.get_function_names())
+        except Exception:
+            return []
+
+    def _build_parse_error(self, available_actions: List[str]) -> str:
+        """Build a concise, informative error message for parse failures."""
+        msg = "Action parsing failed. Could not find a valid action tuple in your response."
+        msg += "\nPlease respond with exactly one action as a Python tuple."
+        if available_actions:
+            names = ", ".join(f"'{a}'" for a in available_actions)
+            msg += f"\nAvailable actions: {names}"
+            msg += f"\nExample: ('{available_actions[0]}', 0) or ('stop', 'stop')"
+        else:
+            msg += "\nExample: ('action_name', payload)"
+        return msg
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """Reset the VisGym env and return the initial multimodal prompt."""
@@ -90,7 +101,7 @@ class VisGymEnv(BaseTextEnv):
         if _has_valid_format(action):
             self.format_successes += 1
 
-        extracted, matched = extract_relaxed_action(action)
+        extracted, matched = extract_action(action)
 
         if not matched:
             self.parse_failures += 1
@@ -98,7 +109,7 @@ class VisGymEnv(BaseTextEnv):
 
             if not done:
                 image = self.visgym_env.render()
-                feedback = self._build_parse_error()
+                feedback = self._build_parse_error(self._get_available_actions())
                 obs_msg = make_image_message(feedback, image)
                 observations = [obs_msg]
             else:

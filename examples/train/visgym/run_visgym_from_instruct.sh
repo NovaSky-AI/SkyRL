@@ -2,29 +2,29 @@
 set -euo pipefail
 set -x
 
-# Relaxed RL training run: VLM RL on VisGym maze_2d/easy with Qwen3-VL-8B-Instruct.
-#
-# Uses keyword actions (left/right/up/down/stop) in <action> tags instead of
-# the structured tuple format, allowing a standard instruct checkpoint.
+# VLM RL on VisGym (maze_2d/easy by default), starting from a vanilla
+# instruct-tuned Qwen3-VL model. Uses keyword actions
+# (left/right/up/down/stop) in <action> tags so no SFT warm-start is
+# needed.
 #
 # Colocated setup: 8 GPUs shared between vLLM inference and FSDP training.
-# Uses the VLM generator (multi-modal) via custom entrypoint.
 #
-# Prerequisites – generate the stub dataset:
-#   uv run examples/train/visgym_relaxed/visgym_dataset.py \
+# Prerequisites – generate the stub dataset (auto-created on first run):
+#   uv run examples/train/visgym/dataset.py \
 #       --env_id maze_2d/easy --num_rows 256 \
 #       --output_dir ~/data/visgym_maze_2d_easy
 #
 # Usage:
-#   bash examples/train/visgym_relaxed/run_visgym_full_mazed2d_easy-relaxed.sh
+#   bash examples/train/visgym/run_visgym_from_instruct.sh
 
 : "${ENV_ID:=maze_2d/easy}"
 : "${DATA_DIR:="$HOME/data/visgym_maze_2d_easy"}"
 : "${NUM_INFERENCE_GPUS:=8}"
 : "${NUM_TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
+: "${MODEL_PATH:=Qwen/Qwen3-VL-8B-Instruct}"
 
-: "${EXPORT_PATH:="$HOME/exports/visgym_maze_2d_easy_relaxed_qwen3vl_instruct-kl0_02"}"
+: "${EXPORT_PATH:="$HOME/exports/visgym_maze_2d_easy_from_instruct"}"
 : "${DUMP_TRAINING_BATCHES:=false}"
 : "${DUMP_EVAL_RESULTS:=true}"
 : "${EVAL_INTERVAL:=10}"
@@ -35,10 +35,9 @@ set -x
 : "${NUM_DATASET_ROWS:=256}"
 : "${EVAL_DATA_DIR:="$HOME/data/visgym_maze_2d_easy_eval"}"
 
-# ── Generate stub dataset if it doesn't exist ────────────────────────
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
   echo "=== Generating train stub dataset for $ENV_ID ==="
-  uv run examples/train/visgym_relaxed/visgym_dataset.py \
+  uv run examples/train/visgym/dataset.py \
     --env_id "$ENV_ID" \
     --num_rows "$NUM_DATASET_ROWS" \
     --output_dir "$DATA_DIR"
@@ -46,17 +45,16 @@ fi
 
 if [ ! -f "$EVAL_DATA_DIR/train.parquet" ]; then
   echo "=== Generating eval stub dataset for $ENV_ID ==="
-  uv run examples/train/visgym_relaxed/visgym_dataset.py \
+  uv run examples/train/visgym/dataset.py \
     --env_id "$ENV_ID" \
     --num_rows 64 \
     --seed \
     --output_dir "$EVAL_DATA_DIR"
 fi
 
-MODEL_PATH="Qwen/Qwen3-VL-8B-Instruct"
 _SKYRL_USE_NEW_INFERENCE=1 \
 uv run --isolated --extra fsdp \
-  python examples/train/visgym_relaxed/visgym_entrypoint.py \
+  python examples/train/visgym/entrypoint_instruct.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$EVAL_DATA_DIR/train.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -91,13 +89,13 @@ uv run --isolated --extra fsdp \
   environment.env_class=visgym \
   trainer.logger="$LOGGER" \
   trainer.project_name="vlm_maze_2d_easy" \
-  trainer.run_name="maze_2d_easy_relaxed_qwen3vl_8b_instruct-kl0_02" \
+  trainer.run_name="maze_2d_easy_from_instruct" \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
   trainer.dump_data_batch="$DUMP_TRAINING_BATCHES" \
   trainer.dump_eval_results="$DUMP_EVAL_RESULTS" \
-  trainer.ckpt_path="$HOME/ckpts/visgym_maze_2d_easy_relaxed_qwen3vl_instruct-kl0_02" \
+  trainer.ckpt_path="$HOME/ckpts/visgym_maze_2d_easy_from_instruct" \
   trainer.use_sample_packing=false \
   trainer.eval_interval="$EVAL_INTERVAL" \
   trainer.ckpt_interval=2 \

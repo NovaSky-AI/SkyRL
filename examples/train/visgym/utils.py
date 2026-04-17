@@ -3,7 +3,7 @@ import base64
 import io
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -35,7 +35,7 @@ def make_image_message(text: str, rgb_array: np.ndarray, role: str = "user") -> 
 
 
 # ---------------------------------------------------------------------------
-# Action extraction
+# Tuple action extraction (SFT recipe)
 # ---------------------------------------------------------------------------
 
 # Finds the opening of a tuple with a quoted action name: ('action_name',
@@ -165,7 +165,6 @@ def extract_action(vlm_output: str) -> Tuple[str, bool]:
             if candidate is None:
                 continue
             action_name = match.group(1)
-            # Inject quotes around the action name and re-validate
             fixed = candidate.replace(action_name, f"'{action_name}'", 1)
             try:
                 parsed = ast.literal_eval(fixed)
@@ -181,3 +180,42 @@ def extract_action(vlm_output: str) -> Tuple[str, bool]:
             return result, True
 
     return vlm_output.strip(), False
+
+
+# ---------------------------------------------------------------------------
+# Keyword action extraction (instruct recipe)
+# ---------------------------------------------------------------------------
+
+VALID_ACTIONS = frozenset({"left", "right", "up", "down", "stop"})
+
+_ACTION_TAG_RE = re.compile(r"<action>\s*(\w+)\s*</action>", re.IGNORECASE)
+
+_KEYWORD_TO_TUPLE: Dict[str, str] = {
+    "right": "('move', 0)",
+    "up": "('move', 1)",
+    "left": "('move', 2)",
+    "down": "('move', 3)",
+    "stop": "('stop', 'stop')",
+}
+
+
+def extract_relaxed_action(vlm_output: str) -> Tuple[str, bool]:
+    """Extract a keyword action from ``<action>keyword</action>`` tags.
+
+    Looks for the *last* ``<action>`` tag in the output (the model may
+    reason about actions earlier in its response).
+
+    Returns:
+        ``(tuple_string, matched)``.  When ``matched`` is True the returned
+        string is a valid tuple string for ``maze_2d.step()`` (e.g.
+        ``"('move', 0)"``).  When False the raw input is returned.
+    """
+    matches = list(_ACTION_TAG_RE.finditer(vlm_output))
+    if not matches:
+        return vlm_output.strip(), False
+
+    keyword = matches[-1].group(1).lower()
+    if keyword not in VALID_ACTIONS:
+        return vlm_output.strip(), False
+
+    return _KEYWORD_TO_TUPLE[keyword], True

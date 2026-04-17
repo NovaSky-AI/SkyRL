@@ -1,13 +1,13 @@
 """
-Custom entrypoint for VLM RL training with VisGym environments.
+Custom entrypoint for VLM RL training with VisGym (SFT recipe).
 
-Sets ``generator.is_vlm=True`` so that BasePPOExp wires in
-SkyRLVLMGymGenerator (multi-modal) instead of the default
-SkyRLGymGenerator (text-only).
+Registers the tuple-action VisGym wrapper from env_sft.py. Use this when
+starting from an SFT checkpoint that already emits the structured
+``<observation>/<justification>/<action>`` format.
 
 Usage:
     uv run --isolated --extra fsdp \
-        python examples/train/visgym/visgym_entrypoint.py \
+        python examples/train/visgym/entrypoint_sft.py \
         generator.is_vlm=True [config overrides...]
 """
 
@@ -28,8 +28,8 @@ mp.set_start_method("spawn", force=True)
 @ray.remote(num_cpus=1)
 def visgym_entrypoint(cfg: SkyRLTrainConfig):
     register(
-        id="visgym",  # <-- The name of the environment.
-        entry_point="examples.train.visgym.env:VisGymEnv",  # <-- The path to the environment class.
+        id="visgym",
+        entry_point="examples.train.visgym.env_sft:VisGymEnv",
     )
 
     exp = BasePPOExp(cfg)

@@ -1,41 +1,27 @@
-import re
 from typing import Any, Dict, List, Tuple
 
 import gymnasium
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from examples.train.visgym.utils import extract_action, make_image_message
-
-_TASK_REWARD_COEFF = 0.8
-_FORMAT_REWARD_COEFF = 0.2
-
-_XML_TAG_RE = {
-    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in ("observation", "justification", "action")
-}
-
-
-def _has_valid_format(text: str) -> bool:
-    """True if all three XML tags are present with non-empty content."""
-    for pattern in _XML_TAG_RE.values():
-        match = pattern.search(text)
-        if not match or not match.group(1).strip():
-            return False
-    return True
+from examples.train.visgym.utils import extract_relaxed_action, make_image_message, VALID_ACTIONS
 
 
 _FORMAT_INSTRUCTION = (
-    "\n\nIMPORTANT: Respond with exactly one action as a Python tuple, "
-    "e.g. ('move', 0) or ('stop', 'stop'). "
-    "Do not wrap the action in backticks, code blocks, or other formatting."
+    "\n\nIMPORTANT: You must end your response with your chosen action "
+    "in this exact format: <action>ACTION</action> "
+    "where ACTION is one of: left, right, up, down, stop."
 )
 
 
 class VisGymEnv(BaseTextEnv):
-    """Wraps a VisGym environment as a BaseTextEnv for use with SkyRLGymGenerator.
+    """Relaxed VisGym wrapper that uses keyword actions instead of tuples.
 
-    Bridges VisGym's gymnasium.Env interface (image observations, tuple-string actions,
-    binary rewards) to SkyRL-Gym's BaseTextEnv interface (OpenAI message format, raw text
-    actions, float rewards).
+    The model can generate free-form reasoning, then must end with
+    ``<action>keyword</action>`` where keyword is one of:
+    left, right, up, down, stop.
+
+    Reward is task-only (no format-reward component); the instruct recipe
+    relies on KL regularization rather than a shaped format reward.
 
     Configuration via extras dict:
         visgym_env_id (str): VisGym environment ID, e.g. "maze_2d/easy"
@@ -52,32 +38,21 @@ class VisGymEnv(BaseTextEnv):
         self.seed_value = extras.get("seed", None)
         self.max_turns = extras.get("max_turns", 10)
         visgym_kwargs = extras.get("visgym_kwargs", {})
+        visgym_kwargs["relaxed"] = True
 
         self.visgym_env = gymnasium.make(self.visgym_env_id, **visgym_kwargs)
 
-        # Tracking
         self.step_count = 0
         self.parse_failures = 0
-        self.format_successes = 0
 
-    def _get_available_actions(self) -> List[str]:
-        """Return the action names this environment supports, if available."""
-        try:
-            return list(self.visgym_env.action_space.get_function_names())
-        except Exception:
-            return []
-
-    def _build_parse_error(self, available_actions: List[str]) -> str:
-        """Build a concise, informative error message for parse failures."""
-        msg = "Action parsing failed. Could not find a valid action tuple in your response."
-        msg += "\nPlease respond with exactly one action as a Python tuple."
-        if available_actions:
-            names = ", ".join(f"'{a}'" for a in available_actions)
-            msg += f"\nAvailable actions: {names}"
-            msg += f"\nExample: ('{available_actions[0]}', 0) or ('stop', 'stop')"
-        else:
-            msg += "\nExample: ('action_name', payload)"
-        return msg
+    def _build_parse_error(self) -> str:
+        """Build a concise error message for parse failures."""
+        valid = ", ".join(sorted(VALID_ACTIONS))
+        return (
+            "Action parsing failed. Could not find a valid action in your response.\n"
+            f"Please end your response with <action>ACTION</action> "
+            f"where ACTION is one of: {valid}"
+        )
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """Reset the VisGym env and return the initial multimodal prompt."""
@@ -91,18 +66,11 @@ class VisGymEnv(BaseTextEnv):
 
         return initial_prompt, {}
 
-    def _compute_terminal_reward(self, task_reward: float) -> float:
-        format_reward = self.format_successes / self.step_count
-        return _TASK_REWARD_COEFF * task_reward + _FORMAT_REWARD_COEFF * format_reward
-
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
         self.step_count += 1
 
-        if _has_valid_format(action):
-            self.format_successes += 1
-
-        extracted, matched = extract_action(action)
+        extracted, matched = extract_relaxed_action(action)
 
         if not matched:
             self.parse_failures += 1
@@ -110,7 +78,7 @@ class VisGymEnv(BaseTextEnv):
 
             if not done:
                 image = self.visgym_env.render()
-                feedback = self._build_parse_error(self._get_available_actions())
+                feedback = self._build_parse_error()
                 obs_msg = make_image_message(feedback, image)
                 observations = [obs_msg]
             else:
@@ -118,7 +86,7 @@ class VisGymEnv(BaseTextEnv):
 
             return BaseTextEnvStepOutput(
                 observations=observations,
-                reward=self._compute_terminal_reward(0.0) if done else 0.0,
+                reward=0.0,
                 done=done,
                 metadata={
                     "env_feedback": "parse_failure",
@@ -145,7 +113,7 @@ class VisGymEnv(BaseTextEnv):
 
         return BaseTextEnvStepOutput(
             observations=observations,
-            reward=self._compute_terminal_reward(float(reward)) if done else 0.0,
+            reward=float(reward) if done else 0.0,
             done=done,
             metadata={
                 "env_feedback": info.get("env_feedback", ""),
@@ -163,8 +131,6 @@ class VisGymEnv(BaseTextEnv):
         return {
             "step_count": self.step_count,
             "parse_failures": self.parse_failures,
-            "format_successes": self.format_successes,
-            "format_success_rate": (self.format_successes / self.step_count if self.step_count > 0 else 0.0),
             "visgym_env_id": self.visgym_env_id,
         }
 
@@ -172,7 +138,7 @@ class VisGymEnv(BaseTextEnv):
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not metrics:
             return {}
-        numeric_keys = ["step_count", "parse_failures", "format_successes", "format_success_rate"]
+        numeric_keys = ["step_count", "parse_failures"]
         result = {}
         for key in numeric_keys:
             values = [m[key] for m in metrics if key in m]

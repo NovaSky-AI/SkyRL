@@ -7,8 +7,8 @@ the system which environment to run. The prompt column is a placeholder
 that passes PromptDataset's tokenizer length filter.
 
 Usage:
-    uv run examples/train/visgym/visgym_dataset.py --output_dir ~/data/visgym
-    uv run examples/train/visgym/visgym_dataset.py --env_id counting/easy --num_rows 128
+    uv run examples/train/visgym/dataset.py --output_dir ~/data/visgym
+    uv run examples/train/visgym/dataset.py --env_id counting/easy --num_rows 128
 """
 
 import argparse
