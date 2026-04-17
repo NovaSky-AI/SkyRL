@@ -100,6 +100,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
         )
         get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+        stop_strs = current_sampling_params.get("stop", None)
 
         # ── Accumulators ───────────────────────────────────────────────
         response_ids: List[int] = []
@@ -154,6 +155,15 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             stop_reason = engine_output["stop_reasons"][0]
             gen_logprobs = engine_output["response_logprobs"][0] if engine_output.get("response_logprobs") else None
 
+            # 2b. Append eos when sampling_params.stop is not None
+            added_eos = False
+            if stop_strs is not None and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn:
+                if gen_text.endswith(tuple(stop_strs)) and gen_ids[-1] != self.tokenizer.eos_token_id:
+                    gen_ids.append(self.tokenizer.eos_token_id)
+                    if gen_logprobs is not None:
+                        gen_logprobs.append(0.0)
+                    added_eos = True
+
             # 3. Environment step
             env_step_output = await self._run_in_executor_if_available(env.step, gen_text)
             new_obs = env_step_output["observations"]
@@ -163,9 +173,12 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             # 4. Append assistant message to conversation
             conversation.append({"role": "assistant", "content": gen_text})
 
-            # 5. Track generated tokens (loss_mask=1)
+            # 5. Track generated tokens (loss_mask=1, except appended eos which is masked out)
             response_ids.extend(gen_ids)
-            loss_mask.extend([1] * len(gen_ids))
+            if added_eos:
+                loss_mask.extend([1] * (len(gen_ids) - 1) + [0])
+            else:
+                loss_mask.extend([1] * len(gen_ids))
             if rollout_logprobs is not None:
                 rollout_logprobs.extend(gen_logprobs if gen_logprobs else [0.0] * len(gen_ids))
 
