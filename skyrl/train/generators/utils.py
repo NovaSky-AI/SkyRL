@@ -574,3 +574,14 @@ def get_response_ids_and_loss_mask_from_messages(
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
 
     return response_ids, loss_mask, rollout_logprobs
+
+
+def append_rollout_expert_indices(
+    rollout_expert_indices: List[List[List[int]]],
+    new_rollout_expert_indices: List[List[List[int]]],
+) -> List[List[List[int]]]:
+
+    existing_len = len(rollout_expert_indices)
+    if existing_len < len(new_rollout_expert_indices):
+        return rollout_expert_indices + new_rollout_expert_indices[existing_len:]
+    return rollout_expert_indices

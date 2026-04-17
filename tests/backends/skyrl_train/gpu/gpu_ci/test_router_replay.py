@@ -114,7 +114,18 @@ def build_training_input_from_text_samples(
         pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
     ],
 )
-async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
+@pytest.mark.parametrize(
+    "max_turns,env_class",
+    [
+        pytest.param(1, "gsm8k", id="single_turn"),
+        # Multi-turn variant exercises the append-only R3 merge path: turn 2's
+        # vLLM call re-prefills turn 1's tokens, but our merge keeps turn 1's
+        # routings for those positions. With correct append semantics the
+        # logprob diff vs vLLM should still drop when routing replay is on.
+        pytest.param(2, "gsm8k_multi_turn", id="multi_turn_append_only"),
+    ],
+)
+async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs, max_turns, env_class):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
     """
@@ -129,7 +140,11 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
             temperature=1.0,
         )
         cfg.generator.batched = False
-        cfg.generator.max_turns = 1
+        cfg.generator.max_turns = max_turns
+        # The multi-turn case must use conversation-style multi-turn so that
+        # `_update_agent_loop_state_with_multiturn_chat_template` is exercised
+        # and the append-only merge runs across turns.
+        cfg.generator.use_conversation_multi_turn = True
 
         tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
 
@@ -157,7 +172,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                 num_prompts=NUM_PROMPTS,
                 n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
                 max_prompt_length=512,
-                env_class="gsm8k",
+                env_class=env_class,
             )
             input_batch["sampling_params"] = get_sampling_params_for_backend(
                 "vllm",

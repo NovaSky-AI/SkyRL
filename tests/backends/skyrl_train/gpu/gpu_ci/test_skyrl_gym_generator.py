@@ -471,9 +471,23 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
+@pytest.mark.parametrize(
+    "use_conversation_multi_turn",
+    [True, False],
+    ids=[
+        "test_generator_multi_turn_gsm8k_router_replay_conversation",
+        "test_generator_multi_turn_gsm8k_router_replay_singleturn_chat",
+    ],
+)
+async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture, use_conversation_multi_turn):
     """
-    Test the generator with the multi-turn GSM8K environment for router replay
+    Test the generator with the multi-turn GSM8K environment for router replay.
+
+    Verifies both that R3 indices are returned in the expected shape and that
+    the multi-turn append-only merge preserves the vLLM length invariant
+    ``len(indices_i) == prompt_len_i + response_len_i - 1`` for every sample.
+    Runs with both conversation-style multi-turn (a new assistant message per
+    turn) and single-turn-chat-template (everything in one assistant message).
     """
     num_prompts = 5
     n_samples_per_prompt = 2
@@ -492,7 +506,7 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
         env_class="gsm8k_multi_turn",
         num_prompts=num_prompts,
         max_turns=2,
-        use_conversation_multi_turn=True,
+        use_conversation_multi_turn=use_conversation_multi_turn,
         max_env_workers=0,
         is_step_wise=False,
         temperature=0,
@@ -502,9 +516,28 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
 
     # check that the rollout expert indices are non-zero, and that the shape is (bs, seq_len, layer_num, topk)
     rollout_expert_indices = generator_output["rollout_expert_indices"]
+    prompt_token_ids = generator_output["prompt_token_ids"]
+    response_ids = generator_output["response_ids"]
     total_batch_size = num_prompts * n_samples_per_prompt
 
     assert len(rollout_expert_indices) == total_batch_size
     assert len(rollout_expert_indices[0]) < max_input_length
     assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
     assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer
+
+    # Append-only merge invariant: vLLM returns ``num_tokens - 1`` routings per
+    # request (the very last decoded token is never re-fed and has no routing).
+    # Across multi-turn append, the final accumulated length must equal the
+    # full sequence length minus 1 -- i.e. prompt + response - 1. If a turn
+    # had its EOS appended manually (single-turn chat template path), the
+    # generator pads one extra zero entry, giving exactly prompt + response.
+    for i in range(total_batch_size):
+        prompt_len = len(prompt_token_ids[i])
+        response_len = len(response_ids[i])
+        indices_len = len(rollout_expert_indices[i])
+        expected = prompt_len + response_len
+        assert indices_len in (expected - 1, expected), (
+            f"Sample {i}: rollout_expert_indices length {indices_len} != "
+            f"prompt+response-1 ({expected - 1}) or prompt+response ({expected}); "
+            f"prompt_len={prompt_len}, response_len={response_len}"
+        )
