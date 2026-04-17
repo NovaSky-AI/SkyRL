@@ -199,7 +199,9 @@ class MeshDispatch(Dispatch):
                 mini_batch = pad_training_input_batch(mini_batch, pad_size)
 
             mini_batch_size = len(mini_batch)
-            assert mini_batch_size % dp_size == 0, f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
+            assert (
+                mini_batch_size % dp_size == 0
+            ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
             chunk_size = mini_batch_size // dp_size
             chunks = mini_batch.chunk(chunk_size)
             all_chunk_refs.append([ray.put(chunk) for chunk in chunks])

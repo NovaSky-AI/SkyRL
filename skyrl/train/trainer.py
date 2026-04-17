@@ -639,7 +639,6 @@ class RayPPOTrainer:
             pixel_values = TensorList(pixel_values)
             image_grid_thw = TensorList(image_grid_thw)
 
-
         # 2. Convert to tensors.
         (
             sequences_tensor,

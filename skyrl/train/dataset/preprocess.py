@@ -206,6 +206,10 @@ def compute_prompt_mini_batch_boundaries(
         train_batch_size: Number of prompts in a training batch. For sanity check.
         is_stepwise: Whether the training is step-wise. For sanity check.
         n_samples_per_prompt: how many samples per prompt. For sanity check.
+    Returns:
+        List of (start, end) indices of the mini-batches. The length of the list is the number of
+        mini-batches, guaranteed to be `train_batch_size // mini_batch_size` regardless of whether
+        the training is step-wise or not.
 
     Consecutive equal entries in ``uids`` belong to the same prompt. Each mini batch spans exactly
     ``mini_batch_size`` prompts (the last may be smaller if the total prompt count is not divisible
@@ -233,7 +237,9 @@ def compute_prompt_mini_batch_boundaries(
     seen_uids.add(uids[0])
     for i in range(1, len(uids)):
         if uids[i] != uids[i - 1]:
-            assert uids[i] not in seen_uids, f"uid {uids[i]!r} appears in non-contiguous positions at index {i}. Full uids: {uids}"
+            assert (
+                uids[i] not in seen_uids
+            ), f"uid {uids[i]!r} appears in non-contiguous positions at index {i}. Full uids: {uids}"
             seen_uids.add(uids[i])
             prompt_end_indices.append(i)
     prompt_end_indices.append(len(uids))
@@ -251,15 +257,13 @@ def compute_prompt_mini_batch_boundaries(
         end_seq = prompt_end_indices[end_prompt_idx]
         boundaries.append((start_seq, end_seq))
         start_seq = end_seq
+    assert len(boundaries) == train_batch_size // mini_batch_size
 
     # Assert that the mini-batch boundaries are uniform for non-step-wise training.
     if not is_stepwise:
         expected_num_seq_in_mini_batch = n_samples_per_prompt * mini_batch_size
-        assert len(boundaries) == train_batch_size // mini_batch_size
         for i, (start, end) in enumerate(boundaries):
             assert start == i * expected_num_seq_in_mini_batch
             assert end - start == expected_num_seq_in_mini_batch
-    else:
-        assert len(boundaries) >= train_batch_size // mini_batch_size
 
     return boundaries

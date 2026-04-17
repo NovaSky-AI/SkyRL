@@ -165,7 +165,7 @@ class TestComputePromptMiniBatchBoundaries:
         """
         is_stepwise = False
         uids = _make_uids_fixed(train_batch_size, spp)
-        boundaries = compute_prompt_mini_batch_boundaries(uids, mini_batch_size, train_batch_size, is_stepwise, spp)
+        compute_prompt_mini_batch_boundaries(uids, mini_batch_size, train_batch_size, is_stepwise, spp)
 
 
 # ---------------------------------------------------------------------------

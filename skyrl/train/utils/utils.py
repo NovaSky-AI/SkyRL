@@ -300,8 +300,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
         # TODO(Charlie): this can be fixed, can revisit later.
         raise ValueError(
-            "`token_mean_legacy` loss reduction is not supported with step-wise training. "
-            "Use `token_mean` instead."
+            "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
         )
 
     assert cfg.trainer.algorithm.loss_reduction in (
