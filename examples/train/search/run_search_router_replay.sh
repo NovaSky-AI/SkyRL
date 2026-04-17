@@ -29,9 +29,9 @@ set -x
 # Dataset path (shared storage across nodes, or local storage on each node)
 DATA_DIR="$HOME/data/searchR1"
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-30B-A3B}"
+MODEL_NAME="/home/ray/models/Qwen3-30B-A3B"
 
-NUM_NODES=${NUM_NODES:-4}
+NUM_NODES=${NUM_NODES:-2}
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-8}
 
 MEGATRON_TP=${MEGATRON_TP:-2}
@@ -44,7 +44,7 @@ MICRO_TRAIN_BATCH_SIZE_PER_GPU=${MICRO_TRAIN_BATCH_SIZE_PER_GPU:-1}
 MICRO_FORWARD_BATCH_SIZE_PER_GPU=${MICRO_FORWARD_BATCH_SIZE_PER_GPU:-2}
 
 # mp executor requires single-node-per-engine; keep INFERENCE_ENGINE_TP <= NUM_GPUS_PER_NODE.
-NUM_INFERENCE_ENGINES=${NUM_INFERENCE_ENGINES:-4}
+NUM_INFERENCE_ENGINES=${NUM_INFERENCE_ENGINES:-1}
 INFERENCE_ENGINE_TP=${INFERENCE_ENGINE_TP:-8}
 
 # Router replay (R3) settings
@@ -95,20 +95,20 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --frozen --extra megatron -m sky
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.gpu_memory_utilization=0.6 \
+  generator.inference_engine.gpu_memory_utilization=0.35 \
   generator.inference_engine.async_engine=true \
   generator.inference_engine.enable_return_routed_experts=$ROUTER_REPLAY \
   generator.inference_engine.distributed_executor_backend=$DISTRIBUTED_EXECUTOR_BACKEND \
   trainer.use_sample_packing=true \
   trainer.epochs=1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=512 \
-  trainer.policy_mini_batch_size=256 \
+  trainer.train_batch_size=256 \
+  trainer.policy_mini_batch_size=128 \
   trainer.micro_forward_batch_size_per_gpu=$MICRO_FORWARD_BATCH_SIZE_PER_GPU \
   trainer.micro_train_batch_size_per_gpu=$MICRO_TRAIN_BATCH_SIZE_PER_GPU \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
-  generator.sampling_params.max_generate_length=500 \
+  generator.sampling_params.max_generate_length=256 \
   generator.batched=false \
   $MULTI_TURN_ARGS \
   generator.n_samples_per_prompt=5 \
