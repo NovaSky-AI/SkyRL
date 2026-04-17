@@ -48,6 +48,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
@@ -605,7 +606,17 @@ class RayPPOTrainer:
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
-        """Converts lists to a padded batch of tensors for training"""
+        """Converts lists to a padded batch of tensors for training
+
+        Args:
+            generator_output (GeneratorOutput): Generated rollouts and associated data.
+            uids (List[str]): List of prompt-unique identifiers for each generator ouput in the same
+                order as `generator_output`. Used to identify which prompt each generated rollout belongs to.
+        Returns:
+            training_input (TrainingInputBatch): Padded batch of tensors for training. It preserves the
+                order of `generator_output` and hence `uids`.
+        """
+        # 1. Extract generator output fields.
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
         rewards: List[List[float]] = generator_output["rewards"]
@@ -628,6 +639,8 @@ class RayPPOTrainer:
             pixel_values = TensorList(pixel_values)
             image_grid_thw = TensorList(image_grid_thw)
 
+
+        # 2. Convert to tensors.
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -657,6 +670,7 @@ class RayPPOTrainer:
             ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
 
+        # 3. Create training input batch.
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -674,7 +688,20 @@ class RayPPOTrainer:
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
 
-        # padded response length
+        # 4. Compute mini-batch boundaries for train_critic_and_policy(). It excludes the ones
+        # we will add in pad_training_input_batch().
+        train_batch_size = self.cfg.trainer.train_batch_size
+        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
+        is_stepwise = self.cfg.generator.step_wise_trajectories
+        training_input.metadata["policy_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
+            uids, self.cfg.trainer.policy_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+        )
+        if self.cfg.trainer.critic.model.path is not None:
+            training_input.metadata["critic_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
+                uids, self.cfg.trainer.critic_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+            )
+
+        # 5. Record metadata and metrics.
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
         logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
@@ -684,14 +711,11 @@ class RayPPOTrainer:
                 "generate/batch_padded_seq_len": batch_padded_seq_len,
             }
         )
-        if self.cfg.generator.step_wise_trajectories:
-            assert (
-                "trajectory_ids" in generator_output
-            ), "Expected `trajectory_ids` in generator output for step wise training"
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
 
+        # 6. Pad the batch, only needed for step-wise training's `fwd_logprobs_values_reward()`.
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         dp_size = self.dispatch.get_lcm_dp_size()
         pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
@@ -1052,7 +1076,11 @@ class RayPPOTrainer:
         return data
 
     @torch.no_grad()
-    def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
+    def _normalize_advantages(
+        self,
+        data: TrainingInputBatch,
+        mini_batch_boundaries: List[Tuple[int, int]],
+    ) -> TrainingInputBatch:
         advantages = data["advantages"]
         response_mask = data["response_mask"]
 
@@ -1065,11 +1093,8 @@ class RayPPOTrainer:
             data["advantages"] = (advantages - mean) * rstd
 
         # Step 2: Loss reduction normalization per mini-batch
-        num_mini_batches = len(data) // mini_batch_size
         normalized_advantages = torch.zeros_like(advantages)
-        for local_step in range(num_mini_batches):
-            start_idx = local_step * mini_batch_size
-            end_idx = (local_step + 1) * mini_batch_size
+        for start_idx, end_idx in mini_batch_boundaries:
             mini_batch = data[start_idx:end_idx]
             normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
                 advantages=mini_batch["advantages"],
@@ -1099,20 +1124,17 @@ class RayPPOTrainer:
         Returns:
             Dict of reduced metrics from training
         """
-        # Compute mini batch size from config (algorithm-level concept)
-        n_samples = self.cfg.generator.n_samples_per_prompt
+        boundaries = data.metadata[f"{model}_mini_batch_boundaries"]
+
         if model == "policy":
-            mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
             # Normalize advantages for policy training; critic training does not need this
-            data = self._normalize_advantages(data, mini_batch_size)
-        else:
-            mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
+            data = self._normalize_advantages(data, boundaries)
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
-        all_chunk_refs = self.dispatch.stage_data(model, data, mini_batch_size)
+        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):

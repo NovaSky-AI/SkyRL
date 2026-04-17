@@ -97,6 +97,9 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
         f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
+
+    # TODO(Charlie): For step-wise training, the number of sequences per prompt is variable, and
+    # padded mini-batch may not be divisible by dp_size. Should check if we need these assertions.
     policy_mini_batch_size_per_gpu = (
         cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -293,6 +296,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             f"and the estimator only sees the last step's slice — there is no cross-step temporal "
             f"connection. Use an outcome-based estimator (grpo, rloo, maxrl) or disable "
             f"step_wise_trajectories."
+        )
+    if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
+        # TODO(Charlie): this can be fixed, can revisit later.
+        raise ValueError(
+            "`token_mean_legacy` loss reduction is not supported with step-wise training. "
+            "Use `token_mean` instead."
         )
 
     assert cfg.trainer.algorithm.loss_reduction in (
