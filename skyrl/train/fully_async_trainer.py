@@ -200,14 +200,14 @@ class _AsyncDataloader:
     A train dataloader wrapper that accommodates the need of fully async training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
     - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
-    - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
-      because the batch size is 1 in fully async training.
+    - Set the effective dataloader length to be divisible by the outer train batch size, since we cannot rely on
+      `drop_last` because the batch size is 1 in fully async training.
     """
 
-    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):
+    def __init__(self, train_dataloader: StatefulDataLoader, train_batch_size: int):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
-        self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
+        self._effective_dataloader_length = len(self._train_dataloader) // train_batch_size * train_batch_size
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
         self._consumed_data_uids: Set[str] = set()
@@ -254,7 +254,7 @@ class _AsyncDataloader:
         assert self._lock is not None, "Dataloader not initialized; call reset() first"
         async with self._lock:
             for uid in uids:
-                assert uid not in self._consumed_data_uids, "Duplicate UID found in mini-batch"
+                assert uid not in self._consumed_data_uids, "Duplicate UID found in train batch"
                 self._consumed_data_uids.add(uid)
 
     def get_consumed_uids_list(self) -> List[str]:
@@ -270,19 +270,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
-        self.mini_batch_size = cfg.trainer.policy_mini_batch_size
+        self.train_batch_size = cfg.trainer.train_batch_size
+        self.policy_mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
 
         assert (
             # otherwise wasted throughput
-            self.mini_batch_size <= self.num_parallel_generation_workers
+            self.train_batch_size <= self.num_parallel_generation_workers
             and
             # otherwise would never use all workers due to capacity constraint
-            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
+            self.num_parallel_generation_workers <= self.train_batch_size * (self.max_staleness_steps + 1)
         ), (
             "Invalid num_parallel_generation_workers, the following must hold: "
-            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
+            "train_batch_size <= num_parallel_generation_workers <= train_batch_size * (max_staleness_steps + 1). "
+            f"Got: {self.train_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
         )
 
         # Initialize base trainer
@@ -290,8 +291,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Some async-specific validations
         assert (
-            self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
-        ), "train_batch_size must equal policy_mini_batch_size for fully async training"
+            self.train_batch_size >= self.policy_mini_batch_size
+        ), "train_batch_size must be >= policy_mini_batch_size for fully async training"
+        assert (
+            self.train_batch_size % self.policy_mini_batch_size == 0
+        ), "train_batch_size must be divisible by policy_mini_batch_size for fully async training"
+        self.num_policy_minibatches_per_outer_step = self.train_batch_size // self.policy_mini_batch_size
         assert (
             self.cfg.trainer.algorithm.dynamic_sampling.type is None
         ), "dynamic sampling is not supported for fully async training yet."
@@ -305,11 +310,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
-        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
+        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.train_batch_size)
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
-            mini_batch_size=self.mini_batch_size,
+            mini_batch_size=self.train_batch_size,
             max_staleness_steps=self.max_staleness_steps,
+        )
+        logger.info(
+            "Fully async outer-batch semantics: "
+            f"train_batch_size={self.train_batch_size}, "
+            f"policy_mini_batch_size={self.policy_mini_batch_size}, "
+            f"num_policy_minibatches_per_outer_step={self.num_policy_minibatches_per_outer_step}"
         )
 
     def _build_train_dataloader_and_compute_training_steps(self):
@@ -317,7 +328,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
-        self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
+        self.num_steps_per_epoch = len(self.train_dataloader) // self.train_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
@@ -344,7 +355,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if steps_completed_in_epoch == 0 and len(loaded_consumed_data_uids_set) > 0:
                         # When resuming mid-epoch at the boundary, treat modulo 0 as a full epoch.
                         steps_completed_in_epoch = self.num_steps_per_epoch
-                    expected_consumed_in_epoch = self.mini_batch_size * steps_completed_in_epoch
+                    expected_consumed_in_epoch = self.train_batch_size * steps_completed_in_epoch
                     assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
                         "Unexpected number of consumed data UIDs. Got: "
                         f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
@@ -371,9 +382,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
+            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1),
+            # where B is the outer train_batch_size in groups.
             generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
+                maxsize=self.train_batch_size * (self.max_staleness_steps + 1)
             )
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers
@@ -384,38 +396,40 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have enough groups buffered.
-                    cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
+                    # 1. Wait until we have enough groups buffered for one outer train batch.
+                    cur_generation_group_train_batch: List[GeneratedOutputGroup] = []
                     with Timer("wait_for_generation_buffer", self.all_timings):
                         buffer_pbar = tqdm(
-                            total=self.mini_batch_size,
+                            total=self.train_batch_size,
                             initial=0,
                             desc="Generation Buffer Progress",
                             position=1,
                         )
                         # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
-                        # self.mini_batch_size, and assume that all trajectories succeed (just like sync training),
-                        # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
-                        # should handle the case where the dataloader is exhausted and the buffer is empty, or
-                        # else this loop will never exit.
-                        while len(cur_generation_group_mini_batch) < self.mini_batch_size:
+                        # self.train_batch_size, and assume that all trajectories succeed (just like sync training),
+                        # so we always get a full outer train batch. Otherwise (e.g. want to drop stale trajectories),
+                        # we should handle the case where the dataloader is exhausted and the buffer is empty, or else
+                        # this loop will never exit.
+                        while len(cur_generation_group_train_batch) < self.train_batch_size:
                             # We do finish-time FIFO here (not schedule-time FIFO)
-                            cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                            cur_generation_group_train_batch.append(await generation_output_group_buffer.get())
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
 
-                    # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
+                    # 2. Post-process the generated groups for one outer train batch, aggregating to a single
+                    # GeneratorOutput, and convert to training format.
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
+                            self.convert_generation_group_train_batch_to_training_input,
+                            cur_generation_group_train_batch,
                         )
 
                     # 3. Run training and update consumed UIDs.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
                         await self.async_train_dataloader.mark_consumed_uids(
-                            [g.uid for g in cur_generation_group_mini_batch]
+                            [g.uid for g in cur_generation_group_train_batch]
                         )
 
                     # 4. After training: pause generation, sync weights, resume.
@@ -462,7 +476,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if steps_completed_in_epoch == 0:
                     # At the end of an epoch, modulo becomes 0 but we've consumed a full epoch.
                     steps_completed_in_epoch = self.num_steps_per_epoch
-                expected_consumed_in_epoch = self.mini_batch_size * steps_completed_in_epoch
+                expected_consumed_in_epoch = self.train_batch_size * steps_completed_in_epoch
                 actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
                 assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
                     "Unexpected number of consumed data UIDs. Got: "
@@ -615,16 +629,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.cfg.generator.inference_engine,
         )
 
-    def convert_generation_group_mini_batch_to_training_input(
-        self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
+    def convert_generation_group_train_batch_to_training_input(
+        self, cur_generation_group_train_batch: List[GeneratedOutputGroup]
     ) -> TrainingInputBatch:
-        """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch."""
+        """Given one outer train batch of generated groups, concatenate them and convert to a TrainingInputBatch."""
         generator_outputs = []
         uids = []
         stalenesses = []
         staleness_violation_count = 0
-        group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
-        for cur_generated_output_group in cur_generation_group_mini_batch:
+        group_size = len(cur_generation_group_train_batch[0].generator_output["response_ids"])
+        for cur_generated_output_group in cur_generation_group_train_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
