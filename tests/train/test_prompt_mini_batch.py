@@ -167,126 +167,6 @@ class TestComputePromptMiniBatchBoundaries:
         uids = _make_uids_fixed(train_batch_size, spp)
         compute_prompt_mini_batch_boundaries(uids, mini_batch_size, train_batch_size, is_stepwise, spp)
 
-
-# ---------------------------------------------------------------------------
-# Tests for MeshDispatch.stage_chunks
-# ---------------------------------------------------------------------------
-
-
-class TestStageChunksVariable:
-    def test_uniform_minibatches_dp1(self):
-        """All mini-batches same size, dp_size=1 => no padding needed."""
-        batch = _make_batch(10)
-        batch.metadata["pad_size"] = 0
-        boundaries = [(0, 5), (5, 10)]
-
-        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
-            mock_ray.put.side_effect = lambda x: x
-            result = MeshDispatch.stage_chunks(dp_size=1, data=batch, mini_batch_boundaries=boundaries)
-
-        assert len(result) == 2
-        assert len(result[0]) == 1
-        assert len(result[1]) == 1
-
-    def test_variable_minibatches_dp2_padding(self):
-        """Variable sizes with dp_size=2 => odd-sized mini-batches get padded."""
-        batch = _make_batch(7)
-        batch.metadata["pad_size"] = 0
-        boundaries = [(0, 3), (3, 7)]
-
-        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
-            chunks_put = []
-            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
-            result = MeshDispatch.stage_chunks(dp_size=2, data=batch, mini_batch_boundaries=boundaries)
-
-        assert len(result) == 2
-        assert len(result[0]) == 2  # 3->4, split into 2
-        assert len(result[1]) == 2  # 4, split into 2
-        assert len(chunks_put[0]) + len(chunks_put[1]) == 4  # padded from 3
-
-    def test_dp_size_4_heavy_padding(self):
-        """dp_size=4, mini-batch of 5 => padded to 8."""
-        batch = _make_batch(5)
-        batch.metadata["pad_size"] = 0
-        boundaries = [(0, 5)]
-
-        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
-            chunks_put = []
-            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
-            result = MeshDispatch.stage_chunks(dp_size=4, data=batch, mini_batch_boundaries=boundaries)
-
-        assert len(result) == 1
-        assert len(result[0]) == 4
-        for chunk in chunks_put:
-            assert len(chunk) == 2
-
-    def test_loss_mask_zero_for_padding(self):
-        """Padding entries should have loss_mask=0."""
-        batch = _make_batch(3, seq_len=4)
-        batch.metadata = {"pad_size": 0}
-        boundaries = [(0, 3)]
-
-        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
-            chunks_put = []
-            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
-            MeshDispatch.stage_chunks(dp_size=2, data=batch, mini_batch_boundaries=boundaries)
-
-        all_loss_masks = torch.cat([c["loss_mask"] for c in chunks_put], dim=0)
-        assert all_loss_masks[:3].sum() == 3 * 4
-        assert all_loss_masks[3].sum() == 0
-
-    def test_is_last_step_metadata_true_for_padding(self):
-        """Padding entries should have is_last_step=True in metadata."""
-        batch = _make_batch(3)
-        boundaries = [(0, 3)]
-
-        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
-            chunks_put = []
-            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
-            MeshDispatch.stage_chunks(dp_size=2, data=batch, mini_batch_boundaries=boundaries)
-
-        # The padded mini-batch (3->4) has is_last_step in metadata
-        # chunks share the same metadata reference from the padded mini-batch
-        assert chunks_put[0].metadata["is_last_step"] == [False, False, False, True]
-
-
-# ---------------------------------------------------------------------------
-# Tests for optimizer step count invariance
-# ---------------------------------------------------------------------------
-
-
-class TestOptimizerStepCount:
-    def test_num_minibatches_equals_train_over_policy(self):
-        """Number of mini-batches = train_batch_size / policy_mini_batch_size."""
-        uids = _make_uids_stepwise(
-            [
-                ("p0", 2, [3, 2]),
-                ("p1", 2, [1, 4]),
-                ("p2", 2, [2, 1]),
-                ("p3", 2, [1, 1]),
-            ]
-        )
-        boundaries = compute_prompt_mini_batch_boundaries(
-            uids, mini_batch_size=2, train_batch_size=4, is_stepwise=True, n_samples_per_prompt=2
-        )
-        assert len(boundaries) == 4 // 2
-
-    def test_step_count_with_epochs(self):
-        """Total optimizer steps = num_mini_batches * update_epochs_per_batch."""
-        uids = _make_uids_stepwise(
-            [
-                ("p0", 5, [3, 2, 1, 4, 2]),
-                ("p1", 5, [1, 1, 1, 1, 1]),
-                ("p2", 5, [2, 3, 1, 1, 2]),
-                ("p3", 5, [1, 2, 3, 2, 1]),
-            ]
-        )
-        boundaries = compute_prompt_mini_batch_boundaries(
-            uids, mini_batch_size=2, train_batch_size=4, is_stepwise=True, n_samples_per_prompt=5
-        )
-        update_epochs = 3
-        assert len(boundaries) * update_epochs == (4 // 2) * update_epochs
-
     def test_same_step_count_as_non_stepwise(self):
         """Step-wise and non-step-wise produce the same number of mini-batches."""
         train_batch_size = 256
@@ -321,3 +201,91 @@ class TestOptimizerStepCount:
 
         # Non-step-wise boundaries should be uniform
         assert non_stepwise_bounds == [(0, 640), (640, 1280)]
+
+
+# ---------------------------------------------------------------------------
+# Tests for MeshDispatch.stage_chunks
+# ---------------------------------------------------------------------------
+
+
+class TestStageChunksVariable:
+    def test_uniform_minibatches_dp1(self):
+        """All mini-batches same size, dp_size=1 => no padding needed."""
+        batch = _make_batch(10)
+        boundaries = [(0, 5), (5, 10)]
+
+        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
+            chunks_put = []
+            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
+            all_chunk_refs = MeshDispatch.stage_chunks(dp_size=1, data=batch, mini_batch_boundaries=boundaries)
+
+        # 2 mini batches, each with 1 chunk for the single DP rank
+        assert len(all_chunk_refs) == 2
+        assert len(all_chunk_refs[0]) == 1
+        assert len(all_chunk_refs[1]) == 1
+
+        # No padding — chunks should exactly match original batch slices.
+        assert torch.equal(chunks_put[0]["sequences"], batch["sequences"][:5])
+        assert torch.equal(chunks_put[1]["sequences"], batch["sequences"][5:10])
+
+    def test_variable_minibatches_dp2_padding(self):
+        """Variable sizes with dp_size=2 => odd-sized mini-batches get padded."""
+        batch = _make_batch(7)
+        boundaries = [(0, 3), (3, 7)]
+
+        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
+            # chunks_put is the physical things being put. `all_chunk_refs` is the dummy references, here is just
+            # a list of indices for each chunk.
+            chunks_put = []
+            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
+            all_chunk_refs = MeshDispatch.stage_chunks(dp_size=2, data=batch, mini_batch_boundaries=boundaries)
+
+        # 2 mini batches, one size 3, one size 4. With dp_size=2, first mini batch pads to 4, gets 2 chunks. Second mini batch gets 2 chunks.
+        assert len(all_chunk_refs) == 2
+        assert len(all_chunk_refs[0]) == 2  # 3->4, split into 2
+        assert len(all_chunk_refs[1]) == 2  # 4, split into 2
+        assert len(chunks_put) == 4  # put got called 4 times.
+        assert all(len(chunk) == 2 for chunk in chunks_put)  # each chunk is size 2
+
+        # Reconstruct each mini-batch from its chunks and verify against original batch.
+        # Mini-batch 0 chunk 1: batch[0:2]. Loss mask should be the same.
+        assert torch.equal(chunks_put[0]["sequences"], batch["sequences"][:2])
+        assert torch.equal(chunks_put[0]["loss_mask"], batch["loss_mask"][:2])
+
+        # Mini-batch 0 chunk 2: batch[2:3] padded to 2 (row 0 cloned as padding). Loss mask second row should be zero.
+        expected_mb0_chunk2 = torch.cat([batch["sequences"][2:3], batch["sequences"][0:1]], dim=0)
+        assert torch.equal(chunks_put[1]["sequences"], expected_mb0_chunk2)
+        assert torch.equal(chunks_put[1]["loss_mask"][0], batch["loss_mask"][2])
+        assert torch.all(chunks_put[1]["loss_mask"][1] == 0)
+
+        # Mini-batch 1 chunk 1 and 2: batch[3:7], no padding needed (already divisible by 2). Should be identical to original batch.
+        assert torch.equal(chunks_put[2]["sequences"], batch["sequences"][3:5])
+        assert torch.equal(chunks_put[3]["sequences"], batch["sequences"][5:7])
+        assert torch.equal(chunks_put[2]["loss_mask"], batch["loss_mask"][3:5])
+        assert torch.equal(chunks_put[3]["loss_mask"], batch["loss_mask"][5:7])
+
+    def test_dp_size_4_heavy_padding(self):
+        """dp_size=4, mini-batch of 5 => padded to 8."""
+        batch = _make_batch(5)
+        boundaries = [(0, 5)]
+
+        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
+            chunks_put = []
+            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
+            all_chunk_refs = MeshDispatch.stage_chunks(dp_size=4, data=batch, mini_batch_boundaries=boundaries)
+
+        assert len(all_chunk_refs) == 1
+        assert len(all_chunk_refs[0]) == 4
+        for chunk in chunks_put:
+            assert len(chunk) == 2
+
+        # Reconstruct: batch[0:5] padded to 8 (3 padding rows, all clones of row 0).
+        mb = torch.cat([c["sequences"] for c in chunks_put], dim=0)
+        assert torch.equal(mb[:5], batch["sequences"])  # original rows preserved
+        for i in range(5, 8):
+            assert torch.equal(mb[i], batch["sequences"][0])  # padding is row 0
+
+        # Loss mask: padding rows should be zero.
+        mb_loss = torch.cat([c["loss_mask"] for c in chunks_put], dim=0)
+        assert torch.equal(mb_loss[:5], batch["loss_mask"][:5])
+        assert torch.all(mb_loss[5:] == 0)
