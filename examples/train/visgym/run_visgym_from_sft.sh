@@ -52,7 +52,8 @@ fi
 
 _SKYRL_USE_NEW_INFERENCE=1 \
 uv run --isolated --extra fsdp \
-  python examples/train/visgym/entrypoint_sft.py \
+  python examples/train/visgym/entrypoint.py \
+  --env_variant sft \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$EVAL_DATA_DIR/train.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

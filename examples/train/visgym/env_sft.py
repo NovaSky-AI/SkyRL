@@ -59,24 +59,16 @@ class VisGymEnv(BaseTextEnv):
         self.parse_failures = 0
         self.format_successes = 0
 
-    def _get_available_actions(self) -> List[str]:
-        """Return the action names this environment supports, if available."""
-        try:
-            return list(self.visgym_env.action_space.get_function_names())
-        except Exception:
-            return []
-
-    def _build_parse_error(self, available_actions: List[str]) -> str:
+    def _build_parse_error(self) -> str:
         """Build a concise, informative error message for parse failures."""
-        msg = "Action parsing failed. Could not find a valid action tuple in your response."
-        msg += "\nPlease respond with exactly one action as a Python tuple."
-        if available_actions:
-            names = ", ".join(f"'{a}'" for a in available_actions)
-            msg += f"\nAvailable actions: {names}"
-            msg += f"\nExample: ('{available_actions[0]}', 0) or ('stop', 'stop')"
-        else:
-            msg += "\nExample: ('action_name', payload)"
-        return msg
+        available_actions = list(self.visgym_env.action_space.get_function_names())
+        names = ", ".join(f"'{a}'" for a in available_actions)
+        return (
+            "Action parsing failed. Could not find a valid action tuple in your response."
+            "\nPlease respond with exactly one action as a Python tuple."
+            f"\nAvailable actions: {names}"
+            f"\nExample: ('{available_actions[0]}', 0) or ('stop', 'stop')"
+        )
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """Reset the VisGym env and return the initial multimodal prompt."""
@@ -109,7 +101,7 @@ class VisGymEnv(BaseTextEnv):
 
             if not done:
                 image = self.visgym_env.render()
-                feedback = self._build_parse_error(self._get_available_actions())
+                feedback = self._build_parse_error()
                 obs_msg = make_image_message(feedback, image)
                 observations = [obs_msg]
             else:

@@ -23,7 +23,7 @@ Reward is sparse — delivered at the terminal step based on whether the task wa
 
 ## Two Recipes
 
-VisGym ships with two training recipes that differ in how the model is asked to output actions:
+VisGym ships with two training recipes that differ in how the model is asked to output actions. The reason there are two: the vanilla instruct model (`Qwen/Qwen3-VL-8B-Instruct`) struggles to reliably produce the structured tuple action format (`('move', 0)`) — it emits code fences, mis-matched quotes, or degenerates into prose. Rather than fight the model's priors with heavy format-reward shaping, the instruct recipe uses a simpler `<action>keyword</action>` XML tag that the base model hits naturally. Starting from an SFT checkpoint that already knows the tuple format unlocks the richer action space at the cost of requiring the SFT pass upfront.
 
 ### `run_visgym_from_sft.sh` — tuple-action, SFT warm-start
 
@@ -86,7 +86,8 @@ Key overrides from both scripts:
 
 ```bash title="examples/train/visgym/run_visgym_from_sft.sh (excerpt)"
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
-  python examples/train/visgym/entrypoint_sft.py \
+  python examples/train/visgym/entrypoint.py \
+  --env_variant sft \
   trainer.policy.model.path="$MODEL_PATH" \         # SFT checkpoint
   trainer.strategy=fsdp2 \
   # VLM flags
@@ -105,7 +106,8 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
 
 ```bash title="examples/train/visgym/run_visgym_from_instruct.sh (excerpt)"
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
-  python examples/train/visgym/entrypoint_instruct.py \
+  python examples/train/visgym/entrypoint.py \
+  --env_variant instruct \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.strategy=fsdp2 \
   # Same VLM flags as above
