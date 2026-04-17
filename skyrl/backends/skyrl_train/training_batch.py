@@ -468,6 +468,7 @@ class TrainingInput(TypedDict, total=False):
     advantages: Float[torch.Tensor, "batch_size seq_len"]
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    process_rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors

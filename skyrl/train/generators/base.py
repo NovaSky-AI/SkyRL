@@ -41,6 +41,8 @@ class GeneratorOutput(TypedDict):
     rollout_logprobs: Optional[List[List[float]]]
     trajectory_ids: Optional[List[TrajectoryID]]
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
+    # Optional per-token process rewards (e.g. for FoldGRPO). Separate from outcome rewards.
+    process_rewards: Optional[List[List[float]]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
 

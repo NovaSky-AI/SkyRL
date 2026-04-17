@@ -297,6 +297,15 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+@dataclass
+class FoldGRPOConfig(BaseConfig):
+
+    reward_clip_low: float = 0.0
+    """Lower bound for clipping the combined (outcome + process) reward."""
+    reward_clip_high: float = 1.0
+    """Upper bound for clipping the combined (outcome + process) reward."""
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -330,7 +339,7 @@ class OffPolicyCorrectionConfig(BaseConfig):
 @dataclass
 class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
-    """``"grpo"``, ``"gae"``, ``"rloo"``, ``"reinforce++"``, or custom via ``AdvantageEstimatorRegistry``."""
+    """``"grpo"``, ``"gae"``, ``"rloo"``, ``"reinforce++"``, ``"fold_grpo"``, or custom via ``AdvantageEstimatorRegistry``."""
     kl_ctrl: KLCtrlConfig = field(default_factory=KLCtrlConfig)
     """Only used when ``use_kl_in_reward=True`` (not applied when ``use_kl_loss=True``).
     Uses ``kl_loss_coef`` as the initial KL coefficient."""
@@ -370,6 +379,8 @@ class AlgorithmConfig(BaseConfig):
     """Deprecated: use ``off_policy_correction`` instead."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
+    fold_grpo: FoldGRPOConfig = field(default_factory=FoldGRPOConfig)
+    """Only used when ``advantage_estimator="fold_grpo"``."""
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)

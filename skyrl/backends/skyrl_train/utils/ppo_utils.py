@@ -403,6 +403,7 @@ class BaseFunctionRegistry:
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
+    FOLD_GRPO = "fold_grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
     MAXRL = "maxrl"
@@ -429,6 +430,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
         ae_avail = set(cls.list_available())
         ae_types = {
             "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
+            "fold_grpo": [AdvantageEstimator.FOLD_GRPO, compute_fold_grpo_advantage],
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
@@ -1222,6 +1224,93 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.FOLD_GRPO)
+def compute_fold_grpo_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    grpo_norm_by_std: bool = True,
+    config: Optional[AlgorithmConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for FoldGRPO (Context-Folding GRPO).
+    Based on https://arxiv.org/abs/2510.11967
+
+    GRPO with token-level process rewards. The group baseline is computed from
+    outcome rewards only: Â_{i,t} = (clip(R_i + Q_{i,t}) - mean({R_j})) / std({R_j}).
+
+    Expects process_rewards (Float[torch.Tensor, "batch_size seqlen"]) via kwargs.
+    Falls back to standard GRPO when process_rewards is not provided.
+
+    Expects:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"] (outcome rewards)
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    process_rewards: Optional[torch.Tensor] = kwargs.get("process_rewards", None)
+
+    if config is not None and hasattr(config, "fold_grpo"):
+        clip_low = config.fold_grpo.reward_clip_low
+        clip_high = config.fold_grpo.reward_clip_high
+    else:
+        clip_low = 0.0
+        clip_high = 1.0
+
+    with torch.no_grad():
+        # outcome reward R_i: response-level scalar per trajectory
+        scores = token_level_rewards.sum(dim=-1)
+
+        bsz = scores.shape[0]
+        id2score = defaultdict(list)
+        id2mean = {}
+        id2std = {}
+
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx, group_scores_list in id2score.items():
+            if len(group_scores_list) == 1:
+                id2mean[idx] = torch.zeros((), device=scores.device)
+                id2std[idx] = torch.ones((), device=scores.device)
+            else:
+                group_scores = torch.stack(group_scores_list)
+                id2mean[idx] = group_scores.mean()
+                id2std[idx] = group_scores.std()
+
+        if process_rewards is not None:
+            # full FoldGRPO: clip(R_i + Q_{i,t}) then group-normalize
+            combined = scores.unsqueeze(-1) + process_rewards
+            combined = combined.clamp(min=clip_low, max=clip_high)
+
+            # Vectorized group normalization
+            batch_means = torch.stack([id2mean[idx] for idx in index]).unsqueeze(-1)
+            batch_stds = torch.stack([id2std[idx] for idx in index]).unsqueeze(-1)
+
+            if grpo_norm_by_std:
+                advantages = (combined - batch_means) / (batch_stds + epsilon)
+            else:
+                advantages = combined - batch_means
+            advantages = advantages * response_mask
+        else:
+            # fallback: response-level advantage (same as standard GRPO)
+            batch_means = torch.stack([id2mean[idx] for idx in index])
+            batch_stds = torch.stack([id2std[idx] for idx in index])
+            if grpo_norm_by_std:
+                scores = (scores - batch_means) / (batch_stds + epsilon)
+            else:
+                scores = scores - batch_means
+            advantages = scores.unsqueeze(-1) * response_mask
+
+        returns = advantages.clone()
+
+    return advantages, returns
 
 
 @register_advantage_estimator(AdvantageEstimator.MAXRL)

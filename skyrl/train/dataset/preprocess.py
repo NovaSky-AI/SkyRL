@@ -38,6 +38,7 @@ def convert_prompts_responses_to_batch_tensors(
     logprobs: Optional[List[List[float]]] = None,
     rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
     max_seq_len: Optional[int] = None,
+    process_rewards: Optional[List[List[float]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -46,6 +47,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
     Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
+    Optional[Float[torch.Tensor, "batch response_len"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -179,6 +181,14 @@ def convert_prompts_responses_to_batch_tensors(
             elif rollout_expert_indices_tensor.max().item() < 2**15:
                 rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
 
+    # Same right-alignment for process rewards.
+    process_rewards_tensor = None
+    if process_rewards:
+        process_rewards_tensor = torch.zeros(len(prompts), max_response, dtype=torch.float)
+        for i, pr in enumerate(process_rewards):
+            pr_t = torch.tensor(pr, dtype=torch.float)
+            process_rewards_tensor[i, max_response - len(pr) :] = pr_t
+
     return (
         sequences,
         attention_mask,
@@ -187,6 +197,7 @@ def convert_prompts_responses_to_batch_tensors(
         ret_loss_masks,
         logprobs_tensor,
         rollout_expert_indices_tensor,
+        process_rewards_tensor,
     )
 
 
