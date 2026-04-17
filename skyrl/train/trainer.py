@@ -1,4 +1,3 @@
-import copy
 import math
 import os
 import shutil
@@ -27,7 +26,11 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -690,7 +693,9 @@ class RayPPOTrainer:
         ) / len(response_ids)
 
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
-        training_input = self.pad_batch(training_input)
+        dp_size = self.dispatch.get_lcm_dp_size()
+        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
+        training_input = pad_training_input_batch(training_input, pad_size)
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
 
         return training_input
@@ -909,50 +914,6 @@ class RayPPOTrainer:
         data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
-
-    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
-        """Pad the batch to be divisible by dp size"""
-        import math
-
-        dp_size = self.dispatch.get_lcm_dp_size()
-        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
-        new_tensors = {}
-        training_input.metadata["pad_size"] = pad_size
-        if pad_size == 0:
-            return training_input
-        for key, tensor in training_input.items():
-            if tensor is not None:
-                if isinstance(tensor, TensorList):
-                    n = len(tensor)
-                    pad_indices = [i % n for i in range(pad_size)]
-                    padding = TensorList([tensor[i].clone() for i in pad_indices])
-                    new_tensors[key] = TensorList.cat([tensor, padding])
-                elif key == "loss_mask":
-                    # ensures that padding tensors don't count towards the loss
-                    additional_dims = tensor.shape[1:]
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-                else:
-                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    n = tensor.shape[0]
-                    pad_indices = torch.arange(pad_size, device=tensor.device) % n
-                    padding_tensor = tensor[pad_indices].clone()
-                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        new_training_input = TrainingInputBatch(new_tensors)
-        new_training_input.metadata = {}
-        for key, value in training_input.metadata.items():
-            if key == "uids":
-                new_training_input.metadata["uids"] = training_input.metadata["uids"] + [
-                    f"pad{i}" for i in range(pad_size)
-                ]
-            elif key == "is_last_step":
-                new_training_input.metadata["is_last_step"] = training_input.metadata["is_last_step"] + [
-                    True for i in range(pad_size)
-                ]
-            else:
-                new_training_input.metadata[key] = copy.deepcopy(value)
-        return new_training_input
 
     @torch.no_grad()
     def fwd_logprobs_values_reward(

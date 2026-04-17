@@ -29,7 +29,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -448,25 +451,11 @@ class SkyRLTrainBackend(AbstractBackend):
         dp_size = self._dispatch.get_lcm_dp_size()
         alignment = dp_size * micro_batch_size if micro_batch_size else dp_size
         pad_size = (alignment - batch.batch_size % alignment) % alignment
-        if pad_size == 0:
-            return batch, 0
-
-        new_tensors = {}
-        for key, tensor in batch.items():
-            if tensor is not None:
-                if key == "loss_mask":
-                    # Padding entries must not contribute to the loss
-                    additional_dims = tensor.shape[1:]
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        padded = TrainingInputBatch(new_tensors)
-        padded.metadata = batch.metadata
-        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})")
-        return padded, pad_size
+        if pad_size > 0:
+            logger.info(
+                f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})"
+            )
+        return pad_training_input_batch(batch, pad_size), pad_size
 
     def _extract_metrics(self, data: dict) -> dict[str, float]:
         """Extract training metrics from dispatch return dict.
