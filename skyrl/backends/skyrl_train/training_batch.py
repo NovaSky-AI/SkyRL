@@ -497,6 +497,8 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
 
     # Handle the special case of no padding.
     if pad_size == 0:
+        if unpadded_batch.metadata is None:
+            unpadded_batch.metadata = {}
         unpadded_batch.metadata["pad_size"] = 0
         return unpadded_batch
 
@@ -525,11 +527,12 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
 
     # Update metadata as well.
     new_metadata = {}
-    for key, value in unpadded_batch.metadata.items():
+    old_metadata = unpadded_batch.metadata or {}
+    for key, value in old_metadata.items():
         if key == "uids":
-            new_metadata["uids"] = unpadded_batch.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
+            new_metadata["uids"] = value + [f"pad{i}" for i in range(pad_size)]
         elif key == "is_last_step":
-            new_metadata["is_last_step"] = unpadded_batch.metadata["is_last_step"] + [True for _ in range(pad_size)]
+            new_metadata["is_last_step"] = value + [True for _ in range(pad_size)]
         else:
             new_metadata[key] = copy.deepcopy(value)
     new_metadata["pad_size"] = pad_size
