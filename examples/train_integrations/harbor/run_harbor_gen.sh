@@ -21,6 +21,7 @@ TRIALS_DIR="$HOME/trials_run"
 # Infrastructure setup
 #----------------
 NUM_GPUS=4
+MAX_MODEL_LEN=8192
 ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
 TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
@@ -37,6 +38,8 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.http_endpoint_host="127.0.0.1" \
   generator.inference_engine.http_endpoint_port=8000 \
   generator.sampling_params.max_generate_length=4096 \
+  trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
+  generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
