@@ -2,9 +2,10 @@
 
 This example shows how to run a PPO-style RL loop against SkyRL's Tinker API server.
 
-The setup mirrors [`examples/train/ppo/run_ppo.sh`](../../train/ppo/run_ppo.sh) where it makes sense:
+Here is the setup:
 - base model: `Qwen/Qwen2.5-1.5B-Instruct`
-- dataset convention: `$HOME/data/gsm8k/{train,validation}.parquet`
+- critic model: `Qwen/Qwen2.5-1.5B-Instruct`
+- dataset : `$HOME/data/gsm8k/{train,validation}.parquet`
 - PPO-style loop with a policy model, a critic model, GAE, KL shaping, checkpointing, and eval
 
 Two terminals are required.
@@ -38,21 +39,28 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
   python examples/tinker/ppo/ppo_client.py
 ```
 
+## Running on Modal (single container, server + client)
+
+`modal_run.py` runs the full example end-to-end in a single Modal container:
+it preps the GSM8K parquet files, starts `run_tinker_server.sh` in the
+background, waits for `http://localhost:8000` to become ready, then runs
+`ppo_client.py` against it. Four GPUs are requested to match the server-side
+defaults (policy, ref, critic, and vLLM engines with `colocate_all=true`).
+
+Prerequisites: [install Modal](https://modal.com/docs/guide) and run
+`modal setup` once. If you want W&B logging, set `WANDB_API_KEY` (and
+optionally `WANDB_PROJECT` / `WANDB_ENTITY` / `WANDB_RUN_NAME` / `WANDB_TAGS`)
+in your shell — they are forwarded into the container.
+
+```bash
+# Full run (from the repo root)
+modal run examples/tinker/ppo/modal_run.py
+```
+
 ## Notes
 
-- The client keeps the model fixed to the same default as `run_tinker_server.sh`
-  so the CLI stays small.
-- If your server is not on `http://localhost:8000`, pass `--base-url`.
-- The actor uses the registered `ppo` (clipped-ratio) loss with
-  `clip_low_threshold = 1 - eps_clip_low` and `clip_high_threshold = 1 + eps_clip_high`,
-  matching SkyRL's `eps_clip_low/high = 0.2` defaults from `examples/train/ppo/run_ppo.sh`.
-- KL is applied as **reward shaping** (semantically equivalent to SkyRL's
-  `use_kl_in_reward=true`), not as a separate loss term. SkyRL's
-  `use_kl_loss=true` path requires a backend-side KL term that the Tinker loss
-  API does not currently expose, so this client implements the reward-shaping
-  variant. The `KL_COEF = 1e-3` constant matches SkyRL's `kl_loss_coef` default.
 - The critic (`ppo_critic`) is implemented end-to-end only on the SkyRL-Train
   (FSDP) backend (see `skyrl/backends/skyrl_train_backend.py`). The launcher
   in `run_tinker_server.sh` selects `--backend fsdp`, so this works out of the
-  box. The JAX backend's `ppo_critic_loss` is a zero-loss stub and would
+  box. Note that the JAX backend's `ppo_critic_loss` is a zero-loss stub and would
   silently no-op critic updates — do not switch backends without verifying this.

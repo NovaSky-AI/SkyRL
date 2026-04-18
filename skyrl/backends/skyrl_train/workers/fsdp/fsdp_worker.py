@@ -373,6 +373,9 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
+    def _set_pad_token_id(self, pad_token_id):
+        self.model.config.pad_token_id = pad_token_id
+
     def forward(
         self,
         data: TrainingInputBatch,

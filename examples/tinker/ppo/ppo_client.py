@@ -38,7 +38,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import datasets
 import torch
@@ -78,6 +78,67 @@ POLICY_LOSS = "ppo"
 STRICT_ANSWER_RE = re.compile(r"#### (\-?[0-9\.,]+)")
 FLEXIBLE_ANSWER_RE = re.compile(r"(\-?[0-9\.,]+)")
 logger = logging.getLogger(__name__)
+
+
+class WandbLogger:
+    def __init__(self, output_dir: str | None):
+        self._run = None
+        api_key = os.environ.get("WANDB_API_KEY")
+        if not api_key:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            logger.warning("WANDB_API_KEY is set, but wandb is not installed; skipping wandb logging")
+            return
+
+        run_kwargs: dict[str, Any] = {
+            "project": os.environ.get("WANDB_PROJECT", "skyrl-tinker-ppo"),
+            "config": {
+                "base_model": DEFAULT_MODEL_NAME,
+                "train_batch_size": TRAIN_BATCH_SIZE,
+                "policy_mini_batch_size": POLICY_MINI_BATCH_SIZE,
+                "critic_mini_batch_size": CRITIC_MINI_BATCH_SIZE,
+                "update_epochs_per_batch": UPDATE_EPOCHS_PER_BATCH,
+                "n_samples_per_prompt": N_SAMPLES_PER_PROMPT,
+                "kl_coef": KL_COEF,
+                "learning_rate": LEARNING_RATE,
+            },
+        }
+        if output_dir:
+            run_kwargs["dir"] = expand_path(output_dir)
+        if entity := os.environ.get("WANDB_ENTITY"):
+            run_kwargs["entity"] = entity
+        if run_name := os.environ.get("WANDB_RUN_NAME"):
+            run_kwargs["name"] = run_name
+        if tags := os.environ.get("WANDB_TAGS"):
+            run_kwargs["tags"] = [tag.strip() for tag in tags.split(",") if tag.strip()]
+
+        self._wandb = wandb
+        self._run = wandb.init(**run_kwargs)
+
+    def log(self, payload: dict[str, Any]) -> None:
+        if self._run is None:
+            return
+
+        numeric_payload = {
+            key: value
+            for key, value in payload.items()
+            if isinstance(value, (int, float, bool)) and not isinstance(value, str)
+        }
+        if numeric_payload:
+            self._wandb.log(numeric_payload, step=payload.get("step"))
+
+        for key, value in payload.items():
+            if key in numeric_payload:
+                continue
+            if isinstance(value, str):
+                self._run.summary[key] = value
+
+    def finish(self) -> None:
+        if self._run is not None:
+            self._wandb.finish()
 
 
 @dataclass
@@ -580,6 +641,7 @@ def build_split_paths(data_dir: str) -> tuple[str, str]:
 def run_training(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+    wandb_logger = WandbLogger(args.output_dir)
 
     service_client = tinker.ServiceClient(base_url=args.base_url, api_key=args.api_key)
     policy_client = service_client.create_lora_training_client(
@@ -618,7 +680,9 @@ def run_training(args: argparse.Namespace) -> None:
         if EVAL_BEFORE_TRAIN:
             eval_metrics = evaluate_policy(policy_client, eval_records, tokenizer, args, global_step=global_step)
             logger.info("Initial eval: %s", eval_metrics)
-            append_metrics(args.output_dir, {"step": global_step, **eval_metrics})
+            payload = {"step": global_step, **eval_metrics}
+            append_metrics(args.output_dir, payload)
+            wandb_logger.log(payload)
 
         for epoch in range(TRAIN_EPOCHS):
             epoch_rng = random.Random(args.seed + epoch)
@@ -669,22 +733,28 @@ def run_training(args: argparse.Namespace) -> None:
 
                 logger.info("Train step %s: %s", global_step, log_payload)
                 append_metrics(args.output_dir, log_payload)
+                wandb_logger.log(log_payload)
 
                 if CKPT_INTERVAL > 0 and global_step % CKPT_INTERVAL == 0:
                     ckpt_info = save_checkpoint_pair(policy_client, critic_client, global_step)
                     logger.info("Saved checkpoints at step %s: %s", global_step, ckpt_info)
-                    append_metrics(args.output_dir, {"step": global_step, **ckpt_info})
+                    payload = {"step": global_step, **ckpt_info}
+                    append_metrics(args.output_dir, payload)
+                    wandb_logger.log(payload)
 
                 if EVAL_INTERVAL > 0 and global_step % EVAL_INTERVAL == 0:
                     eval_metrics = evaluate_policy(policy_client, eval_records, tokenizer, args, global_step=global_step)
                     logger.info("Eval step %s: %s", global_step, eval_metrics)
-                    append_metrics(args.output_dir, {"step": global_step, **eval_metrics})
+                    payload = {"step": global_step, **eval_metrics}
+                    append_metrics(args.output_dir, payload)
+                    wandb_logger.log(payload)
 
                 if args.max_train_steps is not None and train_steps >= args.max_train_steps:
                     logger.info("Reached max_train_steps=%s, stopping early", args.max_train_steps)
                     return
     finally:
         service_client.holder.close()
+        wandb_logger.finish()
 
 
 def main() -> None:
