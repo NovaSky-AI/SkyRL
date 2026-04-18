@@ -1,0 +1,6 @@
+torch==2.11.0
+torchvision==0.26.0
+vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512
+flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+flashinfer-python==0.6.7
+flashinfer-cubin==0.6.7

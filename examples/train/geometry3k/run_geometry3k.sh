@@ -18,14 +18,39 @@ fi
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm"}"
 : "${DUMP_EVAL_RESULTS:=true}"
 
-# Requires nightly vLLM for multi-modal generation
-uv sync --extra fsdp
-source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512"
+# Requires a specific vLLM commit for multi-modal generation. We install into a
+# dedicated venv so the pyproject-managed `.venv` (which pins stable vllm +
+# torch 2.10) stays usable for other examples. `UV_OVERRIDE` forces torch 2.11
+# and a torch-2.11-compatible flash-attn in a single resolve.
+: "${G3K_VENV:="$HOME/.venvs/skyrl-g3k"}"
+OVERRIDES="$(dirname "$0")/custom_vllm_overrides.txt"
 
-_SKYRL_USE_NEW_INFERENCE=1 python examples/train/geometry3k/geometry3k_entrypoint.py \
+if [ ! -x "$G3K_VENV/bin/python" ]; then
+  uv venv "$G3K_VENV" --python 3.12
+fi
+
+VLLM_USE_PRECOMPILED=1 \
+UV_OVERRIDE="$OVERRIDES" \
+  uv pip install \
+    --python "$G3K_VENV/bin/python" \
+    --index-strategy unsafe-best-match \
+    --extra-index-url https://flashinfer.ai/whl/cu128 \
+    -e "$PWD[fsdp]" \
+    pylatexenc
+
+PY="$G3K_VENV/bin/python"
+# Ray workers on the existing (anaconda3-based) cluster must use this venv's
+# interpreter so they can import omegaconf, the custom vllm fork, torch 2.11, etc.
+# pyproject constraint-dependencies pins flashinfer-jit-cache==0.6.6 which
+# clashes with the fork vllm's flashinfer-python==0.6.7 at flashinfer import
+# time. vllm picks FLASH_ATTN for both text and vit anyway; flashinfer only
+# needs to import during backend enumeration, so bypass the defensive check.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+export RAY_JOB_CONFIG_JSON_ENV_VAR='{"runtime_env":{"py_executable":"'"$PY"'","env_vars":{"FLASHINFER_DISABLE_VERSION_CHECK":"1"}}}'
+
+_SKYRL_USE_NEW_INFERENCE=1 "$PY" examples/train/geometry3k/geometry3k_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/val.parquet']" \
+  data.val_data="['$DATA_DIR/test.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.placement.colocate_all=true \
