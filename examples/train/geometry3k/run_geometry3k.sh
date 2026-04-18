@@ -18,8 +18,12 @@ fi
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm"}"
 : "${DUMP_EVAL_RESULTS:=true}"
 
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
-  python examples/train/geometry3k/geometry3k_entrypoint.py \
+# Requires nightly vLLM for multi-modal generation
+uv sync --extra fsdp
+source .venv/bin/activate
+VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512"
+
+_SKYRL_USE_NEW_INFERENCE=1 python examples/train/geometry3k/geometry3k_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/val.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
