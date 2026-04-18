@@ -53,6 +53,7 @@ fi
 # Requires nightly vLLM for multi-modal generation
 uv sync --extra fsdp
 source .venv/bin/activate
+# TODO UPDATE MM
 VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512
 
 _SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \

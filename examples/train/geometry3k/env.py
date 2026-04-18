@@ -5,7 +5,8 @@ The model sees a geometry diagram + question, reasons, and can call a
 ``calc_score`` tool to check its answer against the ground truth. The
 environment returns feedback so the model can iteratively refine.
 
-Adapted from the Slime RL reference implementation to the SkyRL BaseTextEnv API.
+Adapted from the Slime RL environment:
+https://github.com/THUDM/slime/blob/8efb1166c8e4bb4c810059b0161cbd06bcfbb6cf/examples/geo3k_vlm_multi_turn/env_geo3k.py
 """
 
 import json
@@ -38,7 +39,6 @@ class Geometry3kEnv(BaseTextEnv):
     Rewards:
         - Intermediate turns: 0.0
         - Final turn correct: 1.0
-        - Final turn incorrect: 0.0
     """
 
     def __init__(self, env_config: Any = None, extras: Dict[str, Any] = {}):
@@ -50,10 +50,6 @@ class Geometry3kEnv(BaseTextEnv):
 
         self.max_turns = int(extras.get("max_turns", 3))
         self.correct = False
-
-    # ------------------------------------------------------------------
-    # Tool call parsing (ported from reference_slime_env.py)
-    # ------------------------------------------------------------------
 
     def _extract_tool_call(self, text: str) -> Dict[str, Any] | None:
         """Parse the latest tool call payload from ``<tool_call>`` tags."""
@@ -138,10 +134,6 @@ class Geometry3kEnv(BaseTextEnv):
             f"calc_score result: {score}. Parsed answer '{parsed_answer}' does not match the reference. "
             "Your answer is wrong. You may need to reason in a different way. Don't repeat your answer unless necessary."
         )
-
-    # ------------------------------------------------------------------
-    # Core API
-    # ------------------------------------------------------------------
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1

@@ -53,6 +53,7 @@ if [ ! -f "$EVAL_DATA_DIR/train.parquet" ]; then
 fi
 
 # Requires nightly vLLM for multi-modal generation
+# TODO UPDATE MM
 uv sync --extra fsdp
 source .venv/bin/activate
 VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512

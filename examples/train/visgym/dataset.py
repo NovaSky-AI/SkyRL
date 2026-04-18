@@ -25,6 +25,8 @@ def make_rows(env_id: str, num_rows: int, seed: bool = False) -> list[dict]:
             "env_class": "visgym",
             "visgym_env_id": env_id,
         }
+
+        # For validation, we need deterministic environments, so we manually set the seed
         if seed:
             row["seed"] = i
         rows.append(row)
