@@ -277,6 +277,10 @@ class RayPPOTrainer:
                     # 6. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
+
+                        if self.cfg.trainer.algorithm.use_kl_in_advantages and training_input.get("base_action_log_probs") is not None:
+                            training_input = self.apply_kl_advantage_penalty(training_input)
+
                         # remove some unwanted keys
                         for key in ["rewards"]:
                             training_input.pop(key)
@@ -928,6 +932,43 @@ class RayPPOTrainer:
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
             }
         )
+        return data
+
+    def apply_kl_advantage_penalty(
+        self,
+        data: TrainingInputBatch,
+    ) -> TrainingInputBatch:
+        """Modify advantages with a batch-centered relative KL signal.
+
+        For each token the adjustment is:
+
+            advantage += coef * (avg_batch_KL - token_KL) * loss_mask
+
+        Tokens drifting more than the batch average from the reference get
+        penalized; tokens drifting less get a bonus.  Because the adjustment
+        is centered around the batch mean the sum is approximately zero,
+        which is variance-reducing compared to a naive subtraction.
+        """
+        base_action_log_probs = data["base_action_log_probs"]
+        action_log_probs = data["action_log_probs"]
+        loss_mask = data["loss_mask"]
+        advantages = data["advantages"]
+
+        # Per-token KL divergence estimate
+        token_kl = compute_approx_kl(
+            action_log_probs,
+            base_action_log_probs,
+            loss_mask=loss_mask,
+            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+        )
+
+        # Batch-average KL (scalar) -- mean over valid tokens
+        avg_kl = masked_mean(token_kl, loss_mask).item()
+
+        coef = self.cfg.trainer.algorithm.kl_advantages_coef
+        data["advantages"] = advantages + coef * (avg_kl - token_kl) * loss_mask
+
+        self.all_metrics.update({"kl_in_advantages/avg_token_kl": avg_kl})
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
