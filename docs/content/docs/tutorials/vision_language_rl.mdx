@@ -18,11 +18,11 @@ SkyRL supports multi-turn RL training on vision-language models (VLMs) — the p
 Two flags are what actually switch a training run into VLM mode:
 
 ```bash
-generator.is_vlm=true \
+generator.vision_language_generator=true \
 trainer.use_sample_packing=false \
 ```
 
-- **`generator.is_vlm=true`** — the one real VLM switch. Wires in the VLM-aware generator so that image content parts in the prompt are routed through the vision path of the inference engine.
+- **`generator.vision_language_generator=true`** — the one real VLM switch. Wires in the VLM-aware generator so that image content parts in the prompt are routed through the vision path of the inference engine.
 - **`trainer.use_sample_packing=false`** — sample packing is currently unsupported for VLM training (see callout below).
 
 <Callout type="info">
@@ -63,7 +63,7 @@ SkyRL handles two distinct VLM interaction patterns:
 
 **Image-returning observations.** The environment returns a new image observation at every step. The [VisGym example](../examples/visgym) uses this pattern — after each model action, `env.step()` renders a new image of the updated world state, which is passed back as the next user turn's content.
 
-The generator handles both patterns transparently once `generator.is_vlm=true` is set. The environment contract determines which pattern you're in: return observations with `image_url` content parts for image-returning envs, or plain text strings for text-only feedback.
+The generator handles both patterns transparently once `generator.vision_language_generator=true` is set. The environment contract determines which pattern you're in: return observations with `image_url` content parts for image-returning envs, or plain text strings for text-only feedback.
 
 ## Support matrix
 

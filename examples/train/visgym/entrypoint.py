@@ -10,7 +10,7 @@ Usage:
     uv run --isolated --extra fsdp \
         python examples/train/visgym/entrypoint.py \
         --env_variant instruct \
-        generator.is_vlm=True [Hydra config overrides...]
+        generator.vision_language_generator=true [Hydra config overrides...]
 """
 
 import argparse

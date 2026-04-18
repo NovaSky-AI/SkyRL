@@ -63,7 +63,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.strategy=fsdp2 \
   # VLM flags — see the tutorial for background
-  generator.is_vlm=true \
+  generator.vision_language_generator=true \
   generator.batched=false \
   trainer.use_sample_packing=false \
   # Multi-turn rollouts

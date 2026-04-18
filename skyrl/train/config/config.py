@@ -536,6 +536,8 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    vision_language_generator: bool = False
+    """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts)"""
 
     def __post_init__(self):
 
