@@ -3,7 +3,7 @@ title: "Multi-Turn Multi-Image VLM RL on VisGym"
 ---
 
 <Callout type="info">
-Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags, vllm nightly, support matrix).
+Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags, local vLLM source override, support matrix).
 </Callout>
 
 In this example we train a vision-language model to solve VisGym tasks — gymnasium-style environments (e.g. `maze_2d/easy`) where every environment step returns a **new image observation**. The model sees an image, reasons, emits an action, and receives the next rendered image as part of the next user turn. This is the multi-image multi-turn VLM pattern described in the tutorial.

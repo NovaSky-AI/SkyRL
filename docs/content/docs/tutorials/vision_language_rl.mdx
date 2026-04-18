@@ -8,7 +8,15 @@ SkyRL supports multi-turn RL training on vision-language models (VLMs) — the p
 ## Requirements
 
 <Callout type="warn">
-**TODO: vllm nightly install command.** VLM training requires a nightly build of vLLM that includes the multimodal rendering support used by SkyRL's new inference stack. The repo pins `vllm==0.19.0` in `pyproject.toml` for non-VLM workflows, but VLM runs need a newer wheel. Replace this callout with the exact install command before shipping.
+**Local vLLM source override required (temporary).** VLM training needs a newer vLLM than the `vllm==0.19.0` pinned in the root `pyproject.toml`. Until the next vLLM release ships with the multimodal rendering support used by SkyRL's new inference stack, clone vLLM locally and point uv at it by adding one line under `[tool.uv.sources]` in the repo root `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+# ...existing entries (skyrl-gym, torch, etc.)...
+vllm = { path = "/abs/path/to/vllm" }
+```
+
+Use an absolute path. After editing, the standard `uv run --isolated --extra fsdp ...` invocation used by the VLM example scripts will pick up your local vLLM checkout. Remove this override once the next upstream vLLM release is available.
 </Callout>
 
 **Hardware.** The examples in this guide were tested on a single node with 8× H100 GPUs. VLM runs are memory-heavy (image tokens expand dramatically during encoding) — calibrate `gpu_memory_utilization` and `max_model_len` if you're working with a different hardware profile.

@@ -19,7 +19,8 @@ set -x
 : "${DATA_DIR:="$HOME/data/visgym_maze_2d_easy"}"
 : "${NUM_INFERENCE_GPUS:=8}"
 : "${NUM_TRAIN_GPUS:=8}"
-: "${LOGGER:=wandb}"
+# Default to console logging. To use W&B, set LOGGER=wandb and export WANDB_API_KEY.
+: "${LOGGER:=console}"
 : "${MODEL_PATH:=/mnt/local_storage/visgym_model_repo/mixed_qwen3vl}"
 
 : "${EXPORT_PATH:="$HOME/exports/visgym_maze_2d_easy_from_sft"}"
@@ -50,13 +51,11 @@ if [ ! -f "$EVAL_DATA_DIR/train.parquet" ]; then
     --output_dir "$EVAL_DATA_DIR"
 fi
 
-# Requires nightly vLLM for multi-modal generation
-uv sync --extra fsdp
-source .venv/bin/activate
-# TODO UPDATE MM
-VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512
-
-_SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \
+# VLM training requires a newer vLLM than the repo's pinned 0.19.0. See
+# docs/content/docs/tutorials/vision_language_rl.mdx for the one-line
+# [tool.uv.sources] override to add to the root pyproject.toml.
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+  python examples/train/visgym/entrypoint.py \
   --env_variant sft \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$EVAL_DATA_DIR/train.parquet']" \
