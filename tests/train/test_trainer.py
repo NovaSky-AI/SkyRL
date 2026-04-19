@@ -155,7 +155,7 @@ def test_normalize_advantages_prefers_max_response_length(dummy_config, dummy_ge
             "loss_mask": torch.tensor([[1.0, 1.0], [1.0, 0.0]]),
         }
     )
-    normalized = trainer._normalize_advantages(data, mini_batch_size=2)
+    normalized = trainer._normalize_advantages(data, [(0, 2)])
 
     loss = reduce_loss(normalized["advantages"], normalized["loss_mask"])
     assert torch.allclose(loss, torch.tensor(1.4))
