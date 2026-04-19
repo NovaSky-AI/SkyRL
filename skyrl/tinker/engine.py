@@ -409,10 +409,11 @@ class TinkerEngine:
                     | (FutureDB.request_type == types.RequestType.FORWARD)
                 )
                 .where(FutureDB.status == RequestStatus.PENDING)
+                .where(FutureDB.model_id.in_(destructive_barriers.keys()))
                 .order_by(FutureDB.request_id)
             ).all()
             for model_id, req_id in pending_passes:
-                if model_id in destructive_barriers and req_id >= destructive_barriers[model_id]:
+                if req_id >= destructive_barriers[model_id]:
                     blocked_pass_barriers.setdefault(model_id, req_id)
 
         statement = (
