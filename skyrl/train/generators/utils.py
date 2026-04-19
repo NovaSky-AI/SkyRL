@@ -225,6 +225,19 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     )
 
 
+def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
+    """Concatenate a per-sample list-valued field across generator outputs in O(N_total).
+
+    The previous implementation used ``sum([go[key] for go in gens], [])`` which is
+    O(K^2 * L̄) — each ``+`` copies the running result. Using an explicit extend
+    loop keeps this to a single linear pass over the total element count.
+    """
+    flat = []
+    for go in generator_outputs:
+        flat.extend(go[key])
+    return flat
+
+
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches.
@@ -238,31 +251,28 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         raise ValueError(
             "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
         )
+    first = generator_outputs[0]
     result: GeneratorOutput = {
-        "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
-        "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
-        "rewards": sum([output["rewards"] for output in generator_outputs], []),
-        "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
+        "response_ids": _flatten_field(generator_outputs, "response_ids"),
+        "rewards": _flatten_field(generator_outputs, "rewards"),
+        "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": (
-            sum([output["stop_reasons"] for output in generator_outputs], [])
-            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
+            _flatten_field(generator_outputs, "stop_reasons")
+            if "stop_reasons" in first and first["stop_reasons"] is not None
             else None
         ),
         "rollout_logprobs": (
-            sum([output["rollout_logprobs"] for output in generator_outputs], [])
-            if generator_outputs[0]["rollout_logprobs"] is not None
-            else None
+            _flatten_field(generator_outputs, "rollout_logprobs") if first["rollout_logprobs"] is not None else None
         ),
     }
 
     # propagate additional keys with list values as-is
-    additional_keys = [
-        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
-    ]
+    additional_keys = [key for key in first if key not in result and isinstance(first[key], list)]
     if len(additional_keys):
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
-        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+        result[key] = _flatten_field(generator_outputs, key)
 
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
