@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 WorkerDispatch: Manages all actor groups with automatic offload/onload.
 
@@ -9,6 +7,8 @@ Automatically handles GPU placement:
 
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple

@@ -7,7 +7,11 @@ uv run --isolated --extra skyrl-train --extra dev pytest tests/backends/skyrl_tr
 import ray
 import torch
 
-from skyrl.backends.skyrl_train.distributed.dispatch import ActorInfo, MeshDispatch, MeshRank
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    MeshDispatch,
+    MeshRank,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
@@ -30,8 +34,7 @@ class FakeForwardBackwardWorker:
             return status
 
         status["loss_fn_outputs"] = [
-            {"sample_id": sample_id, "dp_rank": self.dp_rank}
-            for sample_id in data["sample_id"].tolist()
+            {"sample_id": sample_id, "dp_rank": self.dp_rank} for sample_id in data["sample_id"].tolist()
         ]
         return status
 
