@@ -3,7 +3,7 @@ title: "Multi-Turn Multi-Image VLM RL on VisGym"
 ---
 
 <Callout type="info">
-Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags, local vLLM source override, support matrix).
+Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and local vLLM source override).
 </Callout>
 
 In this example we train a vision-language model to solve VisGym tasks — gymnasium-style environments (e.g. `maze_2d/easy`) where every environment step returns a **new image observation**. The model sees an image, reasons, emits an action, and receives the next rendered image as part of the next user turn. This is the multi-image multi-turn VLM pattern described in the tutorial.
@@ -59,7 +59,7 @@ Reward is sparse — delivered at the terminal step based on whether the task wa
 
 ## Two Recipes
 
-VisGym ships with two training recipes that differ in how the model is asked to output actions. The reason there are two: the vanilla instruct model (`Qwen/Qwen3-VL-8B-Instruct`) struggles to reliably produce the structured tuple action format (`('move', 0)`) — it emits code fences, mis-matched quotes, or degenerates into prose. Rather than fight the model's priors with heavy format-reward shaping, the instruct recipe uses a simpler `<action>keyword</action>` XML tag that the base model hits naturally. Starting from an SFT checkpoint that already knows the tuple format unlocks the richer action space at the cost of requiring the SFT pass upfront.
+VisGym ships with two training recipes that differ in how the model is asked to output actions. The reason there are two: the vanilla instruct model (`Qwen/Qwen3-VL-8B-Instruct`) struggles to reliably produce the structured tuple action format (`('move', 0)`) — it emits code fences, mis-matched quotes, or degenerates into prose. Instead, the instruct recipe uses a simpler `<action>keyword</action>` XML tag that the base model is able to consistently produce. Starting from an SFT checkpoint bypasses this issue, and produces a higher terminal success rate.
 
 ### `run_visgym_from_sft.sh` — tuple-action, SFT warm-start
 
@@ -71,9 +71,9 @@ Starts from a pre-SFT'd Qwen3-VL checkpoint that already emits structured output
 <action>('move', 0)</action>
 ```
 
-Reward combines task success with a **format reward** (0.8 task + 0.2 format) so the model preserves the SFT output structure during RL. KL regularization is off.
+Reward combines task success with a **format reward** (0.8 task + 0.2 format) so the model emits `<observation>...</observation>` and `<justification>...</justification>` reasoning. The base SFT model is trained to only produce `('move', 0)`. KL regularization is off.
 
-See `examples/train/visgym/env_sft.py` for the action-parsing logic (a balanced-parenthesis walker with several fallback strategies — SFT models sometimes emit markdown-wrapped or JSON-shaped actions).
+See `examples/train/visgym/env_sft.py` for the action-parsing logic.
 
 <Callout type="info">
 **SFT checkpoint.** The SFT'd Qwen3-VL checkpoints are published by the original VisGym authors at [huggingface.co/VisGym/visgym_model](https://huggingface.co/VisGym/visgym_model). This recipe uses the `mixed_qwen3vl` variant — point `MODEL_PATH` at that checkpoint when launching `run_visgym_from_sft.sh`.
@@ -87,7 +87,7 @@ Starts from `Qwen/Qwen3-VL-8B-Instruct` without an SFT warm-start. The action fo
 <action>left</action>
 ```
 
-where the keyword is one of `left`, `right`, `up`, `down`, `stop`. Reward is **task-only** (no format shaping) and KL regularization is on (`kl_loss_coef=0.005`) to prevent reasoning collapse.
+where the keyword is one of `left`, `right`, `up`, `down`, `stop`. Reward is **task-only** (no format shaping). We found that due to the low starting reward, a format reward caused the model to over-index on formatting.
 
 See `examples/train/visgym/env_instruct.py` — the action extractor is a simple regex match for `<action>keyword</action>` tags. The env sets `relaxed=True` on the underlying VisGym env so the gymnasium env accepts keyword inputs.
 

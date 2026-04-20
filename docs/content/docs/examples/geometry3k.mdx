@@ -3,7 +3,7 @@ title: "Multi-Turn VLM RL on Geometry-3K"
 ---
 
 <Callout type="info">
-Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags, local vLLM source override, support matrix).
+Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and local vLLM source override).
 </Callout>
 
 In this example we train a vision-language model to solve geometry problems from the [Geometry-3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). The model sees a geometry diagram plus a text question, reasons, and iteratively checks its answer with a `calc_score` tool before committing to a final boxed answer.

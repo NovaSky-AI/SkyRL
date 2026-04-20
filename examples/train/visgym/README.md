@@ -7,7 +7,7 @@ Two recipes are provided:
 - **`run_visgym_from_sft.sh`** — starts from an SFT-trained Qwen3-VL checkpoint that emits structured `<observation>/<justification>/<action>` output with tuple actions. Uses a mixed task + format reward.
 - **`run_visgym_from_instruct.sh`** — starts from a vanilla `Qwen/Qwen3-VL-8B-Instruct`, uses keyword actions (`<action>left</action>` etc.), task-only reward, KL regularization on.
 
-See [the docs](../../../docs/content/docs/examples/visgym.mdx) and the [Vision-Language RL tutorial](../../../docs/content/docs/tutorials/vision_language_rl.mdx) for walkthroughs.
+See [the docs](https://docs.skyrl.ai/docs/examples/visgym) and the [Vision-Language RL tutorial](https://docs.skyrl.ai/docs/tutorials/vision_language_rl) for walkthroughs.
 
 ## Quick start
 

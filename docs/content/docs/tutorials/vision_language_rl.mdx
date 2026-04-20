@@ -37,7 +37,7 @@ generator.vision_language_generator=true \
 trainer.use_sample_packing=false \
 ```
 
-- **`generator.vision_language_generator=true`** — the one real VLM switch. Switches from the default gym generator to a VLM generator, ensuring that visual content is correctly routed to the inference server.
+- **`generator.vision_language_generator=true`** — Switches from the default gym generator to a VLM generator, ensuring that visual content is correctly routed to the inference server.
 - **`trainer.use_sample_packing=false`** — sample packing is currently unsupported for VLM training (see callout below).
 
 <Callout type="info">
