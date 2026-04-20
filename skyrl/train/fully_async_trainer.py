@@ -623,11 +623,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         uids = []
         stalenesses = []
         staleness_violation_count = 0
-        group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+            # NOTE(Charlie): for step-wise training each group can contain a variable number of entries
+            # (n_samples_per_prompt * variable turns_per_trajectory), so the uid fanout is per-group.
+            group_size = len(cur_generated_output_group.generator_output["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
 
             # Check staleness violation.
@@ -642,7 +644,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 staleness_violation_count += 1
 
-        generator_output = concatenate_generator_outputs(generator_outputs)
+        generator_output = concatenate_generator_outputs(
+            generator_outputs, step_wise=self.cfg.generator.step_wise_trajectories
+        )
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
 
@@ -658,7 +662,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
-        generator_output = self.postprocess_generator_output(generator_output, uids)
+        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])

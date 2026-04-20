@@ -59,6 +59,7 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
+    merge_stepwise_output,
     prepare_generator_input,
 )
 from skyrl.train.utils import (
@@ -248,9 +249,9 @@ class RayPPOTrainer:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
 
-                    # 1.2 postprocess rewards
+                    # 1.2 postprocess rewards (and merge step-wise turns if enabled)
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -752,11 +753,20 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
 
+        For step-wise training with ``merge_stepwise_output=true``, also collapses
+        consecutive turns sharing a common prefix into a single sequence; ``uids``
+        is shortened to match.
+
         In the future algorithm specific reward or loss mask post processing should be done here.
+
+        Returns:
+            (generator_output, uids) — uids may be shorter than the input when merging.
         """
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
@@ -779,6 +789,21 @@ class RayPPOTrainer:
             generator_output_for_metrics,
             uids_for_metrics,
         )
+
+        # Prefix-aware merging of step-wise turns.
+        if self.cfg.generator.merge_stepwise_output:
+            assert self.cfg.generator.step_wise_trajectories, "merge_stepwise_output requires step-wise training"
+            num_seq_before_merge = len(generator_output["response_ids"])
+            generator_output = merge_stepwise_output(generator_output)
+            num_seq_after_merge = len(generator_output["response_ids"])
+            logger.info(f"Merged step wise: {num_seq_before_merge} sequences -> {num_seq_after_merge} sequences")
+            self.all_metrics.update(
+                {
+                    "generate/num_seq_before_merge": num_seq_before_merge,
+                    "generate/num_seq_after_merge": num_seq_after_merge,
+                }
+            )
+            uids = [tid.instance_id for tid in generator_output["trajectory_ids"]]
 
         # these use the full generator output
         rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
@@ -815,7 +840,7 @@ class RayPPOTrainer:
         )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
-        return generator_output
+        return generator_output, uids
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:

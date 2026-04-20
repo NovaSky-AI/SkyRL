@@ -225,12 +225,25 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     )
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
+def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
+    """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
+    flat = []
+    for go in generator_outputs:
+        flat.extend(go[key])
+    return flat
+
+
+def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
-    Concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
 
     We only aggregate rollout metrics the can deduced by responses and rewards, but not
     those that use `env_metrics` or `env_classes`.
+
+    Args:
+        generator_outputs: Per-batch generator outputs to concatenate.
+        step_wise: If True, validate step-wise specific fields on the concatenated result
+            (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -238,31 +251,26 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         raise ValueError(
             "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
         )
+    first = generator_outputs[0]
     result: GeneratorOutput = {
-        "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
-        "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
-        "rewards": sum([output["rewards"] for output in generator_outputs], []),
-        "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
+        "response_ids": _flatten_field(generator_outputs, "response_ids"),
+        "rewards": _flatten_field(generator_outputs, "rewards"),
+        "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": (
-            sum([output["stop_reasons"] for output in generator_outputs], [])
-            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
-            else None
+            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
         ),
         "rollout_logprobs": (
-            sum([output["rollout_logprobs"] for output in generator_outputs], [])
-            if generator_outputs[0]["rollout_logprobs"] is not None
-            else None
+            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
     }
 
     # propagate additional keys with list values as-is
-    additional_keys = [
-        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
-    ]
+    additional_keys = [key for key in first if key not in result and isinstance(first[key], list)]
     if len(additional_keys):
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
-        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+        result[key] = _flatten_field(generator_outputs, key)
 
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
@@ -273,7 +281,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     from skyrl.train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result)
+    validate_generator_output(num_prompts, result, step_wise=step_wise)
 
     return result
 
@@ -574,3 +582,188 @@ def get_response_ids_and_loss_mask_from_messages(
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
 
     return response_ids, loss_mask, rollout_logprobs
+
+
+# -------------------------------------------
+# Prefix-aware merging for step-wise training
+# -------------------------------------------
+
+
+def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
+    """Check if maybe_prefix is a prefix of candidate (or equal)."""
+    if len(maybe_prefix) > len(candidate):
+        return False
+    return maybe_prefix == candidate[: len(maybe_prefix)]
+
+
+def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+    """Slice a GeneratorOutput to keep only the entries at the given indices.
+
+    All sliced entries must share the same TrajectoryID — this helper is used by
+    prefix-aware merging which operates on one trajectory at a time.
+    """
+    assert len(indices) > 0, "indices must be non-empty"
+    # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
+    sliced: GeneratorOutput = {}
+    for key, value in generator_output.items():
+        if key == "rollout_metrics":
+            sliced[key] = value
+        elif value is None:
+            sliced[key] = None
+        else:
+            sliced[key] = [value[i] for i in indices]
+    return sliced
+
+
+def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
+    """Greedily merge turns of a single trajectory using prefix matching.
+
+    Takes a GeneratorOutput whose entries all belong to the same trajectory_id
+    and returns a merged GeneratorOutput (potentially fewer entries).
+    """
+    # Make sure all entries in the trajectory have the same trajectory_id
+    trajectory_ids = gen_out.get("trajectory_ids")
+    assert trajectory_ids is not None, "trajectory_ids is required for prefix-aware merging"
+    for i in range(0, len(trajectory_ids)):
+        assert (
+            trajectory_ids[i] == trajectory_ids[0]
+        ), "all entries in a single trajectory must have the same trajectory_id"
+
+    n = len(gen_out["response_ids"])
+    assert n > 0, "Expect non-empty GeneratorOutput."
+    is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
+    has_logprobs = gen_out.get("rollout_logprobs") is not None
+    has_stop_reasons = gen_out.get("stop_reasons") is not None
+
+    # Per-field output accumulators.
+    # Fields that we take from all the entries in the merge group
+    out_prompt_ids: List[List[int]] = []
+    out_response_ids: List[List[int]] = []
+    out_loss_masks: List[List[int]] = []
+    out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
+    out_rewards: list = []
+
+    # Fields that we only take from the last turn in the merge group
+    out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_trajectory_ids: list = []
+    out_is_last_step: List[bool] = []
+
+    # Accumulator for the current merge group
+    acc_prompt: List[int] = list(gen_out["prompt_token_ids"][0])
+    acc_response: List[int] = list(gen_out["response_ids"][0])
+    acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
+    acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
+    last = 0
+
+    def flush():
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        out_prompt_ids.append(acc_prompt)
+        out_response_ids.append(acc_response)
+        out_loss_masks.append(acc_loss_mask)
+        if has_logprobs:
+            out_logprobs.append(acc_logprobs)
+        out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
+        if has_stop_reasons:
+            out_stop_reasons.append(gen_out["stop_reasons"][last])
+        out_trajectory_ids.append(gen_out["trajectory_ids"][last])
+        out_is_last_step.append(gen_out["is_last_step"][last])
+
+    for i in range(1, n):
+        full_merged = acc_prompt + acc_response
+
+        # If prompt[i-1] + response[i-1] is not a prefix of prompt[i], flush the current merge group
+        # and start a new group to merge.
+        if not _is_prefix(full_merged, gen_out["prompt_token_ids"][i]):
+            flush()
+            acc_prompt = list(gen_out["prompt_token_ids"][i])
+            acc_response = list(gen_out["response_ids"][i])
+            acc_loss_mask = list(gen_out["loss_masks"][i])
+            acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
+            last = i
+            continue
+
+        # prompt[i-1] + response[i-1] is a prefix of prompt[i], so we can merge the two turns.
+        # obs_delta is the newly prefilled tokens not generated by the assistant, so we need to
+        # properly loss mask them.
+        obs_delta = gen_out["prompt_token_ids"][i][len(full_merged) :]
+
+        # Merge obs_delta to the fields, assigning zeros since it is not generated by the assistant.
+        acc_response.extend(obs_delta)
+        acc_loss_mask.extend([0] * len(obs_delta))
+        if acc_logprobs is not None:
+            acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend([0.0] * len(obs_delta))
+
+        # Extend the current merge group with the next turn's fields, exactly the same preserved.
+        acc_response.extend(gen_out["response_ids"][i])
+        acc_loss_mask.extend(gen_out["loss_masks"][i])
+        if acc_logprobs is not None:
+            acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend(gen_out["rewards"][i])
+
+        last = i
+
+    flush()
+
+    return {
+        "prompt_token_ids": out_prompt_ids,
+        "response_ids": out_response_ids,
+        "rewards": out_rewards,
+        "loss_masks": out_loss_masks,
+        "stop_reasons": out_stop_reasons,
+        "rollout_metrics": gen_out.get("rollout_metrics", None),
+        "rollout_logprobs": out_logprobs,
+        "trajectory_ids": out_trajectory_ids,
+        "rollout_expert_indices": None,
+        "is_last_step": out_is_last_step,
+    }
+
+
+def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
+    """Merge step-wise GeneratorOutput entries using prefix-aware merging.
+
+    For consecutive turns within the same trajectory where
+    prompt[i] + response[i] is a prefix of prompt[i+1],
+    merges them into a single entry with:
+    - prompt from the first turn in the merge group
+    - response tokens concatenated with observation deltas (obs_delta) in between
+    - Per-token fields (loss_masks, rewards, logprobs) concatenated, with default
+      values (0) for obs_delta positions
+    - Per-turn fields (stop_reason, is_last_step, trajectory_id) taken from the
+      last turn in the merge group
+
+    When the prefix condition fails between two consecutive turns, the current
+    merge group is flushed and a new group starts (greedy merging).
+
+    Args:
+        generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
+
+    Returns:
+        Merged GeneratorOutput with one entry per merged group.
+    """
+    num_samples = len(generator_output["response_ids"])
+    assert (
+        generator_output.get("rollout_expert_indices") is None
+    ), "rollout_expert_indices not supported for prefix-aware merging"
+    assert (
+        generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
+    ), "pixel_values and image_grid_thw not supported for step-wise training merging"
+
+    # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
+    # (contiguity is guaranteed by validate_generator_output with step_wise=True)
+    is_last_step = generator_output["is_last_step"]
+    trajectory_slices: List[GeneratorOutput] = []
+    start = 0
+    for i in range(num_samples):
+        if is_last_step[i]:
+            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            start = i + 1
+
+    merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
+    # concatenate_generator_outputs re-aggregates rollout_metrics and validates
+    return concatenate_generator_outputs(merged_slices, step_wise=True)

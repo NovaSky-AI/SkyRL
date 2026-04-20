@@ -382,6 +382,7 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  merge_stepwise_output: false
 
   # If true, use SkyRLVLMGymGenerator
   vision_language_generator: false

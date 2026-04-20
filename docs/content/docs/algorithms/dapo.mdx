@@ -80,7 +80,9 @@ We provide an example of this in `examples/train/algorithms/dapo/main_dapo.py`, 
 ```python title="examples/train/algorithms/dapo/main_dapo.py"
 class DAPOTrainer(RayPPOTrainer):
   @torch.no_grad()
-  def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+  def postprocess_generator_output(
+      self, generator_output: GeneratorOutput, uids: List[str]
+  ) -> Tuple[GeneratorOutput, List[str]]:
       # apply soft overlong punishment
       overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
       overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
