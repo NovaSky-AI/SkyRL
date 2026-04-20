@@ -7,7 +7,7 @@ import sys
 import ray
 import torch
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 
 from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig, make_config
 from skyrl.train.trainer import RayPPOTrainer
@@ -64,9 +64,7 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(
-        self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str]]:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 
@@ -75,7 +73,7 @@ class DAPOTrainer(RayPPOTrainer):
             uids: List[str]
 
         Returns:
-            (GeneratorOutput, uids) — uids may be shortened if base class applies step-wise merging.
+            GeneratorOutput
         """
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor

@@ -536,9 +536,6 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
-    merge_stepwise_output: bool = False
-    """When True (and step_wise_trajectories is True), apply prefix-aware merging
-    to collapse multi-turn step-wise sequences into single sequences before training."""
 
     def __post_init__(self):
 

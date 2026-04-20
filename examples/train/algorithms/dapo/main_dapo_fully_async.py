@@ -6,7 +6,7 @@ import sys
 
 import ray
 import torch
-from typing import List, Tuple
+from typing import List
 
 from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
@@ -19,9 +19,7 @@ from examples.train.algorithms.dapo.main_dapo import DAPOConfig
 
 class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
     @torch.no_grad()
-    def postprocess_generator_output(
-        self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str]]:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 
