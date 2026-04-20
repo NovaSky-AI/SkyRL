@@ -1497,11 +1497,13 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         assert isinstance(reward, list), f"rewards[{i}] should be a list (per-token rewards)"
         assert all(isinstance(r, (int, float)) for r in reward), f"rewards[{i}] should contain numeric values"
 
-    # Validate response_ids structure
+    # Validate response_ids are gen-only: obs tokens must not be appended to step-wise response.
+    # The mock LLM returns [10, 11, 12, eos=4] per turn; with obs excluded, that's exactly the
+    # expected per-step response.
     for i, response_ids in enumerate(generator_output["response_ids"]):
-        assert isinstance(response_ids, list), f"response_ids[{i}] should be a list"
-        assert len(response_ids) > 0, f"response_ids[{i}] should not be empty"
-        assert all(isinstance(token, int) for token in response_ids), f"response_ids[{i}] should contain integers"
+        assert response_ids == [10, 11, 12, mock_tokenizer.eos_token_id], (
+            f"response_ids[{i}] should be gen-only output tokens (no obs appended), got {response_ids}"
+        )
 
     # Validate loss_masks structure
     for i, loss_mask in enumerate(generator_output["loss_masks"]):
