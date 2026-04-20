@@ -105,9 +105,9 @@ When enabled, uses `RemoteInferenceClient` with HTTP endpoints for inference
 instead of the legacy `InferenceEngineClient` with Ray actors.
 
 Default: True (uses new code path).
-Set `_SKYRL_USE_NEW_INFERENCE=0` to disables the new inference layer.
+Set `_SKYRL_USE_NEW_INFERENCE=0` to disable the new inference layer.
 
-This flag is intended for testing and will be removed soon.
+This flag will be removed soon - the legacy path will be removed
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
