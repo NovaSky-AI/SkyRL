@@ -304,7 +304,9 @@ async def test_agent_loop_single_turn(
             # No EOS: just add it
             expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
 
-        expected_loss_mask = [1] * (len(expected_response_ids))
+        # The trailing EOS in the singleturn path is always post-hoc appended (the model's EOS
+        # was stripped and re-added), so it carries no real logprob and must be masked out.
+        expected_loss_mask = [1] * (len(expected_response_ids) - 1) + [0]
 
     if logprobs_setting is not None:
         assert output.rollout_logprobs is not None
@@ -792,14 +794,15 @@ async def test_apply_overlong_filtering_non_batched(
 
     output_normal = await generator.generate(input_batch_normal)
 
-    # Verify normal response keeps original loss mask (all 1s)
+    # Verify normal response loss mask: the singleturn path strips the model's EOS and re-appends
+    # it post-hoc, and that appended EOS carries no real logprob so it is masked out (0).
     assert len(output_normal["loss_masks"]) == 1
     assert len(output_normal["loss_masks"][0]) == 3  # 3 response tokens (already includes EOS token)
     assert output_normal["loss_masks"][0] == [
         1,
         1,
-        1,
-    ], "Loss mask should remain as 1s for response ending with eos token"
+        0,
+    ], "Loss mask: real tokens = 1, post-hoc appended EOS = 0"
 
 
 @pytest.mark.asyncio
