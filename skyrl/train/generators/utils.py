@@ -226,12 +226,7 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
 
 def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
-    """Concatenate a per-sample list-valued field across generator outputs in O(N_total).
-
-    The previous implementation used ``sum([go[key] for go in gens], [])`` which is
-    O(K^2 * L̄) — each ``+`` copies the running result. Using an explicit extend
-    loop keeps this to a single linear pass over the total element count.
-    """
+    """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
     flat = []
     for go in generator_outputs:
         flat.extend(go[key])
@@ -258,12 +253,10 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "rewards": _flatten_field(generator_outputs, "rewards"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": (
-            _flatten_field(generator_outputs, "stop_reasons")
-            if "stop_reasons" in first and first["stop_reasons"] is not None
-            else None
+            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
         ),
         "rollout_logprobs": (
-            _flatten_field(generator_outputs, "rollout_logprobs") if first["rollout_logprobs"] is not None else None
+            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
     }
 
