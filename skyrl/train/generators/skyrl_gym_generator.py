@@ -317,10 +317,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not agent_loop_state.done:
 
-            if len(agent_loop_state.input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
@@ -334,6 +330,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+
+            if len(agent_loop_state.input_ids) > max_input_length:
+                stop_reason = "length"
+                break
 
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
