@@ -317,10 +317,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not agent_loop_state.done:
 
-            if len(agent_loop_state.input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
@@ -334,6 +330,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+
+            if len(agent_loop_state.input_ids) > max_input_length:
+                stop_reason = "length"
+                break
 
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
@@ -403,23 +403,33 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.rollout_expert_indices = []
 
             if is_step_wise:
-                # current response + observation ids
-                turn_response_ids = turn_output.output_ids + turn_output.obs_ids
+                # Gen-only response: obs lives in the next turn's prompt (or is recovered as
+                # `obs_delta` under `merge_stepwise_output`). Slice `get_turn_*` helpers — which
+                # emit gen+obs-padded forms — down to gen length so response/loss_mask/logprobs
+                # share the same length.
+                turn_response_ids = turn_output.output_ids
                 turn_prompt_ids = agent_loop_state.input_ids
 
-                # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
-                turn_loss_mask = turn_output.get_turn_loss_mask()
-                turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
+                gen_len = len(turn_output.output_ids)
+                turn_loss_mask = turn_output.get_turn_loss_mask()[:gen_len]
+                full_logprobs = turn_output.get_turn_rollout_logprobs()
+                turn_response_logprobs: Optional[List[float]] = (
+                    full_logprobs[:gen_len] if full_logprobs is not None else None
+                )
+                full_expert_indices = turn_output.get_turn_rollout_expert_indices()
+                turn_rollout_expert_indices = (
+                    full_expert_indices[:gen_len] if full_expert_indices is not None else None
+                )
 
                 per_step_output = TrajectoryOutput(
                     response_ids=turn_response_ids,
-                    reward=step_reward,
+                    reward=float(step_reward),
                     loss_mask=turn_loss_mask,
                     prompt_ids=turn_prompt_ids,
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
                     env_metrics=env.get_metrics() if agent_loop_state.done else {},
-                    rollout_expert_indices=turn_output.get_turn_rollout_expert_indices(),
+                    rollout_expert_indices=turn_rollout_expert_indices,
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
 
@@ -496,7 +506,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 response_ids.append(self.tokenizer.eos_token_id)
                 # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
                 # masked with 0, why bother adding it?
-                loss_mask.append(1)
+                loss_mask.append(0)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
                 if rollout_expert_indices_out is not None and rollout_expert_indices_out:
@@ -505,13 +515,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                 appended_eos_token = True
 
-        if self.generator_cfg.step_wise_trajectories:
-            for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
-                per_token_reward = [0.0] * len(per_step_output.response_ids)
-                per_token_reward[resp_end_idx] = float(reward)
-                # in-place update to per-token reward
-                per_step_output.reward = per_token_reward
-        else:
+        if not self.generator_cfg.step_wise_trajectories:
+            # Step-wise per-step rewards are already attached as scalars when each TrajectoryOutput
+            # is constructed inside the loop; advantage compute sums over positions so a scalar is
+            # equivalent to the prior per-token form with a single non-zero entry at resp_end_idx.
             reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
 
             agent_loop_output = TrajectoryOutput(

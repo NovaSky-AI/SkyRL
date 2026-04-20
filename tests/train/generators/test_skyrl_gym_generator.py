@@ -1489,16 +1489,21 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         True,
     ], f"Expected is_last_step=[False, True], got {generator_output['is_last_step']}"
 
-    # Validate rewards are per-token (List[List[float]]) for step-wise training
+    # Step-wise emits scalar per-step rewards; the trainer converts them to per-token form at
+    # postprocess time. Advantage compute sums over positions so scalar == per-token here.
     for i, reward in enumerate(generator_output["rewards"]):
-        assert isinstance(reward, list), f"rewards[{i}] should be a list (per-token rewards)"
-        assert all(isinstance(r, (int, float)) for r in reward), f"rewards[{i}] should contain numeric values"
+        assert isinstance(reward, float), f"rewards[{i}] should be a scalar float, got {type(reward)}"
 
-    # Validate response_ids structure
+    # Validate response_ids structure — each step's response is gen-only (the 4 output tokens
+    # [10, 11, 12, eos]); obs tokens (from the mock chat template) are NOT appended.
     for i, response_ids in enumerate(generator_output["response_ids"]):
         assert isinstance(response_ids, list), f"response_ids[{i}] should be a list"
-        assert len(response_ids) > 0, f"response_ids[{i}] should not be empty"
-        assert all(isinstance(token, int) for token in response_ids), f"response_ids[{i}] should contain integers"
+        assert response_ids == [10, 11, 12, mock_tokenizer.eos_token_id], (
+            f"response_ids[{i}] should be gen-only output tokens (no obs appended), "
+            f"got {response_ids}"
+        )
+        # loss_mask/rollout alignment follows response length.
+        assert len(generator_output["loss_masks"][i]) == len(response_ids)
 
     # Validate loss_masks structure
     for i, loss_mask in enumerate(generator_output["loss_masks"]):
@@ -1511,3 +1516,97 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     # Validate stop_reasons
     for i, stop_reason in enumerate(generator_output["stop_reasons"]):
         assert isinstance(stop_reason, str), f"stop_reasons[{i}] should be a string"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_step_wise_trajectories_length_check_uses_current_prompt(
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
+):
+    """Regression: step-wise length check must be done AFTER re-tokenization.
+
+    Previously, the `len(agent_loop_state.input_ids) > max_input_length` check ran against the
+    stale input_ids from the previous turn's re-tokenize. This could let a turn whose freshly
+    re-tokenized prompt exceeds `max_input_length` still generate (and be recorded as a step
+    with an over-length prompt). With the fix, the check sees the current chat_history's size
+    and breaks before generation at the correct turn.
+    """
+    from skyrl.train.generators.base import TrajectoryID
+
+    mock_tokenizer.eos_token_id = 4
+
+    # apply_chat_template length grows with chat_history message count — 10 tokens per message.
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [7] * (10 * len(messages))
+        return "".join([m.get("content", "") for m in messages])
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(input_batch):
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+        return {
+            "responses": ["step"] * num,
+            "stop_reasons": ["stop"] * num,
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class NeverDoneEnv(BaseTextEnv):
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            return BaseTextEnvStepOutput(
+                observations=[{"role": "user", "content": "obs"}], reward=0.0, done=False, metadata={}
+            )
+
+    mock_make.side_effect = lambda *a, **k: NeverDoneEnv()
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    # Turn 1 prompt is 10 tokens (initial user only); turn 2 prompt is 30 tokens (user + assistant
+    # + user-obs). Choose a limit between the two: the fix must stop at turn 2 re-tokenize, not
+    # after generating a second step with a 30-token prompt.
+    cfg.max_input_length = 25
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.step_wise_trajectories = True
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    out = await generator.agent_loop(
+        [{"role": "user", "content": "Q?"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=50,
+        max_input_length=cfg.max_input_length,
+        trajectory_id=TrajectoryID(instance_id="uid1", repetition_id=0),
+    )
+
+    # Exactly one step emitted (turn 1). Turn 2's re-tokenized prompt (30) exceeds 25, so the
+    # loop must break before generating a second step.
+    assert len(out.step_outputs) == 1, (
+        f"Expected exactly 1 step before hitting max_input_length=25, got "
+        f"{len(out.step_outputs)}. Each recorded prompt length: "
+        f"{[len(s.prompt_ids) for s in out.step_outputs]}"
+    )
+    # And no step should have a prompt exceeding the limit.
+    for i, step in enumerate(out.step_outputs):
+        assert len(step.prompt_ids) <= cfg.max_input_length, (
+            f"step {i} prompt_ids length {len(step.prompt_ids)} exceeds max_input_length "
+            f"{cfg.max_input_length}"
+        )

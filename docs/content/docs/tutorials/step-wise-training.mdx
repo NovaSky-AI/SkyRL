@@ -76,6 +76,8 @@ class GeneratorOutput(TypedDict):
     is_last_step: Optional[List[bool]]
 ```
 
+For step-wise training, `SkyRLGymGenerator` emits **scalar** per-step rewards (one `float` per step, not a per-token list). The trainer's `postprocess_generator_output` converts the scalar to a per-token vector placed at `response_ids[-1]` before advantage compute. Emitting per-token rewards is still accepted — the scalar and per-token forms are equivalent since the advantage estimators sum over positions.
+
 ### Step-Wise Fields
 
 When `step_wise_trajectories=True`, some related fields:
@@ -107,11 +109,11 @@ GeneratorOutput(
         [tok_B_resp_turn2],
     ],
     rewards=[
-        [0.0, 0.0, ..., 0.0],       # A step 0: all zeros (intermediate)
-        [0.0, 0.0, ..., 0.0],       # A step 1: all zeros (intermediate)
-        [0.0, 0.0, ..., 1.0],       # A step 2: reward at last token of last step
-        [0.0, 0.0, ..., 0.0],       # B step 0: all zeros (intermediate)
-        [0.0, 0.0, ..., 0.5],       # B step 1: reward at last token of last step
+        0.0,                         # A step 0: intermediate (ignored by advantage compute)
+        0.0,                         # A step 1: intermediate (ignored)
+        1.0,                         # A step 2: trajectory reward on the last step
+        0.0,                         # B step 0: intermediate (ignored)
+        0.5,                         # B step 1: trajectory reward on the last step
     ],
     loss_masks=[
         [1, 1, ..., 1],             # all 1s: every response token is trainable
@@ -171,19 +173,16 @@ Set `loss_mask = [1] * len(response_ids[i])` for each step. Since each step's re
 
 ### 3. Assign Rewards
 
-Only the **last step** of each trajectory receives the actual reward. Intermediate steps get all zeros:
+Only the **last step** of each trajectory carries the trajectory reward; intermediate steps get `0.0`:
 
 ```python
 for i, step_output in enumerate(trajectory_steps):
-    if i == len(trajectory_steps) - 1:
-        # Last step: reward at last token position
-        rewards = [0.0] * (len(step_output.response_ids) - 1) + [trajectory_reward]
-    else:
-        # Intermediate step: all zeros
-        rewards = [0.0] * len(step_output.response_ids)
+    step_output.reward = trajectory_reward if i == len(trajectory_steps) - 1 else 0.0
 ```
 
-Note that SkyRL currently only supports trajectory-level reward for step-wise training. Therefore, the reward should be placed at the last step's last token, and all non-last-step rewards are ignored. We then use the last step's reward to estimate the advantage and broadcast it to previous turns. Because of this, you should only use outcome-based advantage estimators (`cfg.trainer.algorithm.advantage_estimator` in `grpo`, `rloo`, or `maxrl`); `reinforce++` and `gae` are rejected at config validation time.
+Note that SkyRL currently only supports trajectory-level reward for step-wise training. The last step's reward is used to estimate the advantage, which is broadcast to previous turns. Because of this, you should only use outcome-based advantage estimators (`cfg.trainer.algorithm.advantage_estimator` in `grpo`, `rloo`, or `maxrl`); `reinforce++` and `gae` are rejected at config validation time.
+
+If you emit per-token rewards instead (a list of zeros with the trajectory reward at the last position), the trainer handles that form too — advantage compute is position-agnostic for supported estimators.
 
 ### 4. Ensure Contiguous Ordering
 
