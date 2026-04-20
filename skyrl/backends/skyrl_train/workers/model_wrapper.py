@@ -365,6 +365,13 @@ class HFModelWrapper(nn.Module):
             )
 
         if self.is_vlm:
+            # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
+            # vs. multimodal tokens, and expects it to be populated at tokenization.
+            # However, vLLM doesn't support transformers v5 yet so no mm_token_type_ids are
+            # returned. For now we populate it here for images (0 = text, 1 = image token).
+            if image_grid_thw is not None and mm_token_type_ids is None:
+                mm_token_type_ids = (sequences_fwd == self.model.config.image_token_id).long()
+
             vlm_kwargs = dict(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,

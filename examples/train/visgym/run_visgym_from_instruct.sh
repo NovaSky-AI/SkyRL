@@ -18,22 +18,15 @@ set -x
 #   bash examples/train/visgym/run_visgym_from_instruct.sh
 
 : "${ENV_ID:=maze_2d/easy}"
-: "${DATA_DIR:="$HOME/data/visgym_maze_2d_easy"}"
-: "${NUM_INFERENCE_GPUS:=8}"
-: "${NUM_TRAIN_GPUS:=8}"
-: "${LOGGER:=wandb}"
+: "${DATA_DIR:="$HOME/data/visgym_maze_2d_instruct"}"
+: "${NUM_GPUS:=8}"
+: "${LOGGER:=console}"
 : "${MODEL_PATH:=Qwen/Qwen3-VL-8B-Instruct}"
 
-: "${EXPORT_PATH:="$HOME/exports/visgym_maze_2d_easy_from_instruct"}"
-: "${DUMP_TRAINING_BATCHES:=false}"
-: "${DUMP_EVAL_RESULTS:=true}"
-: "${EVAL_INTERVAL:=10}"
+: "${EXPORT_PATH:="$HOME/exports/visgym_maze_2d_instruct"}"
 
-: "${TRAIN_BATCH_SIZE:=32}"
-: "${POLICY_MINI_BATCH_SIZE:=16}"
-: "${N_SAMPLES_PER_PROMPT:=8}"
 : "${NUM_DATASET_ROWS:=256}"
-: "${EVAL_DATA_DIR:="$HOME/data/visgym_maze_2d_easy_eval"}"
+: "${EVAL_DATA_DIR:="$HOME/data/visgym_maze_2d_instruct_eval"}"
 
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
   echo "=== Generating train stub dataset for $ENV_ID ==="
@@ -52,13 +45,8 @@ if [ ! -f "$EVAL_DATA_DIR/train.parquet" ]; then
     --output_dir "$EVAL_DATA_DIR"
 fi
 
-# Requires nightly vLLM for multi-modal generation
-# TODO UPDATE MM
-uv sync --extra fsdp
-source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 uv pip install "vllm @ git+https://github.com/nithinvc/vllm@6f40f40a7e4f79347cbc33b566de914533baa512
-
-_SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+  python examples/train/visgym/entrypoint.py \
   --env_variant instruct \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$EVAL_DATA_DIR/train.parquet']" \
@@ -66,17 +54,17 @@ _SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_TRAIN_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_TRAIN_GPUS \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   trainer.ref.fsdp_config.cpu_offload=false \
-  generator.inference_engine.num_engines=$NUM_INFERENCE_GPUS \
+  generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.async_engine=true \
   generator.inference_engine.engine_init_kwargs.max_model_len=60000 \
   trainer.epochs=20 \
-  trainer.train_batch_size=$TRAIN_BATCH_SIZE \
-  trainer.policy_mini_batch_size=$POLICY_MINI_BATCH_SIZE \
+  trainer.train_batch_size=32 \
+  trainer.policy_mini_batch_size=16 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.update_epochs_per_batch=1 \
@@ -85,7 +73,7 @@ _SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \
   generator.sampling_params.temperature=1 \
   generator.max_turns=18 \
   generator.max_input_length=8192 \
-  generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  generator.n_samples_per_prompt=8 \
   generator.vision_language_generator=true \
   generator.batched=false \
   trainer.algorithm.use_kl_loss=true \
@@ -98,10 +86,10 @@ _SKYRL_USE_NEW_INFERENCE=1 python examples/train/visgym/entrypoint.py \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
-  trainer.dump_data_batch="$DUMP_TRAINING_BATCHES" \
-  trainer.dump_eval_results="$DUMP_EVAL_RESULTS" \
+  trainer.dump_eval_results=true \
   trainer.ckpt_path="$HOME/ckpts/visgym_maze_2d_easy_from_instruct" \
   trainer.use_sample_packing=false \
-  trainer.eval_interval="$EVAL_INTERVAL" \
-  trainer.ckpt_interval=2 \
+  trainer.eval_interval=10 \
+  trainer.ckpt_interval=10 \
+  trainer.algorithm.loss_reduction=token_mean_legacy \
   "$@"
