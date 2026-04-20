@@ -21,7 +21,7 @@ The dataset contains ~3,000 geometry problems, each with:
 The model interacts over up to 3 turns per episode:
 
 1. Read the diagram and question.
-2. Reason inside `<think>...</think>`, then call `calc_score` to check an answer:
+2. Reason, then call `calc_score` to check an answer:
    ```
    <tool_call>{"name": "calc_score", "arguments": {"answer": "<your_answer>"}}</tool_call>
    ```
@@ -81,36 +81,22 @@ Defaults: Qwen3-VL-8B-Instruct, GRPO, 8 samples per prompt, 3 turns max, max pro
 ## Launching
 
 ```bash
-NUM_GPUS=4 bash examples/train/geometry3k/run_geometry3k.sh
+bash examples/train/geometry3k/run_geometry3k.sh
 ```
 
 Override with env vars:
 
 ```bash
-# Full 8-GPU run with W&B logging
-NUM_GPUS=8 LOGGER=wandb bash examples/train/geometry3k/run_geometry3k.sh
+# W&B logging
+LOGGER=wandb bash examples/train/geometry3k/run_geometry3k.sh
 
 # Custom data dir
 DATA_DIR=/path/to/data bash examples/train/geometry3k/run_geometry3k.sh
 ```
 
-Tested on 1× 8× H100 node.
-
-## Example Rollout
-
-![Geometry-3K rollout](/images/examples/geometry3k_rollout.gif)
-
-<Callout type="info">
-Placeholder — a real visualized multi-turn rollout (diagram + reasoning + `calc_score` → final `\boxed{}` answer) will replace this asset.
-</Callout>
-
 ## Results
 
 ![Geometry-3K reward curve](/images/examples/geometry3k_reward.png)
-
-<Callout type="info">
-Placeholder — real reward curve from a full training run will replace this asset.
-</Callout>
 
 ## What's Next
 

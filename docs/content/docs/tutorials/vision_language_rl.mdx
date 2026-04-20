@@ -16,10 +16,17 @@ SkyRL supports multi-turn RL training on vision-language models (VLMs) — the p
 vllm = { path = "/abs/path/to/vllm" }
 ```
 
-Use an absolute path. After editing, the standard `uv run --isolated --extra fsdp ...` invocation used by the VLM example scripts will pick up your local vLLM checkout. Remove this override once the next upstream vLLM release is available.
+Use an absolute path. After editing, the standard `uv run --isolated --extra fsdp ...` invocation used by the VLM example scripts will pick up your local vLLM checkout. Remove this override once the next upstream vLLM release is available. Please also unpin the vLLM version:
+```toml
+fsdp = [
+# previously: "vllm==0.19.0; sys_platform == 'linux'",
+"vllm",
+...
+]
+```
 </Callout>
 
-**Hardware.** The examples in this guide were tested on a single node with 8× H100 GPUs. VLM runs are memory-heavy (image tokens expand dramatically during encoding) — calibrate `gpu_memory_utilization` and `max_model_len` if you're working with a different hardware profile.
+**Hardware.** Since VLM runs are memory-heavy, we recommend calibrating `gpu_memory_utilization`, `max_model_len`, and `train_batch_size` to fit your setup.
 
 ## Turning on VLM mode
 
@@ -30,14 +37,12 @@ generator.vision_language_generator=true \
 trainer.use_sample_packing=false \
 ```
 
-- **`generator.vision_language_generator=true`** — the one real VLM switch. Wires in the VLM-aware generator so that image content parts in the prompt are routed through the vision path of the inference engine.
+- **`generator.vision_language_generator=true`** — the one real VLM switch. Switches from the default gym generator to a VLM generator, ensuring that visual content is correctly routed to the inference server.
 - **`trainer.use_sample_packing=false`** — sample packing is currently unsupported for VLM training (see callout below).
 
 <Callout type="info">
-**Sample packing is deferred for VLM.** Each VLM family (Qwen-VL, InternVL, etc.) processes images and positional embeddings differently, and packing across heterogeneous image counts per sample would need per-model handling. Support is expected in a future release; until then, set `trainer.use_sample_packing=false` for any VLM run.
+**Sample packing is unsupported for VL models.** Each VLM family (Qwen-VL, InternVL, etc.) processes images and positional embeddings differently, and packing across heterogeneous image counts per sample would need per-model handling. Support is expected in a future release; until then, set `trainer.use_sample_packing=false` for any VLM run.
 </Callout>
-
-You'll also want `generator.batched=false` for multi-turn rollouts, but this isn't VLM-specific — the same flag appears in non-VLM multi-turn recipes like [Text-to-SQL](../examples/multi_turn_text2sql).
 
 ## Dataset record shape
 
@@ -61,7 +66,7 @@ VLM training datasets embed images directly in the prompt as `image_url` content
 
 A prompt can have multiple `image_url` parts. See `examples/train/geometry3k/geometry_3k_dataset.py` for a full dataset preparation script that converts PIL images to data URIs.
 
-For environments that generate images dynamically at each turn (like VisGym), the dataset contains only stub prompts — the env builds the actual multimodal message in `init()` and `step()`. See `examples/train/visgym/dataset.py`.
+For environments that generate images dynamically at each turn (like VisGym), the dataset contains only stub prompts — the env builds the actual multimodal message in `init()` and `step()`. See `examples/train/visgym/dataset.py`. The validation set is held constant by seeding each dataset row while the training set is randomly sampled.
 
 ## Interaction patterns
 
@@ -73,17 +78,16 @@ SkyRL handles two distinct VLM interaction patterns:
 
 The generator handles both patterns transparently once `generator.vision_language_generator=true` is set. The environment contract determines which pattern you're in: return observations with `image_url` content parts for image-returning envs, or plain text strings for text-only feedback.
 
-## Support matrix
+## Limitations and future work
 
-| Feature | Status | Notes |
-|---|---|---|
-| FSDP backend | Supported | Used by both example recipes. |
-| Megatron backend | Not supported | VLM path has not been wired through Megatron yet. |
-| Sample packing | Deferred | Per-model image/positional-embedding handling required. |
-| Batched generation | Not supported | Use `generator.batched=false` + async engine for multi-turn. |
-| Qwen3-VL | Tested | `Qwen/Qwen3-VL-8B-Instruct` used in both examples. |
-| Multi-image per turn | Supported | See VisGym example. |
-| Hardware tested | 1× 8× H100 | |
+Multimodal support in SkyRL is still early. The current VLM path runs on the FSDP backend and supports multi-image, multi-turn rollouts, but several features are not yet ready:
+
+- **Sample packing** — each VLM family handles images and positional embeddings differently, so packing needs per-model support or a different abstraction.
+- **Megatron backend** — the VLM path has not been wired through Megatron yet.
+- **Context parallelism (CP)** — many VLM tasks are long context, long horizon tasks which get worse as more images are included.
+- **Step-wise training** — step-wise training is currently undergoing rapid development in SkyRL, and will eventually support multimodal models.
+
+Contributions are welcome! This is a good time to get involved in multimodal training in SkyRL.
 
 ## What's next
 

@@ -10,6 +10,42 @@ In this example we train a vision-language model to solve VisGym tasks — gymna
 
 Source code: `examples/train/visgym/`.
 
+## VisGym Setup
+
+<Callout type="warn">
+**Local VisGym install required.** VisGym ships under the `gymnasium` package namespace rather than as a separate PyPI package — its envs register under `gymnasium.make("maze_2d/easy")` etc., so installing it editable takes over the `gymnasium` import in your env. Clone it locally and point uv at it with two local-only `pyproject.toml` edits (do not commit these).
+</Callout>
+
+1. Clone VisGym anywhere (the repo root is conventional):
+
+   ```bash
+   git clone https://github.com/anyscale/VisGym.git
+   ```
+
+2. Add a `[tool.uv.sources]` entry to the root `pyproject.toml` pointing at your clone. Use the absolute or repo-relative path:
+
+   ```toml
+   [tool.uv.sources]
+   # ...existing entries (skyrl-gym, torch, vllm override from the VLM tutorial, etc.)...
+   gymnasium = { path = "./VisGym", editable = true }
+   ```
+
+3. Add `gymnasium` as a direct dep so the source override actually binds — append it to the `skyrl-train` optional-dependencies list in the root `pyproject.toml`:
+
+   ```toml
+   [project.optional-dependencies]
+   skyrl-train = [
+       # ...existing entries...
+       "gymnasium",
+   ]
+   ```
+
+The next `uv run --isolated --extra fsdp …` invocation (used by `run_visgym_from_*.sh`) will pick up the local VisGym checkout automatically. Remove these edits before committing any changes.
+
+<Callout type="info">
+**Robotics envs** (e.g. `fetch_pick_and_place`) additionally require the `Gymnasium-Robotics/` subpackage inside the VisGym clone to be installed editable — see the [VisGym README](https://github.com/anyscale/VisGym) for that extra step. The default `maze_2d/easy` task in this recipe does not need it.
+</Callout>
+
 ## Task Overview
 
 VisGym environments are `gymnasium.Env` instances that return rendered images as observations. The example defaults to `maze_2d/easy`, a 2D navigation maze where:
@@ -39,6 +75,10 @@ Reward combines task success with a **format reward** (0.8 task + 0.2 format) so
 
 See `examples/train/visgym/env_sft.py` for the action-parsing logic (a balanced-parenthesis walker with several fallback strategies — SFT models sometimes emit markdown-wrapped or JSON-shaped actions).
 
+<Callout type="info">
+**SFT checkpoint.** The SFT'd Qwen3-VL checkpoints are published by the original VisGym authors at [huggingface.co/VisGym/visgym_model](https://huggingface.co/VisGym/visgym_model). This recipe uses the `mixed_qwen3vl` variant — point `MODEL_PATH` at that checkpoint when launching `run_visgym_from_sft.sh`.
+</Callout>
+
 ### `run_visgym_from_instruct.sh` — keyword-action, from vanilla instruct
 
 Starts from `Qwen/Qwen3-VL-8B-Instruct` without an SFT warm-start. The action format is a simple keyword tag:
@@ -47,7 +87,7 @@ Starts from `Qwen/Qwen3-VL-8B-Instruct` without an SFT warm-start. The action fo
 <action>left</action>
 ```
 
-where the keyword is one of `left`, `right`, `up`, `down`, `stop`. Reward is **task-only** (no format shaping) and KL regularization is on (`kl_loss_coef=0.005`) to keep the policy anchored to the instruct distribution.
+where the keyword is one of `left`, `right`, `up`, `down`, `stop`. Reward is **task-only** (no format shaping) and KL regularization is on (`kl_loss_coef=0.005`) to prevent reasoning collapse.
 
 See `examples/train/visgym/env_instruct.py` — the action extractor is a simple regex match for `<action>keyword</action>` tags. The env sets `relaxed=True` on the underlying VisGym env so the gymnasium env accepts keyword inputs.
 
@@ -122,7 +162,11 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   environment.env_class=visgym \
 ```
 
-Notable differences: the instruct recipe runs more turns (18 vs 15), samples hotter (temperature 1 vs 0.7), and uses KL to stay close to the base distribution — all compensations for not having an SFT warm-start.
+Some key recipe differences:
+
+- The Instruct recipe runs more turns (18 vs 15) which helps produce a higher initial success rate.
+- The SFT recipe needs a slightly lower temperature compared to the Instruct recipe (0.7 vs. 1). We found the SFT model unable to solve any environment with temperature 1.
+- The Instruct recipe uses a KL loss to prevent reasoning collapse.
 
 ## Launching
 
@@ -134,25 +178,17 @@ bash examples/train/visgym/run_visgym_from_instruct.sh
 MODEL_PATH=/path/to/your/sft_ckpt bash examples/train/visgym/run_visgym_from_sft.sh
 ```
 
-Tested on 1× 8× H100 node.
-
 ## Example Rollout
 
-![VisGym rollout](/images/examples/visgym_rollout.gif)
+![VisGym rollout — Non-SFT Qwen3-VL-8B-Instruct on maze_2d/easy](/images/examples/visgym_rollout.gif)
 
-<Callout type="info">
-Placeholder — a real multi-image multi-turn rollout (per-turn maze frame updates as the agent navigates) will replace this asset.
-</Callout>
+Single trajectory from the from-instruct recipe (no SFT warm-start) on `maze_2d/easy` with `kl_loss_coef=0.005`. Each turn renders a fresh maze frame; the model accumulates them across the conversation.
 
 ## Results
 
-![VisGym from-SFT reward curve](/images/examples/visgym_sft_reward.png)
+![VisGym maze_2d/easy reward curve](/images/examples/visgym_maze2d_reward.png)
 
-![VisGym from-instruct reward curve](/images/examples/visgym_instruct_reward.png)
-
-<Callout type="info">
-Placeholders — real reward curves from each recipe will replace these assets.
-</Callout>
+Reward curve on `maze_2d/easy`.
 
 ## What's Next
 
