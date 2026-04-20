@@ -233,12 +233,17 @@ def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
     return flat
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
+def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
-    Concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
 
     We only aggregate rollout metrics the can deduced by responses and rewards, but not
     those that use `env_metrics` or `env_classes`.
+
+    Args:
+        generator_outputs: Per-batch generator outputs to concatenate.
+        step_wise: If True, validate step-wise specific fields on the concatenated result
+            (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -276,7 +281,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     from skyrl.train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result)
+    validate_generator_output(num_prompts, result, step_wise=step_wise)
 
     return result
 
