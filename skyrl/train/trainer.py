@@ -59,8 +59,8 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
-    prepare_generator_input,
     merge_stepwise_output,
+    prepare_generator_input,
 )
 from skyrl.train.utils import (
     Timer,
