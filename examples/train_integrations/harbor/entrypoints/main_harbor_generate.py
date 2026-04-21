@@ -61,6 +61,19 @@ class HarborGenerateExp(BasePPOExp):
         ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         return prompts_dataset
 
+    def get_eval_dataset(self):
+        """Initializes the evaluation dataset.
+
+        Returns:
+            HarborTaskDataset: The evaluation dataset.
+        """
+        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+            prompts_dataset = HarborTaskDataset(
+                data_files=self.cfg.data.val_data,
+            )
+            return prompts_dataset
+        return None
+
     def run(self):
         generator = self._setup_generator()
 

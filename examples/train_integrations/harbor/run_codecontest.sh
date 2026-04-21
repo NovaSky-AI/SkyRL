@@ -45,7 +45,7 @@ CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_a
 #----------------
 # Infrastructure setup
 #----------------
-NUM_GPUS=4
+NUM_GPUS=8
 ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
 TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
@@ -77,8 +77,8 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.engine_init_kwargs.enable_log_requests=false \
   trainer.epochs=3 \
   trainer.eval_batch_size=128 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=20 \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=100 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$MINI_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

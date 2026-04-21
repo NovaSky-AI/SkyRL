@@ -108,3 +108,33 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     model_name="Qwen/Qwen3-0.6B" \
     lora_rank=0 learning_rate=1e-6
 ```
+
+### Vision Language (`vlm_classifier`)
+
+Trains an image classifier on top of [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) using the [`vlm_classifier` cookbook recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/main/tinker_cookbook/recipes/vlm_classifier). For background on SkyRL's VLM path — dataset record shape, interaction patterns, and the broader support — see the [Vision-Language RL tutorial](../tutorials/vision_language_rl).
+
+<Callout type="warn">
+VLM training requires a newer vLLM than the version pinned in the repo. Clone vLLM from GitHub and point `[tool.uv.sources]` in the root `pyproject.toml` at your local checkout before running. See the [vLLM source override callout](../tutorials/vision_language_rl#requirements) on the tutorial page for the exact steps.
+</Callout>
+
+This recipe uses a **different server command** than the common one at the top of this page, in particular the `use_sample_packing` override is VLM-specific:
+
+```bash
+uv run --isolated --extra tinker --extra fsdp \
+    -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-VL-8B-Instruct" --backend fsdp \
+    --backend-config '{"trainer.use_sample_packing": false}'
+```
+
+Then launch the training recipe:
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.vlm_classifier.train \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-VL-8B-Instruct"
+```
+
+<div style={{width: "75%", margin: "0 auto"}}>
+![VLM classifier NLL over steps](/images/tinker/vlm_classifier_nll.png)
+</div>

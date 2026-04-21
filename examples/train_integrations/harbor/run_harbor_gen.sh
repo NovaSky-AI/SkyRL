@@ -28,10 +28,10 @@ MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must 
 
 uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
+  data.val_data=$TRAIN_DATA \
   harbor_trial_config.trials_dir=$TRIALS_DIR \
-  harbor_trial_config.trial_name="dummy" \
-  trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-  generator.inference_engine.served_model_name="Qwen2.5-1.5B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen3-8B" \
+  generator.inference_engine.served_model_name="Qwen3-8B" \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.enable_http_endpoint=true \
