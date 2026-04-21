@@ -84,7 +84,7 @@ skyrl-train = [
     "datasets>=4.0.0",
     "tensordict",
     "jaxtyping",
-    "skyrl-gym",
+    "skyrl-gym==0.3.0",
     # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
     # flash-attn wheels), drop the custom wheel URL
     "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
@@ -259,7 +259,6 @@ url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-skyrl-gym = { path = "./skyrl-gym", editable = true }
 # flashinfer wheels are only available from the custom cu128 index
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
