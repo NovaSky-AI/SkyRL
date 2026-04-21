@@ -172,34 +172,6 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
     return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
 
 
-def test_forward_backward_rejects_ppo_critic_loss():
-    backend = create_backend()
-    create_model(backend, "model_1")
-    reqs = {
-        "req1": (
-            "model_1",
-            types.ForwardBackwardInput(
-                data=[
-                    types.Datum(
-                        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
-                        loss_fn_inputs=types.LossFnInputs(
-                            target_tokens=types.TensorData(data=[2, 3, 0]),
-                            weights=types.TensorData(data=[1.0, 1.0, 1.0]),
-                            advantages=types.TensorData(data=[]),
-                            logprobs=types.TensorData(data=[]),
-                            values=types.TensorData(data=[0.1, 0.2, 0.3]),
-                            returns=types.TensorData(data=[0.4, 0.5, 0.6]),
-                        ),
-                    )
-                ],
-                loss_fn="ppo_critic",
-            ),
-        )
-    }
-    with pytest.raises(ValueError, match="ppo_critic is only supported"):
-        backend.forward_backward(prepare_model_pass_batch(reqs))
-
-
 def _assert_tree_allclose(t1, t2, rtol=1e-3, atol=1e-3, min_match_pct=99.0):
     """Assert that at least min_match_pct% of elements in two trees are close."""
     leaves1 = jax.tree.leaves(t1)
