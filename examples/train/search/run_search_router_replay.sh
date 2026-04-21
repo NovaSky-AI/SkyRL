@@ -29,9 +29,9 @@ set -x
 # Dataset path (shared storage across nodes, or local storage on each node)
 DATA_DIR="$HOME/data/searchR1"
 
-MODEL_NAME="/home/ray/models/Qwen3-30B-A3B"
+MODEL_NAME=${MODEL_NAME:-"/home/ray/models/Moonlight-16B-A3B-Instruct"}
 
-NUM_NODES=${NUM_NODES:-2}
+NUM_NODES=${NUM_NODES:-1}
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-8}
 
 MEGATRON_TP=${MEGATRON_TP:-2}
@@ -73,6 +73,7 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --frozen --extra megatron -m sky
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.policy.model.path=$MODEL_NAME \
+  trainer.flash_attn=false \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
