@@ -85,9 +85,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
-    # flash-attn wheels), drop the custom wheel URL
-    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "polars",
     "s3fs",
@@ -106,9 +104,7 @@ fsdp = [
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
-    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
-    # flash-attn wheels), drop the custom wheel URL
-    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -119,9 +115,7 @@ fsdp = [
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
-    # flash-attn wheels), drop the custom wheel URL
-    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux' and (python_version != '3.12' or platform_machine != 'x86_64')",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
@@ -259,12 +253,14 @@ url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-skyrl-gym = { path = "./skyrl-gym", editable = true }
 # flashinfer wheels are only available from the custom cu128 index
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 mamba-ssm = { url = "https://github.com/state-spaces/mamba/releases/download/v2.3.1/mamba_ssm-2.3.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
+# flash-attn wheels), drop the custom wheel URL
 # Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
+flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
@@ -335,3 +331,4 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
+
