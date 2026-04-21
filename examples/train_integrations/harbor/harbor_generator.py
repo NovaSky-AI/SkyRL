@@ -217,7 +217,7 @@ def build_step_wise_generator_output(
     rewards_for_metrics: List[float] = []
     for traj in trajectory_outputs:
         tid = traj.trajectory_id
-        
+
         # 2.1. For failed trajectories, set loss mask to [0] and stop reason to "error".
         if tid.instance_id in masked_instance_ids:
             prompt_token_ids.append([0])
@@ -274,7 +274,7 @@ def build_step_wise_generator_output(
             is_last_step_list.append(is_last)
             out_trajectory_ids.append(tid)
             rollout_logprobs_list.append(lp)
-        
+
         # 2.5. For trajectory-level metrics, record the last turn's prompt IDs and response IDs which
         # contains the entire trajectory.
         response_ids_for_metrics.append(prompt_token_ids_per_turn[-1] + completion_token_ids_per_turn[-1])
