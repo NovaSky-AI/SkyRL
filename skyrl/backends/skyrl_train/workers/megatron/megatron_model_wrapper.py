@@ -104,7 +104,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=True,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=16,
             )
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
@@ -146,6 +146,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,  # keep in bf16; log-prob computation casts per-chunk
             )
 
             if self.use_sample_packing:
@@ -158,9 +159,33 @@ class MegatronModelWrapper:
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
             else:
+                # With sequence parallelism (TP > 1), the model output is [batch, seq/TP, vocab/TP]
+                # (the model internally transposes from [seq/TP, batch, vocab/TP] to batch-first).
+                # Gather across TP ranks on dim 1 (sequence) before restoring padding.
+                gather_attention_mask = new_attention_mask
+                if (
+                    mpu.get_tensor_model_parallel_world_size() > 1
+                    and outputs is not None
+                    and mpu.is_pipeline_last_stage(ignore_virtual=True)
+                    and outputs.shape[1] != new_attention_mask.shape[1]
+                ):
+                    from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
+                    # transpose to seq-first for gather, then back to batch-first
+                    outputs = outputs.transpose(0, 1).contiguous()
+                    outputs = gather_from_sequence_parallel_region(outputs, group=mpu.get_tensor_model_parallel_group())
+                    outputs = outputs.transpose(0, 1).contiguous()
+                    # Expand attention mask to match gathered seq length
+                    gathered_seq_len = outputs.shape[1]
+                    gather_attention_mask = torch.zeros(
+                        outputs.shape[0], gathered_seq_len,
+                        dtype=new_attention_mask.dtype, device=new_attention_mask.device
+                    )
+                    seq_lens = new_attention_mask.sum(dim=1)
+                    for i in range(outputs.shape[0]):
+                        gather_attention_mask[i, :seq_lens[i]] = 1
                 outputs = recover_left_padding(
                     outputs,
-                    new_attention_mask,
+                    gather_attention_mask,
                     attention_mask,
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
@@ -264,7 +289,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=False,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=16,
             )
 
             action_log_probs = token_logprobs[:, -num_actions:]
@@ -433,6 +458,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,  # keep in bf16; log-prob computation casts per-chunk
             )
 
             if self.use_sample_packing:
@@ -445,9 +471,36 @@ class MegatronModelWrapper:
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
             else:
+                # With sequence parallelism (TP > 1), the model output is [batch, seq/TP, vocab/TP]
+                # (the model internally transposes from [seq/TP, batch, vocab/TP] to batch-first).
+                # Gather across TP ranks on dim 1 (sequence) before restoring padding.
+                # Only gather when the model output is actually SP-split (seq dim smaller than input).
+                gather_attention_mask = new_attention_mask
+                tp_size = mpu.get_tensor_model_parallel_world_size()
+                if (
+                    tp_size > 1
+                    and outputs is not None
+                    and mpu.is_pipeline_last_stage(ignore_virtual=True)
+                    and outputs.shape[1] != new_attention_mask.shape[1]
+                ):
+                    from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
+                    # transpose to seq-first for gather, then back to batch-first
+                    outputs = outputs.transpose(0, 1).contiguous()
+                    outputs = gather_from_sequence_parallel_region(outputs, group=mpu.get_tensor_model_parallel_group())
+                    outputs = outputs.transpose(0, 1).contiguous()
+                    # Expand attention mask to match gathered seq length (accounts for TP-padding)
+                    gathered_seq_len = outputs.shape[1]
+                    gather_attention_mask = torch.zeros(
+                        outputs.shape[0], gathered_seq_len,
+                        dtype=new_attention_mask.dtype, device=new_attention_mask.device
+                    )
+                    seq_lens = new_attention_mask.sum(dim=1)
+                    for i in range(outputs.shape[0]):
+                        gather_attention_mask[i, :seq_lens[i]] = 1
+
                 outputs = recover_left_padding(
                     outputs,
-                    new_attention_mask,
+                    gather_attention_mask,
                     attention_mask,
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),

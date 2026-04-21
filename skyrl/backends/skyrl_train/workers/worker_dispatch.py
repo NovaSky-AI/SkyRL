@@ -218,10 +218,17 @@ class WorkerDispatch:
         # With DP>1, each rank returns loss_fn_outputs for its data chunk.
         # Concatenate them in rank order to get the full batch's outputs.
         # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
+        # Only collect from collection/primary ranks (TP=0, SP=0, PP=0) to avoid duplicates.
         if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
+            actor_infos = self._actor_groups[model].actor_infos
             all_loss_fn_outputs = []
-            for status in statuses:
-                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+            dp_rank_collected = set()
+            for actor_info, status in zip(actor_infos, statuses):
+                if actor_info.rank.is_collection_dp_rank() and actor_info.rank.dp not in dp_rank_collected:
+                    dp_rank_collected.add(actor_info.rank.dp)
+                    all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+                else:
+                    status.pop("loss_fn_outputs", None)
             result = statuses[0]
             result["loss_fn_outputs"] = all_loss_fn_outputs
             return result

@@ -332,7 +332,8 @@ def preprocess_packed_seqs(
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    # Align to at least 8 for FP8 compatibility (TE requires token count % 8 == 0)
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else max(tp_size, 8)
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
     seqlens_in_batch_padded = seqlens_in_batch + pad_size

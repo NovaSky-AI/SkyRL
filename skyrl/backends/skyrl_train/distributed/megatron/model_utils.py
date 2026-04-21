@@ -214,14 +214,13 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         seq_size = int(vocab_parallel_logits.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
-        all_grad_input = []
-
+        # Write grad directly into vocab_parallel_logits to avoid allocating a separate tensor.
+        # We process chunks sequentially so earlier chunks are already consumed before being overwritten.
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size
             chunk_end = min(seq_size, (chunk_idx + 1) * chunk_size)
 
-            logits = vocab_parallel_logits[:, chunk_start:chunk_end, :]
-            logits = logits.to(dtype=torch.float32)
+            logits = vocab_parallel_logits[:, chunk_start:chunk_end, :].to(dtype=torch.float32)
 
             softmax_output = _compute_distributed_log_softmax(
                 logits,
@@ -235,16 +234,13 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
                 num_classes=partition_vocab_size,
             )
 
-            grad_input = is_chosen.float().sub_(softmax_output)
+            chunk_grad = is_chosen.float().sub_(softmax_output)
+            chunk_grad.mul_(grad_output[:, chunk_start:chunk_end].unsqueeze(dim=-1))
 
-            grad_input.mul_(grad_output[:, chunk_start:chunk_end].unsqueeze(dim=-1))
-
-            all_grad_input.append(grad_input)
-
-        grad_input = torch.cat(all_grad_input, dim=1)
+            vocab_parallel_logits[:, chunk_start:chunk_end, :] = chunk_grad.to(vocab_parallel_logits.dtype)
 
         # if you add an argument to the forward method, then you must add a corresponding None here
-        return grad_input, None, None, None, None, None, None
+        return vocab_parallel_logits, None, None, None, None, None, None
 
 
 def from_parallel_logits_to_logprobs(

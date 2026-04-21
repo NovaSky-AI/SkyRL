@@ -23,6 +23,8 @@ dependencies = [
     "peft",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    # "deep-ep",
+    "nvidia-nvshmem-cu13>=3.6.5; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -187,6 +189,7 @@ required-environments = [
 constraint-dependencies = [
     "flashinfer-jit-cache==0.6.6",
 ]
+
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
 conflicts = [
@@ -220,12 +223,15 @@ override-dependencies = [
     "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    "nvidia-nvshmem-cu13>=3.6.5; sys_platform == 'linux'",
+    "nvidia-nvshmem-cu12; sys_platform == 'never'",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+deep-ep = ["torch", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -264,8 +270,9 @@ torchvision = [
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "420a7da37afea5eb4e8d3899d540c830b9c4cda2", marker = "sys_platform == 'linux'"}
-# megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 4/1/26
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "4ef64ebc468cd3da41a22d46a2db37163694e8e2", marker = "sys_platform == 'linux'"}
+# megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 4/14/26
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "7ff046b1c8b976ff33761976796c4302ebd0a7bc", marker = "sys_platform == 'linux'"}
+deep-ep = { path = "DeepEP" }
 
 [tool.black]
 line-length = 120
