@@ -410,29 +410,43 @@ class TestMergeStepwiseOutput:
         # rollout_metrics is re-aggregated by concatenate_generator_outputs
         assert merged["rollout_metrics"] is not None
 
-    def test_per_trajectory_scalar_rewards(self):
-        """Per-trajectory scalar rewards (List[float]) are handled correctly."""
-        tid = _make_tid("scalar_rew")
-        gen_out: GeneratorOutput = {
-            "prompt_token_ids": [[10], [10, 20, 30]],
-            "response_ids": [[20], [40]],
-            "rewards": [0.0, 5.0],  # scalar per turn
-            "loss_masks": [[1], [1]],
-            "stop_reasons": None,
-            "rollout_metrics": None,
-            "rollout_logprobs": None,
-            "trajectory_ids": [tid, tid],
-            "rollout_expert_indices": None,
-            "is_last_step": [False, True],
-        }
+    def test_per_trajectory_scalar_rewards_and_overlong_filtering(self):
+        """
+        Per-trajectory scalar rewards (List[float]) are handled correctly.
 
-        merged = merge_stepwise_output(gen_out)
+        Also check that overlong filtering is applied correctly. Overlong filtering will have loss
+        masks [0] for assistant responses, which merging should preserve.
+        """
+        for apply_overlong_filtering in [True, False]:
+            tid = _make_tid("scalar_rew")
+            if apply_overlong_filtering:
+                loss_masks = [[0], [0]]
+            else:
+                loss_masks = [[1], [1]]
+            gen_out: GeneratorOutput = {
+                "prompt_token_ids": [[10], [10, 20, 30]],
+                "response_ids": [[20], [40]],
+                "rewards": [0.0, 5.0],  # scalar per turn
+                "loss_masks": loss_masks,
+                "stop_reasons": None,
+                "rollout_metrics": None,
+                "rollout_logprobs": None,
+                "trajectory_ids": [tid, tid],
+                "rollout_expert_indices": None,
+                "is_last_step": [False, True],
+            }
 
-        assert len(merged["response_ids"]) == 1
-        assert merged["response_ids"] == [[20, 30, 40]]
-        # Scalar reward: use the last turn's value
-        assert merged["rewards"] == [5.0]
-        assert merged["rollout_logprobs"] is None
+            merged = merge_stepwise_output(gen_out)
+
+            assert len(merged["response_ids"]) == 1
+            assert merged["response_ids"] == [[20, 30, 40]]
+            # Scalar reward: use the last turn's value
+            assert merged["rewards"] == [5.0]
+            assert merged["rollout_logprobs"] is None
+            if apply_overlong_filtering:
+                assert merged["loss_masks"] == [[0, 0, 0]]
+            else:
+                assert merged["loss_masks"] == [[1, 0, 1]]
 
     def test_no_logprobs_no_stop_reasons(self):
         """Works correctly when rollout_logprobs and stop_reasons are None."""
