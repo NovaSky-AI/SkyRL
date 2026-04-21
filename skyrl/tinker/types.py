@@ -304,11 +304,19 @@ class PreparedSampleBatch(BaseModel):
     request_batch_slices: list[tuple[str, str, int, int, bool]]
 
 
-# Loss function type mappings (used for validation and backend dispatch)
+# All accepted loss functions across backends.
+SUPPORTED_LOSS_FNS = {
+    "cross_entropy",
+    "importance_sampling",
+    "ppo",
+    "cispo",
+    "ppo_critic",
+}
+
+# Loss function type mappings used by the JAX backend dispatch path.
 LOSS_TYPES = {
     "cross_entropy": 0,
     "importance_sampling": 1,
     "ppo": 2,
     "cispo": 3,
-    "ppo_critic": 4,
 }

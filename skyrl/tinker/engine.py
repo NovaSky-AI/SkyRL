@@ -126,9 +126,9 @@ def prepare_model_pass_batch(
     request_batch_slices = []
 
     for request_id, (model_id, request_data) in requests.items():
-        if request_data.loss_fn not in types.LOSS_TYPES:
+        if request_data.loss_fn not in types.SUPPORTED_LOSS_FNS:
             raise ValueError(
-                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
+                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {sorted(types.SUPPORTED_LOSS_FNS)}"
             )
         request_start = len(all_model_inputs)
         for item in request_data.data:
