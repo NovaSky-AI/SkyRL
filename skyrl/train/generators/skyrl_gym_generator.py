@@ -1072,13 +1072,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.generator_cfg.inference_engine.enable_return_routed_experts
             and turn_output.rollout_expert_indices is not None
         ):
-            # overwrite the existing rollout inference indices, since the inference engine should
-            # return the expert indices for the entire sequence including each turn's input and observation tokens
-            # and the final response should not have an observation appended to it
+            # append the rollout expert indices for the current turn, including both
+            # the response and observation tokens
 
-            # TODO(Dev): append here for single-turn?
+            rollout_expert_indices_for_turn = turn_output.rollout_expert_indices[
+                : len(agent_loop_state.input_ids) - len(obs_ids_to_add)
+            ]
             agent_loop_state.rollout_expert_indices = append_rollout_expert_indices(
-                agent_loop_state.rollout_expert_indices, turn_output.rollout_expert_indices
+                agent_loop_state.rollout_expert_indices, rollout_expert_indices_for_turn
             )
 
         return agent_loop_state
