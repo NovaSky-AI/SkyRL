@@ -126,11 +126,11 @@ if __name__ == "__main__":
     print(f"Saved full training set ({len(train_dataset)} examples) to {train_parquet_path}")
 
     # Process and save the val split
-    if "val" in dataset:
-        val_dataset = dataset["val"]
-        print(f"Loaded {len(val_dataset)} val examples")
+    if "validation" in dataset:
+        val_dataset = dataset["validation"]
+        print(f"Loaded {len(val_dataset)} validation examples")
         val_dataset = val_dataset.map(
-            function=make_map_fn("val"),
+            function=make_map_fn("validation"),
             with_indices=True,
             num_proc=os.cpu_count(),
             remove_columns=val_dataset.column_names,

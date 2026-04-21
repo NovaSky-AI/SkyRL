@@ -72,11 +72,11 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   # Algorithm
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.use_kl_loss=false \
-  generator.n_samples_per_prompt=8 \
+  generator.n_samples_per_prompt=4 \
   # ... full config in the script
 ```
 
-Defaults: Qwen3-VL-8B-Instruct, GRPO, 8 samples per prompt, 3 turns max, max prompt length 1024 / max generate 2048 per turn.
+Defaults: Qwen3-VL-8B-Instruct, GRPO, 4 samples per prompt, 3 turns max, max prompt length 1024 / max generate 2048 per turn.
 
 ## Launching
 

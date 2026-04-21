@@ -384,9 +384,6 @@ generator:
   step_wise_trajectories: false
   merge_stepwise_output: false
 
-  # If true, use SkyRLVLMGymGenerator
-  vision_language_generator: false
-
 environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:

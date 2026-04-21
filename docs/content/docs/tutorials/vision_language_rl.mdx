@@ -24,6 +24,8 @@ fsdp = [
 ...
 ]
 ```
+
+vLLM commit required: [80b18230e](https://github.com/vllm-project/vllm/commit/80b18230e0ffe94f8198862675a0dc5e86c10997)
 </Callout>
 
 **Hardware.** Since VLM runs are memory-heavy, we recommend calibrating `gpu_memory_utilization`, `max_model_len`, and `train_batch_size` to fit your setup.

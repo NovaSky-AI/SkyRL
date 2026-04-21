@@ -3,7 +3,7 @@
 """
 Answer checker API that uses sympy to simplify expressions and check for equality.
 
-Call grade_answer_verl(solution_str, ground_truth) to grade a model response.
+Call grade_answer_from_boxed(solution_str, ground_truth) to grade a model response.
 """
 from __future__ import annotations
 
@@ -502,7 +502,8 @@ def extract_answer(passage: str) -> str | None:
     return None
 
 
-def grade_answer_verl(solution_str: str, ground_truth: str) -> bool:
+# Adapted from verl.
+def grade_answer_from_boxed(solution_str: str, ground_truth: str) -> bool:
     """
     Grade a model solution against the ground truth.
 

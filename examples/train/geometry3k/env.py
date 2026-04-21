@@ -16,7 +16,7 @@ from typing import Any, Dict, List
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
-from .math_utils import extract_boxed_answer, grade_answer_verl
+from .math_utils import extract_boxed_answer, grade_answer_from_boxed
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class Geometry3kEnv(BaseTextEnv):
 
         for candidate in candidates:
             try:
-                if grade_answer_verl(candidate, self.ground_truth):
+                if grade_answer_from_boxed(candidate, self.ground_truth):
                     return 1.0
             except Exception:
                 continue
