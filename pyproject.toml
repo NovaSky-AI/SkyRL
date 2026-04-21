@@ -259,8 +259,8 @@ causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/dow
 mamba-ssm = { url = "https://github.com/state-spaces/mamba/releases/download/v2.3.1/mamba_ssm-2.3.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
 # flash-attn wheels), drop the custom wheel URL
-# Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
