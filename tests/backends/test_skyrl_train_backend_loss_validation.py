@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -15,7 +14,7 @@ def test_backend_and_worker_preserve_dedicated_critic_loss_path():
     backend_source = (REPO_ROOT / "skyrl/backends/skyrl_train_backend.py").read_text()
     worker_source = (REPO_ROOT / "skyrl/backends/skyrl_train/workers/worker.py").read_text()
 
-    assert 'self._dispatch.set_algorithm_config(' in backend_source
+    assert "self._dispatch.set_algorithm_config(" in backend_source
     assert 'self._dispatch.forward_backward("critic", batch)' in backend_source
     assert 'if role == "critic":\n            return loss_fn, loss_fn_config' in backend_source
     assert "self.critic_loss_fn: Callable = ppo_critic_loss" in worker_source
