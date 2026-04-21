@@ -253,6 +253,7 @@ url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
+skyrl-gym = { path = "./skyrl-gym", editable = true }
 # flashinfer wheels are only available from the custom cu128 index
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
