@@ -21,7 +21,7 @@ EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 #-----------------------
 # Directory setup
 #-----------------------
-RUN_NAME="codecontest"
+RUN_NAME="codecontest-fullyasync"
 TRIALS_DIR="$HOME/$RUN_NAME/trials_run"
 CKPTS_DIR="$HOME/$RUN_NAME/ckpts"
 EXPORTS_DIR="$HOME/$RUN_NAME/exports"
@@ -48,16 +48,25 @@ CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_a
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
+# -------------------------
+# Fully-async knobs.
+# Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
+# Can increase num_parallel_generation_workers based on your hardware resources (e.g. KV cache size).
+# -------------------------
+MAX_STALENESS_STEPS=4
+NUM_PARALLEL_GENERATION_WORKERS=$(( MINI_BATCH_SIZE * 2 ))
+NUM_INFERENCE_GPUS=4
+NUM_POLICY_GPUS=4
+
 #----------------
 # Infrastructure setup
 #----------------
-NUM_GPUS=8
 ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
 TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
 
 # Run SkyRL command
-uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
+uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor_fully_async \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
@@ -66,19 +75,21 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.log_path=$LOG_DIR \
+  trainer.fully_async.max_staleness_steps=$MAX_STALENESS_STEPS \
+  trainer.fully_async.num_parallel_generation_workers=$NUM_PARALLEL_GENERATION_WORKERS \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
+  trainer.placement.policy_num_gpus_per_node=$NUM_POLICY_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_POLICY_GPUS \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.engine_init_kwargs.chat_template=$CHAT_TEMPLATE_PATH \
   generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
