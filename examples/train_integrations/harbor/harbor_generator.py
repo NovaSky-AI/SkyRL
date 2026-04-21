@@ -200,8 +200,7 @@ class HarborGenerator(GeneratorInterface):
         self._harbor_trial_config_template.setdefault("agent", {})[
             "model_name"
         ] = f"hosted_vllm/{ie_cfg.served_model_name}"
-        self._harbor_trial_config_template["agent"].setdefault(
-            "kwargs", {})["api_base"] = f"{self.base_url}/v1"
+        self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
             f"HarborGenerator initialized with Harbor config. "
@@ -210,13 +209,11 @@ class HarborGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = ie_cfg.engine_init_kwargs.get(
-            "chat_template", None)
+        custom_chat_template_path = ie_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}")
+            logger.info(f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}")
         else:
             self.custom_chat_template_content = None
 
@@ -235,8 +232,7 @@ class HarborGenerator(GeneratorInterface):
                 f"Prompt count ({len(prompts)}) doesn't match " f"trajectory_ids count ({len(trajectory_ids)})"
             )
 
-        all_outputs: List[HarborAgentOutput] = [None] * \
-            len(prompts)  # type: ignore[list-item]
+        all_outputs: List[HarborAgentOutput] = [None] * len(prompts)  # type: ignore[list-item]
         progress = tqdm(
             total=len(prompts),
             desc="Generating Trajectories",
@@ -255,8 +251,7 @@ class HarborGenerator(GeneratorInterface):
                     tg.create_task(_worker(idx, prompt, trajectory_id))
         finally:
             progress.close()
-        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(
-            all_outputs)
+        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
@@ -334,8 +329,7 @@ class HarborGenerator(GeneratorInterface):
         # Failure metrics: timeout vs unknown error trajectories, and masked instances.
         rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
         rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-        rollout_metrics["generate/num_masked_instances"] = len(
-            masked_instance_ids)
+        rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
 
         logger.info(
             f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
@@ -383,8 +377,7 @@ class HarborGenerator(GeneratorInterface):
                 # --- Determine reward ---
                 if is_agent_timeout_error:
                     # AgentTimeoutError: not successful, no retry, loss-masked
-                    logger.debug(
-                        f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
+                    logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
                     break
                 elif is_context_length_error:
                     # ContextLengthExceededError: always train with reward=0.
@@ -394,8 +387,7 @@ class HarborGenerator(GeneratorInterface):
                     reward = 0
                 elif not results.verifier_result:
                     # Does not have a verifier result, so it's not successful, will retry
-                    logger.warning(
-                        f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
+                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
                 else:
                     reward = results.verifier_result.rewards["reward"]
@@ -406,16 +398,14 @@ class HarborGenerator(GeneratorInterface):
                 num_turns = results.agent_result.metadata["n_episodes"]
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
-                    logger.debug(
-                        f"{prefix} successful: reward={reward}. Results: {results}")
+                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
                     break
                 else:
                     logger.warning(
                         f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
                     )
             except Exception as e:
-                logger.warning(
-                    f"{prefix} failed: Error running trial: {e}. Results: {results}")
+                logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
 
         if not successful:
@@ -448,8 +438,7 @@ class HarborGenerator(GeneratorInterface):
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-        assistant_logprobs = getattr(
-            results.agent_result, "output_logprobs", None)
+        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
             response_messages, self.tokenizer, assistant_logprobs, chat_template=self.custom_chat_template_content
         )
