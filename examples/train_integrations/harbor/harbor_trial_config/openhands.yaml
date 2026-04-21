@@ -1,0 +1,54 @@
+# @package harbor_trial_config
+#
+# OpenHands agent configuration for SkyRL RL training
+
+reject_summarization: true
+
+# Harbor TrialConfig fields below
+# --------------------------------
+
+trials_dir: ~/trials
+timeout_multiplier: 1.0
+
+agent:
+  name: openhands
+  override_timeout_sec: 1800
+
+  kwargs:
+    max_turns: 32
+    suppress_max_turns_warning: true
+    enable_plan_mode: false
+
+    # Text-based tool invocation: model generates <execute_bash>, etc. in raw text.
+    # Required for RL training (preserves raw LLM output for proper tokenization).
+    disable_tool_calls: false
+
+    # Preserve raw LLM responses in trajectory for accurate RL training.
+    trajectory_config:
+      raw_content: false
+
+    # Disable reasoning effort to avoid thinking tokens.
+    #reasoning_effort: null
+
+    temperature: 1.0
+
+    # Model info for token budgeting.
+    # NOTE: max_input_tokens should match +generator.engine_init_kwargs.max_model_len
+    # NOTE: max_output_tokens must be < max_input_tokens to leave room for the prompt,
+    #       otherwise every LLM call triggers ContextWindowExceededError.
+    model_info:
+      max_input_tokens: 32768
+      max_output_tokens: 4096
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+
+environment:
+  type: docker
+
+  # OpenHands needs more resources than terminus-2 (runs its own venv, tools, etc.)
+  override_cpus: 2
+  override_memory_mb: 4096
+  suppress_override_warnings: true
+
+verifier:
+  disable: false
