@@ -36,6 +36,7 @@ Usage:
     client = RemoteInferenceClient(
         proxy_url="http://router:8080",  # Data plane (router)
         server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+        data_parallel_size=1,
     )
 
 Comparison with existing code:
@@ -68,6 +69,7 @@ import aiohttp
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
+    MultiModalFeatures,
 )
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -173,6 +175,7 @@ class RemoteInferenceClient:
         client = RemoteInferenceClient(
             proxy_url="http://router:8080",  # Data plane (router)
             server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+            data_parallel_size=1, # data parallel size for deployments
         )
     """
 
@@ -181,6 +184,11 @@ class RemoteInferenceClient:
 
     server_urls: List[str]
     """Control plane URLs (list of backend servers for fan-out)."""
+
+    data_parallel_size: int
+    """Data parallel size. Used to compute total inference world size correctly:
+    server_urls contains num_engines * data_parallel_size entries, but vLLM already
+    reports the full DP world size per server, so we divide by num_deployments."""
 
     model_name: str = "default"
     """Model name for OpenAI-compatible API calls."""
@@ -200,6 +208,15 @@ class RemoteInferenceClient:
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if self.data_parallel_size <= 0:
+            raise ValueError(f"Expected `data_parallel_size` >0, got {self.data_parallel_size}")
+
+        if len(self.server_urls) % self.data_parallel_size != 0:
+            raise ValueError(
+                f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
+            )
 
     # ---------------------------
     # Session Management
@@ -325,6 +342,7 @@ class RemoteInferenceClient:
             raise ValueError("n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead.")
 
         session_ids = input_batch.get("session_ids")
+        mm_features = input_batch.get("mm_features")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -347,12 +365,14 @@ class RemoteInferenceClient:
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
             async with gen_sem:
                 return await self._generate_single(
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
@@ -380,6 +400,7 @@ class RemoteInferenceClient:
         prompt_token_ids: List[int],
         sampling_params: Dict[str, Any],
         session_id: Optional[Any],
+        mm_features: Optional[MultiModalFeatures] = None,
     ) -> Dict[str, Any]:
         """
         Generate completion for a single prompt.
@@ -400,11 +421,13 @@ class RemoteInferenceClient:
         # Use LoRA adapter name if one is active, otherwise use base model name
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
-        payload = {
+        payload: dict[str, Any] = {
             "sampling_params": sampling_params,
             "model": effective_model,
             "token_ids": prompt_token_ids,
         }
+        if mm_features:
+            payload["features"] = mm_features
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -865,7 +888,7 @@ class RemoteInferenceClient:
         """
         _, world_size_per_server = await self.get_world_size()
         num_servers = len(self.server_urls)
-        server_infos = init_info.for_servers(world_size_per_server, num_servers)
+        server_infos = init_info.for_servers(world_size_per_server, num_servers, dp_size=self.data_parallel_size)
         payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
         results = await asyncio.gather(
             *[
@@ -893,6 +916,78 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/update_weights",
             {"update_info": update_info},
+        )
+
+    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
+    # these three methods from /collective_rpc to the native vLLM endpoints
+    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
+    # the NewInferenceWorkerWrap worker extension.
+
+    async def start_weight_update(
+        self,
+        is_checkpoint_format: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Start a new chunked weight update via /collective_rpc.
+
+        Calls the NewInferenceWorkerWrap.start_weight_update method on all
+        workers. For checkpoint-format weights this initializes layerwise
+        reload. Must be called before any update_weights_chunk calls.
+
+        Args:
+            is_checkpoint_format: True if weights are in checkpoint format
+                (need layerwise processing), False for kernel format.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "start_weight_update",
+                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
+            },
+        )
+
+    async def update_weights_chunk(
+        self,
+        update_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Send a single weight chunk via /collective_rpc.
+
+        Calls NewInferenceWorkerWrap.update_weights_chunk on all workers.
+        Can be called multiple times between start_weight_update and
+        finish_weight_update.
+
+        Args:
+            update_info: Dict with backend-specific update info (names,
+                dtype_names, shapes, ipc_handles_pickled or packed flag).
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "update_weights_chunk",
+                "kwargs": {"update_info": update_info},
+            },
+        )
+
+    async def finish_weight_update(self) -> Dict[str, Any]:
+        """
+        Finish the current chunked weight update via /collective_rpc.
+
+        Calls NewInferenceWorkerWrap.finish_weight_update on all workers.
+        For checkpoint-format weights, runs layerwise postprocessing.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {"method": "finish_weight_update"},
         )
 
     async def update_lora_from_disk(
@@ -956,6 +1051,11 @@ class RemoteInferenceClient:
         All servers are expected to have the same world size.
         Result is cached after first call.
 
+        When data_parallel_size > 1, server_urls contains num_engines * dp_size entries.
+        vLLM reports the full DP * TP world size per server, which already
+        covers all DP ranks in one deployment. To avoid double-counting,
+        total_world_size = per_server_ws * num_deployments (not num_servers).
+
         Returns:
             Tuple of (total_world_size, world_size_per_server).
         """
@@ -979,7 +1079,12 @@ class RemoteInferenceClient:
             ws == per_server[0] for ws in per_server
         ), f"All servers must have the same world_size, got {per_server}"
 
-        self._world_size = (per_server[0] * len(self.server_urls), per_server[0])
+        # Each server is one DP rank. vLLM reports world_size = dp_size * tp_size * pp_size,
+        # which is the worker count across ALL DP ranks in one deployment.
+        # num_deployments = num_servers / dp_size (each deployment has dp_size servers).
+        # Total unique workers = per_server_ws * num_deployments.
+        num_deployments = len(self.server_urls) // self.data_parallel_size
+        self._world_size = (per_server[0] * num_deployments, per_server[0])
         return self._world_size
 
     # ---------------------------

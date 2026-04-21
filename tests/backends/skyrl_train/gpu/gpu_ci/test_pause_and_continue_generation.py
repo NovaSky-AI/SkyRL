@@ -41,7 +41,7 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
     num_engines = 2
     num_requests = 6
     max_num_seqs = 2
-    # Create tokenizer separately to work with both InferenceEngineClient and RemoteInferenceClient
+    # Create tokenizer separately to work with RemoteInferenceClient
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     try:
         # 1. Build engine and start server
@@ -59,7 +59,6 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
             # Ensure logprobs and token ids are returned for accumulation checks
             "logprobs": True,
             "top_logprobs": 1,
-            "return_tokens_as_token_ids": True,
         }
         async with InferenceEngineState.create(
             cfg=cfg,
@@ -153,11 +152,9 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
                 # Spot-check structure of each logprob entry: token contains token_id and top_logprobs length matches request
                 top_logprobs = sampling_params["top_logprobs"]
                 for entry in logprobs["content"]:
-                    # tokens are token_id:<int> when return_tokens_as_token_ids=True
-                    parts = str(entry["token"]).split(":")
-                    assert (
-                        len(parts) >= 2 and parts[-1].isdigit()
-                    ), f"Request {i} token field not token_id:int: {entry['token']}"
+                    # expect string outputs for token field
+                    assert isinstance(entry["token"], str)
+
                     assert (
                         len(entry["top_logprobs"]) == top_logprobs
                     ), f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
@@ -273,7 +270,7 @@ async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixt
                 len(out["response_logprobs"][0]) == sampling_params["max_tokens"]
             ), f"Request {i} expected {sampling_params['max_tokens']} logprobs, got {len(out['response_logprobs'][0])}"
             # Check string output is
-            assert out["responses"][0] == tokenizer.decode(token_ids, skip_special_tokens=True)
+            assert out["responses"][0] == tokenizer.decode(token_ids)
             # Print a preview to aid debugging
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
@@ -332,7 +329,7 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                             "messages": convs[i],
                             **sampling_params,
                         }
-                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
+                        return await client.chat_completion({"json": body, "headers": {}})
                     else:
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
                         body = {
@@ -340,7 +337,7 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                             "prompt": prompt_str,
                             **sampling_params,
                         }
-                        return await client.engines[0].completion({"json": body, "headers": {}})
+                        return await client.completion({"json": body, "headers": {}})
 
                 tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
                 await asyncio.sleep(1)

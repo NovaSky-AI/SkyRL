@@ -168,6 +168,90 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     )
 
 
+def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
+    """Regression test for the step-wise advantage broadcast across trajectories.
+
+    See https://github.com/NovaSky-AI/SkyRL/issues/1492.
+    """
+    dummy_config.generator.step_wise_trajectories = True
+    dummy_config.trainer.algorithm.advantage_estimator = "grpo"
+    dummy_config.trainer.algorithm.grpo_norm_by_std = False
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    # Two trajectories (A, B), each with two steps (one intermediate, one last).
+    # Response-level tensors are right-aligned within (batch, max_response) — see
+    # ``convert_prompts_responses_to_batch_tensors`` in ``skyrl/train/dataset/preprocess.py``.
+    # Intermediate and last steps have different response lengths so their mask tails live at
+    # different positions; this is what exposes the broadcast bug.
+    #
+    #   row  traj  step        resp_len  response_mask
+    #   ───  ────  ──────────  ────────  ──────────────────
+    #    0    A    intermed.       4     [0, 0, 1, 1, 1, 1]
+    #    1    A    last            1     [0, 0, 0, 0, 0, 1]
+    #    2    B    intermed.       3     [0, 0, 0, 1, 1, 1]
+    #    3    B    last            2     [0, 0, 0, 0, 1, 1]
+    batch_size, seqlen = 4, 6
+    response_mask = torch.tensor(
+        [
+            [0, 0, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 0, 1, 1],
+        ],
+        dtype=torch.int32,
+    )
+    # Reward lives at the last token of each trajectory's last step — i.e., at the tail
+    # position where that step's response_mask is 1. Traj A -> 2.0, Traj B -> 0.0.
+    rewards = torch.zeros(batch_size, seqlen)
+    rewards[1, -1] = 2.0
+    is_last_step = [False, True, False, True]
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch_size, seqlen, dtype=torch.long),
+            "attention_mask": torch.ones(batch_size, seqlen, dtype=torch.int32),
+            "loss_mask": response_mask.clone(),
+            "response_mask": response_mask,
+            "rewards": rewards,
+            "values": torch.zeros(batch_size, seqlen),
+        },
+    )
+    # Both trajectories share a GRPO group so the group has the 2 samples needed to produce a mean.
+    data.metadata = {
+        "uids": np.array(["grp0", "grp0", "grp0", "grp0"]),
+        "response_length": seqlen,
+        "avg_response_length": (4 + 1 + 3 + 2) / 4,
+        "is_last_step": is_last_step,
+    }
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    # GRPO without std normalization: group mean = (2.0 + 0.0) / 2 = 1.0, so
+    # scalar_A = 2.0 - 1.0 =  1.0 and scalar_B = 0.0 - 1.0 = -1.0.
+    # Each step's advantages must equal `scalar * response_mask` for THAT step, so the
+    # full advantage tensor is the row-wise product of the per-trajectory scalar and the
+    # right-aligned per-step response mask. Returns equal advantages for GRPO.
+    expected_advantages = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, -1.0, -1.0, -1.0],
+            [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        ]
+    )
+    assert torch.allclose(data["advantages"], expected_advantages)
+    assert torch.allclose(data["returns"], expected_advantages)
+
+
 def test_micro_batches_accumulated_initialized():
     """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
 

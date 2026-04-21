@@ -97,6 +97,9 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
         f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
+
+    # TODO(Charlie): For step-wise training, the number of sequences per prompt is variable, and
+    # padded mini-batch may not be divisible by dp_size. Should check if we need these assertions.
     policy_mini_batch_size_per_gpu = (
         cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -242,6 +245,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
     if cfg.trainer.strategy in ("fsdp", "fsdp2"):
         assert not (
@@ -251,6 +255,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
+    if cfg.trainer.policy.language_model_only:
+        assert (
+            cfg.generator.inference_engine.language_model_only
+        ), f"language_model_only should be set consistently between inference engine and policy but got {cfg.generator.inference_engine.language_model_only} for generator and {cfg.trainer.policy.language_model_only} for policy"
+        if use_ref_model:
+            assert cfg.trainer.ref.language_model_only
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
@@ -274,6 +284,32 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"Must be one of {available_advantage_estimators}"
     )
 
+    # Step-wise training collapses each trajectory to a single scalar advantage that is broadcast
+    # uniformly to every step's response tokens. This only makes sense for outcome-based estimators.
+    # Temporal estimators (GAE, REINFORCE++) produce per-token advantages, which the broadcast
+    # discards. Reject the combination explicitly.
+    if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.advantage_estimator in ("gae", "reinforce++"):
+        raise ValueError(
+            f"advantage_estimator={cfg.trainer.algorithm.advantage_estimator!r} is not supported with "
+            f"step_wise_trajectories=True. The step-wise branch collapses each trajectory to a single "
+            f"scalar advantage, which discards the per-token temporal structure these estimators produce, "
+            f"and the estimator only sees the last step's slice — there is no cross-step temporal "
+            f"connection. Use an outcome-based estimator (grpo, rloo, maxrl) or disable "
+            f"step_wise_trajectories."
+        )
+    if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
+        # TODO(Charlie): this can be fixed, can revisit later.
+        raise ValueError(
+            "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
+        )
+
+    if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
+        raise ValueError(
+            "`generator.merge_stepwise_output=True` requires `generator.step_wise_trajectories=True`. "
+            "Prefix-aware merging operates on step-wise GeneratorOutput entries (trajectory_ids + "
+            "is_last_step), which only exist when step-wise training is enabled."
+        )
+
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "token_mean_legacy",
@@ -283,6 +319,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
+    if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
+        if cfg.trainer.algorithm.max_seq_len is None:
+            raise ValueError(
+                "`trainer.algorithm.max_seq_len` must be set explicitly when "
+                "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
+                "Choose the total sequence-length normalization constant for your setup; "
+                "this often matches the model context window / vLLM `max_model_len` when appropriate."
+            )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
@@ -350,7 +394,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "must be the same when colocating all models"
         )
     else:
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "
@@ -384,6 +427,13 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
+
+    if ie_cfg.enable_pd:
+        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
+        assert (
+            ie_cfg.num_prefill < ie_cfg.num_engines
+        ), "num_prefill must be < num_engines (need at least one decode worker)"
+        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
     if not ie_cfg.run_engines_locally:
         assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
@@ -640,8 +690,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
-    if _SKYRL_USE_NEW_INFERENCE:
-        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.

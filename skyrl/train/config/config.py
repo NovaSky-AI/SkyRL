@@ -212,6 +212,9 @@ class PolicyConfig(BaseConfig):
     model_config_kwargs: dict = field(default_factory=dict)
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).
     For Megatron, use ``policy.megatron_config.transformer_config_kwargs`` instead."""
+    language_model_only: bool = False
+    """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
+    Loads only the language model backbone using AutoModelForCausalLM."""
 
 
 @dataclass
@@ -231,6 +234,9 @@ class RefConfig(BaseConfig):
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
     model_config_kwargs: dict = field(default_factory=dict)
+    language_model_only: bool = False
+    """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
+    Loads only the language model backbone using AutoModelForCausalLM."""
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +354,7 @@ class AlgorithmConfig(BaseConfig):
     policy_loss_type: str = "regular"
     """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, or custom via ``PolicyLossRegistry``."""
     loss_reduction: str = "token_mean"
-    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``."""
+    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``. ``max_seq_len`` must be set explicitly for ``"seq_mean_token_sum_norm"``."""
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
@@ -373,8 +379,8 @@ class AlgorithmConfig(BaseConfig):
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
     max_seq_len: Optional[int] = None
-    """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
-    If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""
+    """Used for ``seq_mean_token_sum_norm`` loss reduction.
+    Must be set explicitly for that reduction mode; otherwise can remain ``None``."""
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +477,9 @@ class InferenceEngineConfig(BaseConfig):
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
     or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
     placement groups are created when ``"mp"`` is used."""
+    language_model_only: bool = False
+    """When True, pass ``language_model_only=True`` to the vLLM engine so that
+    multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
@@ -479,6 +488,15 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
+    enable_pd: bool = False
+    """Enable prefill-decode disaggregation. Requires ``num_prefill > 0`` and ``num_engines >= 2``."""
+    num_prefill: int = 0
+    """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
+
+    NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
+    Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +536,11 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    vision_language_generator: bool = False
+    """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts)"""
+    merge_stepwise_output: bool = False
+    """When True (and step_wise_trajectories is True), apply prefix-aware merging
+    to collapse multi-turn step-wise sequences into single sequences before training."""
 
     def __post_init__(self):
 
@@ -716,17 +739,6 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
-
-        if self.trainer.algorithm.max_seq_len is None:
-            # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-            # per batch can be variable based on the prompt length. This is used to normalize the loss for
-            # seq_mean_token_sum_norm loss reduction.
-            # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
-            # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
-            # multi-turn or not?
-            self.trainer.algorithm.max_seq_len = (
-                self.generator.max_input_length + self.generator.sampling_params.max_generate_length
-            )
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side

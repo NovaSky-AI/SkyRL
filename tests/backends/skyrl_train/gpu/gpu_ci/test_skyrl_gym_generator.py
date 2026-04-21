@@ -15,7 +15,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl_gym.envs import register
+from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -91,6 +91,13 @@ register(
     id="test_env",
     entry_point="tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_gym_generator:TestEnv",
 )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def deregister_test_env():
+    yield
+    deregister("test_env")
+
 
 MODEL_TO_GENERATION_PROMPT = {
     "Qwen/Qwen2.5-1.5B-Instruct": "<|im_start|>assistant\n",

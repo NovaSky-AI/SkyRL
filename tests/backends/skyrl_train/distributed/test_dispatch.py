@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     PassThroughDispatch,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.dataset.preprocess import compute_prompt_mini_batch_boundaries
 
 
 @ray.remote
@@ -80,9 +81,16 @@ def test_stage_chunks_and_dispatch_from_staged():
 
     # Full batch has 16 elements, mini_batch_size=8 → 2 mini-batches
     full_data = TrainingInputBatch({"a": torch.arange(16)})
+    uids = [f"p{i}" for i in range(16)]
+    train_batch_size = 16
     mini_batch_size = 8
+    n_samples_per_prompt = 1
+    is_stepwise = False
+    boundaries = compute_prompt_mini_batch_boundaries(
+        uids, mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+    )
 
-    all_chunk_refs = MeshDispatch.stage_chunks(dp_size, full_data, mini_batch_size)
+    all_chunk_refs = MeshDispatch.stage_chunks(dp_size, full_data, boundaries)
     assert len(all_chunk_refs) == 2
     assert len(all_chunk_refs[0]) == dp_size
 

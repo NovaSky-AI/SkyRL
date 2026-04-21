@@ -175,7 +175,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 # generation phase
                 async with Timer("generate", self.all_timings):
                     generator_output: GeneratorOutput = await self.generate(generator_input)
-                    generator_output = self.postprocess_generator_output(generator_output, uids)
+                    generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                 # Add to generation buffer
                 await generation_buffer.put((generator_output, uids))
