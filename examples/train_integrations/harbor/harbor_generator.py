@@ -1,9 +1,14 @@
 import asyncio
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
 from loguru import logger
 from uuid import uuid4
+
+import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -26,6 +31,54 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
 MAX_NUM_RETRIES_PER_TRIAL = 2
+
+# Env vars forwarded from the parent process to each Ray trial worker.
+_TRIAL_WORKER_FORWARD_ENV_KEYS = frozenset(
+    {
+        "DAYTONA_API_KEY",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    }
+)
+
+
+@ray.remote(num_cpus=0, num_gpus=0, max_calls=1)
+def _run_trial_in_process(config_dict: dict, env_vars: dict):
+    """Run a single Harbor trial in an isolated Ray worker process.
+
+    Each invocation gets its own process and event loop. Unlike threads, separate processes
+    avoid blocking the parent event loop and isolate C-level segfaults from concurrent SSL /
+    HTTP / MCP operations.
+
+    num_cpus=0 so Ray doesn't gate scheduling on core count — trials are I/O-bound. Pinned to
+    the entrypoint node by the caller so trial logs all land in the same trials_dir.
+
+    max_calls=1 forces Ray to spawn a fresh worker process per trial. This is required because
+    the Daytona SDK caches httpx/asyncio client state bound to the first event loop seen by
+    the worker; subsequent asyncio.run() invocations close that loop, causing
+    "DaytonaError: Event loop is closed" on reused workers.
+    """
+    # Restore forwarded env vars (API keys) — Ray workers don't inherit parent env.
+    for k, v in env_vars.items():
+        os.environ[k] = v
+
+    # Suppress litellm noise — module-level settings from the parent
+    # process don't carry over to Ray worker processes.
+    litellm.suppress_debug_info = True
+    litellm.set_verbose = False
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+    async def _run():
+        trial_config = TrialConfig.model_validate(config_dict)
+        trial = await Trial.create(trial_config)
+        return await trial.run()
+
+    return asyncio.run(_run())
 
 
 @dataclass
@@ -95,6 +148,29 @@ class HarborGenerator(GeneratorInterface):
         # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
         rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
+
+        # Snapshot env vars to forward to each Ray trial worker. Ray workers do not inherit
+        # the parent process's env, so API keys (Daytona/Modal/HF/etc.) must be propagated.
+        self._worker_env_vars = {
+            k: v for k, v in os.environ.items() if k in _TRIAL_WORKER_FORWARD_ENV_KEYS
+        }
+
+        # Pin each trial task to the entrypoint node so all trials write to the same local
+        # trials_dir. Without this, Ray could schedule trial tasks on other nodes whose
+        # local filesystems don't contain the trials_dir path.
+        this_node_ip = ray.util.get_node_ip_address()
+        this_node_ids = [
+            n["NodeID"]
+            for n in ray.nodes()
+            if n.get("NodeManagerAddress") == this_node_ip and n.get("Alive")
+        ]
+        if not this_node_ids:
+            raise ValueError(f"Could not find entrypoint node {this_node_ip} in Ray cluster")
+        self._trial_scheduling_strategy = NodeAffinitySchedulingStrategy(
+            node_id=this_node_ids[0],
+            soft=False,
+        )
+        logger.info(f"Trial tasks pinned to entrypoint node {this_node_ip}")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         prompts = input_batch["prompts"]
@@ -234,15 +310,20 @@ class HarborGenerator(GeneratorInterface):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
             try:
-                # Create a fresh Trial each attempt so agent state is clean on retry.
+                # Create a fresh config each attempt so agent state is clean on retry.
                 config = deepcopy(self._harbor_trial_config_template)
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = uuid4().hex
-                trial_config = TrialConfig.model_validate(config)
-                trial = await Trial.create(trial_config)
+                # OmegaConf containers aren't guaranteed to round-trip cleanly through Ray's
+                # pickle + the worker's TrialConfig.model_validate; convert to a plain dict.
+                if not isinstance(config, dict):
+                    config = OmegaConf.to_container(config, resolve=True)
 
                 async with self._rate_limiter:
-                    results = await trial.run()
+                    result_ref = _run_trial_in_process.options(
+                        scheduling_strategy=self._trial_scheduling_strategy,
+                    ).remote(config, self._worker_env_vars)
+                    results = await result_ref
 
                 # Parse exception type
                 exc_type = results.exception_info.exception_type if results.exception_info else None
