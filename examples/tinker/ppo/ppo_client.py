@@ -11,19 +11,19 @@ Usage:
 
 This script keeps the same client-visible loop shape and shared defaults as
 examples/train/ppo/run_ppo.sh where that makes sense for a Tinker client:
-policy + critic, GSM8K, GAE, KL shaping, eval-before-train, periodic eval, and
-periodic checkpoints.
+policy + critic, GSM8K, GAE, train/eval sampling defaults, eval-before-train,
+periodic eval, periodic checkpoints, native GAE whitening, and native
+token-mean minibatch loss scaling. Like the current native PPO example, this
+path runs with KL loss disabled.
 
 Notes on parity with examples/train/ppo/run_ppo.sh:
 - Actor loss uses the registered `ppo` (clipped-ratio) loss with
   `clip_low_threshold = 1 - eps_clip_low` and `clip_high_threshold = 1 + eps_clip_high`,
   matching SkyRL's `eps_clip_low/high = 0.2` defaults.
-- KL is applied as **reward shaping** (semantically equivalent to SkyRL's
-  `use_kl_in_reward=true`), not as a separate loss term. SkyRL's
-  `use_kl_loss=true` path requires a backend-side KL term that the Tinker
-  loss API does not currently expose, so this client implements the
-  reward-shaping variant instead. The KL coefficient (`KL_COEF = 1e-3`)
-  matches SkyRL's `kl_loss_coef` default.
+- Sampling defaults are aligned with the native PPO path where Tinker exposes
+  the same knobs: train/eval temperatures, top-p, top-k, max generation length,
+  and samples-per-prompt. Tinker does not currently expose the native trainer's
+  batched generator path, so request scheduling remains client-driven.
 """
 
 from __future__ import annotations
@@ -46,11 +46,18 @@ import tinker
 from tinker import types
 from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
 
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    apply_loss_reduction_to_advantages_minibatch,
+    masked_whiten,
+)
+
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_DATA_DIR = os.path.expanduser("~/data/gsm8k")
 DEFAULT_CKPT_DIR = os.path.expanduser("~/ckpts/gsm8k_1.5B_ckpt_ppo")
+DEFAULT_WANDB_PROJECT = "gsm8k"
+DEFAULT_WANDB_RUN_NAME = "gsm8k_tinker_ppo"
 DEFAULT_LORA_RANK = 0
 TRAIN_EPOCHS = 20
 TRAIN_BATCH_SIZE = 1024
@@ -58,19 +65,29 @@ EVAL_BATCH_SIZE = 1024
 POLICY_MINI_BATCH_SIZE = 256
 CRITIC_MINI_BATCH_SIZE = 256
 UPDATE_EPOCHS_PER_BATCH = 1
+# Keep this aligned with examples/tinker/ppo/run_tinker_server.sh so policy
+# minibatch normalization matches the backend's microbatching.
+MICRO_TRAIN_BATCH_SIZE = 64
 N_SAMPLES_PER_PROMPT = 5
 EVAL_N_SAMPLES_PER_PROMPT = 1
 MAX_PROMPT_LENGTH = 512
 MAX_GENERATE_LENGTH = 1024
-LEARNING_RATE = 1.0e-6
+TRAIN_SAMPLING_TEMPERATURE = 1.0
+EVAL_SAMPLING_TEMPERATURE = 0.0
+SAMPLING_TOP_P = 1.0
+SAMPLING_TOP_K = -1
+SAMPLING_STOP_STRINGS: list[str] | None = None
+POLICY_LEARNING_RATE = 1.0e-6
+CRITIC_LEARNING_RATE = 5.0e-6
 GAMMA = 1.0
 GAE_LAMBDA = 1.0
-KL_COEF = 1.0e-3
-USE_KL_IN_REWARD = True
 VALUE_CLIP = 0.2
 EPS_CLIP_LOW = 0.2
 EPS_CLIP_HIGH = 0.2
+# This is an extra batch-level normalization toggle on top of the native GAE
+# whitening that always runs below.
 ADVANTAGE_BATCH_NORMALIZE = False
+LOSS_REDUCTION = "token_mean"
 EVAL_BEFORE_TRAIN = True
 EVAL_INTERVAL = 5
 CKPT_INTERVAL = 10
@@ -83,8 +100,10 @@ logger = logging.getLogger(__name__)
 class WandbLogger:
     def __init__(self, output_dir: str | None):
         self._run = None
+        self.enabled = False
         api_key = os.environ.get("WANDB_API_KEY")
         if not api_key:
+            logger.warning("WANDB_API_KEY is not set; skipping wandb logging")
             return
 
         try:
@@ -94,7 +113,7 @@ class WandbLogger:
             return
 
         run_kwargs: dict[str, Any] = {
-            "project": os.environ.get("WANDB_PROJECT", "skyrl-tinker-ppo"),
+            "project": os.environ.get("WANDB_PROJECT", DEFAULT_WANDB_PROJECT),
             "config": {
                 "base_model": DEFAULT_MODEL_NAME,
                 "train_batch_size": TRAIN_BATCH_SIZE,
@@ -102,21 +121,30 @@ class WandbLogger:
                 "critic_mini_batch_size": CRITIC_MINI_BATCH_SIZE,
                 "update_epochs_per_batch": UPDATE_EPOCHS_PER_BATCH,
                 "n_samples_per_prompt": N_SAMPLES_PER_PROMPT,
-                "kl_coef": KL_COEF,
-                "learning_rate": LEARNING_RATE,
+                "policy_learning_rate": POLICY_LEARNING_RATE,
+                "critic_learning_rate": CRITIC_LEARNING_RATE,
             },
         }
         if output_dir:
             run_kwargs["dir"] = expand_path(output_dir)
         if entity := os.environ.get("WANDB_ENTITY"):
             run_kwargs["entity"] = entity
-        if run_name := os.environ.get("WANDB_RUN_NAME"):
-            run_kwargs["name"] = run_name
+        run_kwargs["name"] = os.environ.get("WANDB_RUN_NAME", DEFAULT_WANDB_RUN_NAME)
         if tags := os.environ.get("WANDB_TAGS"):
             run_kwargs["tags"] = [tag.strip() for tag in tags.split(",") if tag.strip()]
 
+        logger.info(
+            "Initializing wandb: project=%s entity=%s run_name=%s output_dir=%s",
+            run_kwargs["project"],
+            run_kwargs.get("entity"),
+            run_kwargs.get("name"),
+            run_kwargs.get("dir"),
+        )
         self._wandb = wandb
         self._run = wandb.init(**run_kwargs)
+        self.enabled = self._run is not None
+        if self.enabled:
+            logger.info("wandb initialized successfully")
 
     def log(self, payload: dict[str, Any]) -> None:
         if self._run is None:
@@ -155,7 +183,6 @@ class Trajectory:
     prompt_tokens: list[int]
     response_tokens: list[int]
     old_logprobs: list[float]
-    ref_logprobs: list[float]
     values: list[float]
     advantages: list[float]
     returns: list[float]
@@ -173,7 +200,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.environ.get("TINKER_API_KEY", "tml-dummy"))
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_CKPT_DIR)
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-eval-steps", type=int, default=None)
     return parser.parse_args()
@@ -323,6 +350,36 @@ def policy_loss_config() -> dict | None:
     return None
 
 
+def adam_params(learning_rate: float) -> types.AdamParams:
+    # The Tinker backend currently applies only the learning rate at optim step.
+    # These fixed Adam fields are passed solely to satisfy the request schema.
+    return types.AdamParams(
+        learning_rate=learning_rate,
+        beta1=0.9,
+        beta2=0.999,
+        eps=1.0e-8,
+    )
+
+
+def grouped_minibatches(
+    trajectories: Sequence[Trajectory],
+    prompt_mini_batch_size: int,
+) -> Iterable[list[Trajectory]]:
+    grouped: dict[int, list[Trajectory]] = {}
+    for trajectory in trajectories:
+        grouped.setdefault(trajectory.prompt_group, []).append(trajectory)
+
+    prompt_groups = list(grouped.keys())
+    random.shuffle(prompt_groups)
+
+    for group_batch in chunked(prompt_groups, prompt_mini_batch_size):
+        minibatch: list[Trajectory] = []
+        for prompt_group in group_batch:
+            minibatch.extend(grouped[prompt_group])
+        if minibatch:
+            yield minibatch
+
+
 async def wait_for_result(holder, future, label: str):
     request = types.FutureRetrieveRequest(request_id=future.request_id)
     while True:
@@ -369,6 +426,17 @@ def create_critic_training_client(
     return tinker.TrainingClient(holder, model_seq_id=model_seq_id, model_id=model_id)
 
 
+def extract_critic_values(output: Any) -> list[float]:
+    values = output["values"]
+    if hasattr(values, "data"):
+        return [float(v) for v in values.data]
+    if isinstance(values, dict) and "data" in values:
+        return [float(v) for v in values["data"]]
+    if isinstance(values, list):
+        return [float(v) for v in values]
+    raise TypeError(f"Unsupported critic forward output format: {type(values)!r}")
+
+
 def collect_rollouts(
     policy_client: tinker.TrainingClient,
     batch: Sequence[ExampleRecord],
@@ -379,26 +447,30 @@ def collect_rollouts(
     eval_mode: bool,
 ) -> tuple[list[Trajectory], dict[str, float]]:
     sampling_client = policy_client.save_weights_and_get_sampling_client()
-    temperature = 0.0 if eval_mode else 1.0
+    temperature = EVAL_SAMPLING_TEMPERATURE if eval_mode else TRAIN_SAMPLING_TEMPERATURE
     n_samples = EVAL_N_SAMPLES_PER_PROMPT if eval_mode else N_SAMPLES_PER_PROMPT
     trajectories: list[Trajectory] = []
     prompt_rewards: list[list[float]] = []
+    pending_samples: list[tuple[ExampleRecord, object]] = []
 
     for batch_offset, record in enumerate(batch):
         params = types.SamplingParams(
             max_tokens=MAX_GENERATE_LENGTH,
             seed=args.seed + global_step * 10_000 + batch_offset,
             temperature=temperature,
-            top_p=1.0,
-            top_k=-1,
+            stop_strings=SAMPLING_STOP_STRINGS,
+            top_p=SAMPLING_TOP_P,
+            top_k=SAMPLING_TOP_K,
         )
         future = sampling_client.sample(
             prompt=types.ModelInput.from_ints(record.prompt_tokens),
             num_samples=n_samples,
             sampling_params=params,
         )
-        result = future.result()
+        pending_samples.append((record, future))
 
+    for prompt_group, (record, future) in enumerate(pending_samples):
+        result = future.result()
         rewards_for_prompt: list[float] = []
         for sequence in result.sequences:
             response_tokens = list(sequence.tokens)
@@ -412,7 +484,6 @@ def collect_rollouts(
                     prompt_tokens=record.prompt_tokens,
                     response_tokens=response_tokens,
                     old_logprobs=old_logprobs,
-                    ref_logprobs=[],
                     values=[],
                     advantages=[],
                     returns=[],
@@ -421,38 +492,39 @@ def collect_rollouts(
                     question=record.question,
                     ground_truth=record.ground_truth,
                     response_text=response_text,
-                    prompt_group=len(prompt_rewards),
+                    prompt_group=prompt_group,
                 )
             )
             rewards_for_prompt.append(reward)
         prompt_rewards.append(rewards_for_prompt)
 
+    return trajectories, summarize_reward_metrics(prompt_rewards, n_samples_per_prompt=n_samples)
+
+
+def summarize_reward_metrics(
+    prompt_rewards: Sequence[Sequence[float]],
+    *,
+    n_samples_per_prompt: int,
+) -> dict[str, float]:
     flat_rewards = [reward for rewards in prompt_rewards for reward in rewards]
     pass_at_n = 0.0
     if prompt_rewards:
         pass_at_n = sum(1 for rewards in prompt_rewards if any(r > 0.0 for r in rewards)) / len(prompt_rewards)
-    metrics = {
-        "avg_reward": float(sum(flat_rewards) / len(flat_rewards)) if flat_rewards else 0.0,
+
+    avg_reward = float(sum(flat_rewards) / len(flat_rewards)) if flat_rewards else 0.0
+    mean_positive_reward = (
+        float(sum(max(reward, 0.0) for reward in flat_rewards) / len(flat_rewards)) if flat_rewards else 0.0
+    )
+
+    return {
+        "avg_reward": avg_reward,
+        "avg_raw_reward": avg_reward,
         "pass_at_n": pass_at_n,
-        "num_trajectories": float(len(trajectories)),
+        f"avg_pass_at_{n_samples_per_prompt}": pass_at_n,
+        "mean_positive_reward": mean_positive_reward,
+        "num_prompts": float(len(prompt_rewards)),
+        "num_trajectories": float(len(flat_rewards)),
     }
-    return trajectories, metrics
-
-
-def fill_reference_logprobs(
-    trajectories: Sequence[Trajectory],
-    ref_sampling_client: tinker.SamplingClient,
-) -> None:
-    for trajectory in trajectories:
-        full_sequence = trajectory.prompt_tokens + trajectory.response_tokens
-        prompt_logprobs = ref_sampling_client.compute_logprobs(types.ModelInput.from_ints(full_sequence)).result()
-        response_len = len(trajectory.response_tokens)
-        response_logprobs = prompt_logprobs[-response_len:]
-        trajectory.ref_logprobs = [float(lp) if lp is not None else 0.0 for lp in response_logprobs]
-        if len(trajectory.ref_logprobs) != response_len:
-            raise ValueError(
-                f"Reference logprobs length mismatch: expected {response_len}, got {len(trajectory.ref_logprobs)}"
-            )
 
 
 def fill_critic_values(
@@ -461,17 +533,17 @@ def fill_critic_values(
 ) -> None:
     for minibatch in chunked(list(trajectories), CRITIC_MINI_BATCH_SIZE):
         data = [build_critic_forward_datum(t.prompt_tokens, t.response_tokens) for t in minibatch]
-        result = critic_client.forward(data, "ppo_critic").result()
-        for trajectory, output in zip(minibatch, result.loss_fn_outputs, strict=True):
-            values_tensor = output["values"]
-            trajectory.values = [float(v) for v in values_tensor.data]
+        result = critic_client.forward(data, "ppo").result()
+        loss_fn_outputs = result.loss_fn_outputs
+
+        for trajectory, output in zip(minibatch, loss_fn_outputs, strict=True):
+            trajectory.values = extract_critic_values(output)
 
 
 def compute_advantages_and_returns(
     trajectories: Sequence[Trajectory],
     gamma: float,
     gae_lambda: float,
-    kl_coef: float,
     normalize_advantages: bool = False,
 ) -> None:
     if not trajectories:
@@ -484,8 +556,7 @@ def compute_advantages_and_returns(
 
     for row, trajectory in enumerate(trajectories):
         length = len(trajectory.response_tokens)
-        kl_penalty = [kl_coef * (old - ref) for old, ref in zip(trajectory.old_logprobs, trajectory.ref_logprobs, strict=True)]
-        token_rewards = [-penalty for penalty in kl_penalty]
+        token_rewards = [0.0] * length
         token_rewards[-1] += trajectory.reward
         trajectory.token_rewards = token_rewards
 
@@ -503,6 +574,10 @@ def compute_advantages_and_returns(
 
     returns = advantages + values
 
+    # Native SkyRL GAE whitens valid response-token advantages before policy
+    # minibatch normalization.
+    advantages = masked_whiten(advantages, mask)
+
     if normalize_advantages:
         valid_advantages = advantages[mask.bool()]
         if valid_advantages.numel() > 1:
@@ -517,26 +592,51 @@ def compute_advantages_and_returns(
         trajectory.returns = returns[row, :length].tolist()
 
 
+def normalize_policy_minibatch_advantages(
+    minibatch: Sequence[Trajectory],
+) -> list[list[float]]:
+    if not minibatch:
+        return []
+
+    max_len = max(len(t.response_tokens) for t in minibatch)
+    advantages = torch.zeros((len(minibatch), max_len), dtype=torch.float32)
+    loss_mask = torch.zeros((len(minibatch), max_len), dtype=torch.float32)
+
+    for row, trajectory in enumerate(minibatch):
+        length = len(trajectory.response_tokens)
+        advantages[row, :length] = torch.tensor(trajectory.advantages, dtype=torch.float32)
+        loss_mask[row, :length] = 1.0
+
+    normalized = apply_loss_reduction_to_advantages_minibatch(
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_reduction=LOSS_REDUCTION,
+        micro_batch_size=MICRO_TRAIN_BATCH_SIZE,
+        max_seq_len=MAX_PROMPT_LENGTH + MAX_GENERATE_LENGTH,
+    )
+
+    return [normalized[row, : len(trajectory.response_tokens)].tolist() for row, trajectory in enumerate(minibatch)]
+
+
 def train_policy(
     policy_client: tinker.TrainingClient,
     trajectories: Sequence[Trajectory],
 ) -> dict[str, float]:
     all_metrics: list[dict[str, float]] = []
-    optimizer = types.AdamParams(learning_rate=LEARNING_RATE)
+    optimizer = adam_params(POLICY_LEARNING_RATE)
     loss_fn_config = policy_loss_config()
 
     for _ in range(UPDATE_EPOCHS_PER_BATCH):
-        shuffled = list(trajectories)
-        random.shuffle(shuffled)
-        for minibatch in chunked(shuffled, POLICY_MINI_BATCH_SIZE):
+        for minibatch in grouped_minibatches(trajectories, POLICY_MINI_BATCH_SIZE):
+            normalized_advantages = normalize_policy_minibatch_advantages(minibatch)
             data = [
                 build_policy_train_datum(
                     t.prompt_tokens,
                     t.response_tokens,
                     old_logprobs=t.old_logprobs,
-                    advantages=t.advantages,
+                    advantages=advantages,
                 )
-                for t in minibatch
+                for t, advantages in zip(minibatch, normalized_advantages, strict=True)
             ]
             forward_result = policy_client.forward_backward(data, POLICY_LOSS, loss_fn_config).result()
             optim_result = policy_client.optim_step(optimizer).result()
@@ -552,12 +652,10 @@ def train_critic(
     trajectories: Sequence[Trajectory],
 ) -> dict[str, float]:
     all_metrics: list[dict[str, float]] = []
-    optimizer = types.AdamParams(learning_rate=LEARNING_RATE)
+    optimizer = adam_params(CRITIC_LEARNING_RATE)
 
     for _ in range(UPDATE_EPOCHS_PER_BATCH):
-        shuffled = list(trajectories)
-        random.shuffle(shuffled)
-        for minibatch in chunked(shuffled, CRITIC_MINI_BATCH_SIZE):
+        for minibatch in grouped_minibatches(trajectories, CRITIC_MINI_BATCH_SIZE):
             data = [
                 build_critic_train_datum(
                     t.prompt_tokens,
@@ -567,7 +665,11 @@ def train_critic(
                 )
                 for t in minibatch
             ]
-            forward_result = critic_client.forward_backward(data, "ppo_critic", {"value_clip": VALUE_CLIP}).result()
+            forward_result = critic_client.forward_backward(
+                data,
+                "ppo",
+                {"value_clip": VALUE_CLIP},
+            ).result()
             optim_result = critic_client.optim_step(optimizer).result()
             metrics = dict(forward_result.metrics)
             metrics.update(optim_result.metrics or {})
@@ -595,12 +697,15 @@ def evaluate_policy(
     args: argparse.Namespace,
     global_step: int,
 ) -> dict[str, float]:
-    all_rewards: list[float] = []
-    pass_flags: list[float] = []
+    total_reward = 0.0
+    total_positive_reward = 0.0
+    total_passes = 0.0
+    total_prompts = 0.0
+    total_trajectories = 0.0
     eval_steps = 0
 
     for batch in chunked(list(eval_records), EVAL_BATCH_SIZE):
-        trajectories, metrics = collect_rollouts(
+        _, metrics = collect_rollouts(
             policy_client,
             batch,
             tokenizer,
@@ -608,16 +713,25 @@ def evaluate_policy(
             global_step=global_step + eval_steps,
             eval_mode=True,
         )
-        all_rewards.extend(t.reward for t in trajectories)
-        pass_flags.append(metrics["pass_at_n"])
+        total_reward += metrics["avg_raw_reward"] * metrics["num_trajectories"]
+        total_positive_reward += metrics["mean_positive_reward"] * metrics["num_trajectories"]
+        total_passes += metrics["pass_at_n"] * metrics["num_prompts"]
+        total_prompts += metrics["num_prompts"]
+        total_trajectories += metrics["num_trajectories"]
         eval_steps += 1
         if args.max_eval_steps is not None and eval_steps >= args.max_eval_steps:
             break
 
+    avg_reward = total_reward / total_trajectories if total_trajectories else 0.0
+    mean_positive_reward = total_positive_reward / total_trajectories if total_trajectories else 0.0
+    pass_at_1 = total_passes / total_prompts if total_prompts else 0.0
     return {
-        "eval/avg_reward": float(sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0,
-        "eval/pass_at_1": float(sum(pass_flags) / len(pass_flags)) if pass_flags else 0.0,
+        "eval/avg_reward": avg_reward,
+        "eval/pass_at_1": pass_at_1,
         "eval/num_steps": float(eval_steps),
+        "eval/all/avg_score": avg_reward,
+        f"eval/all/pass_at_{EVAL_N_SAMPLES_PER_PROMPT}": pass_at_1,
+        "eval/all/mean_positive_reward": mean_positive_reward,
     }
 
 
@@ -642,6 +756,13 @@ def run_training(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     wandb_logger = WandbLogger(args.output_dir)
+    logger.info(
+        "wandb status: enabled=%s project=%s run_name=%s entity=%s",
+        wandb_logger.enabled,
+        os.environ.get("WANDB_PROJECT", DEFAULT_WANDB_PROJECT),
+        os.environ.get("WANDB_RUN_NAME", DEFAULT_WANDB_RUN_NAME),
+        os.environ.get("WANDB_ENTITY"),
+    )
 
     service_client = tinker.ServiceClient(base_url=args.base_url, api_key=args.api_key)
     policy_client = service_client.create_lora_training_client(
@@ -659,7 +780,6 @@ def run_training(args: argparse.Namespace) -> None:
         seed=args.seed,
     )
     tokenizer = policy_client.get_tokenizer()
-    ref_sampling_client = service_client.create_sampling_client(base_model=DEFAULT_MODEL_NAME)
 
     train_path, val_path = build_split_paths(args.data_dir)
     train_records = load_split(train_path, tokenizer, max_prompt_length=MAX_PROMPT_LENGTH)
@@ -703,13 +823,14 @@ def run_training(args: argparse.Namespace) -> None:
                     logger.warning("Skipping empty rollout batch at step %s", global_step)
                     continue
 
-                fill_reference_logprobs(trajectories, ref_sampling_client)
-                fill_critic_values(critic_client, trajectories)
+                fill_critic_values(
+                    critic_client,
+                    trajectories,
+                )
                 compute_advantages_and_returns(
                     trajectories,
                     gamma=GAMMA,
                     gae_lambda=GAE_LAMBDA,
-                    kl_coef=KL_COEF if USE_KL_IN_REWARD else 0.0,
                     normalize_advantages=ADVANTAGE_BATCH_NORMALIZE,
                 )
 
@@ -727,6 +848,11 @@ def run_training(args: argparse.Namespace) -> None:
                     "rollout/avg_reward": rollout_metrics["avg_reward"],
                     f"rollout/pass_at_{N_SAMPLES_PER_PROMPT}": rollout_metrics["pass_at_n"],
                     "rollout/num_trajectories": rollout_metrics["num_trajectories"],
+                    "reward/avg_raw_reward": rollout_metrics["avg_raw_reward"],
+                    f"reward/avg_pass_at_{N_SAMPLES_PER_PROMPT}": rollout_metrics[
+                        f"avg_pass_at_{N_SAMPLES_PER_PROMPT}"
+                    ],
+                    "reward/mean_positive_reward": rollout_metrics["mean_positive_reward"],
                 }
                 log_payload.update({f"policy/{k}": v for k, v in policy_metrics.items()})
                 log_payload.update({f"critic/{k}": v for k, v in critic_metrics.items()})
@@ -743,7 +869,9 @@ def run_training(args: argparse.Namespace) -> None:
                     wandb_logger.log(payload)
 
                 if EVAL_INTERVAL > 0 and global_step % EVAL_INTERVAL == 0:
-                    eval_metrics = evaluate_policy(policy_client, eval_records, tokenizer, args, global_step=global_step)
+                    eval_metrics = evaluate_policy(
+                        policy_client, eval_records, tokenizer, args, global_step=global_step
+                    )
                     logger.info("Eval step %s: %s", global_step, eval_metrics)
                     payload = {"step": global_step, **eval_metrics}
                     append_metrics(args.output_dir, payload)

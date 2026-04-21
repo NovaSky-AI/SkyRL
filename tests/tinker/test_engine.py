@@ -94,6 +94,7 @@ def test_cleanup_stale_sessions():
             [],
             id="ppo_with_loss_fn_config",
         ),
+        pytest.param("ppo", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_with_value_clip"),
         pytest.param("cross_entropy", None, [], [], [], [], id="cross_entropy_default_config"),
         pytest.param(
             "cispo",

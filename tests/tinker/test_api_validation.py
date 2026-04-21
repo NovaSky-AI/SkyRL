@@ -27,6 +27,15 @@ def test_forward_backward_input_accepts_ppo_threshold_keys():
     assert req.loss_fn_config == {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}
 
 
+def test_forward_backward_input_accepts_ppo_value_clip():
+    req = api.ForwardBackwardInput(
+        data=[_make_datum()],
+        loss_fn="ppo",
+        loss_fn_config={"value_clip": 0.2},
+    )
+    assert req.loss_fn_config == {"value_clip": 0.2}
+
+
 def test_forward_backward_input_accepts_ppo_critic_value_clip():
     req = api.ForwardBackwardInput(
         data=[_make_datum()],

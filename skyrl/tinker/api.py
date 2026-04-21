@@ -411,7 +411,7 @@ class ForwardBackwardInput(BaseModel):
     _ALLOWED_KEYS_BY_LOSS_FN: ClassVar[dict[str, set[str]]] = {
         "cross_entropy": set(),
         "importance_sampling": set(),
-        "ppo": {"clip_low_threshold", "clip_high_threshold"},
+        "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
     }

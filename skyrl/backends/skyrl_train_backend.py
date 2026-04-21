@@ -77,7 +77,7 @@ def _build_skyrl_train_config(
     user_overrides = dict(overrides.model_extra)
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
-    # that will resolve other attributes such as the reference model path based on the policy model path.
+    # that resolves other config derived from the policy model path.
     user_overrides["trainer.policy.model.path"] = base_model
     user_overrides["trainer.critic.model.path"] = base_model
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
@@ -535,13 +535,25 @@ class SkyRLTrainBackend(AbstractBackend):
         # Include RL fields (action_log_probs, advantages) when data is present
         has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
         has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
+        has_values = any(len(v) > 0 for v in prepared_batch.all_values)
+        has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
             batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
-            batch_dict["values"] = torch.tensor(values_list, dtype=torch.float32)
-            batch_dict["returns"] = torch.tensor(returns_list, dtype=torch.float32)
+            if has_values != has_returns:
+                raise ValueError("Critic batches must provide both values and returns, or neither")
+            if has_values and any(
+                len(values) != len(weights) or len(returns) != len(weights)
+                for values, returns, weights in zip(
+                    prepared_batch.all_values, prepared_batch.all_returns, prepared_batch.all_token_weights
+                )
+            ):
+                raise ValueError("Critic batches with values/returns must align with response-token lengths")
+            if has_values:
+                batch_dict["values"] = torch.tensor(values_list, dtype=torch.float32)
+                batch_dict["returns"] = torch.tensor(returns_list, dtype=torch.float32)
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
@@ -632,10 +644,32 @@ class SkyRLTrainBackend(AbstractBackend):
                 asyncio.run(self._inference_engine_client.sleep())
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
-        if role == "critic" and loss_fn != "ppo_critic":
-            raise ValueError(f"Critic batches must use loss_fn='ppo_critic', got {loss_fn!r}")
+        if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
+            raise ValueError(f"Critic batches must use loss_fn='ppo' or 'ppo_critic', got {loss_fn!r}")
         if role != "critic" and loss_fn == "ppo_critic":
             raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
+
+    def _normalize_policy_loss_request(
+        self,
+        role: str,
+        loss_fn: str,
+        loss_fn_config: dict[str, float] | None,
+    ) -> tuple[str, dict[str, float] | None]:
+        """Normalize public Tinker loss names/config into SkyRL-Train policy settings."""
+        if role == "critic":
+            return loss_fn, loss_fn_config
+
+        if loss_fn != "ppo":
+            return loss_fn, loss_fn_config
+
+        normalized_config = dict(loss_fn_config or {})
+        clip_low_threshold = normalized_config.pop("clip_low_threshold", None)
+        clip_high_threshold = normalized_config.pop("clip_high_threshold", None)
+        if clip_low_threshold is not None:
+            normalized_config["eps_clip_low"] = 1.0 - clip_low_threshold
+        if clip_high_threshold is not None:
+            normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
+        return "regular", normalized_config or None
 
     def forward_backward(
         self,
@@ -678,6 +712,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 loss_fn,
             )
         loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
+        loss_fn, loss_fn_config = self._normalize_policy_loss_request(role, loss_fn, loss_fn_config)
         if role == "critic":
             self._dispatch.set_algorithm_config(
                 "critic",
@@ -741,8 +776,6 @@ class SkyRLTrainBackend(AbstractBackend):
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         role = self._get_batch_role(prepared_batch.all_model_ids)
-        loss_fn = prepared_batch.all_loss_fns[0]
-        self._validate_batch_role_and_loss(role, loss_fn)
         batch = self._to_training_batch(prepared_batch, role)
         micro_bs = (
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None

@@ -6,7 +6,7 @@ Here is the setup:
 - base model: `Qwen/Qwen2.5-1.5B-Instruct`
 - critic model: `Qwen/Qwen2.5-1.5B-Instruct`
 - dataset : `$HOME/data/gsm8k/{train,validation}.parquet`
-- PPO-style loop with a policy model, a critic model, GAE, KL shaping, checkpointing, and eval
+- PPO-style loop with a policy model, a critic model, GAE, checkpointing, and eval
 
 Two terminals are required.
 
@@ -23,7 +23,6 @@ your own `BACKEND_CONFIG=...`, for example:
 ```bash
 BACKEND_CONFIG='{
   "trainer.placement.policy_num_gpus_per_node": 2,
-  "trainer.placement.ref_num_gpus_per_node": 2,
   "trainer.placement.critic_num_gpus_per_node": 2,
   "generator.inference_engine.num_engines": 2
 }' bash examples/tinker/ppo/run_tinker_server.sh
@@ -45,7 +44,7 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
 it preps the GSM8K parquet files, starts `run_tinker_server.sh` in the
 background, waits for `http://localhost:8000` to become ready, then runs
 `ppo_client.py` against it. Four GPUs are requested to match the server-side
-defaults (policy, ref, critic, and vLLM engines with `colocate_all=true`).
+defaults for the colocated policy/critic/vLLM layout.
 
 Prerequisites: [install Modal](https://modal.com/docs/guide) and run
 `modal setup` once. If you want W&B logging, set `WANDB_API_KEY` (and
@@ -59,8 +58,14 @@ modal run examples/tinker/ppo/modal_run.py
 
 ## Notes
 
-- The critic (`ppo_critic`) is implemented end-to-end only on the SkyRL-Train
-  (FSDP) backend (see `skyrl/backends/skyrl_train_backend.py`). The launcher
-  in `run_tinker_server.sh` selects `--backend fsdp`, so this works out of the
-  box. Note that the JAX backend's `ppo_critic_loss` is a zero-loss stub and would
-  silently no-op critic updates — do not switch backends without verifying this.
+- This example runs with KL loss disabled. The Tinker PPO path is a clipped-ratio
+  PPO loop over rollout logprobs plus a critic trained with GAE; it does not
+  build or use a separate reference model.
+- The example client sends critic updates with the public `ppo` loss name because
+  the upstream `tinker` SDK does not accept SkyRL's internal `ppo_critic` literal.
+  On the SkyRL-Train (FSDP) backend, critic-role batches are still routed onto the
+  dedicated `ppo_critic_loss` path in `skyrl/backends/skyrl_train/utils/ppo_utils.py`
+  via `skyrl/backends/skyrl_train_backend.py`. The launcher in
+  `run_tinker_server.sh` selects `--backend fsdp`, so this works out of the box.
+- The JAX backend does not support critic training through this path and rejects
+  `ppo_critic`, so do not switch backends without verifying critic-loss behavior.

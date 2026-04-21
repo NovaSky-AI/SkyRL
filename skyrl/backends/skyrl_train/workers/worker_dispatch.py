@@ -203,10 +203,11 @@ class WorkerDispatch:
         Args:
             model: Model identifier ("policy", "critic", or "ref")
             data: Training batch data
-            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
-                     If provided, overrides the config's policy_loss_type.
+            loss_fn: Optional resolved train loss name (for example, "cross_entropy"
+                     or "regular"). Public Tinker aliases like "ppo" should be
+                     normalized before dispatch.
             loss_fn_config: Optional config overrides for the loss function
-                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+                           (e.g., {"eps_clip_low": 0.1} for the regular PPO loss)
 
         Returns:
             Dictionary of training metrics
