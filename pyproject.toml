@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=5.0.0,<=5.3.0",
+    "transformers>=5.0.0,<=5.6.2",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -98,7 +98,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.19.0; sys_platform == 'linux'",
+    "vllm==0.19.1; sys_platform == 'linux'",  # Pin at least 0.19.1 for transformers v5 support from https://github.com/vllm-project/vllm/pull/30566
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
@@ -117,7 +117,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.19.0; sys_platform == 'linux'",
+    "vllm==0.19.1; sys_platform == 'linux'",  # Pin at least 0.19.1 for transformers v5 support from https://github.com/vllm-project/vllm/pull/30566
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
@@ -214,7 +214,7 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
+    "transformers>=5.0.0,<=5.6.2; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
