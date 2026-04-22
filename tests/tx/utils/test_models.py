@@ -34,6 +34,11 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
     base_config.intermediate_size = 128
     base_config.num_attention_heads = 2
     base_config.num_key_value_heads = 2
+    # transformers v5.5 added `validate_layer_type` that requires
+    # `len(layer_types) == num_hidden_layers`
+    # https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/configuration_utils.py#L459-L468
+    if getattr(base_config, "layer_types", None):
+        base_config.layer_types = base_config.layer_types[: base_config.num_hidden_layers]
 
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
