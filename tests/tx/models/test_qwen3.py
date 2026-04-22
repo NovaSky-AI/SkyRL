@@ -7,7 +7,7 @@ import pytest
 import torch
 from flax import nnx
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock,
 )
@@ -71,7 +71,7 @@ def test_qwen3_moe_layer(ep: int, tp: int):
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
 
     hf_moe_layer = hf_model.model.layers[0].mlp
@@ -126,7 +126,7 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
     hf_moe_layer = hf_model.model.layers[0].mlp
