@@ -127,3 +127,4 @@ class BatchIterator:
             image_grid_thw=batch.get("image_grid_thw"),
         )
         return exp
+        

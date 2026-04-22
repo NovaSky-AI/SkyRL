@@ -163,3 +163,4 @@ class DistributedStrategy(ABC):
         # Only restore CUDA RNG state if it was saved and CUDA is available
         if "cuda" in rng_state and torch.cuda.is_available() and torch.cuda.device_count() > 0:
             torch.cuda.set_rng_state(rng_state["cuda"])
+            
