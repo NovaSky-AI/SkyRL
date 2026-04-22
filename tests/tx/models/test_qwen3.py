@@ -25,7 +25,7 @@ def test_qwen3(tp: int):
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-0.6B", attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        "Qwen/Qwen3-0.6B", attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
 
     inputs = ["The capital of France is", "The most popular programming language is"]
@@ -69,7 +69,7 @@ def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: H
 def test_qwen3_moe_layer(ep: int, tp: int):
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
     base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
@@ -124,7 +124,7 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
     base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
@@ -209,7 +209,7 @@ def test_qwen3_lora():
 
         hf_model = get_peft_model(
             AutoModelForCausalLM.from_pretrained(
-                base_model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+                base_model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
             ),
             lora_config,
         )
