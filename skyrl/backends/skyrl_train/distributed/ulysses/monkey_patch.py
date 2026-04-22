@@ -139,7 +139,11 @@ def apply_monkey_patch(
     else:
         module = sys.modules[model.__module__]
 
-    num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+    # VLM composite configs (e.g. Gemma4Config) nest attention fields under text_config;
+    # HF's get_text_config returns self for text-only models, so this is a no-op for them:
+    # https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/configuration_utils.py#L1202-L1212
+    text_config = model.config.get_text_config()
+    num_attention_heads, num_key_value_heads = text_config.num_attention_heads, text_config.num_key_value_heads
     assert (
         num_attention_heads % ulysses_sp_size == 0
     ), f"num_attention_heads {num_attention_heads} must be divisible by ulysses_sp_size {ulysses_sp_size}"
