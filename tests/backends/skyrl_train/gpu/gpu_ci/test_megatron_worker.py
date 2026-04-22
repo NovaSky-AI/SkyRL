@@ -33,8 +33,6 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 
-_skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
-
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
@@ -121,9 +119,9 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(True, 4, 2, 2, 1, None, False, id="colocate_all"),
         pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+        pytest.param(True, 4, 2, 2, 1, None, True, id="colocate_all_lora"),
     ],
 )
 @pytest.mark.asyncio

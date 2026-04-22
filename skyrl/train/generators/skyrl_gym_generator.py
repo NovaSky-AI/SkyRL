@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import torch
 from loguru import logger
 from tqdm.asyncio import tqdm
 
@@ -84,6 +85,8 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    pixel_values: Optional[torch.Tensor] = None
+    image_grid_thw: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -1471,6 +1474,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = None
             step_metadata = None
 
+        has_vision_features = any(getattr(output, "pixel_values", None) is not None for output in all_outputs)
+        pixel_values = (
+            [getattr(output, "pixel_values", None) for output in all_outputs] if has_vision_features else None
+        )
+        image_grid_thw = (
+            [getattr(output, "image_grid_thw", None) for output in all_outputs] if has_vision_features else None
+        )
+
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
             get_logprobs = sampling_params.get("logprobs", None) is not None
@@ -1520,6 +1531,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             "env_metrics": env_metrics,
             "step_metadata": step_metadata,
         }
+        if has_vision_features:
+            generator_output["pixel_values"] = pixel_values
+            generator_output["image_grid_thw"] = image_grid_thw
 
         return generator_output
 

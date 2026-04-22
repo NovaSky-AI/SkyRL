@@ -12,7 +12,7 @@ from ray.actor import ActorHandle
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
-    pad_batch,
+    pad_training_input_batch
 )
 
 
@@ -196,9 +196,13 @@ class MeshDispatch(Dispatch):
             # Pad to make divisible by dp_size. Will only be non-zero for step-wise training.
             pad_size = (-mb_size) % dp_size
             if pad_size > 0:
-                mini_batch = pad_batch(mini_batch, pad_size)
+                mini_batch = pad_training_input_batch(mini_batch, pad_size)
 
-            chunk_size = len(mini_batch) // dp_size
+            mini_batch_size = len(mini_batch)
+            assert (
+                mini_batch_size % dp_size == 0
+            ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
+            chunk_size = mini_batch_size // dp_size
             chunks = mini_batch.chunk(chunk_size)
             all_chunk_refs.append([ray.put(chunk) for chunk in chunks])
         return all_chunk_refs

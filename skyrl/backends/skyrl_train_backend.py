@@ -16,7 +16,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import render_model_input
+from skyrl.backends.renderer import VLLMRenderer, render_model_input
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
@@ -27,9 +27,16 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_router_args,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -130,6 +137,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._renderer = None
 
         # New inference infrastructure
         self._server_group = None
@@ -244,7 +252,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         elif has_external_servers and not has_external_proxy:
             server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external servers - "
@@ -264,7 +273,8 @@ class SkyRLTrainBackend(AbstractBackend):
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -366,6 +376,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch = None
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._renderer = None
         self._colocate_pg = None
 
         logger.info(f"Successfully deleted model {model_id}")
@@ -375,8 +386,15 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        # Extract token IDs from ModelInput chunks
-        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
+        if _SKYRL_USE_NEW_INFERENCE:
+            if self._renderer is None:
+                self._ensure_inference_engines()
+                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        else:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
+
+        all_input_ids = [r.prompt_ids for r in rendered_inputs]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
@@ -426,6 +444,22 @@ class SkyRLTrainBackend(AbstractBackend):
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
 
+        # In mixed batches (some vision, some text-only), text-only samples
+        # get an empty tensor placeholder so the TensorList length matches the batch size.
+        # Empty tensors contribute zero rows when torch.cat'd downstream.
+        for mm_key in ("pixel_values", "image_grid_thw"):
+            values = [
+                r.multi_modal_kwargs.get(mm_key) if r.multi_modal_kwargs is not None else None for r in rendered_inputs
+            ]
+            # Iterate through to get the first non-none value.
+            # We use the reference shape to make sure subsequent stack / cat calls
+            # don't run into shape errors.
+            ref = next((v for v in values if v is not None), None)
+            # If ref is None, then all of the values empty and we don't need to add placeholder tensors.
+            if ref is not None:
+                placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
+                batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
+
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
@@ -448,25 +482,11 @@ class SkyRLTrainBackend(AbstractBackend):
         dp_size = self._dispatch.get_lcm_dp_size()
         alignment = dp_size * micro_batch_size if micro_batch_size else dp_size
         pad_size = (alignment - batch.batch_size % alignment) % alignment
-        if pad_size == 0:
-            return batch, 0
-
-        new_tensors = {}
-        for key, tensor in batch.items():
-            if tensor is not None:
-                if key == "loss_mask":
-                    # Padding entries must not contribute to the loss
-                    additional_dims = tensor.shape[1:]
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        padded = TrainingInputBatch(new_tensors)
-        padded.metadata = batch.metadata
-        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})")
-        return padded, pad_size
+        if pad_size > 0:
+            logger.info(
+                f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})"
+            )
+        return pad_training_input_batch(batch, pad_size), pad_size
 
     def _extract_metrics(self, data: dict) -> dict[str, float]:
         """Extract training metrics from dispatch return dict.
@@ -511,8 +531,8 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return {}
 
-        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
+        self._sleep_inference_engines()
         micro_bs = (
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
@@ -574,8 +594,8 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return {}
 
-        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
+        self._sleep_inference_engines()
         micro_bs = (
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )

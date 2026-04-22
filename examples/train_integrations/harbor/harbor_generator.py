@@ -239,7 +239,7 @@ class HarborGenerator(GeneratorInterface):
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = uuid4().hex
                 trial_config = TrialConfig.model_validate(config)
-                trial = Trial(trial_config)
+                trial = await Trial.create(trial_config)
 
                 async with self._rate_limiter:
                     results = await trial.run()

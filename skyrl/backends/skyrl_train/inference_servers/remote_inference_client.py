@@ -918,6 +918,78 @@ class RemoteInferenceClient:
             {"update_info": update_info},
         )
 
+    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
+    # these three methods from /collective_rpc to the native vLLM endpoints
+    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
+    # the NewInferenceWorkerWrap worker extension.
+
+    async def start_weight_update(
+        self,
+        is_checkpoint_format: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Start a new chunked weight update via /collective_rpc.
+
+        Calls the NewInferenceWorkerWrap.start_weight_update method on all
+        workers. For checkpoint-format weights this initializes layerwise
+        reload. Must be called before any update_weights_chunk calls.
+
+        Args:
+            is_checkpoint_format: True if weights are in checkpoint format
+                (need layerwise processing), False for kernel format.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "start_weight_update",
+                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
+            },
+        )
+
+    async def update_weights_chunk(
+        self,
+        update_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Send a single weight chunk via /collective_rpc.
+
+        Calls NewInferenceWorkerWrap.update_weights_chunk on all workers.
+        Can be called multiple times between start_weight_update and
+        finish_weight_update.
+
+        Args:
+            update_info: Dict with backend-specific update info (names,
+                dtype_names, shapes, ipc_handles_pickled or packed flag).
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "update_weights_chunk",
+                "kwargs": {"update_info": update_info},
+            },
+        )
+
+    async def finish_weight_update(self) -> Dict[str, Any]:
+        """
+        Finish the current chunked weight update via /collective_rpc.
+
+        Calls NewInferenceWorkerWrap.finish_weight_update on all workers.
+        For checkpoint-format weights, runs layerwise postprocessing.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {"method": "finish_weight_update"},
+        )
+
     async def update_lora_from_disk(
         self,
         lora_path: str,

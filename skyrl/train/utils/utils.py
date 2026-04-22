@@ -98,38 +98,35 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
         f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
 
-    # For step-wise training, the number of sequences per prompt is variable, and padded
-    # per-mini-batch to be divisible by dp_size.
-    step_wise = cfg.generator.step_wise_trajectories
+    # TODO(Charlie): For step-wise training, the number of sequences per prompt is variable, and
+    # padded mini-batch may not be divisible by dp_size. Should check if we need these assertions.
+    policy_mini_batch_size_per_gpu = (
+        cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
+    )
+    assert policy_mini_batch_size_per_gpu > 0, (
+        f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
+        f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
+        f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+        f"dp_size={policy_dp_size}"
+    )
+    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+        f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
+    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
+        f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
+    policy_train_batch_size_per_gpu = (
+        cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
+    )
 
-    if not step_wise:
-        policy_mini_batch_size_per_gpu = (
-            cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-        )
-        assert policy_mini_batch_size_per_gpu > 0, (
-            f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
-            f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
-            f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
-            f"dp_size={policy_dp_size}"
-        )
-        assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
-            f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
-            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        policy_train_batch_size_per_gpu = (
-            cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-        )
-
-        # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
-        assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
-            f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
-            f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
-            f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
-        )
+    # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
+    assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
+        f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
+        f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
+        f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+    )
 
     # Validate critic mini batch size
     critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
@@ -301,6 +298,18 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             f"connection. Use an outcome-based estimator (grpo, rloo, maxrl) or disable "
             f"step_wise_trajectories."
         )
+    if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
+        # TODO(Charlie): this can be fixed, can revisit later.
+        raise ValueError(
+            "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
+        )
+
+    if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
+        raise ValueError(
+            "`generator.merge_stepwise_output=True` requires `generator.step_wise_trajectories=True`. "
+            "Prefix-aware merging operates on step-wise GeneratorOutput entries (trajectory_ids + "
+            "is_last_step), which only exist when step-wise training is enabled."
+        )
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
@@ -311,6 +320,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
+    if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
+        if cfg.trainer.algorithm.max_seq_len is None:
+            raise ValueError(
+                "`trainer.algorithm.max_seq_len` must be set explicitly when "
+                "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
+                "Choose the total sequence-length normalization constant for your setup; "
+                "this often matches the model context window / vLLM `max_model_len` when appropriate."
+            )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
@@ -674,8 +691,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
-    if _SKYRL_USE_NEW_INFERENCE:
-        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.

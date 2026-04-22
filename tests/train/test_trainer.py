@@ -213,7 +213,7 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     # position where that step's response_mask is 1. Traj A -> 2.0, Traj B -> 0.0.
     rewards = torch.zeros(batch_size, seqlen)
     rewards[1, -1] = 2.0
-    is_last_step = torch.tensor([False, True, False, True])
+    is_last_step = [False, True, False, True]
 
     data = TrainingInputBatch(
         {
@@ -223,7 +223,6 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
             "response_mask": response_mask,
             "rewards": rewards,
             "values": torch.zeros(batch_size, seqlen),
-            "is_last_step": is_last_step,
         },
     )
     # Both trajectories share a GRPO group so the group has the 2 samples needed to produce a mean.
@@ -231,6 +230,7 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
         "uids": np.array(["grp0", "grp0", "grp0", "grp0"]),
         "response_length": seqlen,
         "avg_response_length": (4 + 1 + 3 + 2) / 4,
+        "is_last_step": is_last_step,
     }
 
     data = trainer.compute_advantages_and_returns(data)

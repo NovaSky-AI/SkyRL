@@ -386,10 +386,10 @@ class WorkerDispatch:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model."""
+        """Finish weight sync: offload model weights and optimizer state."""
         if not self.colocate_all:
             return
-        self._offload("policy", offload_optimizer=False, offload_model=True)
+        self._offload("policy", offload_optimizer=True, offload_model=True)
 
     async def save_weights_for_sampler(self) -> None:
         """
