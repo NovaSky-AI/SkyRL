@@ -23,7 +23,7 @@ def test_qwen3_5(tp: int):
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-0.8B")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3.5-0.8B", attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        "Qwen/Qwen3.5-0.8B", attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
 
     inputs = ["The capital of France is", "The most popular programming language is"]
