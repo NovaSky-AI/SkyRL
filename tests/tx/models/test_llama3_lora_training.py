@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 from huggingface_hub import snapshot_download
-from transformers import PretrainedConfig
+from transformers import AutoConfig
 
 from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.lora import init_lora_adapter
@@ -19,7 +19,7 @@ from tests.tx.models.lora_test_utils import (
 
 def test_lora_training():
     base_model = "unsloth/Llama-3.2-1B"
-    base_config = PretrainedConfig.from_pretrained(base_model)
+    base_config = AutoConfig.from_pretrained(base_model)
     config = Llama3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
