@@ -836,7 +836,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        # For step-wise training, the last step's prompt already accumulates all prior turns, so
+        # (prompt + response) at last-step rows is the full-trajectory length proxy.
+        if self.generator_cfg.step_wise_trajectories:
+            keep = [i for i, last in enumerate(is_last_step) if last]
+            rollout_metrics = get_rollout_metrics(
+                [prompt_token_ids[i] + responses[i] for i in keep],
+                [rewards[i] for i in keep],
+                [env_metrics[i] for i in keep],
+                [env_classes[i] for i in keep],
+            )
+        else:
+            rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
