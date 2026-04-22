@@ -46,9 +46,15 @@ def test_qwen3_5(tp: int):
 
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
     assert outputs.hidden_states is not None
-    assert np.allclose(hf_outputs.hidden_states[0].numpy(), outputs.hidden_states[0], rtol=1e-6)
-    assert np.allclose(hf_outputs.hidden_states[1].numpy(), outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-    assert np.allclose(hf_outputs.hidden_states[-1].numpy(), outputs.hidden_states[-1], rtol=1e-3, atol=1e-3)
+    assert np.allclose(hf_outputs.hidden_states[0].float(), outputs.hidden_states[0], rtol=1e-6)
+    # transformers Qwen3.5 returns hidden_states as bfloat16 even when
+    # `dtype=torch.float32` is passed to from_pretrained.
+    # Since transformers==5.4.0's https://github.com/huggingface/transformers/pull/41250,
+    # the dtype keyword argument is consumed by AutoConfig and not forwarded
+    # to the model when the config has a nested text_config, so weights load
+    # from checkpoint in bfloat16. Thus, tolerances now reflect bfloat16 precision
+    assert np.allclose(hf_outputs.hidden_states[1].float(), outputs.hidden_states[1], rtol=5e-3, atol=5e-3)
+    assert np.allclose(hf_outputs.hidden_states[-1].float(), outputs.hidden_states[-1], rtol=5e-3, atol=5e-3)
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
