@@ -101,4 +101,3 @@ class WorkerWrap:
             warnings.warn("No weight receiver to teardown")
             return
         self._weight_receiver.teardown()
-        
