@@ -180,10 +180,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         Uses the start/update/finish lifecycle to enable chunked transfers.
         Per chunk, all tensors are packed into a single contiguous CUDA buffer
         (one dtype per chunk, guaranteed by the weight extractor) and one IPC
-        handle is created for the packed buffer per rank. This mirrors the
-        legacy path and avoids the one-handle-per-param ceiling of vLLM's
-        default IPCWeightTransferEngine, which otherwise dominates latency
-        for models with many small parameters.
+        handle is created for the packed buffer per rank.
 
         All ranks iterate chunks (weight extraction may use collective ops).
         Per chunk, each rank packs + creates one IPC handle, handles are

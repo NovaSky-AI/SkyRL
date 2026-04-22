@@ -121,10 +121,7 @@ class NewInferenceWorkerWrap:
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
         func, args = handles[physical_gpu_id]
-        # Remap device index to the LOCAL current-device — mirrors the legacy
-        # receiver (CudaIpcWeightTransferReceiver.receive_weights). Without
-        # this, cross-device rebuilds on colocated runs silently corrupt or
-        # fail because logical and physical device indices can differ.
+        # Remap device index to the LOCAL current-device.
         list_args = list(args)
         list_args[6] = device_index
         packed_tensor = func(*list_args)
