@@ -5,20 +5,17 @@ Main entrypoint for evaluation-only.
 import asyncio
 import sys
 from typing import Any
-from typing import Any
 
 import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.utils.trainer_utils import build_dataloader
-from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 
 

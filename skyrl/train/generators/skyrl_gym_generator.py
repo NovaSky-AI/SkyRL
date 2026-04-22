@@ -184,7 +184,6 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
-
 def _write_rlm_rollout(
     rollout_output_dir: str,
     prompt: ConversationType,
@@ -933,7 +932,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
 
-
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
                 logger.warning(
@@ -1008,7 +1006,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
-        # Get environment-specific metrics after the episode is done.
+        # Get environment-specific metrics after the episode is done
         # For RLM envs, store the full chat_history on the env before calling get_metrics()
         # so it's available in env_metrics for rollout logging.
         if env_class == "rlm" and hasattr(env, "set_chat_history"):

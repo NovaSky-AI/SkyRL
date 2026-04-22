@@ -1500,3 +1500,5 @@ class RayPPOTrainer:
             logger.info(f"Cleaned up temporary policy export directory: {policy_export_dir}")
         except Exception as e:
             logger.warning(f"Failed to clean up temporary policy export directory {policy_export_dir}: {e}")
+
+        logger.info("Successfully updated ref model with policy model, training continues.")
