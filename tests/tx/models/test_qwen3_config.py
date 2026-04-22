@@ -1,13 +1,13 @@
 """Tests for Qwen3Config."""
 
-from transformers import PretrainedConfig
+from transformers import AutoConfig
 
 from skyrl.tx.models.configs import Qwen3Config
 
 
 def test_config_wraps_pretrained_config():
     """Test that Qwen3Config wraps a PretrainedConfig and adds LoRA params."""
-    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    hf_config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
     config = Qwen3Config(hf_config, max_lora_adapters=8, max_lora_rank=16, shard_attention_heads=False)
 
     # Check LoRA params were set
@@ -23,7 +23,7 @@ def test_config_wraps_pretrained_config():
 
 def test_config_preserves_moe_config():
     """Test that MoE-specific configs are preserved."""
-    hf_config = PretrainedConfig.from_pretrained("trl-internal-testing/tiny-Qwen3MoeForCausalLM")
+    hf_config = AutoConfig.from_pretrained("trl-internal-testing/tiny-Qwen3MoeForCausalLM")
     config = Qwen3Config(hf_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
     # Check that MoE-specific attributes are preserved
