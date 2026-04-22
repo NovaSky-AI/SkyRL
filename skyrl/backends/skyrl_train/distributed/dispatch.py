@@ -338,4 +338,3 @@ def concatenate_outputs_after_mesh_dispatch(
     for i in range(actor_infos[0].rank.dp_size):
         shards.append(dp_rank_to_shard[i])
     return TrainingOutputBatch.cat(shards)
-    

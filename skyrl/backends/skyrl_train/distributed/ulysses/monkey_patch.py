@@ -169,4 +169,3 @@ def is_transformers_version_in_range(min_version: str, max_version: str) -> bool
 
     # Check if the version is within the specified range
     return version.parse(min_version) <= version.parse(transformers_version) <= version.parse(max_version)
-    
