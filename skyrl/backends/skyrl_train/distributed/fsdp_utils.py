@@ -131,7 +131,6 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
                 )
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
-     
 
         if len(transformer_cls_to_wrap) == 0:
             raise Exception(

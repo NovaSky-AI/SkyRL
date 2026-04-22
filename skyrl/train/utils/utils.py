@@ -137,32 +137,31 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
             f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
             f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
         )
-        if not step_wise:
-            critic_mini_batch_size_per_gpu = (
-                cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-            )
-            assert critic_mini_batch_size_per_gpu > 0, (
-                f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
-                f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
-                f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
-                f"dp_size={critic_dp_size}"
-            )
-            assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
-                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-            )
-            assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
-                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-            )
-            critic_train_batch_size_per_gpu = (
-                cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-            )
-            assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
-                f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
-                f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
-                f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
-            )
+        critic_mini_batch_size_per_gpu = (
+            cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
+        )
+        assert critic_mini_batch_size_per_gpu > 0, (
+            f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
+            f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
+            f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+            f"dp_size={critic_dp_size}"
+        )
+        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        critic_train_batch_size_per_gpu = (
+            cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
+        )
+        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
+            f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
+            f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
+            f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+        )
 
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size

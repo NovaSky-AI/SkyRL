@@ -86,12 +86,6 @@ class WorkerWrap:
         assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
         request = pickle.loads(request)
 
-        # Pass FSDP weight names directly to model.load_weights().
-        # For Qwen3_5ForConditionalGeneration, FSDP extracts names like
-        # "model.language_model.*" which are HF-format names. The vLLM model's
-        # load_weights() uses hf_to_vllm_mapper to convert these correctly.
-        # Adding an extra "language_model." prefix here would produce wrong names
-        # like "language_model.model.language_model.*" causing all weights to be skipped.
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))

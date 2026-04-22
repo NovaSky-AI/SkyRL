@@ -12,7 +12,7 @@ from ray.actor import ActorHandle
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
-    pad_training_input_batch
+    pad_training_input_batch,
 )
 
 

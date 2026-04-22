@@ -30,7 +30,6 @@ from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
-    pad_batch
 )
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
@@ -628,11 +627,6 @@ class RayPPOTrainer:
         rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
             "rollout_expert_indices", None
         )
-
-        # Extract config fields.
-        train_batch_size = self.cfg.trainer.train_batch_size
-        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
-        is_stepwise = self.cfg.generator.step_wise_trajectories
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -1506,5 +1500,3 @@ class RayPPOTrainer:
             logger.info(f"Cleaned up temporary policy export directory: {policy_export_dir}")
         except Exception as e:
             logger.warning(f"Failed to clean up temporary policy export directory {policy_export_dir}: {e}")
-
-        logger.info("Successfully updated ref model with policy model, training continues.")
