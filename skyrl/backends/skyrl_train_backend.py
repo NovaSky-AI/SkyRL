@@ -27,7 +27,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_router_args,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -249,7 +252,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         elif has_external_servers and not has_external_proxy:
             server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external servers - "
@@ -269,7 +273,8 @@ class SkyRLTrainBackend(AbstractBackend):
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
