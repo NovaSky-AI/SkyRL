@@ -84,13 +84,22 @@ class NewInferenceWorkerWrap:
         """
         Receive and load a single chunk of weights.
 
-        Delegates to the weight transfer engine's receive_weights, using
-        model.load_weights for checkpoint format or direct param.copy_ for
-        kernel format. Can be called multiple times between start and finish.
+        SkyRL packs each chunk's tensors into a single contiguous CUDA buffer
+        (see CudaIpcWeightTransferSender._send_chunks_vllm_native) and sends
+        one IPC handle per rank plus per-param `sizes` metadata. We rebuild
+        the packed tensor here, slice it per param, and hand the list to
+        model.load_weights (checkpoint format) or copy per-param directly
+        (kernel format). We intentionally bypass vLLM's IPCWeightTransferEngine
+        for the IPC unpack because its update_info schema enforces one handle
+        per param and does not support packed transfers.
 
         Args:
-            update_info: Dict with backend-specific update info (names,
-                dtypes, shapes, IPC handles or NCCL packed flag, etc.)
+            update_info: Dict with keys:
+                - names: list[str]
+                - dtype_names: list[str]
+                - shapes: list[list[int]]
+                - sizes: list[int]  (element count per param; used for slicing)
+                - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("start_weight_update must be called before update_weights_chunk.")
@@ -100,29 +109,46 @@ class NewInferenceWorkerWrap:
                 "Weight transfer not configured. " "Please set weight_transfer_config to enable weight transfer."
             )
 
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
-        model = self.model_runner.model
+        # --- unpack SkyRL packed CUDA IPC format ---
+        import base64
+        import pickle
 
+        names = update_info["names"]
+        shapes = update_info["shapes"]
+        sizes = update_info["sizes"]
+        pickled = update_info["ipc_handles_pickled"]
+        handles = pickle.loads(base64.b64decode(pickled))
+
+        device_index = torch.cuda.current_device()
+        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
+        if physical_gpu_id not in handles:
+            raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
+        func, args = handles[physical_gpu_id]
+        # Remap device index to the LOCAL current-device — mirrors the legacy
+        # receiver (CudaIpcWeightTransferReceiver.receive_weights). Without
+        # this, cross-device rebuilds on colocated runs silently corrupt or
+        # fail because logical and physical device indices can differ.
+        list_args = list(args)
+        list_args[6] = device_index
+        packed_tensor = func(*list_args)
+
+        weights: list[tuple[str, torch.Tensor]] = []
+        offset = 0
+        for name, shape, size in zip(names, shapes, sizes):
+            weights.append((name, packed_tensor[offset : offset + size].view(*shape)))
+            offset += size
+
+        model = self.model_runner.model
         with torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
+                model.load_weights(weights=weights)
             else:
+                for name, weight in weights:
+                    param = model.get_parameter(name)
+                    param.copy_(weight)
 
-                def load_weights_direct(
-                    weights: list[tuple[str, torch.Tensor]],
-                ) -> None:
-                    for name, weight in weights:
-                        param = model.get_parameter(name)
-                        param.copy_(weight)
-
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=load_weights_direct,
-                )
-
+        # Ensure consumption of packed_tensor finishes before we return (and
+        # before the sender drops its reference on the next barrier).
         torch.accelerator.synchronize()
 
     def finish_weight_update(self) -> None:
