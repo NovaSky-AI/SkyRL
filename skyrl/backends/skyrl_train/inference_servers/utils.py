@@ -3,6 +3,9 @@ import json
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
+from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
+    VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
+)
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import (
     InferenceEngineConfig,
@@ -45,6 +48,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         weight_transfer_config=WeightTransferConfig(
             backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
         ),
+        worker_extension_cls=VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
         generation_config="vllm",
         # NOTE: vllm expects a list entry for served_model_name
@@ -60,7 +64,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         setattr(args, key, value)
 
     # Add LoRA params if enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
         args.enable_lora = True
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1

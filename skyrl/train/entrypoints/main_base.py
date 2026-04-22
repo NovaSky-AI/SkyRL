@@ -225,9 +225,16 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        if cfg.generator.vision_language_generator:
+            from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
 
-        return SkyRLGymGenerator(
+            generator_cls = SkyRLVLMGymGenerator
+        else:
+            from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+            generator_cls = SkyRLGymGenerator
+
+        return generator_cls(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,

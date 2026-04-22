@@ -84,6 +84,6 @@ Your agent harness can still use `/chat/completions` with tool call parsing, sin
 
 **Cons:**
 - Training time can grow: O(T^2) vs O(T), since each trajectory of T turns becomes T sequences to forward (each with a growing prefix), as opposed to 1 sequence.
-  - SkyRL will support prefix-aware merging of per-step sequences when the prefix matches (WIP), which brings the cost back to O(T) in the common case.
+  - SkyRL support prefix-aware merging of per-step sequences when the prefix matches with config flag `generator.merge_stepwise_output`, which can reduce the O(T^2) cost if chat history is linearly appending across turns and there is no token mismatch. See https://github.com/NovaSky-AI/SkyRL/pull/1532
 
 For the full details on how to structure the `GeneratorOutput` for step-wise training, including the required fields, invariants, and a concrete example, see: [Step-Wise Training](step-wise-training).

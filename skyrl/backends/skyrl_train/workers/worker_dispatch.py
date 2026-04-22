@@ -9,7 +9,7 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 from ray import ObjectRef
@@ -162,24 +162,28 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def stage_data(self, model: str, data: TrainingInputBatch, mini_batch_size: int) -> List[List[ObjectRef]]:
-        """
-        Pre-stage all mini-batch chunks in the Ray object store.
+    def stage_data(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        mini_batch_boundaries: List[Tuple[int, int]],
+    ) -> List[List[ObjectRef]]:
+        """Pre-stage mini-batch chunks in the Ray object store.
 
         Call this once before the training loop so that all serialization is
         done upfront and GPUs stay saturated during training.
 
         Args:
-            model: Model name (used to look up DP size)
-            data: Full training batch
-            mini_batch_size: Size of each mini-batch (before DP chunking)
+            model: Model name (used to look up DP size).
+            data: Full training batch.
+            mini_batch_boundaries: List of ``(start, end)`` index pairs.
+                The i-th mini-batch is data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
         Returns:
-            ``result[i][dp_rank]`` is the ObjectRef for mini-batch *i*,
-            DP rank *dp_rank*.
+            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_size)
+        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries)
 
     def forward_backward(
         self,
@@ -382,10 +386,10 @@ class WorkerDispatch:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model."""
+        """Finish weight sync: offload model weights and optimizer state."""
         if not self.colocate_all:
             return
-        self._offload("policy", offload_optimizer=False, offload_model=True)
+        self._offload("policy", offload_optimizer=True, offload_model=True)
 
     async def save_weights_for_sampler(self) -> None:
         """
