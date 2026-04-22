@@ -217,6 +217,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
 
+        self._set_expandable_segments(True)
+
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
@@ -285,6 +287,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
+        # Disable expandable_segments before weight sync so that new allocations
+        # use standard CUDA memory compatible with cudaIpcGetMemHandle.
+        if self.cfg.placement.colocate_all:
+            self._set_expandable_segments(False)
+
         torch.cuda.empty_cache()
 
         # Check if this is a LoRA model
@@ -309,6 +316,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+        # Re-enable expandable_segments after weight sync completes
+        if self.cfg.placement.colocate_all:
+            self._set_expandable_segments(True)
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
@@ -391,6 +402,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
+        self._set_expandable_segments(True)
+
     def forward(
         self,
         data: TrainingInputBatch,
@@ -446,6 +459,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
+
+        self._set_expandable_segments(True)
 
     def forward(
         self,

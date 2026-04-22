@@ -240,6 +240,30 @@ class Worker(DistributedTorchRayActor):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
         raise NotImplementedError()
 
+    def _set_expandable_segments(self, enabled: bool) -> None:
+        """Toggle PyTorch CUDA expandable_segments allocator on training workers.
+
+        When ``cfg.placement.use_expandable_segments`` is False this is a no-op.
+        Only affects NEW allocations; existing tensors keep their allocation type.
+
+        Call with ``True`` after model init so that weights stay in standard CUDA
+        memory (IPC-compatible) while activations benefit from defragmentation.
+        For ``colocate_all=True``, call with ``False``/``True`` around CUDA IPC
+        weight sync to keep IPC handles compatible.
+        """
+        if not self.cfg.placement.use_expandable_segments or not torch.cuda.is_available():
+            return
+        setting = f"expandable_segments:{'True' if enabled else 'False'}"
+        try:
+            # Prefer the non-deprecated accelerator API when available (PyTorch 2.7+)
+            if hasattr(torch._C, "_accelerator_setAllocatorSettings"):
+                torch._C._accelerator_setAllocatorSettings(setting)
+            else:
+                torch.cuda.memory._set_allocator_settings(setting)
+            logger.info(f"[expandable_segments] Set CUDA allocator: {setting} (rank={self._rank})")
+        except RuntimeError as e:
+            logger.warning(f"Failed to set CUDA allocator setting '{setting}': {e}")
+
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()

@@ -65,6 +65,23 @@ The policy and critic models are not colocated, but fine-grained placement of th
 - `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`) or place them on separate GPUs (`false`)
 - `trainer.placement.colocate_critic_reward`: Colocate critic and reward models (`true`) or place them on separate GPUs (`false`)
 
+## Memory Optimization
+
+### Expandable Segments (`use_expandable_segments`)
+
+SkyRL enables PyTorch's CUDA `expandable_segments` allocator on training workers by default (`trainer.placement.use_expandable_segments=true`). This reduces GPU memory fragmentation during training, which is especially beneficial for long-context training with large models.
+
+Without `expandable_segments`, PyTorch's CUDA allocator creates fixed-size memory segments that can become fragmented over multiple training steps — memory is reserved but unusable for large contiguous allocations. This often manifests as OOMs on step 2+ even when total free memory appears sufficient.
+
+`expandable_segments` uses CUDA Virtual Memory Management (VMM) to create growable segments, where non-contiguous physical blocks appear contiguous to PyTorch. This eliminates fragmentation.
+
+**How it works with colocation:**
+
+- For `colocate_all=true`: `expandable_segments` is automatically toggled off during CUDA IPC weight sync (since IPC handles are incompatible with VMM-based allocations) and re-enabled afterward. This is handled transparently.
+- For `colocate_all=false`: `expandable_segments` stays enabled at all times since weight sync uses NCCL broadcast, which is unaffected.
+
+To disable (not recommended): `trainer.placement.use_expandable_segments=false`
+
 ## Hardware Configuration
 
 Finally, the configuration for specifying node and GPU counts for each model (along with their default values) is as follows:
