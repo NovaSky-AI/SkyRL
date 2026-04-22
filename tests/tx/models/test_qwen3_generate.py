@@ -21,7 +21,7 @@ def test_qwen3_generate():
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
 
     inputs = ["My name is", "The capital of France is", "Test stopping", "Test stopping"]
@@ -129,7 +129,7 @@ def test_qwen3_generate_speed():
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="right")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
     base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)

@@ -112,7 +112,7 @@ def test_compute_logits(
 
     # Load HF model, get logits, then delete to free memory
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
+        model_name, attn_implementation="eager", use_safetensors=True, dtype=torch.float32
     )
     hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
     hf_logits = hf_outputs.logits.detach().numpy()
