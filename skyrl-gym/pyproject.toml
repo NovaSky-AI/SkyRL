@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skyrl-gym"
-version = "0.2.0"
+version = "0.3.0"
 description = "RL environments for LLMs implemented with the Gymnasium API."
 authors = [
     { name = "NovaSkyAI AI Team"}
@@ -79,3 +79,4 @@ extend-ignore = [
 ignore = [
     "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
 ]
+
