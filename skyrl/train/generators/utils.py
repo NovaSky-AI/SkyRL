@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
@@ -225,55 +224,63 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     )
 
 
-def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
-    """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
-    flat = []
-    for go in generator_outputs:
-        flat.extend(go[key])
-    return flat
-
-
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
 
-    We only aggregate rollout metrics the can deduced by responses and rewards, but not
-    those that use `env_metrics` or `env_classes`.
+    We use best-effort to aggregate rollout metrics.
 
     Args:
         generator_outputs: Per-batch generator outputs to concatenate.
         step_wise: If True, validate step-wise specific fields on the concatenated result
             (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
+
+    def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
+        """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
+        flat = []
+        for go in generator_outputs:
+            flat.extend(go[key])
+        return flat
+
     assert len(generator_outputs) > 0
-    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
-    if any(has_rollout_logprobs) and not all(has_rollout_logprobs):
-        raise ValueError(
-            "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
-        )
+
+    # 1. Aggregate the list-valued fields across generator outputs in O(N_total).
+    # If `first` has a field, we expect all other generator outputs to have the same field.
     first = generator_outputs[0]
-    result: GeneratorOutput = {
-        "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
-        "response_ids": _flatten_field(generator_outputs, "response_ids"),
-        "rewards": _flatten_field(generator_outputs, "rewards"),
-        "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
-        "stop_reasons": (
-            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
-        ),
-        "rollout_logprobs": (
-            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
-        ),
-    }
+    result = {}
+    for key in first:
+        if isinstance(first[key], list):
+            result[key] = _flatten_field(generator_outputs, key)
+        elif first[key] is None:
+            result[key] = None
+    result = GeneratorOutput(result)
 
-    # propagate additional keys with list values as-is
-    additional_keys = [key for key in first if key not in result and isinstance(first[key], list)]
-    if len(additional_keys):
-        logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
-    for key in additional_keys:
-        result[key] = _flatten_field(generator_outputs, key)
-
-    # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    # 2. Re-aggregate rollout metrics from the concatenated data. We do not call `get_rollout_metrics`
+    # again because some generators (e.g. step-wise ones) may have their own logics on giving the
+    # input to `get_rollout_metrics`. We aggregate by inferring from the key name.
+    rollout_metrics = {}
+    rollout_metric_keys: dict = {}
+    for go in generator_outputs:
+        per_group = go.get("rollout_metrics") or {}
+        for k, v in per_group.items():
+            if isinstance(v, (int, float)):
+                rollout_metric_keys.setdefault(k, []).append(v)
+    for k, values in rollout_metric_keys.items():
+        if "avg" in k or "mean" in k:
+            # Works because each generator output's rollout metric is computed based on the same
+            # number of trajectories (even for step-wise).
+            rollout_metrics[k] = sum(values) / len(values)
+        elif "min" in k:
+            rollout_metrics[k] = min(values)
+        elif "max" in k:
+            rollout_metrics[k] = max(values)
+        elif "std" in k:
+            # Approximation: mean of per-group stds. True pooled std requires per-group mean and
+            # count, which we don't carry through.
+            rollout_metrics[k] = sum(values) / len(values)
+        else:
+            rollout_metrics[k] = sum(values)
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -607,7 +614,8 @@ def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int
     sliced: GeneratorOutput = {}
     for key, value in generator_output.items():
         if key == "rollout_metrics":
-            sliced[key] = value
+            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
+            continue
         elif value is None:
             sliced[key] = None
         else:
@@ -716,7 +724,6 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "rewards": out_rewards,
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
-        "rollout_metrics": gen_out.get("rollout_metrics", None),
         "rollout_logprobs": out_logprobs,
         "trajectory_ids": out_trajectory_ids,
         "rollout_expert_indices": None,
@@ -739,6 +746,9 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
 
     When the prefix condition fails between two consecutive turns, the current
     merge group is flushed and a new group starts (greedy merging).
+
+    The returned GeneratorOutput's rollout_metrics should be ignored. We already recorded it before
+    calling this function.
 
     Args:
         generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
@@ -765,5 +775,5 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
             start = i + 1
 
     merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
-    # concatenate_generator_outputs re-aggregates rollout_metrics and validates
+
     return concatenate_generator_outputs(merged_slices, step_wise=True)

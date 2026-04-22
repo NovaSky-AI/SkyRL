@@ -40,6 +40,10 @@ def test_generator_output_concatenation():
         "It is needed to help Trainer.eval() record the full GeneratorOutput information."
     )
 
+    # Each generator output carries its own `rollout_metrics` (the contract —
+    # `concatenate_generator_outputs` re-aggregates by key name instead of re-computing from
+    # response_ids/rewards). Exercises every aggregation branch: avg/mean, min, max, std,
+    # and the fallback sum (for Harbor-style count-like metrics).
     generator_output_1: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -47,6 +51,14 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
+        "rollout_metrics": {
+            "generate/avg_num_tokens": 10.0,
+            "generate/mean_reward": 1.0,
+            "generate/min_num_tokens": 3,
+            "generate/max_num_tokens": 15,
+            "generate/std_num_tokens": 2.0,
+            "generate/num_timeout_trajectories": 2,
+        },
     }
 
     generator_output_2: GeneratorOutput = {
@@ -56,11 +68,19 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
+        "rollout_metrics": {
+            "generate/avg_num_tokens": 20.0,
+            "generate/mean_reward": 3.0,
+            "generate/min_num_tokens": 5,
+            "generate/max_num_tokens": 30,
+            "generate/std_num_tokens": 4.0,
+            "generate/num_timeout_trajectories": 3,
+        },
     }
 
-    generator_outputs = [generator_output_1, generator_output_2]
-    concatenated_output = concatenate_generator_outputs(generator_outputs)
+    concatenated_output = concatenate_generator_outputs([generator_output_1, generator_output_2])
 
+    # List-valued fields concatenate in order.
     assert concatenated_output["prompt_token_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["response_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["rewards"] == [1.0, 2.0, 2.0, 3.0]
@@ -68,18 +88,116 @@ def test_generator_output_concatenation():
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
 
-    # Validate rollout metrics
-    expected_rollout_metrics = {
-        "generate/min_num_tokens": 1,
-        "generate/max_num_tokens": 3,
-        "generate/avg_num_tokens": 2.0,
-        "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
-        "generate/avg_tokens_non_zero_rewards": 2.0,
-        "generate/avg_tokens_zero_rewards": 0,
+    # Rollout metrics re-aggregate per-key based on the key name.
+    metrics = concatenated_output["rollout_metrics"]
+    # avg/mean → per-group mean
+    np.testing.assert_allclose(metrics["generate/avg_num_tokens"], 15.0)
+    np.testing.assert_allclose(metrics["generate/mean_reward"], 2.0)
+    # min/max → min/max across groups
+    assert metrics["generate/min_num_tokens"] == 3
+    assert metrics["generate/max_num_tokens"] == 30
+    # fallback → sum (counts add up)
+    assert metrics["generate/num_timeout_trajectories"] == 5
+    # std → mean-of-stds approximation (see concatenate_generator_outputs for details).
+    np.testing.assert_allclose(metrics["generate/std_num_tokens"], 3.0)
+
+
+def test_concatenate_rollout_metrics_missing_or_none():
+    """If no generator output carries rollout_metrics, the result is an empty dict, not a crash."""
+    base: GeneratorOutput = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[1]],
+        "rewards": [0.0],
+        "loss_masks": [[1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": None,
     }
-    assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
-    for key, value in expected_rollout_metrics.items():
-        np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+    # Case A: key absent entirely.
+    concat = concatenate_generator_outputs([dict(base), dict(base)])
+    assert concat["rollout_metrics"] == {}
+
+    # Case B: key present but None (simulates the trainer having popped it).
+    go_none_1 = {**base, "rollout_metrics": None}
+    go_none_2 = {**base, "rollout_metrics": None}
+    concat = concatenate_generator_outputs([go_none_1, go_none_2])
+    assert concat["rollout_metrics"] == {}
+
+    # Case C: mixed — one missing, one present. Missing group simply contributes nothing.
+    go_with = {**base, "rollout_metrics": {"generate/avg_num_tokens": 5.0, "generate/count": 7}}
+    go_without = {**base, "rollout_metrics": None}
+    concat = concatenate_generator_outputs([go_with, go_without])
+    assert concat["rollout_metrics"]["generate/avg_num_tokens"] == 5.0
+    assert concat["rollout_metrics"]["generate/count"] == 7
+
+
+def test_concatenate_rollout_metrics_stepwise_custom_metrics():
+    """Step-wise + custom generator metrics (Harbor-style) survive per-group re-aggregation.
+
+    Simulates two step-wise generator groups in the fully-async path. Each group has already
+    computed its `rollout_metrics` on last-step rows only (that's SkyRLGymGenerator's new
+    contract), and also carries a custom count-like metric (Harbor's `num_timeout_trajectories`)
+    and a rate-like metric (`avg_num_turns`). Concatenate must aggregate each correctly.
+    """
+    tid_a = _make_tid("A")
+    tid_b = _make_tid("B")
+
+    go1: GeneratorOutput = {
+        "prompt_token_ids": [[1], [1, 2]],  # 2 turns of trajectory A
+        "response_ids": [[10], [20]],
+        "rewards": [[0.0], [1.0]],
+        "loss_masks": [[1], [1]],
+        "stop_reasons": ["c", "eos"],
+        "rollout_logprobs": None,
+        "trajectory_ids": [tid_a, tid_a],
+        "is_last_step": [False, True],
+        "rollout_metrics": {
+            # Pre-computed on last-step row: len(prompt+response) = 2 + 1 = 3
+            "generate/avg_num_tokens": 3.0,
+            "generate/min_num_tokens": 3,
+            "generate/max_num_tokens": 3,
+            # Custom Harbor-style metrics
+            "generate/num_timeout_trajectories": 1,
+            "generate/avg_num_turns": 2.0,
+        },
+    }
+
+    go2: GeneratorOutput = {
+        "prompt_token_ids": [[5], [5, 6, 7]],  # 2 turns of trajectory B
+        "response_ids": [[50], [60]],
+        "rewards": [[0.0], [2.0]],
+        "loss_masks": [[1], [1]],
+        "stop_reasons": ["c", "eos"],
+        "rollout_logprobs": None,
+        "trajectory_ids": [tid_b, tid_b],
+        "is_last_step": [False, True],
+        "rollout_metrics": {
+            # Pre-computed on last-step row: len(prompt+response) = 3 + 1 = 4
+            "generate/avg_num_tokens": 4.0,
+            "generate/min_num_tokens": 4,
+            "generate/max_num_tokens": 4,
+            "generate/num_timeout_trajectories": 0,
+            "generate/avg_num_turns": 2.0,
+        },
+    }
+
+    concat = concatenate_generator_outputs([go1, go2], step_wise=True)
+    metrics = concat["rollout_metrics"]
+
+    # List-valued fields concat the same way regardless of step_wise.
+    assert concat["is_last_step"] == [False, True, False, True]
+    assert concat["trajectory_ids"] == [tid_a, tid_a, tid_b, tid_b]
+
+    # avg across the two groups — NOTE this is only correct if each group has the same number
+    # of trajectories contributing to the metric. The comment in concatenate_generator_outputs
+    # asserts this invariant for step-wise.
+    np.testing.assert_allclose(metrics["generate/avg_num_tokens"], 3.5)
+    assert metrics["generate/min_num_tokens"] == 3
+    assert metrics["generate/max_num_tokens"] == 4
+    # Count-like Harbor metric — falls through to sum branch.
+    assert metrics["generate/num_timeout_trajectories"] == 1
+    # `avg_num_turns` matches the "avg" branch — averaged across groups.
+    np.testing.assert_allclose(metrics["generate/avg_num_turns"], 2.0)
 
 
 def test_get_metrics_from_generator_output():
@@ -407,8 +525,9 @@ class TestMergeStepwiseOutput:
         assert merged["rollout_logprobs"] == [[-0.1, -0.2]]
         assert merged["rewards"] == [[0.5, 0.6]]
         assert merged["is_last_step"] == [True]
-        # rollout_metrics is re-aggregated by concatenate_generator_outputs
-        assert merged["rollout_metrics"] is not None
+        # `rollout_metrics` on the merged output is intentionally dropped — the trainer records
+        # metrics from the un-merged GeneratorOutput before calling `merge_stepwise_output`.
+        assert merged["rollout_metrics"] == {}
 
     def test_per_trajectory_scalar_rewards_and_overlong_filtering(self):
         """
