@@ -64,7 +64,7 @@ def get_rope(
     rope_type = rope_scaling.get("rope_type", "default")
 
     match rope_type:
-        case "deepseek_yarn":
+        case "yarn":
             mscale = yarn_get_mscale(rope_scaling["factor"], rope_scaling["mscale_all_dim"])
 
             def rotary_emb(inputs: jax.Array, positions: jax.Array) -> jax.Array:
