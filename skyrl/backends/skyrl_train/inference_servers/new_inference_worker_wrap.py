@@ -84,14 +84,11 @@ class NewInferenceWorkerWrap:
         """
         Receive and load a single chunk of weights.
 
-        SkyRL packs each chunk's tensors into a single contiguous CUDA buffer
-        (see CudaIpcWeightTransferSender._send_chunks_vllm_native) and sends
+        SkyRL packs each chunk's tensors into a single contiguous CUDA buffer and sends
         one IPC handle per rank plus per-param `sizes` metadata. We rebuild
         the packed tensor here, slice it per param, and hand the list to
         model.load_weights (checkpoint format) or copy per-param directly
-        (kernel format). We intentionally bypass vLLM's IPCWeightTransferEngine
-        for the IPC unpack because its update_info schema enforces one handle
-        per param and does not support packed transfers.
+        (kernel format).
 
         Args:
             update_info: Dict with keys:
