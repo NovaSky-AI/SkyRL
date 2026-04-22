@@ -38,7 +38,36 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        super().__init__(**(config if isinstance(config, dict) else config.__dict__))
+        # Inherit the source config's attribute_map so aliases like `Qwen3MoeConfig`'s
+        # `num_experts` -> `num_local_experts` mapping continues to work
+        # https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/models/qwen3_moe/configuration_qwen3_moe.py#L51-L53
+        if not isinstance(config, dict) and type(config).attribute_map:
+            self.attribute_map = type(config).attribute_map
+
+        # Set these attributes before the parent class `PreTrainedConfig.__init__`,
+        # as it runs @strict validators, one of which calls self.get_text_config,
+        # and our custom get_text_config method pulls these attributes from self
+        # https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/configuration_utils.py#L444-L446
+        self.max_lora_adapters = max_lora_adapters
+        self.max_lora_rank = max_lora_rank
+        self.shard_attention_heads = shard_attention_heads
+        self.loss_chunk_size = loss_chunk_size
+        self.gradient_checkpointing = gradient_checkpointing
+        self.mhc_expansion_rate = mhc_expansion_rate
+
+        # `super().__init__` below iterates `config.__dict__` and setattrs each entry
+        # onto `self`, which would silently overwrite the attributes we just set if there
+        # is any overlap, so we raise instead:
+        # https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/configuration_utils.py#L288-L296
+        config_dict = config if isinstance(config, dict) else config.__dict__
+        overlap = sorted(self.__dict__.keys() & config_dict.keys())
+        if overlap:
+            raise ValueError(
+                f"Configuration {config} carries keys {overlap} that conflict with"
+                f" {type(self).__name__}'s own kwargs."
+            )
+
+        super().__init__(**config_dict)
 
         # In transformers v5, rope_parameters may not contain rope_theta
         # even when it exists as a top-level config attribute (e.g. DeepSeek v3).
@@ -50,13 +79,6 @@ class ModelConfig(PretrainedConfig):
                 rope_params["rope_theta"] = rope_theta
         if rope_params:
             self.rope_parameters = rope_params
-
-        self.max_lora_adapters = max_lora_adapters
-        self.max_lora_rank = max_lora_rank
-        self.shard_attention_heads = shard_attention_heads
-        self.loss_chunk_size = loss_chunk_size
-        self.gradient_checkpointing = gradient_checkpointing
-        self.mhc_expansion_rate = mhc_expansion_rate
 
     def get_config(self) -> PretrainedConfig:
         """Return `text_config` when present, otherwise return this config."""
