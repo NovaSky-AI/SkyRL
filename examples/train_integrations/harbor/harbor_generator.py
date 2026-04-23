@@ -296,12 +296,6 @@ def build_step_wise_generator_output(
     rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
     rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
 
-    logger.info(
-        f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
-        f"# of timeout trajectories: {num_timeout_trajectories}\n"
-        f"# of error trajectories: {num_error_trajectories}"
-    )
-
     return GeneratorOutput(
         prompt_token_ids=prompt_token_ids,
         response_ids=response_ids,
@@ -382,7 +376,7 @@ class HarborGenerator(GeneratorInterface):
         rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         prompts = input_batch["prompts"]
         trajectory_ids = input_batch["trajectory_ids"]
 
@@ -395,6 +389,7 @@ class HarborGenerator(GeneratorInterface):
 
         all_outputs: List[HarborTrajectoryOutput] = [None] * len(prompts)  # type: ignore[list-item]
         progress = tqdm(
+            disable=disable_tqdm,  # disable for fully async training
             total=len(prompts),
             desc="Generating Trajectories",
             miniters=max(1, len(prompts) // 10),

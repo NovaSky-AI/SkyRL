@@ -274,6 +274,25 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
 
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+
+    # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
+    # computes basic stats (response length, reward); generators may add custom keys, which we
+    # aggregate by inferring from the key name. TODO(Charlie): hacky, to be removed soon.
+    extra_keys: dict = {}
+    for go in generator_outputs:
+        per_group = go.get("rollout_metrics") or {}
+        for k, v in per_group.items():
+            if k not in rollout_metrics and isinstance(v, (int, float)):
+                extra_keys.setdefault(k, []).append(v)
+    for k, values in extra_keys.items():
+        if "avg" in k or "mean" in k:
+            rollout_metrics[k] = sum(values) / len(values)
+        elif "min" in k:
+            rollout_metrics[k] = min(values)
+        elif "max" in k:
+            rollout_metrics[k] = max(values)
+        else:
+            rollout_metrics[k] = sum(values)
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -607,7 +626,8 @@ def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int
     sliced: GeneratorOutput = {}
     for key, value in generator_output.items():
         if key == "rollout_metrics":
-            sliced[key] = value
+            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
+            continue
         elif value is None:
             sliced[key] = None
         else:
@@ -716,7 +736,6 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "rewards": out_rewards,
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
-        "rollout_metrics": gen_out.get("rollout_metrics", None),
         "rollout_logprobs": out_logprobs,
         "trajectory_ids": out_trajectory_ids,
         "rollout_expert_indices": None,
@@ -739,6 +758,9 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
 
     When the prefix condition fails between two consecutive turns, the current
     merge group is flushed and a new group starts (greedy merging).
+
+    The returned GeneratorOutput's rollout_metrics should be ignored. We already recorded it before
+    calling this function.
 
     Args:
         generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
@@ -765,5 +787,5 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
             start = i + 1
 
     merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
-    # concatenate_generator_outputs re-aggregates rollout_metrics and validates
+
     return concatenate_generator_outputs(merged_slices, step_wise=True)

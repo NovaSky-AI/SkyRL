@@ -22,10 +22,11 @@ EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 # Directory setup
 #-----------------------
 RUN_NAME="codecontest"
-TRIALS_DIR="$HOME/$RUN_NAME/trials_run"
-CKPTS_DIR="$HOME/$RUN_NAME/ckpts"
-EXPORTS_DIR="$HOME/$RUN_NAME/exports"
-LOG_DIR="/tmp/skyrl-logs/$RUN_NAME"
+STORAGE_ROOT="/mnt/local_storage/$RUN_NAME"
+TRIALS_DIR="$STORAGE_ROOT/trials_run"
+CKPTS_DIR="$STORAGE_ROOT/ckpts"
+EXPORTS_DIR="$STORAGE_ROOT/exports"
+LOG_DIR="$STORAGE_ROOT/logs"
 
 #-----------------------
 # Training setup

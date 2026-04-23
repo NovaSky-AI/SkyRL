@@ -743,6 +743,7 @@ class RayPPOTrainer:
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
+        generator_output.pop("rollout_metrics", None)
 
         validate_generator_output(
             len(input_batch["prompts"]),
