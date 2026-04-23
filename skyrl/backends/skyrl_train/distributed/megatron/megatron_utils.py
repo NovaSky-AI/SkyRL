@@ -95,16 +95,20 @@ def get_model_size(model: nn.Module, scale="auto"):
 
 
 def freeze_moe_router(model):
+    # Unwrap common Megatron/Torch DDP + Float16Module wrappers so callers can
+    # pass a wrapped chunk (e.g. ``DDP(Float16Module(GPTModel))``) directly.
+    while hasattr(model, "module"):
+        model = model.module
     for layer in model.decoder.layers:
         if hasattr(layer.mlp, "router"):
-            if hasattr(layer.mlp.router, "weight"):
+            if getattr(layer.mlp.router, "weight", None) is not None:
                 layer.mlp.router.weight.requires_grad = False
-            if hasattr(layer.mlp.router, "bias"):
+            if getattr(layer.mlp.router, "bias", None) is not None:
                 layer.mlp.router.bias.requires_grad = False
         if hasattr(layer.mlp, "shared_experts"):
-            if hasattr(layer.mlp.shared_experts, "gate_weight"):
+            if getattr(layer.mlp.shared_experts, "gate_weight", None) is not None:
                 layer.mlp.shared_experts.gate_weight.requires_grad = False
-            if hasattr(layer.mlp.shared_experts, "gate_bias"):
+            if getattr(layer.mlp.shared_experts, "gate_bias", None) is not None:
                 layer.mlp.shared_experts.gate_bias.requires_grad = False
 
 

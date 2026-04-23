@@ -9,6 +9,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from huggingface_hub import snapshot_download
+from loguru import logger
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.bridge.peft.lora import LoRA
@@ -23,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
+    freeze_moe_router,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -618,6 +620,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.cfg.policy.megatron_config.torch_profiler_config.enable:
             self.profiler = Profiler(self.cfg.policy.megatron_config.torch_profiler_config)
 
+        # Freeze MoE router and shared-expert gate params before optimizer build.
+        # Megatron's DistributedOptimizer reads requires_grad at construction.
+        if self.cfg.policy.megatron_config.freeze_moe_router:
+            if self._rank == 0:
+                logger.info("freeze_moe_router=True: freezing MoE router and shared-expert gate params")
+            for chunk in self.actor_module:
+                freeze_moe_router(chunk)
+
         # create optimizer
         optim_config = init_megatron_optim_config(
             self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
@@ -925,6 +935,12 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # load weights
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+
+        # Mirror policy hook for symmetry; ref builds no optimizer so this is a no-op for
+        # grad flow but keeps the config surface consistent.
+        if self.cfg.ref.megatron_config.freeze_moe_router:
+            for chunk in self.actor_module:
+                freeze_moe_router(chunk)
 
         # create worker model
         self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
