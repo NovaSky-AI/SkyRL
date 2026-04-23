@@ -53,6 +53,7 @@ TIS_IMP_RATIO_CAP=2.0
 
 # -------------------------
 # Fully-async knobs.
+# All knobs are tuned for 1x8xH100 node for Qwen3-8B, please adjust accordingly.
 # Constraint: mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)
 # Can increase num_parallel_generation_workers based on your hardware resources (e.g. KV cache size).
 # -------------------------
@@ -60,7 +61,8 @@ MAX_STALENESS_STEPS=4
 NUM_PARALLEL_GENERATION_WORKERS=$(( MINI_BATCH_SIZE * 2 ))
 
 #----------------
-# Infrastructure setup. All knobs are tuned for 1x8xH100 node for Qwen3-8B.
+# Infrastructure setup.
+# All knobs are tuned for 1x8xH100 node for Qwen3-8B, please adjust accordingly.
 #----------------
 NUM_INFERENCE_ENGINES=2
 TP_SIZE=2
