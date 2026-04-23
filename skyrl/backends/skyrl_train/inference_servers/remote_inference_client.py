@@ -67,6 +67,7 @@ from typing import (
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
+    ImagePlaceholder,
     InferenceEngineInput,
     InferenceEngineOutput,
     MultiModalFeatures,
@@ -455,6 +456,93 @@ class RemoteInferenceClient:
             "routed_experts": routed_experts,
         }
 
+    async def _render_for_sample(
+        self,
+        prompt: Dict[str, Any],
+        session_id: Optional[str],
+    ) -> Tuple[List[int], Optional[MultiModalFeatures]]:
+        """Build token_ids and optional multi-modal features from a Tinker prompt.
+
+        For text-only prompts this simply flattens chunk tokens (no HTTP call).
+        When image chunks are present, calls /v1/chat/completions/render to
+        process images, then splices the resulting placeholder tokens into the
+        pre-tokenized text stream and adjusts placeholder offsets.
+
+        Returns:
+            (token_ids, features) where features is None for text-only prompts.
+        """
+        chunks = prompt.get("chunks", [])
+
+        # No images → flatten text tokens directly.
+        image_chunks = [c for c in chunks if c.get("type") in ("image", "image_asset_pointer")]
+        if not image_chunks:
+            token_ids = [tok for c in chunks for tok in c.get("tokens", [])]
+            return token_ids, None
+
+        # Build OpenAI chat template with only image_urls
+        content_parts: List[Dict[str, Any]] = []
+        for c in image_chunks:
+            if c["type"] == "image":
+                # model_dump() on Base64Bytes produces bytes with the b64 string.
+                raw = c["data"]
+                b64_str = raw.decode("ascii") if isinstance(raw, bytes) else raw
+                url = f"data:image/{c.get('format', 'jpeg')};base64,{b64_str}"
+            else:  # image_asset_pointer
+                url = c["location"]
+            content_parts.append({"type": "image_url", "image_url": {"url": url}})
+
+        effective_model = self.active_lora_name if self.active_lora_name else self.model_name
+        render_payload: Dict[str, Any] = {
+            "json": {
+                "model": effective_model,
+                "messages": [{"role": "user", "content": content_parts}],
+            }
+        }
+        if session_id:
+            render_payload["json"]["session_id"] = session_id
+
+        render_resp = await self.render_chat_completion(render_payload)
+
+        # Extract per-image placeholder token slices from the render output.
+        features = render_resp.get("features") or {}
+        render_token_ids = render_resp.get("token_ids", [])
+        render_placeholders = features.get("mm_placeholders", {}).get("image", [])
+
+        placeholder_token_slices: List[List[int]] = []
+        for ph in render_placeholders:
+            offset, length = ph["offset"], ph["length"]
+            placeholder_token_slices.append(render_token_ids[offset : offset + length])
+
+        if len(placeholder_token_slices) != len(image_chunks):
+            raise ValueError(
+                f"Expected {len(image_chunks)} placeholder token slices, got {len(placeholder_token_slices)}"
+            )
+
+        # Splice: walk chunks in order, substituting image placeholder tokens.
+        final_token_ids: List[int] = []
+        new_placeholders: List[ImagePlaceholder] = []
+        img_idx = 0
+
+        for c in chunks:
+            ctype = c.get("type", "encoded_text")
+            if ctype == "encoded_text":
+                final_token_ids.extend(c.get("tokens", []))
+            elif ctype in ("image", "image_asset_pointer"):
+                ph_tokens = placeholder_token_slices[img_idx]
+                new_placeholders.append({"offset": len(final_token_ids), "length": len(ph_tokens)})
+                final_token_ids.extend(ph_tokens)
+                img_idx += 1
+
+        adjusted_features: MultiModalFeatures = {
+            "mm_hashes": features.get("mm_hashes", {}),
+            "mm_placeholders": {"image": new_placeholders},
+        }
+        # No need to decode, vllm handles decoding
+        if features.get("kwargs_data") is not None:
+            adjusted_features["kwargs_data"] = features["kwargs_data"]
+
+        return final_token_ids, adjusted_features
+
     async def sample(self, request_payload: SampleRequestPayload) -> SampleResponse:
         """
         Sample completions via /inference/v1/generate (Tinker API).
@@ -486,8 +574,9 @@ class RemoteInferenceClient:
         if include_prompt_logprobs:
             prompt_logprobs_sp = topk_prompt_logprobs_k if topk_prompt_logprobs_k > 0 else 0
 
-        # Flatten prompt chunks → token IDs
-        token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
+        # Render prompt: flatten text tokens and, if images are present,
+        # call the render endpoint to get placeholder tokens + features.
+        token_ids, mm_features = await self._render_for_sample(prompt, session_id)
 
         # Map Tinker SamplingParams → vLLM format
         sampling_params: Dict[str, Any] = {
@@ -504,11 +593,13 @@ class RemoteInferenceClient:
 
         effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
-        payload = {
+        payload: Dict[str, Any] = {
             "sampling_params": sampling_params,
             "model": effective_model,
             "token_ids": token_ids,
         }
+        if mm_features is not None:
+            payload["features"] = mm_features
 
         headers = {"Content-Type": "application/json"}
         if session_id:
