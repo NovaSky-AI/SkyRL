@@ -1,8 +1,9 @@
 set -x
 
-# Multi-paper RLM training with alphaXiv/rlm-sft-multi-9b-v1.
+# Single-paper RLM training.
+# The top-level agent runs as a child-style evidence extractor (no parent orchestration layer).
 #
-# 1. Create data: uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir $DATA_DIR
+# 1. Create data: uv run -- python examples/train/rlm/rlm_dataset_synthetic_multi.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/run_multi_paper_rlm.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,15 +12,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 : "${UV_PROJECT_ENVIRONMENT:=$PROJECT_ROOT/.venv}"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
-: "${DATA_DIR:=$HOME/data/multi-paper}"
+: "${DATA_DIR:=$HOME/data/rlm-synthetic-multi}"
 : "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
+: "${JUDGE_MODEL:=gpt-5.4-mini-2026-03-17}"
 
-# Increase Ray compiled-graph channel timeout (default 300s) to avoid false
-# timeouts when a rollout batch with max_turns=10 takes >5 minutes to generate.
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp -m examples.train.rlm.main_rlm \
@@ -27,11 +27,12 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
   generator.step_wise_trajectories=true \
+  generator.enable_child_agents=true \
   generator.train_child_trajectories=true \
-  generator.max_turns=10 \
+  generator.max_turns=6 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/rlm-sft-multi-9b-step-250" \
+  trainer.policy.model.path="alphaXiv/evidence-rlm-sft-2b" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
@@ -45,24 +46,20 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.eval_batch_size=16 \
-  trainer.train_batch_size=2 \
-  trainer.policy_mini_batch_size=2 \
-  trainer.micro_forward_batch_size_per_gpu=1 \
-  trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=20 \
+  trainer.train_batch_size=4 \
+  trainer.policy_mini_batch_size=4 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.ckpt_interval=100 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=1024 \
   generator.eval_sampling_params.max_generate_length=1024 \
-  generator.sampling_params.temperature=0.7 \
-  generator.sampling_params.top_p=0.8 \
-  generator.sampling_params.top_k=20 \
-  generator.sampling_params.min_p=0.0 \
-  generator.sampling_params.repetition_penalty=1.0 \
-  generator.sampling_params.additional_kwargs.presence_penalty=1.5 \
+  generator.sampling_params.temperature=1.0 \
+  generator.sampling_params.top_p=1.0 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
-  trainer.algorithm.kl_loss_coef=0.001 \
+  trainer.algorithm.kl_loss_coef=0.01 \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
@@ -75,16 +72,13 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
-  trainer.run_name="rlm_multi_paper_grpo_observability" \
+  trainer.run_name="rlm_single_paper_grpo" \
   trainer.log_path="$(pwd)/.neer/artifacts/skyrl-logs" \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
-  trainer.dump_eval_results=true \
+  trainer.dump_eval_results=false \
   environment.skyrl_gym.rlm.rollout_output_dir="$(pwd)/.neer/artifacts/rlm_rollouts" \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
+  generator.judge_reward_model="$JUDGE_MODEL" \
   "$@"
-
-# To route child agents (depth >= 1) through OpenRouter instead of the policy
-# inference engine, set OPENROUTER_API_KEY and add:
-#   generator.child_openrouter_model="google/gemini-2.5-flash" \
