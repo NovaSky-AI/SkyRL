@@ -125,8 +125,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
     via four hooks: ``_setup_env_extras``, ``_call_inference``,
     ``_finalize_episode``, ``_flatten_step_wise_outputs`` (and its logprobs
     sister). A thin ``generate`` wrapper resolves the batch-level RLM overrides
-    (``custom_system_prompt``, ``child_system_prompt``, ``rollout_output_dir``,
-    ``include_children``) once and stashes them on ``self`` for the hooks.
+    (``custom_system_prompt``, ``child_system_prompt``, ``rollout_output_dir``)
+    once and stashes them on ``self`` for the hooks.
     """
 
     def __init__(self, *args, **kwargs):
@@ -134,7 +134,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         self.openrouter_usage = {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "requests": 0}
         # Set per-call by ``generate``; read by hooks. Reset in finally.
         self._batch_rlm_overrides: Dict[str, Optional[str]] = {}
-        self._include_children: bool = True
         # Per-call setup state stashed by ``_setup_env_extras`` so
         # ``_finalize_episode`` can read judge_scores / child_results /
         # child_call_tracker without re-passing them through the loop body.
@@ -144,7 +143,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
     # generate(): thin wrapper that resolves batch-level overrides once
     # ------------------------------------------------------------------
 
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False, include_children: bool = True) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         rlm_cfg = getattr(self.skyrl_gym_cfg, "rlm", None)
         overrides: Dict[str, Optional[str]] = {
             "custom_system_prompt": None,
@@ -166,12 +165,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
                     overrides["rollout_output_dir"] = base_dir
 
         self._batch_rlm_overrides = overrides
-        self._include_children = include_children
         try:
             return await super().generate(input_batch, disable_tqdm)
         finally:
             self._batch_rlm_overrides = {}
-            self._include_children = True
 
     # ------------------------------------------------------------------
     # Hook 1: env-extras setup (runs inside agent_loop, before env construction)
@@ -345,18 +342,13 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     def _flatten_step_wise_outputs(self, all_outputs, trajectory_ids, env_classes):
         train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
-        include_children = self._include_children
 
         responses, rewards, stop_reasons, loss_masks = [], [], [], []
         prompt_token_ids, env_metrics = [], []
         is_last_step, out_trajectory_ids, out_env_classes = [], [], []
 
         for i, output in enumerate(all_outputs):
-            include_children_for_output = (
-                train_child_trajectories
-                and include_children
-                and output.child_outputs
-            )
+            include_children_for_output = train_child_trajectories and output.child_outputs
 
             # Children first: all is_last_step=False, share parent's trajectory_id.
             if include_children_for_output:
@@ -391,11 +383,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     def _flatten_step_wise_logprobs(self, all_outputs):
         train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
-        include_children = self._include_children
 
         rollout_logprobs: List[Optional[List[float]]] = []
         for output in all_outputs:
-            if train_child_trajectories and include_children and output.child_outputs:
+            if train_child_trajectories and output.child_outputs:
                 for child in output.child_outputs:
                     rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
             rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]

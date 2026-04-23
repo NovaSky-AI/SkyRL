@@ -711,15 +711,6 @@ class RayPPOTrainer:
                 "generate/batch_padded_seq_len": batch_padded_seq_len,
             }
         )
-        #TODO (daniel): not sure what this is, figure out why this is needed or remove it
-        if is_stepwise:
-            assert (
-                "trajectory_ids" in generator_output
-            ), "Expected `trajectory_ids` in generator output for step wise training"
-            training_input.metadata["trajectory_ids"] = [
-                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
-            ]
-
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
