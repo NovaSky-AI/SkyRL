@@ -85,14 +85,6 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
   "$@"
 
-# To enable LEASH adaptive length penalty, add these overrides:
-#   trainer.algorithm.leash.use_leash=true \
-#   trainer.algorithm.leash.lambda_init=0.2 \
-#   trainer.algorithm.leash.lambda_lr=0.05 \
-#   trainer.algorithm.leash.lambda_min=0.0 \
-#   trainer.algorithm.leash.lambda_max=1.0 \
-#   trainer.algorithm.leash.target_length=4096 \  
-
 # To route child agents (depth >= 1) through OpenRouter instead of the policy
 # inference engine, set OPENROUTER_API_KEY and add:
 #   generator.child_openrouter_model="google/gemini-2.5-flash" \

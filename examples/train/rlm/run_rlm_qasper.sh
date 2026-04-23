@@ -108,25 +108,11 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
-  trainer.run_name="rlm_qasper_grpo_leash" \
+  trainer.run_name="rlm_qasper_grpo" \
   trainer.log_path="$(pwd)/.neer/artifacts/skyrl-logs" \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
-  trainer.algorithm.leash.use_leash=true \
-  trainer.algorithm.leash.lambda_init=0.2 \
-  trainer.algorithm.leash.lambda_lr=0.05 \
-  trainer.algorithm.leash.lambda_min=0.0 \
-  trainer.algorithm.leash.lambda_max=1.0 \
-  trainer.algorithm.leash.target_length=512 \
   "$@"
-
-# To enable LEASH adaptive length penalty, add these overrides:
-#   trainer.algorithm.leash.use_leash=true \
-#   trainer.algorithm.leash.lambda_init=0.2 \
-#   trainer.algorithm.leash.lambda_lr=0.05 \
-#   trainer.algorithm.leash.lambda_min=0.0 \
-#   trainer.algorithm.leash.lambda_max=1.0 \
-#   trainer.algorithm.leash.target_length=4096 \
