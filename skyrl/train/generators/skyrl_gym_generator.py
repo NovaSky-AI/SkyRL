@@ -298,7 +298,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
     def _flatten_step_wise_outputs(
         self, all_outputs, trajectory_ids, env_classes
-    ) -> Tuple[List, List, List, List, List, List, List, List, List, Optional[List]]:
+    ) -> Tuple[List, List, List, List, List, List, List, List, List]:
         """Hook: flatten step-wise outputs to per-step lists. Default emits parent steps only."""
         responses, rewards, stop_reasons, loss_masks = [], [], [], []
         prompt_token_ids, env_metrics = [], []
@@ -317,7 +317,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         return (
             responses, rewards, stop_reasons, loss_masks,
             prompt_token_ids, env_metrics,
-            is_last_step, out_trajectory_ids, out_env_classes, None,
+            is_last_step, out_trajectory_ids, out_env_classes,
         )
 
     def _flatten_step_wise_logprobs(self, all_outputs) -> List[Optional[List[float]]]:
@@ -898,7 +898,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             (
                 responses, rewards, stop_reasons, loss_masks,
                 prompt_token_ids, env_metrics,
-                is_last_step, out_trajectory_ids, out_env_classes, step_metadata,
+                is_last_step, out_trajectory_ids, out_env_classes,
             ) = self._flatten_step_wise_outputs(all_outputs, trajectory_ids, env_classes)
             env_classes = out_env_classes
         else:
@@ -910,7 +910,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_metrics = [output.env_metrics for output in all_outputs]
             is_last_step = None
             out_trajectory_ids = None
-            step_metadata = None
 
         has_vision_features = any(getattr(output, "pixel_values", None) is not None for output in all_outputs)
         pixel_values = (
@@ -960,7 +959,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
-            "step_metadata": step_metadata,
         }
         if has_vision_features:
             generator_output["pixel_values"] = pixel_values

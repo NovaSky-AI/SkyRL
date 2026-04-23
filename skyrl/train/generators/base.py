@@ -48,8 +48,6 @@ class GeneratorOutput(TypedDict):
     # Applicable only for vision-language models
     pixel_values: Optional[List[torch.Tensor]]
     image_grid_thw: Optional[List[torch.Tensor]]
-    # Per-entry metadata for parent/child distinction (depth, child_index, step_index)
-    step_metadata: Optional[List[Dict[str, Any]]]
 
 
 class MetricsOutput(TypedDict):

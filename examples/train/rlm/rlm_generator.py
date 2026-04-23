@@ -350,7 +350,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         responses, rewards, stop_reasons, loss_masks = [], [], [], []
         prompt_token_ids, env_metrics = [], []
         is_last_step, out_trajectory_ids, out_env_classes = [], [], []
-        step_metadata = []
 
         for i, output in enumerate(all_outputs):
             include_children_for_output = (
@@ -361,8 +360,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
             # Children first: all is_last_step=False, share parent's trajectory_id.
             if include_children_for_output:
-                for child_idx, child_output in enumerate(output.child_outputs):
-                    for j, step_output in enumerate(child_output.step_outputs):
+                for child_output in output.child_outputs:
+                    for step_output in child_output.step_outputs:
                         responses.append(step_output.response_ids)
                         rewards.append(step_output.reward)
                         stop_reasons.append(step_output.stop_reason)
@@ -372,7 +371,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                         is_last_step.append(False)
                         out_trajectory_ids.append(trajectory_ids[i])
                         out_env_classes.append(env_classes[i])
-                        step_metadata.append({"depth": 1, "child_index": child_idx, "step_index": j})
 
             for j, step_output in enumerate(output.step_outputs):
                 responses.append(step_output.response_ids)
@@ -384,12 +382,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 is_last_step.append(j == len(output.step_outputs) - 1)
                 out_trajectory_ids.append(trajectory_ids[i])
                 out_env_classes.append(env_classes[i])
-                step_metadata.append({"depth": 0, "child_index": None, "step_index": j})
 
         return (
             responses, rewards, stop_reasons, loss_masks,
             prompt_token_ids, env_metrics,
-            is_last_step, out_trajectory_ids, out_env_classes, step_metadata,
+            is_last_step, out_trajectory_ids, out_env_classes,
         )
 
     def _flatten_step_wise_logprobs(self, all_outputs):
