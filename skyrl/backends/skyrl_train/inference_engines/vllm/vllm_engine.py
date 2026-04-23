@@ -361,6 +361,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if enable_ray_prometheus_stats:
             stat_loggers = self._create_ray_prometheus_stat_loggers()
 
+        # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
+        # vLLM's get_open_port() queries a free port then releases the socket;
+        # if multiple engines on the same node call it simultaneously, they can
+        # get the same port. A random delay desynchronises the calls.
+        import random
+
+        _stagger = random.uniform(1.5, 3.0)
+        logger.info(f"Engine startup stagger: sleeping {_stagger:.2f}s to avoid port collisions")
+        time.sleep(_stagger)
+
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         model_path = kwargs.get("model")
