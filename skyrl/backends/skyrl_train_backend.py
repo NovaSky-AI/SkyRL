@@ -5,6 +5,7 @@ Currently supports a single model only.
 """
 
 import asyncio
+import io
 import os
 import tarfile
 import tempfile
@@ -898,8 +899,11 @@ class SkyRLTrainBackend(AbstractBackend):
             # Hot path: write a lightweight marker so the engine's checkpoint
             # bookkeeping stays consistent.  Actual weights live in GPU memory.
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with tarfile.open(output_path, "w"):
-                pass  # empty tar — marker only
+            marker = f"SkyRL sampler marker for {model_id}: weights live in GPU memory (persist=False).\n".encode()
+            with tarfile.open(output_path, "w") as tar:
+                info = tarfile.TarInfo("MARKER")
+                info.size = len(marker)
+                tar.addfile(info, io.BytesIO(marker))
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
 
 
