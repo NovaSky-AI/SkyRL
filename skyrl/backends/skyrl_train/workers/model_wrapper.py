@@ -150,19 +150,14 @@ class HFModelWrapper(nn.Module):
             else:
                 nf4_config = None
 
-            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
-
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
                 model_class = AutoLigerKernelForCausalLM
             else:
-                arch = (model_config.architectures or [None])[0] if hasattr(model_config, "architectures") else None
-                if arch and arch.endswith("ForConditionalGeneration"):
-                    from transformers import AutoModelForImageTextToText
-                    model_class = AutoModelForImageTextToText
-                else:
-                    model_class = AutoModelForCausalLM
+                model_class = AutoModelForCausalLM
+
+            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
             if language_model_only:
                 logger.info("[VLM] language_model_only=True, skipping vision encoder initialization")
