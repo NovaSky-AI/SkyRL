@@ -935,12 +935,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # Mirror policy hook for symmetry; ref builds no optimizer so this is a no-op for
-        # grad flow but keeps the config surface consistent.
-        if self.cfg.ref.megatron_config.freeze_moe_router:
-            for chunk in self.actor_module:
-                freeze_moe_router(chunk)
-
         # create worker model
         self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
 
