@@ -95,10 +95,6 @@ def get_model_size(model: nn.Module, scale="auto"):
 
 
 def freeze_moe_router(model):
-    # Unwrap common Megatron/Torch DDP + Float16Module wrappers so callers can
-    # pass a wrapped chunk (e.g. ``DDP(Float16Module(GPTModel))``) directly.
-    while hasattr(model, "module"):
-        model = model.module
     for layer in model.decoder.layers:
         if hasattr(layer.mlp, "router"):
             if getattr(layer.mlp.router, "weight", None) is not None:

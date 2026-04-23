@@ -625,8 +625,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.cfg.policy.megatron_config.freeze_moe_router:
             if self._rank == 0:
                 logger.info("freeze_moe_router=True: freezing MoE router and shared-expert gate params")
-            for chunk in self.actor_module:
-                freeze_moe_router(chunk)
+            self.provider.register_pre_wrap_hook(freeze_moe_router)
 
         # create optimizer
         optim_config = init_megatron_optim_config(
