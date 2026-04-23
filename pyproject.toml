@@ -258,12 +258,6 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
-# Pre-built flash-attn wheel for torch 2.10.0+cu128 (official PyPI only has source tarballs)
-# From: https://github.com/mjun0812/flash-attention-prebuild-wheels
-flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
-# Pre-built causal-conv1d wheel for torch 2.10.0+cu12 (no PyPI wheel for this torch version)
-# From: https://github.com/Dao-AILab/causal-conv1d/releases
-causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
 # flashinfer wheels are only available from the custom cu128 index
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
