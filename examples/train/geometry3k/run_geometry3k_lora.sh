@@ -3,7 +3,7 @@ set -x
 # Multi-turn GRPO LoRA training for Geometry-3K (VLM).
 #
 # LoRA variant of run_geometry3k.sh. See docs/content/docs/examples/lora.mdx
-# for the full LoRA parameter reference, and the "LoRA Configuration" section
+# for the full LoRA parameter reference, and the "LoRA Support" section
 # in docs/content/docs/examples/geometry3k.mdx for a walkthrough of the
 # VLM-specific overrides below.
 #
