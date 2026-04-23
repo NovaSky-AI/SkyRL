@@ -7,11 +7,6 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
-import functools
-import json
-import os
-import re
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -43,34 +38,6 @@ from skyrl.train.generators.utils import (
     get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-
-
-_RUBRIC_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "RubricScore",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "precision_score": {
-                    "type": "integer",
-                    "description": "1-10: how tight and accurate the spans are (no extraneous sentences, no off-topic padding)",
-                },
-                "recall_score": {
-                    "type": "integer",
-                    "description": "1-10: how thoroughly the evidence covers what is needed to answer the question",
-                },
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief explanation of the scores",
-                },
-            },
-            "required": ["precision_score", "recall_score", "reasoning"],
-            "additionalProperties": False,
-        },
-    },
-}
 
 
 @dataclass
@@ -184,73 +151,6 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
-def _write_rlm_rollout(
-    rollout_output_dir: str,
-    prompt: ConversationType,
-    env_extras: Dict[str, Any],
-    env_metrics: Dict[str, Any],
-    parent_step_outputs: List["TrajectoryOutput"],
-    child_step_outputs: List[List["TrajectoryOutput"]],
-    tokenizer,
-    trajectory_id_str: Optional[str] = None,
-) -> None:
-    """Write one JSON file per trajectory (parent + children) into rollout_output_dir."""
-    os.makedirs(rollout_output_dir, exist_ok=True)
-
-    tid = trajectory_id_str or "unknown"
-    # Sanitize so it's safe as a filename
-    tid_safe = tid.replace("/", "_").replace(":", "-")
-
-    reward_spec = env_extras.get("reward_spec", {})
-
-    # Write each child as its own file: child_{parent_tid}_{idx}.json
-    child_refs = []
-    for idx, child in enumerate(child_step_outputs):
-        if not child:
-            continue
-        child_record = {
-            "trajectory_id": f"child_{tid}_{idx}",
-            "parent_trajectory_id": tid,
-            "child_index": idx,
-            "turns": [
-                {
-                    "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
-                    "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
-                }
-                for s in child
-            ],
-            "reward": (child[-1].env_metrics or {}).get("reward") if child else None,
-            "stop_reason": child[-1].stop_reason if child else None,
-            "final_answer": (child[-1].env_metrics or {}).get("final_answer") if child else None,
-        }
-        child_filename = f"child_{tid_safe}_{idx}.json"
-        child_path = os.path.join(rollout_output_dir, child_filename)
-        with open(child_path, "w") as f:
-            f.write(json.dumps(child_record, ensure_ascii=False, indent=2))
-        child_refs.append(child_filename)
-
-    # Write the parent trajectory file: traj_{tid}.json
-    parent_record = {
-        "trajectory_id": tid,
-        "reward": env_metrics.get("reward", 0.0),
-        "turns_used": env_metrics.get("turns_used", 0),
-        "stop_reason": parent_step_outputs[-1].stop_reason if parent_step_outputs else None,
-        "final_answer": env_metrics.get("final_answer"),
-        "evidence": reward_spec.get("evidence"),
-        "turns": [
-            {
-                "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
-                "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
-            }
-            for s in parent_step_outputs
-        ],
-        "child_files": child_refs,
-    }
-    parent_path = os.path.join(rollout_output_dir, f"traj_{tid_safe}.json")
-    with open(parent_path, "w") as f:
-        f.write(json.dumps(parent_record, ensure_ascii=False, indent=2))
-
-
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
@@ -282,8 +182,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
-
-        self.openrouter_usage = {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "requests": 0}
 
         self._validate_cfg(generator_cfg)
 
@@ -340,375 +238,91 @@ class SkyRLGymGenerator(GeneratorInterface):
             return func(*args, **kwargs)
 
     # ------------------------------------------------------------------
-    # OpenRouter / OpenAI-compatible external generation
+    # Subclass hooks. Default implementations are no-ops so generic envs
+    # see the upstream behavior; subclasses (e.g. RLMGymGenerator) override.
     # ------------------------------------------------------------------
 
-    async def _openrouter_generate(
+    def _setup_env_extras(
         self,
-        messages: List[Dict[str, str]],
-        sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Call an OpenAI-compatible endpoint (e.g. OpenRouter) and return the assistant message."""
-        try:
-            import httpx
-        except ImportError:
-            raise ImportError("httpx is required for child_openrouter_model support.  Install with: pip install httpx")
-
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY environment variable must be set when using child_openrouter_model")
-
-        model = getattr(self.generator_cfg, "child_openrouter_model", None)
-        base_url = getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1").rstrip("/")
-
-        params = sampling_params or {}
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": params.get("temperature", 0.7),
-            "top_p": params.get("top_p", 1.0),
-            "max_tokens": params.get("max_generate_length", 1024),
-            "reasoning": {"effort": "none"},
-        }
-        if params.get("additional_kwargs"):
-            body.update(params["additional_kwargs"])
-
-        last_exc: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=300) as client:
-                    resp = await client.post(
-                        f"{base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=body,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    usage = data.get("usage", {})
-                    if usage:
-                        self.openrouter_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                        self.openrouter_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                        self.openrouter_usage["requests"] += 1
-                        details = usage.get("prompt_tokens_details") or {}
-                        self.openrouter_usage["cached_tokens"] += details.get("cached_tokens", 0)
-                    return data["choices"][0]["message"]["content"]
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-        raise RuntimeError(f"OpenRouter API call failed after 3 attempts: {last_exc}") from last_exc
-
-    def _make_openrouter_lm_callback(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        sampling_params: Optional[Dict[str, Any]],
-    ) -> Callable[[List[str]], List[str]]:
-        """Build an lm_callback that routes through OpenRouter instead of the inference engine."""
-
-        async def _generate(prompts: List[str]) -> List[str]:
-            tasks = [
-                self._openrouter_generate([{"role": "user", "content": p}], sampling_params)
-                for p in prompts
-            ]
-            return list(await asyncio.gather(*tasks))
-
-        def callback(prompts: List[str]) -> List[str]:
-            future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
-            return future.result(timeout=300)
-
-        return callback
-
-    # ------------------------------------------------------------------
-    # Inference-engine lm_callback (default)
-    # ------------------------------------------------------------------
-
-    def _make_lm_callback(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        sampling_params: Optional[Dict[str, Any]],
-    ) -> Callable[[List[str]], List[str]]:
-        """Build a sync callback that dispatches batched text prompts to the inference engine.
-
-        The callback can be called from a non-async thread (e.g. inside REPL exec()).
-        It blocks until all responses are returned.
-        """
-        async def _generate(prompts: List[str]) -> List[str]:
-            token_ids = [
-                self.tokenizer.apply_chat_template(
-                    [{"role": "user", "content": p}],
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_dict=False,
-                )
-                for p in prompts
-            ]
-            engine_input = InferenceEngineInput(
-                prompt_token_ids=token_ids,
-                sampling_params=sampling_params,
-            )
-            output = await self.inference_engine_client.generate(engine_input)
-            return output["responses"]
-
-        def callback(prompts: List[str]) -> List[str]:
-            future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
-            return future.result(timeout=300)
-
-        return callback
-
-    def _make_judge_reward_fn(
-        self,
-        loop: asyncio.AbstractEventLoop,
+        env_class: str,
         env_extras: Dict[str, Any],
         prompt: ConversationType,
-        judge_scores: Optional[Dict[str, Any]] = None,
-    ) -> Callable[[str], float]:
-        """Build a sync callable that scores the final answer using an LLM judge via OpenRouter.
-
-        The callable replaces the F1 reward when judge_reward_model is set.
-        Score = ((precision + recall) / 2) ** 2, where each dimension is normalized to [0, 1].
-        """
-        import ast as _ast
-        import json as _json
-        import textwrap as _textwrap
-
-        question = " ".join(msg["content"] for msg in prompt if msg.get("content"))
-
-        reward_spec = env_extras.get("reward_spec", {})
-        raw_evidence = reward_spec.get("evidence") or []
-        gt_strings: List[str] = []
-        for ev in raw_evidence:
-            if isinstance(ev, str):
-                gt_strings.append(ev)
-            elif isinstance(ev, dict):
-                for sel in ev.get("selections", []):
-                    text = sel.get("text", "").strip()
-                    if text:
-                        gt_strings.append(text)
-
-        model = getattr(self.generator_cfg, "judge_reward_model", None)
-        base_url = getattr(self.generator_cfg, "judge_reward_base_url", "https://api.openai.com/v1").rstrip("/")
-
-        def _judge(final_answer: str) -> float:
-            import httpx as _httpx
-
-            try:
-                predicted = _ast.literal_eval(final_answer)
-                if isinstance(predicted, str):
-                    predicted = [predicted]
-                elif isinstance(predicted, (list, tuple)):
-                    predicted = [s if isinstance(s, str) else str(s) for s in predicted]
-                else:
-                    predicted = [str(predicted)]
-            except (ValueError, SyntaxError):
-                predicted = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
-
-            gt_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(gt_strings)) or "(none)"
-            pred_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(predicted)) or "(none)"
-
-            user_msg = _textwrap.dedent(f"""\
-                You are evaluating predicted evidence extractions against ground truth evidence for a question.
-                Treat the ground truth evidence as a perfect 10/10 reference for all dimensions.
-
-                Question: {question}
-
-                Ground truth evidence (reference — treat as 10/10 on all dimensions):
-                {gt_block}
-
-                Predicted evidence:
-                {pred_block}
-
-                Score the predicted evidence on two dimensions (1-10 each):
-
-                PRECISION SCORE — are the spans tight and free of off-topic padding?
-                  10 — every span contains only directly relevant sentences; no extraneous setup, headers, or filler
-                   9 — essentially tight; one trivially redundant phrase but no real noise
-                   8 — minor padding (1-2 extra sentences) but core content is accurate
-                   7 — a few extra sentences that are related but not strictly necessary
-                   6 — noticeable extraneous text in some spans, but the relevant parts are present
-                   5 — roughly half the content is relevant; half is filler or tangential
-                   4 — spans are significantly bloated with irrelevant surrounding text
-                   3 — small fraction of each span is on-topic; most is irrelevant context
-                   2 — most of each span is irrelevant; the relevant fragment is buried
-                   1 — extractions are almost entirely off-topic or wrong
-
-                RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
-                  10 — all key facts from the ground truth are present; nothing important missing
-                   9 — all key facts present; only a trivially minor detail absent
-                   8 — most key facts covered; one minor detail from the ground truth absent
-                   7 — core answer present; a couple of supporting details from the ground truth missing
-                   6 — core answer present but a meaningful portion of the ground truth evidence is missing
-                   5 — about half the ground truth evidence is covered; half is missing
-                   4 — partial answer only; several important aspects from the ground truth are absent
-                   3 — a few relevant facts retrieved but most of the ground truth evidence is missing
-                   2 — barely touches the question; most of the ground truth evidence is missing
-                   1 — no relevant content retrieved
-
-                Provide a brief reasoning string (2-4 sentences) explaining the scores.
-            """)
-
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY environment variable must be set when using judge_reward_model")
-
-            result = None
-            for attempt in range(5):
-                if attempt > 0:
-                    time.sleep(2 ** attempt)
-                try:
-                    with _httpx.Client(timeout=60) as client:
-                        resp = client.post(
-                            f"{base_url}/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {api_key}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": model,
-                                "messages": [{"role": "user", "content": user_msg}],
-                                "temperature": 0,
-                                "response_format": _RUBRIC_RESPONSE_FORMAT,
-                            },
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                except Exception as e:
-                    if attempt == 4:
-                        logger.warning(f"Judge reward model failed after 5 attempts: {e}")
-                        return 0.0
-                    logger.warning(f"Judge reward model attempt {attempt + 1} failed: {e}, retrying...")
-                    continue
-
-                try:
-                    result = _json.loads(data["choices"][0]["message"]["content"])
-                    break
-                except _json.JSONDecodeError:
-                    if attempt == 4:
-                        return 0.0
-                    continue
-
-            precision = result.get("precision_score", 0) / 10.0
-            recall = result.get("recall_score", 0) / 10.0
-            if judge_scores is not None:
-                judge_scores["judge_precision"] = precision
-                judge_scores["judge_recall"] = recall
-            overall = (precision + recall) / 2.0
-            return overall
-
-        def judge_reward_fn(final_answer: str) -> float:
-            return _judge(final_answer)
-
-        return judge_reward_fn
-
-    def _make_subcall_fn(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        env_extras: Dict[str, Any],
         sampling_params: Optional[Dict[str, Any]],
         max_tokens: int,
         max_input_length: int,
-        child_histories: Optional[List] = None,
-        child_results: Optional[List] = None,
-        child_call_tracker: Optional[List] = None,
-    ) -> Callable[[str], str]:
-        """Build a sync subcall_fn that runs a full child agent_loop (child RLMEnv).
+    ) -> Dict[str, Any]:
+        """Hook: subclasses may inject env-specific callables/extras before env construction."""
+        return env_extras
 
-        The child env gets the same lm_callback as the parent so it can make LLM
-        calls, but does NOT get a subcall_fn — preventing unbounded recursion.
+    async def _call_inference(
+        self,
+        agent_loop_state: "AgentLoopState",
+        chat_history: ConversationType,
+        ephemeral_user_message: Optional[Dict[str, str]],
+        current_sampling_params: Dict[str, Any],
+        sampling_params: Optional[Dict[str, Any]],
+        session_id: str,
+        external_generate_fn: Optional[Callable] = None,
+    ) -> Tuple[str, List[int], str, Optional[List[float]], Optional[Any]]:
+        """Hook: dispatch one generation call. Default routes to the inference engine.
 
-        When ``child_openrouter_model`` is configured, both the child's main
-        generation loop and its ``lm_callback`` (for ``llm_query``) are routed
-        through the OpenRouter API so that only the top-level (depth-0) agent
-        uses the policy inference engine.
-
-        child_histories: if provided, each child's chat_history is appended to this
-        list after the child completes (used for rollout logging).
-        child_call_tracker: if provided, each child call's metadata (paper_id,
-        final_answer, had_final_answer) is appended for aggregate metric computation.
+        Returns ``(output, output_ids, stop_reason, response_logprobs, rollout_expert_indices)``.
         """
-        use_openrouter = getattr(self.generator_cfg, "child_openrouter_model", None) is not None
-        external_generate_fn = self._openrouter_generate if use_openrouter else None
+        engine_input = InferenceEngineInput(
+            prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+        )
+        engine_output = await self.inference_engine_client.generate(engine_input)
+        output = engine_output["responses"][0]
+        output_ids = engine_output["response_ids"][0]
+        stop_reason = engine_output["stop_reasons"][0]
+        response_logprobs = engine_output.get("response_logprobs", None)
+        rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
+        if response_logprobs is not None:
+            response_logprobs = response_logprobs[0]
+            if self.custom_chat_template is not None:
+                raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
+        return output, output_ids, stop_reason, response_logprobs, rollout_expert_indices
 
-        # Build reverse lookup from paper text → paper_id for child call tracking.
-        _context_to_pid: Dict[str, str] = {}
-        if child_call_tracker is not None:
-            _extra_info = env_extras.get("extra_info") or {}
-            if isinstance(_extra_info, dict):
-                _ctx_raw = _extra_info.get("context_text")
-                if isinstance(_ctx_raw, str):
-                    try:
-                        _decoded = json.loads(_ctx_raw)
-                        if isinstance(_decoded, dict):
-                            _context_to_pid = {v: k for k, v in _decoded.items()}
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                elif isinstance(_ctx_raw, dict):
-                    _context_to_pid = {v: k for k, v in _ctx_raw.items()}
+    async def _finalize_episode(
+        self,
+        env,
+        env_class: str,
+        agent_loop_state: "AgentLoopState",
+        agent_loop_output,
+        env_extras: Dict[str, Any],
+        prompt: ConversationType,
+        trajectory_id: Optional[TrajectoryID],
+    ) -> Dict[str, Any]:
+        """Hook: post-episode finalization. Default just calls ``env.get_metrics()``."""
+        return env.get_metrics()
 
-        async def _run_child(prompt: str, context=None) -> str:
-            child_prompt = [{"role": "user", "content": prompt}]
-            # Strip lm_callback/subcall_fn so the child cannot recurse further
-            child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            # Re-inject lm_callback — via OpenRouter when configured, else via the inference engine
-            if use_openrouter:
-                child_extras["lm_callback"] = self._make_openrouter_lm_callback(loop, sampling_params)
-            else:
-                child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
-            # If a child-specific system prompt is configured, use it as the child's custom_system_prompt
-            child_system_prompt = child_extras.pop("child_system_prompt", None)
-            if child_system_prompt:
-                child_extras["custom_system_prompt"] = child_system_prompt
-            # Children don't write their own rollout files; parent handles everything
-            child_extras.pop("rollout_output_dir", None)
-            # If the parent passed a per-child context, override the child's context_text
-            # so the child REPL sees this value as its `context` variable instead of
-            # inheriting the parent's full context.
-            if context is not None:
-                child_extra_info = dict(child_extras.get("extra_info", {}) or {})
-                if isinstance(context, str):
-                    child_extra_info["context_text"] = context
-                else:
-                    import json as _json
-                    child_extra_info["context_text"] = _json.dumps(context)
-                child_extras["extra_info"] = child_extra_info
-                # Clear parent's evidence-based reward_spec for children — the child
-                # is not scored independently; the parent aggregates results.
-                child_extras["reward_spec"] = {"ground_truth": None}
-                # Drop parent's custom_tools so env.init() builds fresh ones
-                # that close over the child's own context instead.
-                child_extras.pop("custom_tools", None)
-            result = await self.agent_loop(
-                prompt=child_prompt,
-                env_class="rlm",
-                env_extras=child_extras,
-                max_tokens=max_tokens,
-                max_input_length=max_input_length,
-                sampling_params=sampling_params,
-                external_generate_fn=external_generate_fn,
-            )
-            if child_histories is not None:
-                child_chat_history = result.env_metrics.get("chat_history") if isinstance(result.env_metrics, dict) else None
-                child_histories.append(child_chat_history)
-            if child_results is not None and isinstance(result, StepWiseOutput):
-                child_results.append(result)
-            child_env_metrics = result.env_metrics if isinstance(result.env_metrics, dict) else {}
-            child_final = child_env_metrics.get("final_answer")
-            if child_call_tracker is not None:
-                paper_id = _context_to_pid.get(context) if isinstance(context, str) else None
-                child_call_tracker.append({
-                    "paper_id": paper_id,
-                    "final_answer": child_final,
-                    "had_final_answer": child_final is not None,
-                })
-            return child_final or ""
+    def _flatten_step_wise_outputs(
+        self, all_outputs, trajectory_ids, env_classes
+    ) -> Tuple[List, List, List, List, List, List, List, List, List, Optional[List]]:
+        """Hook: flatten step-wise outputs to per-step lists. Default emits parent steps only."""
+        responses, rewards, stop_reasons, loss_masks = [], [], [], []
+        prompt_token_ids, env_metrics = [], []
+        is_last_step, out_trajectory_ids, out_env_classes = [], [], []
+        for i, output in enumerate(all_outputs):
+            for j, step_output in enumerate(output.step_outputs):
+                responses.append(step_output.response_ids)
+                rewards.append(step_output.reward)
+                stop_reasons.append(step_output.stop_reason)
+                loss_masks.append(step_output.loss_mask)
+                prompt_token_ids.append(step_output.prompt_ids)
+                env_metrics.append(step_output.env_metrics)
+                is_last_step.append(j == len(output.step_outputs) - 1)
+                out_trajectory_ids.append(trajectory_ids[i])
+                out_env_classes.append(env_classes[i])
+        return (
+            responses, rewards, stop_reasons, loss_masks,
+            prompt_token_ids, env_metrics,
+            is_last_step, out_trajectory_ids, out_env_classes, None,
+        )
 
-        def subcall_fn(prompt: str, context=None) -> str:
-            future = asyncio.run_coroutine_threadsafe(_run_child(prompt, context=context), loop)
-            return future.result(timeout=600)
-
-        return subcall_fn
+    def _flatten_step_wise_logprobs(self, all_outputs) -> List[Optional[List[float]]]:
+        """Hook: flatten per-step rollout logprobs. Default is parent-only."""
+        return [s.rollout_logprobs for output in all_outputs for s in output.step_outputs]
 
     async def agent_loop(
         self,
@@ -757,39 +371,9 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_extras["step_wise"] = self.generator_cfg.step_wise_trajectories
-
-        # For RLM envs, inject lm_callback, subcall_fn, and optionally judge_reward_fn.
-        # We only inject lm_callback/subcall_fn if not already present (allows caller to override).
-        # subcall_fn is skipped when enable_child_agents=False (single-paper mode): the top-level
-        # agent never calls rlm_query_batched, and omitting subcall_fn keeps the shorter repl_timeout.
-        # judge_reward_fn replaces the F1 reward when judge_reward_model is set.
-        child_histories: Optional[List] = None
-        child_results: List[StepWiseOutput] = []
-        child_call_tracker: List[Dict[str, Any]] = []
-        judge_scores: Dict[str, Any] = {}
-        _judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
-        _enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
-        _needs_rlm_setup = env_class == "rlm" and (
-            "lm_callback" not in env_extras or _judge_reward_model
+        env_extras = self._setup_env_extras(
+            env_class, env_extras, prompt, sampling_params, max_tokens, max_input_length
         )
-        if _needs_rlm_setup:
-            loop = asyncio.get_running_loop()
-            env_extras = dict(env_extras)  # don't mutate caller's dict
-            if "lm_callback" not in env_extras:
-                env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
-                if _enable_child_agents:
-                    child_histories = []
-                    child_results = []
-                    env_extras["subcall_fn"] = self._make_subcall_fn(
-                        loop, env_extras, sampling_params, max_tokens, max_input_length,
-                        child_histories=child_histories,
-                        child_results=child_results,
-                        child_call_tracker=child_call_tracker,
-                    )
-            if _judge_reward_model:
-                judge_scores = {}
-                env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, judge_scores)
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
@@ -847,16 +431,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             done=False,
         )
 
-        _turn_num = 0
         while not agent_loop_state.done:
-            _turn_num += 1
-
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
 
             # 1. Generate output
-            _t_tokenize = time.perf_counter()
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct.
                 # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
@@ -874,36 +454,16 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if len(agent_loop_state.input_ids) > max_input_length:
                     stop_reason = "length"
                     break
-            _tokenize_s = time.perf_counter() - _t_tokenize
-            _prompt_tokens = len(agent_loop_state.input_ids)
 
-            _t_infer = time.perf_counter()
-            if external_generate_fn is not None:
-                # Route through an external API (e.g. OpenRouter) instead of the
-                # policy inference engine.  We send the full message list and
-                # tokenize the returned text so step-wise bookkeeping still works.
-                _ext_msgs = list(chat_history) + ([next_user_message] if next_user_message else [])
-                output = await external_generate_fn(_ext_msgs, current_sampling_params)
-                output_ids = self.tokenizer.encode(output, add_special_tokens=False)
-                stop_reason = "stop"
-                response_logprobs = None
-                rollout_expert_indices = None
-            else:
-                engine_input = InferenceEngineInput(
-                    prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
-                )
-                engine_output = await self.inference_engine_client.generate(engine_input)
-                output = engine_output["responses"][0]
-                output_ids = engine_output["response_ids"][0]
-                stop_reason = engine_output["stop_reasons"][0]
-                response_logprobs = engine_output.get("response_logprobs", None)
-                rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
-                if response_logprobs is not None:
-                    response_logprobs = response_logprobs[0]
-                    if self.custom_chat_template is not None:
-                        raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
-
-            _inference_s = time.perf_counter() - _t_infer
+            output, output_ids, stop_reason, response_logprobs, rollout_expert_indices = await self._call_inference(
+                agent_loop_state,
+                chat_history,
+                next_user_message,
+                current_sampling_params,
+                sampling_params,
+                session_id,
+                external_generate_fn=external_generate_fn,
+            )
 
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices[0]
@@ -926,9 +486,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos = True
 
             # 2. Environment step
-            _t_env = time.perf_counter()
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            _env_step_s = time.perf_counter() - _t_env
             new_obs = env_step_output["observations"]
             next_user_message = env_step_output.get("next_user_message")
             step_reward: float = env_step_output["reward"]
@@ -970,14 +528,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 turn_loss_mask = turn_output.get_turn_loss_mask()
                 turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
 
-                _step_latency = {
-                    "prompt_tokens": _prompt_tokens,
-                    "output_tokens": len(output_ids),
-                    "tokenize_s": _tokenize_s,
-                    "inference_s": _inference_s,
-                    "env_step_s": _env_step_s,
-                    "repl_exec_s": env_step_output.get("metadata", {}).get("repl_exec_s"),
-                }
                 per_step_output = TrajectoryOutput(
                     response_ids=turn_response_ids,
                     reward=step_reward,
@@ -985,7 +535,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_ids=turn_prompt_ids,
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
-                    env_metrics={**(env.get_metrics() if agent_loop_state.done else {}), "latency": _step_latency},
+                    env_metrics=env.get_metrics() if agent_loop_state.done else {},
                     rollout_expert_indices=turn_output.get_turn_rollout_expert_indices(),
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
@@ -1008,62 +558,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
-        # Get environment-specific metrics after the episode is done
-        # For RLM envs, store the full chat_history on the env before calling get_metrics()
-        # so it's available in env_metrics for rollout logging.
-        if env_class == "rlm" and hasattr(env, "set_chat_history"):
-            env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
-        env_metrics = env.get_metrics()
-
-        # Attach child results to the output before writing rollout files.
-        if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
-            agent_loop_output.child_outputs = child_results
-
-        # Merge judge sub-scores (precision, recall) into env_metrics for WandB logging.
-        if judge_scores:
-            env_metrics.update(judge_scores)
-
-        # Compute child RLM aggregate metrics (paper selection F1, submission rate, etc.)
-        if env_class == "rlm" and child_call_tracker:
-            from skyrl_gym.envs.rlm.evidence_tools import compute_child_rlm_metrics
-
-            reward_spec = env_extras.get("reward_spec") or {}
-            evidence = reward_spec.get("evidence") or []
-            _extra_info = env_extras.get("extra_info") or {}
-            _ctx_raw = _extra_info.get("context_text") if isinstance(_extra_info, dict) else None
-            parent_context: Dict[str, str] = {}
-            if isinstance(_ctx_raw, str):
-                try:
-                    _decoded = json.loads(_ctx_raw)
-                    if isinstance(_decoded, dict):
-                        parent_context = _decoded
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            elif isinstance(_ctx_raw, dict):
-                parent_context = _ctx_raw
-
-            if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) and parent_context:
-                child_rlm_metrics = compute_child_rlm_metrics(child_call_tracker, evidence, parent_context)
-                env_metrics.update(child_rlm_metrics)
-                if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
-                    agent_loop_output.step_outputs[-1].env_metrics.update(child_rlm_metrics)
-
-        # Write rollout JSONL for RLM envs when rollout_output_dir is configured.
-        rollout_output_dir = env_extras.get("rollout_output_dir")
-        if env_class == "rlm" and rollout_output_dir and isinstance(agent_loop_output, StepWiseOutput):
-            parent_steps = agent_loop_output.step_outputs
-            child_steps = [co.step_outputs for co in (agent_loop_output.child_outputs or [])]
-            _tid_str = trajectory_id.to_string() if trajectory_id is not None else None
-            await self._run_in_executor_if_available(
-                functools.partial(_write_rlm_rollout, trajectory_id_str=_tid_str),
-                rollout_output_dir,
-                prompt,
-                env_extras,
-                env_metrics,
-                parent_steps,
-                child_steps,
-                self.tokenizer,
-            )
+        # Episode finished: subclasses may merge extra metrics, attach children, etc.
+        env_metrics = await self._finalize_episode(
+            env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id,
+        )
 
         # Close the environment
         await self._run_in_executor_if_available(env.close)
@@ -1349,7 +847,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False, include_children: bool = True) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
@@ -1372,25 +870,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if self.batched:
             return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
-
-        for i in range(len(prompts)):
-            if env_classes[i] == "rlm":
-                rlm_config = getattr(self.skyrl_gym_cfg, "rlm", None)
-                if rlm_config is not None:
-                    cfg = vars(rlm_config) if hasattr(rlm_config, "__dict__") else rlm_config
-                    custom_prompt = cfg.get("custom_system_prompt")
-                    if custom_prompt:
-                        env_extras[i]["custom_system_prompt"] = custom_prompt
-                    child_prompt = cfg.get("child_system_prompt")
-                    if child_prompt:
-                        env_extras[i]["child_system_prompt"] = child_prompt
-                    rollout_output_dir = cfg.get("rollout_output_dir")
-                    if rollout_output_dir:
-                        batch_metadata = input_batch.get("batch_metadata")
-                        if batch_metadata and batch_metadata.training_phase == "eval":
-                            step = batch_metadata.global_step
-                            step_label = f"eval_step_{step}" if step is not None else "eval"
-                            env_extras[i]["rollout_output_dir"] = os.path.join(rollout_output_dir, step_label)
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []
@@ -1416,53 +895,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         if self.generator_cfg.step_wise_trajectories:
-            responses = []
-            rewards = []
-            stop_reasons = []
-            loss_masks = []
-            prompt_token_ids = []
-            env_metrics = []
-            is_last_step = []
-            out_trajectory_ids = []
-            out_env_classes = []
-            step_metadata = []
-            _train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
-            for i, output in enumerate(all_outputs):
-                include_children_for_output = (
-                    _train_child_trajectories
-                    and include_children
-                    and output.child_outputs
-                )
-
-                # Append child steps first (all is_last_step=False, share
-                # parent's trajectory_id).  They inherit the parent's GRPO
-                # advantage via the cumsum broadcast.
-                if include_children_for_output:
-                    for child_idx, child_output in enumerate(output.child_outputs):
-                        for j, step_output in enumerate(child_output.step_outputs):
-                            responses.append(step_output.response_ids)
-                            rewards.append(step_output.reward)
-                            stop_reasons.append(step_output.stop_reason)
-                            loss_masks.append(step_output.loss_mask)
-                            prompt_token_ids.append(step_output.prompt_ids)
-                            env_metrics.append(step_output.env_metrics)
-                            is_last_step.append(False)
-                            out_trajectory_ids.append(trajectory_ids[i])
-                            out_env_classes.append(env_classes[i])
-                            step_metadata.append({"depth": 1, "child_index": child_idx, "step_index": j})
-
-                # Always append parent steps.
-                for j, step_output in enumerate(output.step_outputs):
-                    responses.append(step_output.response_ids)
-                    rewards.append(step_output.reward)
-                    stop_reasons.append(step_output.stop_reason)
-                    loss_masks.append(step_output.loss_mask)
-                    prompt_token_ids.append(step_output.prompt_ids)
-                    env_metrics.append(step_output.env_metrics)
-                    is_last_step.append(j == len(output.step_outputs) - 1)
-                    out_trajectory_ids.append(trajectory_ids[i])
-                    out_env_classes.append(env_classes[i])
-                    step_metadata.append({"depth": 0, "child_index": None, "step_index": j})
+            (
+                responses, rewards, stop_reasons, loss_masks,
+                prompt_token_ids, env_metrics,
+                is_last_step, out_trajectory_ids, out_env_classes, step_metadata,
+            ) = self._flatten_step_wise_outputs(all_outputs, trajectory_ids, env_classes)
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -1491,13 +928,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
-                rollout_logprobs = []
-                for output in all_outputs:
-                    # Match flattening order: children first, then all parent steps
-                    if getattr(self.generator_cfg, "train_child_trajectories", False) and include_children and output.child_outputs:
-                        for child in output.child_outputs:
-                            rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
-                    rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]
+                rollout_logprobs = self._flatten_step_wise_logprobs(all_outputs)
             else:
                 rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:
@@ -1529,7 +960,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
-            "env_metrics": env_metrics,
             "step_metadata": step_metadata,
         }
         if has_vision_features:

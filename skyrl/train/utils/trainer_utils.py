@@ -253,7 +253,6 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
-    env_metrics_list = concat_generator_outputs.get("env_metrics", None)
     step_metadata_list = concat_generator_outputs.get("step_metadata", None)
 
     # Group indices by data source
@@ -287,7 +286,6 @@ def dump_per_dataset_eval_results(
                     "env_class": concat_all_envs[i],
                     "env_extras": serializable_extras,
                     "data_source": data_source,
-                    "latency": env_metrics_list[i].get("latency") if env_metrics_list else None,
                 }
                 if step_metadata_list is not None:
                     entry["step_metadata"] = step_metadata_list[i]
@@ -318,7 +316,6 @@ def dump_per_dataset_eval_results(
                 "output_response": output_responses[i],
                 "env_class": concat_all_envs[i] if i < len(concat_all_envs) else None,
                 "data_source": concat_data_sources[i] if i < len(concat_data_sources) else None,
-                "latency": env_metrics_list[i].get("latency") if env_metrics_list and i < len(env_metrics_list) else None,
             })
         manifest = {}
         for rlm_key, entries in sorted(rlm_buckets.items()):

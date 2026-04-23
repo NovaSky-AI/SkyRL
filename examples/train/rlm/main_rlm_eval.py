@@ -1,8 +1,8 @@
 """Eval-only entry point for the Recursive Language Model (RLM) environment.
 
-Mirrors ``skyrl.train.entrypoints.main_generate`` but uses ``RLMConfig`` so the
-RLM-specific generator fields (``child_openrouter_model``, etc.) are recognized
-on the CLI.
+Mirrors ``skyrl.train.entrypoints.main_generate`` but uses ``RLMConfig`` and
+constructs ``RLMGymGenerator`` via an overridden ``get_generator`` so the
+RLM-specific hooks fire during eval rollouts too.
 """
 
 import asyncio
@@ -16,14 +16,25 @@ from skyrl.train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 
 from .rlm_config import RLMGeneratorConfig
+from .rlm_generator import RLMGymGenerator
 
 
 RLMConfig = make_config(generator_cls=RLMGeneratorConfig)
 
 
+class RLMEvalEntrypoint(EvalOnlyEntrypoint):
+    def get_generator(self, cfg, tokenizer, inference_engine_client):
+        return RLMGymGenerator(
+            generator_cfg=cfg.generator,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+        )
+
+
 @ray.remote(num_cpus=1)
 def eval_entrypoint(cfg) -> dict:
-    exp = EvalOnlyEntrypoint(cfg)
+    exp = RLMEvalEntrypoint(cfg)
     inference_engine_client = exp.get_inference_client()
     return asyncio.run(exp.run(inference_engine_client))
 
