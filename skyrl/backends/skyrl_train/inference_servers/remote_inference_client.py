@@ -67,9 +67,9 @@ from typing import (
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    ImagePlaceholder,
     InferenceEngineInput,
     InferenceEngineOutput,
+    MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
 from skyrl.env_vars import (
@@ -520,7 +520,7 @@ class RemoteInferenceClient:
 
         # Splice: walk chunks in order, substituting image placeholder tokens.
         final_token_ids: List[int] = []
-        new_placeholders: List[ImagePlaceholder] = []
+        new_placeholders: List[MMPlaceholderRangeInfo] = []
         img_idx = 0
 
         for c in chunks:
@@ -533,13 +533,12 @@ class RemoteInferenceClient:
                 final_token_ids.extend(ph_tokens)
                 img_idx += 1
 
+        # No need to decode, vllm handles decoding
         adjusted_features: MultiModalFeatures = {
             "mm_hashes": features.get("mm_hashes", {}),
             "mm_placeholders": {"image": new_placeholders},
+            "kwargs_data": features.get("kwargs_data"),
         }
-        # No need to decode, vllm handles decoding
-        if features.get("kwargs_data") is not None:
-            adjusted_features["kwargs_data"] = features["kwargs_data"]
 
         return final_token_ids, adjusted_features
 

@@ -31,23 +31,6 @@ class InferenceEngineInput(TypedDict):
     mm_features: Optional[List[MultiModalFeatures]]
 
 
-class ImagePlaceholder(TypedDict):
-    offset: int
-    length: int
-
-
-class MultiModalPlaceholders(TypedDict):
-    image: List[ImagePlaceholder]
-
-
-class MultiModalFeatures(TypedDict, total=False):
-    """Mirrors the structure of vLLM's MultiModalFeatures with base64 encoded kwargs_data."""
-
-    mm_hashes: Dict[str, Any]
-    mm_placeholders: MultiModalPlaceholders
-    kwargs_data: Any
-
-
 class InferenceEngineOutput(TypedDict):
     # We always return both tokens and text outputs. The tokens are the outputs
     # of inference engine, and the text is the decoded text output. Therefore,
