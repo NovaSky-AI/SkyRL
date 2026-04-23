@@ -37,12 +37,21 @@ def _patch_qwen3_5():
     """Apply patches for Qwen3.5 model compatibility issues in transformers 5.3.0.
 
     1. Fix 3D MRoPE position_ids passed to decoder layers instead of 2D text_position_ids,
-       which causes CUDA errors with flash attention. Upstream fix: huggingface/transformers#44399
+       which causes CUDA errors with flash attention. Upstream fix landed in transformers
+       5.4.0 via huggingface/transformers#44399 (https://github.com/huggingface/transformers/pull/44399),
+       merged one day after 5.3.0 was tagged. SkyRL's `pyproject.toml` still pins
+       `transformers>=5.0.0,<=5.3.0` (as of this writing), so the patch fires today.
+       Once this project bumps the transformers pin to >=5.4.0, this patch becomes a
+       no-op via the version gate below and the whole function can be deleted.
+       SkyRL's equivalent FSDP patch was opened as NovaSky-AI/SkyRL#1313
+       (https://github.com/NovaSky-AI/SkyRL/pull/1313) but never merged, because the
+       upstream transformers fix made it obsolete.
     2. Fix CPU tensor creation in torch_chunk_gated_delta_rule that fails during
        gradient checkpointing recomputation.
     """
     try:
         import inspect
+        import transformers
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5TextModel
 
         # Verify that the fast-path kernels (causal-conv1d + flash-linear-attention)
@@ -59,7 +68,11 @@ def _patch_qwen3_5():
                 "Install causal-conv1d and flash-linear-attention to enable the fast path."
             )
 
-        # Patch 1: Fix 3D position_ids → 2D
+        # Patch 1: Fix 3D position_ids → 2D. Skip on transformers >=5.4.0 where the
+        # upstream fix makes this monkey-patch unnecessary.
+        # See https://github.com/huggingface/transformers/pull/44399.
+        if Version(transformers.__version__) >= Version("5.4.0"):
+            return
         source = inspect.getsource(Qwen3_5TextModel.forward)
         if "decoder_layer" not in source or "position_ids=text_position_ids" not in source.split("decoder_layer")[-1]:
             _original_decoder_forward = Qwen3_5DecoderLayer.forward
