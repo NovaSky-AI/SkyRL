@@ -29,6 +29,9 @@ concurrency:
 jobs:
   skyrl_gpu_tests:
     runs-on: ubuntu-latest
+    env:
+      ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+      ANYSCALE_HOST: https://console.anyscale.com
     defaults:
       run:
         shell: bash
@@ -47,10 +50,11 @@ jobs:
           activate-environment: true
       - name: Install dependencies
         run: uv pip install anyscale==0.24.79 typer==0.9.0
+      - name: Skip GPU tests when Anyscale credentials are unavailable
+        if: ${{ env.ANYSCALE_CLI_TOKEN == '' }}
+        run: echo "Skipping GPU tests because ANYSCALE_CLI_TOKEN is unavailable in this workflow context."
       - name: GPU tests
-        env:
-          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
-          ANYSCALE_HOST: https://console.anyscale.com
+        if: ${{ env.ANYSCALE_CLI_TOKEN != '' }}
         run: |
           anyscale job submit -f ci/anyscale_gpu_ci.yaml --timeout 10000
           anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-tx-gpu-ci --timeout 10000

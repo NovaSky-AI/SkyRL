@@ -444,6 +444,7 @@ class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
     GSPO = "gspo"
+    GMPO = "gmpo"
     CISPO = "cispo"
     ROLLOUT_IS = "rollout_is"
     CLIP_COV = "clip_cov"
@@ -477,6 +478,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "gmpo": [PolicyLossType.GMPO, gmpo_policy_loss],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
@@ -702,6 +704,69 @@ def gspo_policy_loss(
     loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.GMPO)
+def gmpo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """
+    GMPO (Geometric-Mean Policy Optimization) policy loss function.
+
+    GMPO is a sequence-level objective. In SkyRL, ``sequence_mean`` reduction is
+    implemented by pre-scaling token advantages in the trainer. Summing the masked
+    advantages here therefore recovers one sequence weight per response, which lets
+    us compute the GMPO objective without changing the trainer's reduction pipeline.
+    """
+    if config.loss_reduction != "sequence_mean":
+        raise ValueError(
+            'GMPO requires `trainer.algorithm.loss_reduction="sequence_mean"` because it is a sequence-level objective.'
+        )
+
+    off_policy_correction = config.off_policy_correction
+    uses_off_policy_correction = (
+        off_policy_correction.tis_ratio_type is not None
+        or off_policy_correction.sequence_mask_metric is not None
+        or off_policy_correction.outlier_token_is_threshold_low is not None
+        or off_policy_correction.outlier_token_is_threshold_high is not None
+        or off_policy_correction.token_mask_is_threshold_low is not None
+        or off_policy_correction.token_mask_is_threshold_high is not None
+    )
+    if uses_off_policy_correction:
+        raise NotImplementedError("GMPO does not support `trainer.algorithm.off_policy_correction` yet.")
+
+    loss_mask = torch.ones_like(log_probs) if loss_mask is None else loss_mask.to(log_probs.dtype)
+
+    log_ratio = log_probs - old_log_probs
+    clipped_log_ratio = torch.clamp(log_ratio, -config.eps_clip_low, config.eps_clip_high)
+
+    sign = torch.sign(advantages)
+    effective_log_ratio = sign * torch.minimum(sign * log_ratio, sign * clipped_log_ratio)
+
+    seq_len = loss_mask.sum(dim=-1).clamp(min=1.0)
+    seq_log_ratio = (effective_log_ratio * loss_mask).sum(dim=-1) / seq_len
+    seq_ratio = safe_exp_delta(seq_log_ratio, clip=20.0, out_dtype=log_probs.dtype)
+
+    # For sequence_mean reduction, advantages have already been pre-scaled by the
+    # trainer. Summing across valid tokens recovers one sequence weight per sample.
+    seq_advantage = (advantages * loss_mask).sum(dim=-1)
+    loss = (-seq_advantage * seq_ratio).sum()
+
+    clipped = torch.ne(log_ratio, clipped_log_ratio)
+    clip_ratio = masked_mean((clipped & (advantages > 0)).float(), loss_mask).mean().detach().item()
+    clip_ratio_lower = masked_mean((clipped & (advantages < 0)).float(), loss_mask).mean().detach().item()
+    seq_ratio_mean = seq_ratio.mean().detach().item()
+
+    return loss, {
+        "clip_ratio": clip_ratio,
+        "clip_ratio_lower": clip_ratio_lower,
+        "seq_ratio_mean": seq_ratio_mean,
+    }
 
 
 @register_policy_loss(PolicyLossType.CISPO)

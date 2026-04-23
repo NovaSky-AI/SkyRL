@@ -142,7 +142,7 @@ The following loss functions are validated through the Tinker API:
 | `cross_entropy` | Standard next-token prediction loss | Supervised fine-tuning |
 | `importance_sampling` | Off-policy policy gradient: `-(exp(logp - old_logp) * advantage)` | RL training (GRPO, REINFORCE) |
 
-SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo`, `clip_cov`, `kl_cov`) used by SkyRL's native trainer. These are not yet wired through the Tinker data conversion path, which does not currently populate the required `advantages` and `old_log_probs` fields in the training batch for these loss types.
+SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`regular`, `dual_clip`, `gspo`, `gmpo`, `sapo`, `cispo`, `clip_cov`, `kl_cov`) used by SkyRL's native trainer. These are not yet wired through the Tinker data conversion path, which does not currently populate the required `advantages` and `old_log_probs` fields in the training batch for these loss types.
 
 ## Concurrency Model
 

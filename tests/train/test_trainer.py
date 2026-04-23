@@ -15,7 +15,7 @@ from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWo
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils.utils import validate_batch_sizes
+from skyrl.train.utils.utils import validate_batch_sizes, validate_cfg
 from tests.train.util import example_dummy_config
 
 
@@ -621,3 +621,30 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_validate_cfg_accepts_gmpo_sequence_mean(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.policy_loss_type = "gmpo"
+    cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+
+    validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_gmpo_non_sequence_mean(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.policy_loss_type = "gmpo"
+    cfg.trainer.algorithm.loss_reduction = "token_mean"
+
+    with pytest.raises(AssertionError, match="GMPO requires `trainer.algorithm.loss_reduction`"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_gmpo_off_policy_correction(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.policy_loss_type = "gmpo"
+    cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+    cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+
+    with pytest.raises(NotImplementedError, match="GMPO does not support `trainer.algorithm.off_policy_correction`"):
+        validate_cfg(cfg)
