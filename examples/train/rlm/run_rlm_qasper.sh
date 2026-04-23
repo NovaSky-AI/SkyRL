@@ -57,7 +57,7 @@ _sq="'"
 _YAML_PROMPT="${CUSTOM_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
 _YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
 
-uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \

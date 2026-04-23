@@ -358,8 +358,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY environment variable must be set when using child_openrouter_model")
 
-        model = self.generator_cfg.child_openrouter_model
-        base_url = self.generator_cfg.child_openrouter_base_url.rstrip("/")
+        model = getattr(self.generator_cfg, "child_openrouter_model", None)
+        base_url = getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1").rstrip("/")
 
         params = sampling_params or {}
         body: Dict[str, Any] = {
@@ -488,8 +488,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     if text:
                         gt_strings.append(text)
 
-        model = self.generator_cfg.judge_reward_model
-        base_url = self.generator_cfg.judge_reward_base_url.rstrip("/")
+        model = getattr(self.generator_cfg, "judge_reward_model", None)
+        base_url = getattr(self.generator_cfg, "judge_reward_base_url", "https://api.openai.com/v1").rstrip("/")
 
         def _judge(final_answer: str) -> float:
             import httpx as _httpx
@@ -628,7 +628,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         child_call_tracker: if provided, each child call's metadata (paper_id,
         final_answer, had_final_answer) is appended for aggregate metric computation.
         """
-        use_openrouter = self.generator_cfg.child_openrouter_model is not None
+        use_openrouter = getattr(self.generator_cfg, "child_openrouter_model", None) is not None
         external_generate_fn = self._openrouter_generate if use_openrouter else None
 
         # Build reverse lookup from paper text → paper_id for child call tracking.
@@ -768,15 +768,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         child_results: List[StepWiseOutput] = []
         child_call_tracker: List[Dict[str, Any]] = []
         judge_scores: Dict[str, Any] = {}
+        _judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
+        _enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
         _needs_rlm_setup = env_class == "rlm" and (
-            "lm_callback" not in env_extras or self.generator_cfg.judge_reward_model
+            "lm_callback" not in env_extras or _judge_reward_model
         )
         if _needs_rlm_setup:
             loop = asyncio.get_running_loop()
             env_extras = dict(env_extras)  # don't mutate caller's dict
             if "lm_callback" not in env_extras:
                 env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
-                if self.generator_cfg.enable_child_agents:
+                if _enable_child_agents:
                     child_histories = []
                     child_results = []
                     env_extras["subcall_fn"] = self._make_subcall_fn(
@@ -785,7 +787,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                         child_results=child_results,
                         child_call_tracker=child_call_tracker,
                     )
-            if self.generator_cfg.judge_reward_model:
+            if _judge_reward_model:
                 judge_scores = {}
                 env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, judge_scores)
 
@@ -1424,9 +1426,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = []
             out_env_classes = []
             step_metadata = []
+            _train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
             for i, output in enumerate(all_outputs):
                 include_children_for_output = (
-                    self.generator_cfg.train_child_trajectories
+                    _train_child_trajectories
                     and include_children
                     and output.child_outputs
                 )
@@ -1491,7 +1494,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_logprobs = []
                 for output in all_outputs:
                     # Match flattening order: children first, then all parent steps
-                    if self.generator_cfg.train_child_trajectories and include_children and output.child_outputs:
+                    if getattr(self.generator_cfg, "train_child_trajectories", False) and include_children and output.child_outputs:
                         for child in output.child_outputs:
                             rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
                     rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]
@@ -1754,397 +1757,3 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
 
         return agent_loop_state
-
-
-if __name__ == "__main__":
-    """
-    Standalone entrypoint: generate one trajectory for a single dataset row.
-
-    Two task types:
-      - Single-paper (default): uses alphaXiv/rlm-sft-Qwen3.5-9B-v1 with
-        single-paper parquet data from ~/data/rlm/validation.parquet.
-      - Multi-paper (--multi_paper): uses alphaXiv/rlm-sft-multi-9b-v1-epoch-4
-        with multi-paper parquet data from ~/data/multi-paper/validation.parquet,
-        multipaper system prompts, and eval-tuned sampling params. All defaults
-        can be overridden by explicit CLI args.
-
-    Two engine modes:
-      1. Cold start  – spins up a fresh vLLM engine via Ray (slower first run).
-      2. Hot connect  – pass --vllm_url <host:port> to reuse a running vLLM
-         server, skipping model load entirely.  Start the server once with:
-
-           vllm serve alphaXiv/rlm-sft-Qwen3.5-9B-v1 \
-               --host 0.0.0.0 --port 8000 \
-               --dtype bfloat16 \
-               --max-model-len 32768 --gpu-memory-utilization 0.95 \
-               --language-model-only --enable-prefix-caching \
-               --cudagraph-capture-sizes 1
-
-         Single-paper example:
-
-           python -m skyrl.train.generators.skyrl_gym_generator \
-               --vllm_url localhost:8000 --row_idx 0 \
-               "data.val_data=['$HOME/data/rlm/validation.parquet']" \
-               environment.env_class=rlm \
-               generator.max_turns=10 \
-               trainer.policy.model.path=alphaXiv/rlm-sft-Qwen3.5-9B-v1 \
-               trainer.max_prompt_length=32768 \
-               generator.max_input_length=32768 \
-               generator.eval_sampling_params.max_generate_length=1024 \
-               generator.eval_sampling_params.temperature=1.0 \
-               generator.chat_template_kwargs.enable_thinking=false
-
-         Multi-paper example (uses built-in defaults, just pass --multi_paper):
-
-           python -m skyrl.train.generators.skyrl_gym_generator \
-               --multi_paper --vllm_url localhost:8000 --row_idx 0
-
-         Or override the data dir / model:
-
-           python -m skyrl.train.generators.skyrl_gym_generator \
-               --multi_paper --vllm_url localhost:8000 --row_idx 0 \
-               "data.val_data=['$HOME/data/multi-paper/test.parquet']" \
-               trainer.policy.model.path=my-org/my-multi-paper-model
-    """
-    import json
-    import sys
-    import time as _time
-
-    import asyncio
-
-    from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-    from skyrl.train.config import SkyRLTrainConfig
-    from skyrl.train.generators.base import TrajectoryID
-    from skyrl.train.utils.utils import validate_generator_cfg
-    from skyrl.utils.tok import get_tokenizer  # noqa: E402
-
-    _t0 = _time.perf_counter()
-
-    # ---- Strip custom flags from argv before handing rest to config ----
-    argv = sys.argv[1:]
-
-    row_idx = 0
-    if "--row_idx" in argv:
-        pos = argv.index("--row_idx")
-        row_idx = int(argv[pos + 1])
-        argv = argv[:pos] + argv[pos + 2:]
-
-    vllm_url: str | None = None
-    if "--vllm_url" in argv:
-        pos = argv.index("--vllm_url")
-        vllm_url = argv[pos + 1]
-        argv = argv[:pos] + argv[pos + 2:]
-
-    multi_paper = False
-    if "--multi_paper" in argv:
-        pos = argv.index("--multi_paper")
-        multi_paper = True
-        argv = argv[:pos] + argv[pos + 1:]
-
-    dump_eval = False
-    if "--dump_eval" in argv:
-        pos = argv.index("--dump_eval")
-        dump_eval = True
-        argv = argv[:pos] + argv[pos + 1:]
-
-    if multi_paper:
-        # Prepend multi-paper defaults; explicit user args that follow will override.
-        _mp_defaults = [
-            "trainer.policy.model.path=alphaXiv/rlm-sft-multi-9b-v1-epoch-4",
-            "data.val_data=['~/data/multi-paper/validation.parquet']",
-            "environment.env_class=rlm",
-            "environment.skyrl_gym.rlm.custom_system_prompt=multipaper",
-            "environment.skyrl_gym.rlm.child_system_prompt=multipaper_child",
-            "generator.max_turns=10",
-            "generator.eval_sampling_params.max_generate_length=4096",
-            "generator.eval_sampling_params.temperature=0.7",
-            "generator.eval_sampling_params.top_p=0.8",
-            "generator.eval_sampling_params.top_k=20",
-            "generator.eval_sampling_params.min_p=0.0",
-            "generator.eval_sampling_params.repetition_penalty=1.0",
-            "generator.eval_sampling_params.additional_kwargs.presence_penalty=1.5",
-            "trainer.max_prompt_length=32768",
-            "generator.max_input_length=32768",
-            "generator.chat_template_kwargs.enable_thinking=false",
-            "generator.child_openrouter_model=openai/gpt-5.4-nano",
-        ]
-        argv = _mp_defaults + argv
-        logger.info("Multi-paper mode: injected default overrides (model, data, prompts, sampling)")
-
-    cfg = SkyRLTrainConfig.from_cli_overrides(argv)
-
-    # ---- Fast defaults for 1-GPU dev loop ----
-    ie = cfg.generator.inference_engine
-    ie.enforce_eager = False
-    ie.num_engines = 1
-    ie.tensor_parallel_size = 1
-    ie.pipeline_parallel_size = 1
-    ie.data_parallel_size = 1
-    ie.max_num_seqs = 8
-    ie.gpu_memory_utilization = 0.95
-    ie.ray_actor_max_concurrency = 1
-    ie.engine_init_kwargs.setdefault("language_model_only", True)
-    ie.engine_init_kwargs.setdefault("async_scheduling", True)
-    ie.engine_init_kwargs["compilation_config"] = {"cudagraph_capture_sizes": [1]}
-    cfg.generator.batched = False
-    cfg.generator.step_wise_trajectories = True
-    cfg.trainer.placement.colocate_all = False
-
-    validate_generator_cfg(cfg)
-
-    # ---- Tokenizer (needed for chat template / decoding) ----
-    tokenizer = get_tokenizer(
-        cfg.trainer.policy.model.path,
-        trust_remote_code=True,
-        use_fast=not cfg.trainer.disable_fast_tokenizer,
-        padding_side="left",
-    )
-
-    # ---- Load single row directly from parquet (no PromptDataset overhead) ----
-    import os
-    import pyarrow.parquet as pq
-
-    _parquet_path = os.path.expanduser(cfg.data.val_data[0])
-    _table = pq.read_table(_parquet_path)
-    assert row_idx < len(_table), (
-        f"--row_idx {row_idx} out of range (parquet has {len(_table)} rows)"
-    )
-    _row = {col: _table.column(col)[row_idx].as_py() for col in _table.column_names}
-    messages = _row.pop("prompt")
-    env_class = _row.pop("env_class", None) or cfg.environment.env_class
-    env_extras = _row
-    uid = str(row_idx)
-    logger.info(f"Config + row load: {_time.perf_counter() - _t0:.1f}s")
-
-    async def _run() -> None:
-
-        _t1 = _time.perf_counter()
-
-        if vllm_url is not None:
-            # ---- Hot path: connect to an already-running vLLM server ----
-            from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-                InferenceEngineClient,
-            )
-            from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
-                RemoteInferenceEngine,
-            )
-
-            engine = RemoteInferenceEngine(
-                url=vllm_url,
-                model_name=cfg.trainer.policy.model.path,
-                engine_backend="vllm",
-                tokenizer=tokenizer,
-                tp_size=1, pp_size=1, dp_size=1, ep_size=1,
-            )
-            inference_engine_client = InferenceEngineClient(
-                engines=[engine],
-                tokenizer=tokenizer,
-                model_path=cfg.trainer.policy.model.path,
-                lora_cfg=cfg.trainer.policy.model.lora,
-                inference_engine_cfg=ie,
-            )
-            logger.info(f"Connected to vLLM at {vllm_url}: {_time.perf_counter() - _t1:.1f}s")
-        else:
-            # ---- Cold path: spin up vLLM via Ray ----
-            from skyrl.train.entrypoints.main_base import BasePPOExp
-            from skyrl.train.utils.utils import initialize_ray
-
-            initialize_ray(cfg)
-
-            class _Exp(BasePPOExp):
-                def get_train_dataset(self):
-                    return None
-                def get_eval_dataset(self):
-                    return None
-
-            exp = _Exp(cfg)
-            inference_engine_client = exp.get_inference_client()
-            await inference_engine_client.wake_up()
-            logger.info(f"vLLM engine cold-started: {_time.perf_counter() - _t1:.1f}s")
-
-        generator = SkyRLGymGenerator(
-            generator_cfg=cfg.generator,
-            skyrl_gym_cfg=cfg.environment.skyrl_gym,
-            inference_engine_client=inference_engine_client,
-            tokenizer=tokenizer,
-        )
-
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend,
-            cfg.generator.eval_sampling_params,
-        )
-
-        # Inject RLM config into env_extras (mirrors what generate() does)
-        if env_class == "rlm":
-            rlm_config = getattr(cfg.environment.skyrl_gym, "rlm", None)
-            if rlm_config is not None:
-                _rlm_cfg = vars(rlm_config) if hasattr(rlm_config, "__dict__") else rlm_config
-                if _rlm_cfg.get("custom_system_prompt"):
-                    env_extras["custom_system_prompt"] = _rlm_cfg["custom_system_prompt"]
-                if _rlm_cfg.get("child_system_prompt"):
-                    env_extras["child_system_prompt"] = _rlm_cfg["child_system_prompt"]
-
-        max_tokens = cfg.generator.eval_sampling_params.max_generate_length
-        max_input_length = cfg.generator.max_input_length
-
-        _task_label = "multi-paper" if multi_paper else "single-paper"
-        logger.info(f"[{_task_label}] Row {row_idx} | uid={uid} | env_class={env_class}")
-
-        _t2 = _time.perf_counter()
-        agent_output = await generator.agent_loop(
-            prompt=messages,
-            env_class=env_class,
-            env_extras=env_extras,
-            max_tokens=max_tokens,
-            max_input_length=max_input_length,
-            sampling_params=sampling_params,
-            trajectory_id=TrajectoryID(instance_id=uid, repetition_id=0),
-        )
-        logger.info(f"agent_loop() took {_time.perf_counter() - _t2:.1f}s")
-
-        import pathlib
-        _traj_prefix = "mp_trajectory" if multi_paper else "trajectory"
-        traj_root = pathlib.Path("trajectories")
-        existing = sorted(traj_root.glob(f"{_traj_prefix}_*")) if traj_root.exists() else []
-        next_id = len(existing) + 1
-        traj_dir = traj_root / f"{_traj_prefix}_{next_id}"
-        traj_dir.mkdir(parents=True, exist_ok=True)
-
-        def _save_stepwise_output(sw_output, traj_dir, depth=0, child_idx=None):
-            """Recursively save parent + child step outputs with depth in filename."""
-            n_saved = 0
-            for step_idx, step_output in enumerate(sw_output.step_outputs):
-                prompt_text = tokenizer.decode(step_output.prompt_ids)
-                response_text = tokenizer.decode(step_output.response_ids)
-                is_last = step_idx == len(sw_output.step_outputs) - 1
-
-                step_data = {
-                    "step": step_idx + 1,
-                    "depth": depth,
-                    "child_index": child_idx,
-                    "is_last": is_last,
-                    "stop_reason": step_output.stop_reason,
-                    "prompt_text": prompt_text,
-                    "response_text": response_text,
-                    "prompt_token_ids": step_output.prompt_ids,
-                    "response_token_ids": step_output.response_ids,
-                    "latency": step_output.env_metrics.get("latency", {}),
-                }
-
-                if child_idx is not None:
-                    filename = f"depth-{depth}_child-{child_idx}_step_{step_idx + 1}.json"
-                else:
-                    filename = f"depth-{depth}_step_{step_idx + 1}.json"
-
-                (traj_dir / filename).write_text(json.dumps(step_data, indent=2, ensure_ascii=False))
-                n_saved += 1
-
-            for ci, child_output in enumerate(sw_output.child_outputs or []):
-                n_saved += _save_stepwise_output(child_output, traj_dir, depth=depth + 1, child_idx=ci)
-
-            return n_saved
-
-        n_parent = len(agent_output.step_outputs)
-        n_children = len(agent_output.child_outputs) if hasattr(agent_output, "child_outputs") else 0
-        total_saved = _save_stepwise_output(agent_output, traj_dir)
-
-        # Save rollout metrics from the last step's env_metrics + OpenRouter pricing
-        _PRICING = {
-            "openai/gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
-            "openai/gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
-        }
-        last_metrics = agent_output.step_outputs[-1].env_metrics if agent_output.step_outputs else {}
-        usage = generator.openrouter_usage
-        if usage["requests"] > 0:
-            model_name = cfg.generator.child_openrouter_model
-            pricing = _PRICING.get(model_name, _PRICING["openai/gpt-5.4-mini"])
-            if model_name not in _PRICING:
-                logger.warning(f"No pricing entry for {model_name}, falling back to gpt-5.4-mini rates")
-
-            prompt_tok = usage["prompt_tokens"]
-            cached_tok = usage["cached_tokens"]
-            uncached_tok = prompt_tok - cached_tok
-            completion_tok = usage["completion_tokens"]
-            cost_input = uncached_tok / 1_000_000 * pricing["input"]
-            cost_cached = cached_tok / 1_000_000 * pricing["cached_input"]
-            cost_output = completion_tok / 1_000_000 * pricing["output"]
-            cost_total = cost_input + cost_cached + cost_output
-            last_metrics["openrouter"] = {
-                "requests": usage["requests"],
-                "prompt_tokens": prompt_tok,
-                "cached_tokens": cached_tok,
-                "uncached_tokens": uncached_tok,
-                "completion_tokens": completion_tok,
-                "cost_input_usd": round(cost_input, 6),
-                "cost_cached_usd": round(cost_cached, 6),
-                "cost_output_usd": round(cost_output, 6),
-                "cost_total_usd": round(cost_total, 6),
-                "model": model_name,
-                "pricing_per_million": pricing,
-            }
-            logger.info(
-                f"OpenRouter usage: {usage['requests']} requests, "
-                f"{uncached_tok:,} uncached + {cached_tok:,} cached input tok, "
-                f"{completion_tok:,} output tok → ${cost_total:.4f}"
-            )
-        if last_metrics:
-            meta_path = traj_dir / "metadata.json"
-            meta_path.write_text(json.dumps(last_metrics, indent=2))
-            logger.info(f"Rollout metrics:\n{json.dumps(last_metrics, indent=2)}")
-
-        logger.info(
-            f"Wrote {total_saved} files to {traj_dir} "
-            f"({n_parent} parent steps, {n_children} child rollouts)"
-        )
-
-        if dump_eval:
-            from collections import defaultdict as _defaultdict
-
-            eval_dump_dir = traj_dir / "eval_dump"
-            eval_dump_dir.mkdir(parents=True, exist_ok=True)
-
-            rlm_entries: dict[str, list] = _defaultdict(list)
-
-            def _collect_for_eval(sw_output, depth=0, child_idx=None):
-                if depth == 0:
-                    rlm_key = "root_rlm"
-                else:
-                    rlm_key = f"child_rlm_{child_idx}"
-                for j, step_out in enumerate(sw_output.step_outputs):
-                    rlm_entries[rlm_key].append({
-                        "step_index": j,
-                        "depth": depth,
-                        "child_index": child_idx,
-                        "is_last_step": j == len(sw_output.step_outputs) - 1,
-                        "stop_reason": step_out.stop_reason,
-                        "input_prompt": tokenizer.decode(step_out.prompt_ids),
-                        "output_response": tokenizer.decode(step_out.response_ids),
-                        "latency": step_out.env_metrics.get("latency", {}),
-                        "env_class": env_class,
-                    })
-                for ci, child_out in enumerate(sw_output.child_outputs or []):
-                    _collect_for_eval(child_out, depth=depth + 1, child_idx=ci)
-
-            _collect_for_eval(agent_output)
-
-            manifest = {}
-            for rlm_key, entries in sorted(rlm_entries.items()):
-                filename = eval_dump_dir / f"{rlm_key}.jsonl"
-                with open(filename, "w") as f:
-                    for entry in entries:
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                manifest[rlm_key] = {
-                    "file": str(filename.name),
-                    "num_steps": len(entries),
-                    "depth": entries[0]["depth"],
-                    "child_index": entries[0]["child_index"],
-                }
-                logger.info(f"  {rlm_key}: {len(entries)} steps → {filename.name}")
-
-            manifest_path = eval_dump_dir / "manifest.json"
-            manifest_path.write_text(json.dumps(manifest, indent=2))
-            logger.info(f"Eval dump written to {eval_dump_dir} ({len(rlm_entries)} RLM files + manifest)")
-
-        logger.info(f"Total wall time: {_time.perf_counter() - _t0:.1f}s")
-
-    asyncio.run(_run())

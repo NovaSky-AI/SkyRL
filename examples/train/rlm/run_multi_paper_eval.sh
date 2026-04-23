@@ -4,6 +4,30 @@ set -x
 #
 # 1. Create data: uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/run_multi_paper_eval.sh
+#
+# ---------------------------------------------------------------------------
+# Fast iteration: forward to an already-running vLLM server
+# ---------------------------------------------------------------------------
+# By default this script cold-starts vLLM via Ray on every run, which is slow
+# (model load + Ray placement group + engine actor spawn). For tight debug
+# loops, start vLLM once in another terminal and point this script at it:
+#
+#     vllm serve "$MODEL_PATH" \
+#         --host 0.0.0.0 --port 8000 \
+#         --dtype bfloat16 \
+#         --max-model-len 32768 --gpu-memory-utilization 0.95 \
+#         --language-model-only --enable-prefix-caching
+#
+# Then add these two CLI overrides to the `uv run` invocation below (or pass
+# them as trailing args to this script — they will be forwarded via "$@"):
+#
+#     generator.inference_engine.run_engines_locally=false \
+#     generator.inference_engine.remote_urls='["localhost:8000"]' \
+#
+# This skips the model load and engine spin-up entirely; every generate() call
+# becomes an HTTP request to your running server. The eval entrypoint still
+# initializes Ray for its own actor (sub-second), which is unavoidable with
+# the existing EvalOnlyEntrypoint shape.
 
 : "${UV_CACHE_DIR:=/workspace/.uv-cache}"
 : "${UV_PROJECT_ENVIRONMENT:=/workspace/SkyRL/.venv}"
@@ -17,7 +41,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-step-500}"
 : "${ROLLOUT_OUTPUT_DIR:=$(pwd)/tmp/multi-paper-eval/rollouts}"
 
-uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
+uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
   generator.step_wise_trajectories=true \

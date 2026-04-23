@@ -22,7 +22,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 # timeouts when a rollout batch with max_turns=10 takes >5 minutes to generate.
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
-uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
+uv run --extra fsdp -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
