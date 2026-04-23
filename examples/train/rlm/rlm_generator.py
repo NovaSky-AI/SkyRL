@@ -334,6 +334,12 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 self.tokenizer,
             )
 
+        # Drop the (potentially huge) context payload from extra_info now that the REPL
+        # owns it, so downstream eval dumps don't serialize hundreds of KB per row.
+        extra_info = env_extras.get("extra_info")
+        if isinstance(extra_info, dict):
+            extra_info.pop("context_text", None)
+
         return env_metrics
 
     # ------------------------------------------------------------------

@@ -270,23 +270,13 @@ def dump_per_dataset_eval_results(
 
         with open(filename, "w") as f:
             for i in indices:
-                # Skip RLM `context_text` (full paper bodies) — including it balloons eval dumps
-                # with hundreds of KB of noise per row. Strip from both env_extras and extra_info.
-                _skip_keys = {"context_text"}
-                serializable_extras = {
-                    k: v for k, v in concat_env_extras[i].items() if not callable(v) and k not in _skip_keys
-                }
-                if "extra_info" in serializable_extras and isinstance(serializable_extras["extra_info"], dict):
-                    serializable_extras["extra_info"] = {
-                        k: v for k, v in serializable_extras["extra_info"].items() if k != "context_text"
-                    }
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
                     "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": serializable_extras,
+                    "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
