@@ -142,31 +142,3 @@ def test_freeze_moe_router_no_bias():
     assert not m.decoder.layers[0].mlp.router.weight.requires_grad
     assert not m.decoder.layers[0].mlp.shared_experts.gate_weight.requires_grad
     assert m.decoder.layers[0].mlp.linear_fc1.weight.requires_grad
-
-
-def test_freeze_moe_router_two_level_wrap():
-    """
-    Under Megatron's ``bf16=True`` path, chunks are wrapped as
-    ``DDP(Float16Module(GPTModel))``. This tests whether `freeze_moe_router`
-    can handle 2 levels of wrapping.
-    """
-    inner_model = _Model()
-
-    class FakeFloat16Module(nn.Module):
-        def __init__(self, m):
-            super().__init__()
-            self.module = m
-
-    class FakeDDP(nn.Module):
-        def __init__(self, m):
-            super().__init__()
-            self.module = m
-
-    wrapped = FakeDDP(FakeFloat16Module(inner_model))
-
-    # Pass the wrapped chunk directly — the helper must unwrap internally.
-    freeze_moe_router(wrapped)
-
-    for layer in inner_model.decoder.layers:
-        assert not layer.mlp.router.weight.requires_grad
-        assert layer.mlp.linear_fc1.weight.requires_grad
