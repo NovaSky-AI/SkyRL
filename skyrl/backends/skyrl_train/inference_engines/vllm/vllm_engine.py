@@ -278,6 +278,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Only supported in AsyncVLLMInferenceEngine."""
         raise NotImplementedError("`completion` is only supported in AsyncVLLMInferenceEngine.")
 
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Only supported in AsyncVLLMInferenceEngine."""
+        raise NotImplementedError("`anthropic_messages` is only supported in AsyncVLLMInferenceEngine.")
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
@@ -642,6 +646,108 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert Anthropic Messages format to OpenAI chat completions and back."""
+        request_json = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+
+        if "model" not in request_json:
+            return {"error": {"message": "The field `model` is required", "type": "invalid_request_error"}}
+        messages = request_json.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return {"error": {"message": "The field `messages` is required, must be a non-empty list", "type": "invalid_request_error"}}
+
+        try:
+            openai_request = {
+                "model": request_json["model"],
+                "messages": [],
+                "stream": False,
+            }
+
+            if "system" in request_json and request_json["system"]:
+                system_content = request_json["system"]
+                if isinstance(system_content, list):
+                    text_parts = []
+                    for block in system_content:
+                        if block.get("type") == "text":
+                            text_parts.append(block["text"])
+                    system_content = "\n".join(text_parts)
+                openai_request["messages"].append({"role": "system", "content": system_content})
+
+            for msg in request_json["messages"]:
+                content = msg["content"]
+                if isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        if block.get("type") == "text":
+                            text_parts.append(block["text"])
+                    content = "\n".join(text_parts)
+                openai_msg = {"role": msg["role"], "content": content}
+                openai_request["messages"].append(openai_msg)
+
+            if "max_tokens" in request_json:
+                openai_request["max_tokens"] = request_json["max_tokens"]
+            if "temperature" in request_json:
+                openai_request["temperature"] = request_json["temperature"]
+            if "top_p" in request_json:
+                openai_request["top_p"] = request_json["top_p"]
+            if "stop_sequences" in request_json:
+                openai_request["stop"] = request_json["stop_sequences"]
+
+            payload = {
+                "json": openai_request,
+                "headers": headers,
+            }
+            openai_response = await self.chat_completion(payload)
+
+            if "error" in openai_response or openai_response.get("object") == "error":
+                # Normalize to Anthropic error schema for consistent HTTP handler detection
+                if "error" not in openai_response:
+                    openai_response = {"error": {
+                        "message": openai_response.get("message", "Unknown upstream error"),
+                        "type": openai_response.get("type", "internal_error"),
+                        "code": openai_response.get("code"),
+                    }}
+                return openai_response
+
+            finish_reason = openai_response["choices"][0].get("finish_reason", "stop")
+            stop_reason_map = {
+                "stop": "end_turn",
+                "length": "max_tokens",
+                "content_filter": "end_turn",
+                "tool_calls": "tool_use",
+                "function_call": "tool_use",
+            }
+            stop_reason = stop_reason_map.get(finish_reason, "end_turn")
+
+            message_content = openai_response["choices"][0]["message"]["content"]
+            if message_content is None:
+                message_content = ""
+
+            anthropic_response = {
+                "id": openai_response.get("id") or f"msg-{uuid4()}",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": message_content}],
+                "model": openai_response.get("model", request_json["model"]),
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": openai_response.get("usage", {}).get("prompt_tokens", 0),
+                    "output_tokens": openai_response.get("usage", {}).get("completion_tokens", 0),
+                },
+            }
+
+            return anthropic_response
+
+        except Exception as e:
+            logger.error(f"anthropic_messages error: {e}")
+            return {
+                "error": {
+                    "message": f"Error converting response: {str(e)}",
+                    "type": "internal_error",
+                }
+            }
 
     async def pause_generation(self, clear_cache: bool = False) -> None:
         """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
