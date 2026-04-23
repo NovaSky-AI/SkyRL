@@ -85,7 +85,6 @@ Using the `fsdp` backend, LoRA is supported for VLM models. Enabling LoRA requir
 ```bash title="delta vs. run_geometry3k.sh"
   trainer.policy.model.lora.rank=32 \
   trainer.policy.model.lora.alpha=32 \
-  trainer.policy.model.lora.target_modules="all-linear" \
   trainer.policy.optimizer_config.lr=3.0e-5 \
 ```
 
