@@ -9,7 +9,7 @@ import asyncio
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import torch
@@ -20,6 +20,7 @@ import skyrl_gym
 from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
+    InferenceEngineInterface,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -254,35 +255,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Hook: subclasses may inject env-specific callables/extras before env construction."""
         return env_extras
 
-    async def _call_inference(
-        self,
-        agent_loop_state: "AgentLoopState",
-        chat_history: ConversationType,
-        ephemeral_user_message: Optional[Dict[str, str]],
-        current_sampling_params: Dict[str, Any],
-        sampling_params: Optional[Dict[str, Any]],
-        session_id: str,
-        external_generate_fn: Optional[Callable] = None,
-    ) -> Tuple[str, List[int], str, Optional[List[float]], Optional[Any]]:
-        """Hook: dispatch one generation call. Default routes to the inference engine.
-
-        Returns ``(output, output_ids, stop_reason, response_logprobs, rollout_expert_indices)``.
-        """
-        engine_input = InferenceEngineInput(
-            prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
-        )
-        engine_output = await self.inference_engine_client.generate(engine_input)
-        output = engine_output["responses"][0]
-        output_ids = engine_output["response_ids"][0]
-        stop_reason = engine_output["stop_reasons"][0]
-        response_logprobs = engine_output.get("response_logprobs", None)
-        rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
-        if response_logprobs is not None:
-            response_logprobs = response_logprobs[0]
-            if self.custom_chat_template is not None:
-                raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
-        return output, output_ids, stop_reason, response_logprobs, rollout_expert_indices
-
     async def _finalize_episode(
         self,
         env,
@@ -333,7 +305,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        external_generate_fn: Optional[Callable] = None,
+        inference_engine_client: Optional[InferenceEngineInterface] = None,
     ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -352,10 +324,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_tokens: int
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
-            external_generate_fn: Optional async callable ``(messages, sampling_params) -> str``.
-                When provided, each generation step calls this function (e.g. OpenRouter)
-                instead of the local inference engine.  The returned text is tokenized with
-                the policy tokenizer so that loss-mask / step-wise bookkeeping still works.
+            inference_engine_client: Optional ``InferenceEngineInterface`` to use for generation
+                instead of ``self.inference_engine_client``. Useful for child rollouts that need
+                to route through a different model (e.g. an external API engine).
         Returns:
             response_ids: List[int]
             reward: Union[float, List[float]]
@@ -368,6 +339,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         # This is no longer needed now given that step wise training is supported
         # TODO (sumanthrh): This path can be deprecated
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
+
+        # Use the override client if provided (e.g. child rollouts routed through an external API).
+        engine_client = inference_engine_client if inference_engine_client is not None else self.inference_engine_client
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -455,15 +429,19 @@ class SkyRLGymGenerator(GeneratorInterface):
                     stop_reason = "length"
                     break
 
-            output, output_ids, stop_reason, response_logprobs, rollout_expert_indices = await self._call_inference(
-                agent_loop_state,
-                chat_history,
-                next_user_message,
-                current_sampling_params,
-                sampling_params,
-                session_id,
-                external_generate_fn=external_generate_fn,
+            engine_input = InferenceEngineInput(
+                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
+            engine_output = await engine_client.generate(engine_input)
+            output = engine_output["responses"][0]
+            output_ids = engine_output["response_ids"][0]
+            stop_reason = engine_output["stop_reasons"][0]
+            response_logprobs = engine_output.get("response_logprobs", None)
+            rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
+            if response_logprobs is not None:
+                response_logprobs = response_logprobs[0]
+                if self.custom_chat_template is not None:
+                    raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
 
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices[0]

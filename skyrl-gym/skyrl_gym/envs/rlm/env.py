@@ -431,9 +431,6 @@ class RLMEnv(BaseTextEnv):
         else:
             self.rlm_config = RLMEnvConfig()
 
-        if extras.get("custom_system_prompt"):
-            self.rlm_config.custom_system_prompt = extras["custom_system_prompt"]
-
         # Per-example custom tools (e.g. search/extract_section that close over context)
         # merged on top of any static config-level tools
         if extras.get("custom_tools"):

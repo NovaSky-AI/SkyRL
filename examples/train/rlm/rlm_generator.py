@@ -11,14 +11,17 @@ import functools
 import json
 import os
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
+    InferenceEngineInterface,
 )
+
+from .openrouter_engine import OpenRouterInferenceEngine
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     AgentLoopState,
@@ -122,22 +125,22 @@ class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
-    via four hooks: ``_setup_env_extras``, ``_call_inference``,
-    ``_finalize_episode``, ``_flatten_step_wise_outputs`` (and its logprobs
-    sister). A thin ``generate`` wrapper resolves the batch-level RLM overrides
-    (``custom_system_prompt``, ``child_system_prompt``, ``rollout_output_dir``)
-    once and stashes them on ``self`` for the hooks.
+    via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
+    ``_flatten_step_wise_outputs`` (plus its logprobs sister). A thin
+    ``generate`` wrapper resolves the batch-level RLM overrides
+    (``child_system_prompt``, ``rollout_output_dir``) once and stashes them on
+    ``self`` for the hooks. Child rollouts that should hit an external model
+    (when ``generator.child_openrouter_model`` is set) are routed via a
+    lazily-built ``OpenRouterInferenceEngine`` passed through ``agent_loop``'s
+    ``inference_engine_client`` parameter — no inference-dispatch hook needed.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.openrouter_usage = {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "requests": 0}
         # Set per-call by ``generate``; read by hooks. Reset in finally.
         self._batch_rlm_overrides: Dict[str, Optional[str]] = {}
-        # Per-call setup state stashed by ``_setup_env_extras`` so
-        # ``_finalize_episode`` can read judge_scores / child_results /
-        # child_call_tracker without re-passing them through the loop body.
-        self._rlm_setup_state: Optional[Dict[str, Any]] = None
+        # Lazily built on first child rollout when child_openrouter_model is set.
+        self._openrouter_engine: Optional[InferenceEngineInterface] = None
 
     # ------------------------------------------------------------------
     # generate(): thin wrapper that resolves batch-level overrides once
@@ -146,13 +149,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         rlm_cfg = getattr(self.skyrl_gym_cfg, "rlm", None)
         overrides: Dict[str, Optional[str]] = {
-            "custom_system_prompt": None,
             "child_system_prompt": None,
             "rollout_output_dir": None,
         }
         if rlm_cfg is not None:
             cfg_dict = vars(rlm_cfg) if hasattr(rlm_cfg, "__dict__") else dict(rlm_cfg)
-            overrides["custom_system_prompt"] = cfg_dict.get("custom_system_prompt")
             overrides["child_system_prompt"] = cfg_dict.get("child_system_prompt")
             base_dir = cfg_dict.get("rollout_output_dir")
             if base_dir:
@@ -185,12 +186,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
     ) -> Dict[str, Any]:
         """Inject lm_callback / subcall_fn / judge_reward_fn for RLM envs.
 
-        Stashes ``judge_scores`` / ``child_results`` / ``child_call_tracker`` on
-        ``self._rlm_setup_state`` so ``_finalize_episode`` can read them.
+        Stashes ``judge_scores`` / ``child_results`` / ``child_call_tracker`` into
+        ``env_extras["rlm_setup_state"]`` — a per-rollout handoff to
+        ``_finalize_episode``. Lives on ``env_extras`` (not ``self``) so concurrent
+        rollouts can't stomp on each other's state.
         """
-        # Reset per-call state so non-RLM rollouts don't leak prior values.
-        self._rlm_setup_state = None
-
         if env_class != "rlm":
             return env_extras
 
@@ -199,10 +199,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
         enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
-        custom_system_prompt = self._batch_rlm_overrides.get("custom_system_prompt")
-
-        if custom_system_prompt:
-            env_extras["custom_system_prompt"] = custom_system_prompt
 
         child_results: List[StepWiseOutput] = []
         child_call_tracker: List[Dict[str, Any]] = []
@@ -221,7 +217,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
         if judge_reward_model:
             env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, judge_scores)
 
-        self._rlm_setup_state = {
+        # Per-rollout handoff to _finalize_episode. Lives on env_extras (not self) so
+        # concurrent rollouts each have their own copy and can't overwrite each other's.
+        env_extras["rlm_setup_state"] = {
             "child_results": child_results,
             "child_call_tracker": child_call_tracker,
             "judge_scores": judge_scores,
@@ -229,35 +227,23 @@ class RLMGymGenerator(SkyRLGymGenerator):
         return env_extras
 
     # ------------------------------------------------------------------
-    # Hook 2: inference dispatch (one generation call per turn)
+    # OpenRouter engine for child rollouts (when configured)
     # ------------------------------------------------------------------
 
-    async def _call_inference(
-        self,
-        agent_loop_state: AgentLoopState,
-        chat_history: ConversationType,
-        ephemeral_user_message: Optional[Dict[str, str]],
-        current_sampling_params: Dict[str, Any],
-        sampling_params: Optional[Dict[str, Any]],
-        session_id: str,
-        external_generate_fn: Optional[Callable] = None,
-    ) -> Tuple[str, List[int], str, Optional[List[float]], Optional[Any]]:
-        """Route through ``external_generate_fn`` (e.g. OpenRouter) when set."""
-        if external_generate_fn is not None:
-            messages = list(chat_history) + ([ephemeral_user_message] if ephemeral_user_message else [])
-            output = await external_generate_fn(messages, current_sampling_params)
-            output_ids = self.tokenizer.encode(output, add_special_tokens=False)
-            return output, output_ids, "stop", None, None
+    def _get_openrouter_engine(self) -> InferenceEngineInterface:
+        """Lazily build the OpenRouter engine used for child rollouts.
 
-        return await super()._call_inference(
-            agent_loop_state,
-            chat_history,
-            ephemeral_user_message,
-            current_sampling_params,
-            sampling_params,
-            session_id,
-            external_generate_fn=external_generate_fn,
-        )
+        Built once per generator instance and reused across all child rollouts.
+        Returns an ``InferenceEngineInterface`` that can be passed directly to
+        ``agent_loop(inference_engine_client=...)``.
+        """
+        if self._openrouter_engine is None:
+            self._openrouter_engine = OpenRouterInferenceEngine(
+                model=getattr(self.generator_cfg, "child_openrouter_model"),
+                tokenizer=self.tokenizer,
+                base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
+            )
+        return self._openrouter_engine
 
     # ------------------------------------------------------------------
     # Hook 3: post-episode finalize
@@ -283,7 +269,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
             env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
         env_metrics = env.get_metrics()
 
-        setup = self._rlm_setup_state or {}
+        setup = env_extras.get("rlm_setup_state") or {}
         child_results: List[StepWiseOutput] = setup.get("child_results", [])
         child_call_tracker: List[Dict[str, Any]] = setup.get("child_call_tracker", [])
         judge_scores: Dict[str, Any] = setup.get("judge_scores", {})
@@ -402,91 +388,20 @@ class RLMGymGenerator(SkyRLGymGenerator):
     # RLM-specific helpers (called by hooks above)
     # ==================================================================
 
-    async def _openrouter_generate(
-        self,
-        messages: List[Dict[str, str]],
-        sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Call an OpenAI-compatible endpoint (e.g. OpenRouter) and return the assistant message."""
-        try:
-            import httpx
-        except ImportError:
-            raise ImportError("httpx is required for child_openrouter_model support.  Install with: pip install httpx")
-
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY environment variable must be set when using child_openrouter_model")
-
-        model = getattr(self.generator_cfg, "child_openrouter_model", None)
-        base_url = getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1").rstrip("/")
-
-        params = sampling_params or {}
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": params.get("temperature", 0.7),
-            "top_p": params.get("top_p", 1.0),
-            "max_tokens": params.get("max_generate_length", 1024),
-            "reasoning": {"effort": "none"},
-        }
-        if params.get("additional_kwargs"):
-            body.update(params["additional_kwargs"])
-
-        last_exc: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=300) as client:
-                    resp = await client.post(
-                        f"{base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=body,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    usage = data.get("usage", {})
-                    if usage:
-                        self.openrouter_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                        self.openrouter_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                        self.openrouter_usage["requests"] += 1
-                        details = usage.get("prompt_tokens_details") or {}
-                        self.openrouter_usage["cached_tokens"] += details.get("cached_tokens", 0)
-                    return data["choices"][0]["message"]["content"]
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-        raise RuntimeError(f"OpenRouter API call failed after 3 attempts: {last_exc}") from last_exc
-
-    def _make_openrouter_lm_callback(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        sampling_params: Optional[Dict[str, Any]],
-    ) -> Callable[[List[str]], List[str]]:
-        async def _generate(prompts: List[str]) -> List[str]:
-            tasks = [
-                self._openrouter_generate([{"role": "user", "content": p}], sampling_params)
-                for p in prompts
-            ]
-            return list(await asyncio.gather(*tasks))
-
-        def callback(prompts: List[str]) -> List[str]:
-            future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
-            return future.result(timeout=300)
-
-        return callback
-
     def _make_lm_callback(
         self,
         loop: asyncio.AbstractEventLoop,
         sampling_params: Optional[Dict[str, Any]],
+        engine: Optional[InferenceEngineInterface] = None,
     ) -> Callable[[List[str]], List[str]]:
-        """Sync callback that dispatches batched text prompts to the inference engine.
+        """Sync callback that dispatches batched text prompts to an inference engine.
 
         Safe to call from a non-async thread (e.g. inside a REPL ``exec()``).
+        ``engine`` defaults to ``self.inference_engine_client``; child rollouts pass
+        the OpenRouter engine when ``child_openrouter_model`` is set.
         """
+        target_engine = engine if engine is not None else self.inference_engine_client
+
         async def _generate(prompts: List[str]) -> List[str]:
             token_ids = [
                 self.tokenizer.apply_chat_template(
@@ -501,7 +416,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 prompt_token_ids=token_ids,
                 sampling_params=sampling_params,
             )
-            output = await self.inference_engine_client.generate(engine_input)
+            output = await target_engine.generate(engine_input)
             return output["responses"]
 
         def callback(prompts: List[str]) -> List[str]:
@@ -663,12 +578,13 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         Spawns a child agent_loop with stripped extras (no ``lm_callback``/``subcall_fn``
         from the parent) so the base hook re-injects fresh ones. When
-        ``child_openrouter_model`` is set, both the child's main loop and its
-        ``lm_callback`` route through OpenRouter, leaving the policy engine for
-        the depth-0 agent.
+        ``child_openrouter_model`` is set, the child's agent_loop and its
+        ``lm_callback`` are both routed through an ``OpenRouterInferenceEngine``,
+        leaving the policy engine for the depth-0 agent.
         """
         use_openrouter = getattr(self.generator_cfg, "child_openrouter_model", None) is not None
-        external_generate_fn = self._openrouter_generate if use_openrouter else None
+        # Resolve the engine the child should use. None means "inherit parent's policy engine".
+        child_engine: Optional[InferenceEngineInterface] = self._get_openrouter_engine() if use_openrouter else None
         child_system_prompt = self._batch_rlm_overrides.get("child_system_prompt")
 
         # Reverse lookup: paper text → paper_id, for child-call attribution.
@@ -690,10 +606,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         async def _run_child(prompt: str, context=None) -> str:
             child_prompt = [{"role": "user", "content": prompt}]
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            if use_openrouter:
-                child_extras["lm_callback"] = self._make_openrouter_lm_callback(loop, sampling_params)
-            else:
-                child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, engine=child_engine)
             if child_system_prompt:
                 child_extras["custom_system_prompt"] = child_system_prompt
             if context is not None:
@@ -715,7 +628,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 max_tokens=max_tokens,
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
-                external_generate_fn=external_generate_fn,
+                inference_engine_client=child_engine,
             )
             if child_results is not None and isinstance(result, StepWiseOutput):
                 child_results.append(result)
