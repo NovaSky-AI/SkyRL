@@ -81,8 +81,8 @@ class Qwen3Attention(nnx.Module):
         v = v.reshape(B, T, self.num_kv_heads, self.head_dim)
 
         # Apply RoPE
-        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
-        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
+        q = apply_rope(q, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
+        k = apply_rope(k, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
 
         # Handle KV cache
         if kv_cache is not None:
@@ -172,8 +172,10 @@ class Qwen3Experts(nnx.Module):
     def __call__(
         self, hidden_states: jax.Array, router_logits: jax.Array, adapter_indices: jax.Array | None = None
     ) -> jax.Array:
-        routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
-        routing_weights = nnx.softmax(routing_weights, axis=-1)
+        routing_weights = nnx.softmax(router_logits, axis=-1)
+        routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
+        if getattr(self.config, "norm_topk_prob", True):
+            routing_weights = routing_weights / routing_weights.sum(axis=-1, keepdims=True)
 
         num_experts = self.config.num_experts
         num_experts_per_tok = self.config.num_experts_per_tok

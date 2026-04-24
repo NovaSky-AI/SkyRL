@@ -23,6 +23,7 @@ from typing import Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from loguru import logger
 from omegaconf import DictConfig
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
@@ -63,20 +64,13 @@ def init_fn(x: torch.nn.Module):
     return x
 
 
-def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = None):
-    from accelerate import init_empty_weights
-
-    def cpu_init_weights():
-        return torch.device("cpu")
-
-    if use_meta_tensor:
-        if mesh is None:
-            init_context = init_empty_weights if torch.distributed.get_rank() != 0 else cpu_init_weights
-        else:
-            init_context = init_empty_weights if mesh.get_coordinate()[-1] != 0 else cpu_init_weights
-    else:
-        init_context = cpu_init_weights
-    return init_context
+def should_use_meta_init(use_meta_tensor=True, mesh: DeviceMesh = None) -> bool:
+    """Return True when this rank should create an empty model on meta device."""
+    if not use_meta_tensor:
+        return False
+    if mesh is None:
+        return torch.distributed.get_rank() != 0
+    return mesh.get_coordinate()[-1] != 0
 
 
 def get_fsdp_wrap_policy(module, config=None, is_lora=False):
@@ -131,9 +125,18 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                logger.warning(
+                    f"Could not find transformer layer class '{layer_class}' in the model, skipping. "
+                    "This is expected when using language_model_only=True with multimodal models."
+                )
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+
+        if len(transformer_cls_to_wrap) == 0:
+            raise Exception(
+                f"Could not find any transformer layer class to wrap in the model. "
+                f"Searched for: {list(fsdp_transformer_layer_cls_to_wrap)}"
+            )
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,
@@ -176,6 +179,14 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
+    # Materialize any leftover meta buffers (e.g. non-persistent inv_freq from
+    # RotaryEmbedding created via from_config on meta device).  We must NOT call
+    # model.to_empty() because that would wipe already-loaded FSDP parameters.
+    for module in model.modules():
+        for key in list(module._buffers.keys()):
+            buf = module._buffers[key]
+            if buf is not None and buf.device.type == "meta":
+                module._buffers[key] = torch.empty(buf.shape, dtype=buf.dtype, device="cpu")
     model.to("cpu", non_blocking=True)
     if empty_cache:
         torch.cuda.empty_cache()
@@ -245,6 +256,27 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
         return FSDP.state_dict_type(model, state_type, state_cfg, optim_cfg)
     else:
         return nullcontext()
+
+
+def _sync_non_persistent_buffers(model: torch.nn.Module, loaded_sd: dict):
+    """Broadcast non-persistent buffers (e.g. inv_freq) from rank 0 to all ranks.
+
+    Non-persistent buffers are excluded from state_dict so they are never loaded
+    by the parameter broadcast loop.  On non-rank-0 meta-init they remain on the
+    meta device with no data; rank 0 has the correctly computed values.
+    """
+    for module in model.modules():
+        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        for key in sorted(non_persistent):
+            buf = module._buffers.get(key)
+            if buf is None:
+                continue
+            if dist.get_rank() == 0:
+                src = buf.detach().cuda()
+            else:
+                src = torch.empty(buf.shape, dtype=buf.dtype, device="cuda")
+            dist.broadcast(src, src=0)
+            module._buffers[key] = src.cpu()
 
 
 # Fsdp2 load full state dict from `accelerate`
@@ -323,6 +355,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
 
     # we set `assign=True` because our params can be on meta device
     model.load_state_dict(sharded_sd, assign=True)
+
+    # Broadcast non-persistent buffers (e.g. inv_freq from RotaryEmbedding) that
+    # are excluded from state_dict.  On non-rank-0 meta-init these are still on
+    # meta device with no data; rank 0 has the correctly computed values.
+    _sync_non_persistent_buffers(model, sharded_sd)
 
     # If we don't offload FSDP2 Module to CPU and then back to GPU,
     # it will occupy a large amount of reserved GPU memory，which can not be released using torch.cuda.empty_cache()

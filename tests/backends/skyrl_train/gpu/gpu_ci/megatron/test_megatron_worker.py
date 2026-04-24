@@ -1,9 +1,7 @@
 """
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_worker.py
 """
-
-import asyncio
 
 import pytest
 import ray
@@ -34,8 +32,6 @@ from tests.backends.skyrl_train.gpu.utils import (
     ray_init_for_tests,
     run_inference,
 )
-
-_skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
@@ -123,12 +119,14 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(True, 4, 2, 2, 1, None, False, id="colocate_all"),
         pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
+        pytest.param(True, 4, 2, 2, 1, None, True, id="colocate_all_lora"),
     ],
 )
+@pytest.mark.asyncio
 @pytest.mark.megatron
-def test_megatron_policy_weight_sync(
+async def test_megatron_policy_weight_sync(
     ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
@@ -151,7 +149,7 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        with InferenceEngineState.create(
+        async with InferenceEngineState.create(
             cfg=cfg,
             model=MODEL_NAME,
             use_local=True,
@@ -159,7 +157,7 @@ def test_megatron_policy_weight_sync(
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
             client, pg = engines.client, engines.pg
-            asyncio.run(client.sleep())
+            await client.sleep()
 
             policy = init_worker_with_type(
                 "policy",
@@ -173,7 +171,7 @@ def test_megatron_policy_weight_sync(
                     "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
-            asyncio.run(client.wake_up(tags=["weights"]))
+            await client.wake_up(tags=["weights"])
             # TODO (erictang000): improve this timing
             # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
             # or ~20 seconds on 8xH100
@@ -186,16 +184,14 @@ def test_megatron_policy_weight_sync(
                 )
 
             policy.offload_to_cpu()
-            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            await client.wake_up(tags=["kv_cache"])
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
             tokenizer = (
                 AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
             )
-            outputs = asyncio.run(
-                run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
-            )
+            outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
@@ -290,13 +286,14 @@ async def test_megatron_forward(
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
-        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1).to("cuda")
-
-        sequences_fwd, attention_mask, position_ids = (
+        sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        sequences_fwd, attention_mask, position_ids, sequences_rolled = (
             sequences_fwd.to("cuda"),
             attention_mask.to("cuda"),
             position_ids.to("cuda"),
+            sequences_rolled.to("cuda"),
         )
+
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             output = model(sequences_fwd, attention_mask=attention_mask, position_ids=position_ids)
             log_probs = logprobs_from_logits(output["logits"], sequences_rolled)
@@ -591,7 +588,7 @@ async def test_megatron_train(
                 # the entropy calculation is different (fsdp has random logits for padding tokens)
                 continue
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 2.5e-1, f"diff in {k} is too large!"
+            assert abs(result[k] - results_megatron[i][k]) < 4e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio

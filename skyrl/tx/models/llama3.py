@@ -98,8 +98,8 @@ class Llama3Attention(nnx.Module):
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
         # Apply RoPE
-        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
-        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
+        q = apply_rope(q, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
+        k = apply_rope(k, positions, self.head_dim, self.config.rope_parameters["rope_theta"])
 
         # Handle KV cache
         if kv_cache is not None:

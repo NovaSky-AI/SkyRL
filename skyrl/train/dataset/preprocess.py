@@ -188,3 +188,82 @@ def convert_prompts_responses_to_batch_tensors(
         logprobs_tensor,
         rollout_expert_indices_tensor,
     )
+
+
+def compute_prompt_mini_batch_boundaries(
+    uids: List[str],
+    mini_batch_size: int,
+    train_batch_size: int,
+    is_stepwise: bool,
+    n_samples_per_prompt: int,
+) -> List[Tuple[int, int]]:
+    """Compute mini-batch ``(start, end)`` slices from a flat ``uids`` list.
+
+    Args:
+        uids: List of uids, representing which prompt each sequence belongs to.
+        mini_batch_size: Number of prompts to include in each mini-batch. Same as training config's
+            config.trainer.policy_mini_batch_size or config.trainer.critic_mini_batch_size.
+        train_batch_size: Number of prompts in a training batch. For sanity check.
+        is_stepwise: Whether the training is step-wise. For sanity check.
+        n_samples_per_prompt: how many samples per prompt. For sanity check.
+    Returns:
+        List of (start, end) indices of the mini-batches. The length of the list is the number of
+        mini-batches, guaranteed to be `train_batch_size // mini_batch_size` regardless of whether
+        the training is step-wise or not.
+
+    Consecutive equal entries in ``uids`` belong to the same prompt. Each mini batch spans exactly
+    ``mini_batch_size`` prompts (the last may be smaller if the total prompt count is not divisible
+    in step-wise training). Works for both step-wise (variable sequences per prompt) and non-step-wise
+    (fixed ``n_samples_per_prompt`` sequences per prompt) training.
+
+    We assume uids are contiguous, i.e. all n_samples_per_prompt trajectories for a prompt, or all
+    per-step sequences for a trajectory, are contiguous.
+
+    Example A: normal non-step-wise training, with n_samples_per_prompt=2 and train_batch_size=4.
+    uids = ["p0", "p0", "p1", "p1", "p2", "p2", "p3", "p3"]
+    mini_batch_size = 2
+    prompt_end_indices = [2, 4, 6, 8]
+    boundaries = [(0, 4), (4, 8)]  # because each mini batch spans exactly 2 prompts, hence 4 sequences
+
+    Example B: step-wise training with n_samples_per_prompt = 2, and each trajectory can have 1-2 turns.
+    uids = ["p0", "p0", "p0", "p0", "p1", "p1", "p2", "p2", "p2", "p3", "p3"]
+    mini_batch_size = 2
+    prompt_end_indices = [4, 6, 9, 11]
+    boundaries = [(0, 6), (6, 11)]
+    """
+    # First compute the end indices of each prompt.
+    prompt_end_indices: List[int] = []
+    seen_uids: set[str] = set()
+    seen_uids.add(uids[0])
+    for i in range(1, len(uids)):
+        if uids[i] != uids[i - 1]:
+            assert (
+                uids[i] not in seen_uids
+            ), f"uid {uids[i]!r} appears in non-contiguous positions at index {i}. Full uids: {uids}"
+            seen_uids.add(uids[i])
+            prompt_end_indices.append(i)
+    prompt_end_indices.append(len(uids))
+
+    # seen_uids should equal to the number of prompts and equal to `train_batch_size`
+    num_prompts = len(prompt_end_indices)
+    assert num_prompts == train_batch_size and len(seen_uids) == train_batch_size
+    assert train_batch_size % mini_batch_size == 0
+
+    # Compute boundaries.
+    boundaries: List[Tuple[int, int]] = []
+    start_seq = 0
+    for i in range(0, num_prompts, mini_batch_size):
+        end_prompt_idx = i + mini_batch_size - 1  # i + mini_batch_size is next mini-batch's first prompt's end index
+        end_seq = prompt_end_indices[end_prompt_idx]
+        boundaries.append((start_seq, end_seq))
+        start_seq = end_seq
+    assert len(boundaries) == train_batch_size // mini_batch_size
+
+    # Assert that the mini-batch boundaries are uniform for non-step-wise training.
+    if not is_stepwise:
+        expected_num_seq_in_mini_batch = n_samples_per_prompt * mini_batch_size
+        for i, (start, end) in enumerate(boundaries):
+            assert start == i * expected_num_seq_in_mini_batch
+            assert end - start == expected_num_seq_in_mini_batch
+
+    return boundaries
