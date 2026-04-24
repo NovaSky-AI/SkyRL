@@ -220,7 +220,6 @@ override-dependencies = [
     "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
-    "transformers>=4.56.1,<5; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
