@@ -282,7 +282,11 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         lora_cfg = self._cfg.trainer.policy.model.lora
-        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
+        active_lora_name = (
+            _SKYRL_LORA_ADAPTER_NAME
+            if lora_cfg and lora_cfg.rank > 0 and self._cfg.trainer.strategy != "megatron"
+            else None
+        )
         self._inference_engine_client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
