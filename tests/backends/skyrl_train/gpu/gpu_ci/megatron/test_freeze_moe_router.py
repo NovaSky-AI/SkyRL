@@ -1,8 +1,11 @@
-"""CPU-only smoke tests for the ``freeze_moe_router`` helper.
+"""Smoke tests for the ``freeze_moe_router`` helper.
 
 The helper walks ``model.decoder.layers`` and flips ``requires_grad`` on
 router weights/biases. These tests build minimal mock modules that mimic Megatron-Core's attribute layout
 without importing Megatron.
+
+Run with:
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_freeze_moe_router.py
 """
 
 import torch
