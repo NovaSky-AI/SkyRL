@@ -649,6 +649,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
+        generator_output.pop("rollout_metrics", None)
 
         # Log staleness statistics for this step
         self.all_metrics.update(

@@ -1,6 +1,7 @@
 """SkyRL-Train backend for TinkerEngine."""
 
 import asyncio
+import io
 import os
 import tarfile
 import tempfile
@@ -23,7 +24,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_router_args,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -348,7 +352,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         elif has_external_servers and not has_external_proxy:
             server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external servers - "
@@ -368,7 +373,8 @@ class SkyRLTrainBackend(AbstractBackend):
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = VLLMRouter(server_urls=server_urls)
+            router_args = build_router_args(ie_cfg, server_urls=server_urls)
+            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
@@ -376,7 +382,11 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         lora_cfg = self._cfg.trainer.policy.model.lora
-        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
+        active_lora_name = (
+            _SKYRL_LORA_ADAPTER_NAME
+            if lora_cfg and lora_cfg.rank > 0 and self._cfg.trainer.strategy != "megatron"
+            else None
+        )
         self._inference_engine_client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
@@ -1105,8 +1115,11 @@ class SkyRLTrainBackend(AbstractBackend):
             # Hot path: write a lightweight marker so the engine's checkpoint
             # bookkeeping stays consistent.  Actual weights live in GPU memory.
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with tarfile.open(output_path, "w"):
-                pass  # empty tar — marker only
+            marker = f"SkyRL sampler marker for {model_id}: weights live in GPU memory (persist=False).\n".encode()
+            with tarfile.open(output_path, "w") as tar:
+                info = tarfile.TarInfo("MARKER")
+                info.size = len(marker)
+                tar.addfile(info, io.BytesIO(marker))
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
 
 

@@ -9,6 +9,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from huggingface_hub import snapshot_download
+from loguru import logger
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.bridge.peft.lora import LoRA
@@ -23,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
+    freeze_moe_router,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -595,6 +597,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
 
             patch_topk_router_layer_number()
+
+        # Freeze MoE router params before optimizer build.
+        # Megatron's DistributedOptimizer reads requires_grad at construction.
+        if self.cfg.policy.megatron_config.freeze_moe_router:
+            if self._rank == 0:
+                logger.info("freeze_moe_router=True: freezing MoE router params")
+            self.provider.register_pre_wrap_hook(freeze_moe_router)
 
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(

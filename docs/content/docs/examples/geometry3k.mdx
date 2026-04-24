@@ -78,6 +78,24 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
 
 Defaults: Qwen3-VL-8B-Instruct, GRPO, 4 samples per prompt, 3 turns max, max prompt length 1024 / max generate 2048 per turn.
 
+## LoRA Support
+
+Using the `fsdp` backend, LoRA is supported for VLM models. Enabling LoRA requires a few additional configuration flags to `run_geometry3k.sh` — add the `trainer.policy.model.lora.*` overrides and bump the policy learning rate since LoRA usually tolerates a larger learning rate:
+
+```bash title="delta vs. run_geometry3k.sh"
+  trainer.policy.model.lora.rank=32 \
+  trainer.policy.model.lora.alpha=32 \
+  trainer.policy.optimizer_config.lr=3.0e-5 \
+```
+
+The complete, runnable script is at `examples/train/geometry3k/run_geometry3k_lora.sh`:
+
+```bash
+bash examples/train/geometry3k/run_geometry3k_lora.sh
+```
+
+For the full parameter reference (`rank`, `alpha`, `dropout`, `target_modules`, `exclude_modules`, `lora_sync_path`, `init_method`) and general guidance on choosing LoRA hyperparameters, see the [LoRA example](../examples/lora).
+
 ## Launching
 
 ```bash

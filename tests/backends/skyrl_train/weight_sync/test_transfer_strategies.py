@@ -78,7 +78,7 @@ class TestCreateInitInfo:
             data_parallel_size=1,
             override_existing_update_group="enable",
         )
-        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=4)
 
         assert isinstance(init_info, BroadcastInitInfo)
         assert init_info.master_addr == "192.168.1.1"
@@ -98,7 +98,7 @@ class TestCreateInitInfo:
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
         ie_cfg = self._make_ie_cfg(override_existing_update_group="disable")
-        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=1)
 
         assert init_info.override_existing_receiver is False
 
