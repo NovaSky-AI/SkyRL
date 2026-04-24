@@ -172,6 +172,9 @@ class MegatronConfig(BaseConfig):
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
+    freeze_moe_router: bool = False
+    """If True, freeze MoE router parameters so they are not updated during training. No-op on
+    non-MoE models."""
 
 
 # ---------------------------------------------------------------------------
