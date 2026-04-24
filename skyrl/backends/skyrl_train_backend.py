@@ -253,7 +253,7 @@ class SkyRLTrainBackend(AbstractBackend):
         elif has_external_servers and not has_external_proxy:
             server_urls = list(external_server_urls)
             router_args = build_router_args(ie_cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args)
+            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Created router over external servers - "
@@ -274,7 +274,7 @@ class SkyRLTrainBackend(AbstractBackend):
             server_urls = [info.url for info in server_infos]
 
             router_args = build_router_args(ie_cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args)
+            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
             proxy_url = self._inference_router.start()
             logger.info(
                 f"HTTP Inference: Built servers and router internally - "
