@@ -105,8 +105,8 @@ def test_freeze_moe_router_no_bias():
             super().__init__()
             self.router = nn.Linear(8, 4, bias=False)  # router.bias is None
             self.shared_experts = nn.Module()
-            self.shared_experts.gate_weight = nn.Parameter(torch.randn(4, 8))
             # no gate_bias attr on shared_experts
+            self.shared_experts.gate_weight = nn.Parameter(torch.randn(4, 8))
             self.linear_fc1 = nn.Linear(8, 16)
 
     class _MoELayer(nn.Module):
