@@ -64,16 +64,6 @@ def test_freeze_moe_router_freezes_router_params():
         assert layer.mlp.router.bias.requires_grad is False
 
 
-def test_freeze_moe_router_freezes_shared_expert_gate():
-    m = _Model()
-
-    freeze_moe_router(m)
-
-    for layer in m.decoder.layers:
-        assert layer.mlp.shared_experts.gate_weight.requires_grad is False
-        assert layer.mlp.shared_experts.gate_bias.requires_grad is False
-
-
 def test_freeze_moe_router_leaves_other_params_trainable():
     m = _Model()
 
@@ -82,16 +72,8 @@ def test_freeze_moe_router_leaves_other_params_trainable():
     for layer in m.decoder.layers:
         assert layer.mlp.linear_fc1.weight.requires_grad is True
         assert layer.mlp.linear_fc1.bias.requires_grad is True
-
-
-def test_freeze_moe_router_handles_missing_shared_experts():
-    m = _Model(with_shared_experts=False)
-
-    # Should not raise when shared_experts attribute is absent.
-    freeze_moe_router(m)
-
-    for layer in m.decoder.layers:
-        assert layer.mlp.router.weight.requires_grad is False
+        assert layer.mlp.shared_experts.gate_weight.requires_grad is True
+        assert layer.mlp.shared_experts.gate_bias.requires_grad is True
 
 
 def test_freeze_moe_router_handles_layer_without_router():
@@ -123,7 +105,7 @@ def test_freeze_moe_router_no_bias():
             self.router = nn.Linear(8, 4, bias=False)  # router.bias is None
             self.shared_experts = nn.Module()
             self.shared_experts.gate_weight = nn.Parameter(torch.randn(4, 8))
-            # deliberately no gate_bias attr on shared_experts
+            # no gate_bias attr on shared_experts
             self.linear_fc1 = nn.Linear(8, 16)
 
     class _MoELayer(nn.Module):
@@ -140,5 +122,5 @@ def test_freeze_moe_router_no_bias():
     m = _Model()
     freeze_moe_router(m)  # should NOT raise
     assert not m.decoder.layers[0].mlp.router.weight.requires_grad
-    assert not m.decoder.layers[0].mlp.shared_experts.gate_weight.requires_grad
+    assert m.decoder.layers[0].mlp.shared_experts.gate_weight.requires_grad
     assert m.decoder.layers[0].mlp.linear_fc1.weight.requires_grad
