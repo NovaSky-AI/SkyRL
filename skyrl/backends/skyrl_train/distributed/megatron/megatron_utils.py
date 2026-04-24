@@ -101,11 +101,6 @@ def freeze_moe_router(model):
                 layer.mlp.router.weight.requires_grad = False
             if getattr(layer.mlp.router, "bias", None) is not None:
                 layer.mlp.router.bias.requires_grad = False
-        if hasattr(layer.mlp, "shared_experts"):
-            if getattr(layer.mlp.shared_experts, "gate_weight", None) is not None:
-                layer.mlp.shared_experts.gate_weight.requires_grad = False
-            if getattr(layer.mlp.shared_experts, "gate_bias", None) is not None:
-                layer.mlp.shared_experts.gate_bias.requires_grad = False
 
 
 @torch.no_grad()
