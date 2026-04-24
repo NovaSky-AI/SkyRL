@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import gc
+from typing import List, Union
 
 import torch
 import torch.nn as nn
@@ -94,7 +95,7 @@ def get_model_size(model: nn.Module, scale="auto"):
     return n_params, scale
 
 
-def freeze_moe_router(model_or_models):
+def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
         models = [model_or_models]
