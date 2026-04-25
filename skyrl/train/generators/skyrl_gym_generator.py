@@ -845,12 +845,15 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         if self.generator_cfg.step_wise_trajectories:
-            # Flatten per-prompt step-wise outputs into per-step parallel lists for the trainer.
-            # is_last_step marks the trajectory boundary (the parent's final turn); the trainer
-            # uses cumsum(shifted is_last_step) to broadcast advantages across each trajectory.
-            responses, rewards, stop_reasons, loss_masks = [], [], [], []
-            prompt_token_ids, env_metrics = [], []
-            is_last_step, out_trajectory_ids, out_env_classes = [], [], []
+            responses = []
+            rewards = []
+            stop_reasons = []
+            loss_masks = []
+            prompt_token_ids = []
+            env_metrics = []
+            is_last_step = []
+            out_trajectory_ids = []
+            out_env_classes = []
             for i, output in enumerate(all_outputs):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
@@ -889,7 +892,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
-                rollout_logprobs = [s.rollout_logprobs for output in all_outputs for s in output.step_outputs]
+                rollout_logprobs = sum(
+                    [[step_output.rollout_logprobs for step_output in output.step_outputs] for output in all_outputs],
+                    [],
+                )
             else:
                 rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:
