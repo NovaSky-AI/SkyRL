@@ -268,34 +268,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Hook: post-episode finalization. Default just calls ``env.get_metrics()``."""
         return env.get_metrics()
 
-    def _flatten_step_wise_outputs(
-        self, all_outputs, trajectory_ids, env_classes
-    ) -> Tuple[List, List, List, List, List, List, List, List, List]:
-        """Hook: flatten step-wise outputs to per-step lists. Default emits parent steps only."""
-        responses, rewards, stop_reasons, loss_masks = [], [], [], []
-        prompt_token_ids, env_metrics = [], []
-        is_last_step, out_trajectory_ids, out_env_classes = [], [], []
-        for i, output in enumerate(all_outputs):
-            for j, step_output in enumerate(output.step_outputs):
-                responses.append(step_output.response_ids)
-                rewards.append(step_output.reward)
-                stop_reasons.append(step_output.stop_reason)
-                loss_masks.append(step_output.loss_mask)
-                prompt_token_ids.append(step_output.prompt_ids)
-                env_metrics.append(step_output.env_metrics)
-                is_last_step.append(j == len(output.step_outputs) - 1)
-                out_trajectory_ids.append(trajectory_ids[i])
-                out_env_classes.append(env_classes[i])
-        return (
-            responses, rewards, stop_reasons, loss_masks,
-            prompt_token_ids, env_metrics,
-            is_last_step, out_trajectory_ids, out_env_classes,
-        )
-
-    def _flatten_step_wise_logprobs(self, all_outputs) -> List[Optional[List[float]]]:
-        """Hook: flatten per-step rollout logprobs. Default is parent-only."""
-        return [s.rollout_logprobs for output in all_outputs for s in output.step_outputs]
-
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -873,11 +845,23 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         if self.generator_cfg.step_wise_trajectories:
-            (
-                responses, rewards, stop_reasons, loss_masks,
-                prompt_token_ids, env_metrics,
-                is_last_step, out_trajectory_ids, out_env_classes,
-            ) = self._flatten_step_wise_outputs(all_outputs, trajectory_ids, env_classes)
+            # Flatten per-prompt step-wise outputs into per-step parallel lists for the trainer.
+            # is_last_step marks the trajectory boundary (the parent's final turn); the trainer
+            # uses cumsum(shifted is_last_step) to broadcast advantages across each trajectory.
+            responses, rewards, stop_reasons, loss_masks = [], [], [], []
+            prompt_token_ids, env_metrics = [], []
+            is_last_step, out_trajectory_ids, out_env_classes = [], [], []
+            for i, output in enumerate(all_outputs):
+                for j, step_output in enumerate(output.step_outputs):
+                    responses.append(step_output.response_ids)
+                    rewards.append(step_output.reward)
+                    stop_reasons.append(step_output.stop_reason)
+                    loss_masks.append(step_output.loss_mask)
+                    prompt_token_ids.append(step_output.prompt_ids)
+                    env_metrics.append(step_output.env_metrics)
+                    is_last_step.append(j == len(output.step_outputs) - 1)
+                    out_trajectory_ids.append(trajectory_ids[i])
+                    out_env_classes.append(env_classes[i])
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -905,7 +889,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
-                rollout_logprobs = self._flatten_step_wise_logprobs(all_outputs)
+                rollout_logprobs = [s.rollout_logprobs for output in all_outputs for s in output.step_outputs]
             else:
                 rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:

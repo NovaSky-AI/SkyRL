@@ -125,14 +125,15 @@ class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
-    via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
-    ``_flatten_step_wise_outputs`` (plus its logprobs sister). A thin
+    via two hooks: ``_setup_env_extras`` and ``_finalize_episode``. A thin
     ``generate`` wrapper resolves the batch-level RLM overrides
     (``child_system_prompt``, ``rollout_output_dir``) once and stashes them on
     ``self`` for the hooks. Child rollouts that should hit an external model
     (when ``generator.child_openrouter_model`` is set) are routed via a
     lazily-built ``OpenRouterInferenceEngine`` passed through ``agent_loop``'s
-    ``inference_engine_client`` parameter — no inference-dispatch hook needed.
+    ``inference_engine_client`` parameter. Children are inlined into
+    ``step_outputs`` at the end of ``_finalize_episode`` so the base flattener
+    in ``generate()`` picks them up without needing a flatten hook override.
     """
 
     def __init__(self, *args, **kwargs):
@@ -276,6 +277,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         if isinstance(agent_loop_output, StepWiseOutput):
             agent_loop_output.child_outputs = child_results
+            # Inline children into step_outputs so the base flattener (in generate())
+            # picks them up without needing a hook override. Children come first per
+            # parent, sharing the parent's trajectory_id; the parent's last step
+            # remains the final entry, so is_last_step still marks the trajectory end.
+            # `child_outputs` is retained for the per-child rollout dump only.
+            if getattr(self.generator_cfg, "train_child_trajectories", False) and child_results:
+                children_flat = [s for c in child_results for s in c.step_outputs]
+                agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
         if judge_scores:
             env_metrics.update(judge_scores)
@@ -327,62 +336,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             extra_info.pop("context_text", None)
 
         return env_metrics
-
-    # ------------------------------------------------------------------
-    # Hook 4: step-wise output flattening (children-first)
-    # ------------------------------------------------------------------
-
-    def _flatten_step_wise_outputs(self, all_outputs, trajectory_ids, env_classes):
-        train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
-
-        responses, rewards, stop_reasons, loss_masks = [], [], [], []
-        prompt_token_ids, env_metrics = [], []
-        is_last_step, out_trajectory_ids, out_env_classes = [], [], []
-
-        for i, output in enumerate(all_outputs):
-            include_children_for_output = train_child_trajectories and output.child_outputs
-
-            # Children first: all is_last_step=False, share parent's trajectory_id.
-            if include_children_for_output:
-                for child_output in output.child_outputs:
-                    for step_output in child_output.step_outputs:
-                        responses.append(step_output.response_ids)
-                        rewards.append(step_output.reward)
-                        stop_reasons.append(step_output.stop_reason)
-                        loss_masks.append(step_output.loss_mask)
-                        prompt_token_ids.append(step_output.prompt_ids)
-                        env_metrics.append(step_output.env_metrics)
-                        is_last_step.append(False)
-                        out_trajectory_ids.append(trajectory_ids[i])
-                        out_env_classes.append(env_classes[i])
-
-            for j, step_output in enumerate(output.step_outputs):
-                responses.append(step_output.response_ids)
-                rewards.append(step_output.reward)
-                stop_reasons.append(step_output.stop_reason)
-                loss_masks.append(step_output.loss_mask)
-                prompt_token_ids.append(step_output.prompt_ids)
-                env_metrics.append(step_output.env_metrics)
-                is_last_step.append(j == len(output.step_outputs) - 1)
-                out_trajectory_ids.append(trajectory_ids[i])
-                out_env_classes.append(env_classes[i])
-
-        return (
-            responses, rewards, stop_reasons, loss_masks,
-            prompt_token_ids, env_metrics,
-            is_last_step, out_trajectory_ids, out_env_classes,
-        )
-
-    def _flatten_step_wise_logprobs(self, all_outputs):
-        train_child_trajectories = getattr(self.generator_cfg, "train_child_trajectories", False)
-
-        rollout_logprobs: List[Optional[List[float]]] = []
-        for output in all_outputs:
-            if train_child_trajectories and output.child_outputs:
-                for child in output.child_outputs:
-                    rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
-            rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]
-        return rollout_logprobs
 
     # ==================================================================
     # RLM-specific helpers (called by hooks above)
