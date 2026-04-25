@@ -746,13 +746,12 @@ class SkyRLTrainConfig(BaseConfig):
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            _uses_lora_weight_sync,
+        )
+
         ie_cfg = self.generator.inference_engine
-        if (
-            self.trainer.policy.model.lora.rank > 0
-            and self.trainer.strategy != "megatron"
-            and ie_cfg.enforce_eager
-            and ie_cfg.backend == "vllm"
-        ):
+        if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 
             warnings.warn(
