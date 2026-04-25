@@ -39,7 +39,6 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
 : "${MODEL_PATH:=alphaXiv/rlm-sft-multi-9b-step-500}"
-: "${ROLLOUT_OUTPUT_DIR:=$(pwd)/tmp/multi-paper-eval/rollouts}"
 
 uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -74,5 +73,4 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
   generator.child_openrouter_model="openai/gpt-5.4-nano" \
-  environment.skyrl_gym.rlm.rollout_output_dir="$ROLLOUT_OUTPUT_DIR" \
   "$@"

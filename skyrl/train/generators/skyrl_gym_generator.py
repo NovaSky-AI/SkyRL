@@ -927,6 +927,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
+            "env_metrics": env_metrics,
         }
         if has_vision_features:
             generator_output["pixel_values"] = pixel_values

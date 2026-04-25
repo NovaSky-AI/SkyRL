@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import functools
 import json
 import os
 import time
@@ -59,75 +58,13 @@ _RUBRIC_RESPONSE_FORMAT = {
 }
 
 
-def _write_rlm_rollout(
-    rollout_output_dir: str,
-    prompt: ConversationType,
-    env_extras: Dict[str, Any],
-    env_metrics: Dict[str, Any],
-    parent_step_outputs: List[TrajectoryOutput],
-    child_step_outputs: List[List[TrajectoryOutput]],
-    tokenizer,
-    trajectory_id_str: Optional[str] = None,
-) -> None:
-    """Write one JSON file per trajectory (parent + children) into rollout_output_dir."""
-    os.makedirs(rollout_output_dir, exist_ok=True)
-
-    tid = trajectory_id_str or "unknown"
-    tid_safe = tid.replace("/", "_").replace(":", "-")
-
-    reward_spec = env_extras.get("reward_spec", {})
-
-    child_refs = []
-    for idx, child in enumerate(child_step_outputs):
-        if not child:
-            continue
-        child_record = {
-            "trajectory_id": f"child_{tid}_{idx}",
-            "parent_trajectory_id": tid,
-            "child_index": idx,
-            "turns": [
-                {
-                    "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
-                    "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
-                }
-                for s in child
-            ],
-            "reward": (child[-1].env_metrics or {}).get("reward") if child else None,
-            "stop_reason": child[-1].stop_reason if child else None,
-            "final_answer": (child[-1].env_metrics or {}).get("final_answer") if child else None,
-        }
-        child_filename = f"child_{tid_safe}_{idx}.json"
-        with open(os.path.join(rollout_output_dir, child_filename), "w") as f:
-            f.write(json.dumps(child_record, ensure_ascii=False, indent=2))
-        child_refs.append(child_filename)
-
-    parent_record = {
-        "trajectory_id": tid,
-        "reward": env_metrics.get("reward", 0.0),
-        "turns_used": env_metrics.get("turns_used", 0),
-        "stop_reason": parent_step_outputs[-1].stop_reason if parent_step_outputs else None,
-        "final_answer": env_metrics.get("final_answer"),
-        "evidence": reward_spec.get("evidence"),
-        "turns": [
-            {
-                "input": tokenizer.decode(s.prompt_ids, skip_special_tokens=False),
-                "output": tokenizer.decode(s.response_ids, skip_special_tokens=False),
-            }
-            for s in parent_step_outputs
-        ],
-        "child_files": child_refs,
-    }
-    with open(os.path.join(rollout_output_dir, f"traj_{tid_safe}.json"), "w") as f:
-        f.write(json.dumps(parent_record, ensure_ascii=False, indent=2))
-
-
 class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
     via two hooks: ``_setup_env_extras`` and ``_finalize_episode``. A thin
     ``generate`` wrapper resolves the batch-level RLM overrides
-    (``child_system_prompt``, ``rollout_output_dir``) once and stashes them on
+    (``child_system_prompt``) once and stashes them on
     ``self`` for the hooks. Child rollouts that should hit an external model
     (when ``generator.child_openrouter_model`` is set) are routed via a
     lazily-built ``OpenRouterInferenceEngine`` passed through ``agent_loop``'s
@@ -149,22 +86,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         rlm_cfg = getattr(self.skyrl_gym_cfg, "rlm", None)
-        overrides: Dict[str, Optional[str]] = {
-            "child_system_prompt": None,
-            "rollout_output_dir": None,
-        }
+        overrides: Dict[str, Optional[str]] = {"child_system_prompt": None}
         if rlm_cfg is not None:
             cfg_dict = vars(rlm_cfg) if hasattr(rlm_cfg, "__dict__") else dict(rlm_cfg)
             overrides["child_system_prompt"] = cfg_dict.get("child_system_prompt")
-            base_dir = cfg_dict.get("rollout_output_dir")
-            if base_dir:
-                batch_metadata = input_batch.get("batch_metadata")
-                if batch_metadata and batch_metadata.training_phase == "eval":
-                    step = batch_metadata.global_step
-                    step_label = f"eval_step_{step}" if step is not None else "eval"
-                    overrides["rollout_output_dir"] = os.path.join(base_dir, step_label)
-                else:
-                    overrides["rollout_output_dir"] = base_dir
 
         self._batch_rlm_overrides = overrides
         try:
@@ -275,15 +200,24 @@ class RLMGymGenerator(SkyRLGymGenerator):
         child_call_tracker: List[Dict[str, Any]] = setup.get("child_call_tracker", [])
         judge_scores: Dict[str, Any] = setup.get("judge_scores", {})
 
+        # Track which steps came from which child (by index in child_results) so we can
+        # stamp depth/child_index metadata onto each step's env_metrics below.
+        child_index_by_step: Dict[int, int] = {}  # id(step_output) → child_index
+
         if isinstance(agent_loop_output, StepWiseOutput):
             agent_loop_output.child_outputs = child_results
             # Inline children into step_outputs so the base flattener (in generate())
             # picks them up without needing a hook override. Children come first per
             # parent, sharing the parent's trajectory_id; the parent's last step
             # remains the final entry, so is_last_step still marks the trajectory end.
-            # `child_outputs` is retained for the per-child rollout dump only.
+            # `child_outputs` is retained as a structural marker (not flattened);
+            # nothing reads it anymore, but kept for now as a debugging aid.
             if getattr(self.generator_cfg, "train_child_trajectories", False) and child_results:
-                children_flat = [s for c in child_results for s in c.step_outputs]
+                children_flat: List[TrajectoryOutput] = []
+                for child_idx, child in enumerate(child_results):
+                    for step in child.step_outputs:
+                        child_index_by_step[id(step)] = child_idx
+                        children_flat.append(step)
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
         if judge_scores:
@@ -313,27 +247,54 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
                     agent_loop_output.step_outputs[-1].env_metrics.update(child_rlm_metrics)
 
-        rollout_output_dir = self._batch_rlm_overrides.get("rollout_output_dir")
-        if rollout_output_dir and isinstance(agent_loop_output, StepWiseOutput):
-            parent_steps = agent_loop_output.step_outputs
-            child_steps = [co.step_outputs for co in (agent_loop_output.child_outputs or [])]
+        # Stamp per-step rlm_metadata onto each step's env_metrics so the upstream eval
+        # dump (dump_per_dataset_eval_results) carries enough info to reconstruct the
+        # parent/child structure of each rollout from the JSONL alone. Trajectory-level
+        # fields (final_answer, turns_used) live only on the parent's last step row.
+        if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
             tid_str = trajectory_id.to_string() if trajectory_id is not None else None
-            await self._run_in_executor_if_available(
-                functools.partial(_write_rlm_rollout, trajectory_id_str=tid_str),
-                rollout_output_dir,
-                prompt,
-                env_extras,
-                env_metrics,
-                parent_steps,
-                child_steps,
-                self.tokenizer,
+            num_children_steps = len(agent_loop_output.step_outputs) - sum(
+                1 for s in agent_loop_output.step_outputs if id(s) not in child_index_by_step
+            )
+            parent_step_index = 0
+            child_step_index_by_idx: Dict[int, int] = {}
+            for step in agent_loop_output.step_outputs:
+                child_idx = child_index_by_step.get(id(step))
+                meta: Dict[str, Any] = {"trajectory_id": tid_str}
+                if child_idx is not None:
+                    meta["depth"] = 1
+                    meta["child_index"] = child_idx
+                    meta["step_index"] = child_step_index_by_idx.get(child_idx, 0)
+                    child_step_index_by_idx[child_idx] = child_step_index_by_idx.get(child_idx, 0) + 1
+                else:
+                    meta["depth"] = 0
+                    meta["child_index"] = None
+                    meta["step_index"] = parent_step_index
+                    parent_step_index += 1
+                step.env_metrics["rlm_metadata"] = meta
+
+            # Promote trajectory-level summary onto the parent's final step.
+            agent_loop_output.step_outputs[-1].env_metrics["rlm_metadata"].update(
+                {
+                    "final_answer": env_metrics.get("final_answer"),
+                    "turns_used": env_metrics.get("turns_used"),
+                    "evidence": (env_extras.get("reward_spec") or {}).get("evidence"),
+                    "num_children": len(child_results),
+                }
             )
 
-        # Drop the (potentially huge) context payload from extra_info now that the REPL
-        # owns it, so downstream eval dumps don't serialize hundreds of KB per row.
+        # Drop the (potentially huge) context payload and internal-only callables from
+        # env_extras now that the rollout is done. This makes env_extras safe to JSON-
+        # serialize in the upstream eval dump (dump_per_dataset_eval_results).
         extra_info = env_extras.get("extra_info")
         if isinstance(extra_info, dict):
             extra_info.pop("context_text", None)
+        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_setup_state"):
+            env_extras.pop(k, None)
+        # reward_spec.reward_fn is a callable injected by some flows; same treatment.
+        reward_spec = env_extras.get("reward_spec")
+        if isinstance(reward_spec, dict):
+            reward_spec.pop("reward_fn", None)
 
         return env_metrics
 

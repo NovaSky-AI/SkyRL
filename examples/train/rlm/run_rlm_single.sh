@@ -79,7 +79,6 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
-  environment.skyrl_gym.rlm.rollout_output_dir="$(pwd)/.neer/artifacts/rlm_rollouts" \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper_child \
   generator.judge_reward_model="$JUDGE_MODEL" \
   "$@"

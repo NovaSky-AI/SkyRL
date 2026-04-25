@@ -253,6 +253,7 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    env_metrics_list = concat_generator_outputs.get("env_metrics", None)
 
     # Group indices by data source
     data_source_indices = {}
@@ -279,6 +280,8 @@ def dump_per_dataset_eval_results(
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
+                if env_metrics_list is not None and i < len(env_metrics_list):
+                    entry["env_metrics"] = env_metrics_list[i]
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
