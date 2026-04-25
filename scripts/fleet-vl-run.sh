@@ -56,10 +56,10 @@ bash scripts/fleet-common-run.sh \
   trainer.eval_before_train=false \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=16 \
+  trainer.train_batch_size=50 \
   trainer.use_hybrid_env_sampling=true \
-  trainer.min_samples_per_env=1 \
-  trainer.policy_mini_batch_size=16 \
+  trainer.min_samples_per_env=2 \
+  trainer.policy_mini_batch_size=50 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
