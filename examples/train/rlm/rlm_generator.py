@@ -6,7 +6,6 @@ RLM-specific generator: extends SkyRLGymGenerator via four hooks plus a thin
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import os
 import time
@@ -191,8 +190,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id
             )
 
-        if hasattr(env, "set_chat_history"):
-            env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
         env_metrics = env.get_metrics()
 
         setup = env_extras.get("rlm_setup_state") or {}

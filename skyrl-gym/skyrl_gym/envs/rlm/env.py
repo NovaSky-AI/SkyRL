@@ -345,33 +345,29 @@ def _format_execution_result(result: REPLResult) -> str:
 _MAX_RESULT_LEN = 20_000
 
 
-# ---------------------------------------------------------------------------
-# QueryMetadata (from rlm/rlm/core/types.py)
-# ---------------------------------------------------------------------------
-
-class _QueryMetadata:
-    def __init__(self, context_payload):
-        if isinstance(context_payload, str):
-            self.context_lengths = [len(context_payload)]
-            self.context_type = "str"
-        elif isinstance(context_payload, dict):
-            self.context_type = "dict"
-            self.context_lengths = []
-            for chunk in context_payload.values():
-                if isinstance(chunk, str):
-                    self.context_lengths.append(len(chunk))
-                else:
-                    try:
-                        self.context_lengths.append(len(json.dumps(chunk, default=str)))
-                    except Exception:
-                        self.context_lengths.append(len(repr(chunk)))
-        elif isinstance(context_payload, list):
-            self.context_type = "list"
-            self.context_lengths = [len(str(c)) for c in context_payload]
-        else:
-            self.context_type = type(context_payload).__name__
-            self.context_lengths = [len(repr(context_payload))]
-        self.context_total_length = sum(self.context_lengths)
+def _format_context_metadata(context_payload) -> str:
+    """Build the model-facing 'your context is a ... with ... total characters' line."""
+    if isinstance(context_payload, str):
+        ctx_type, lengths = "str", [len(context_payload)]
+    elif isinstance(context_payload, dict):
+        ctx_type = "dict"
+        lengths = []
+        for chunk in context_payload.values():
+            if isinstance(chunk, str):
+                lengths.append(len(chunk))
+            else:
+                try:
+                    lengths.append(len(json.dumps(chunk, default=str)))
+                except Exception:
+                    lengths.append(len(repr(chunk)))
+    elif isinstance(context_payload, list):
+        ctx_type, lengths = "list", [len(str(c)) for c in context_payload]
+    else:
+        ctx_type, lengths = type(context_payload).__name__, [len(repr(context_payload))]
+    return (
+        f"Your context is a {ctx_type} with {sum(lengths)} total characters, "
+        f"and is broken up into chunks of char lengths: {lengths}."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +444,6 @@ class RLMEnv(BaseTextEnv):
         self._final_answer: Optional[str] = None
         self._turn_index = 0  # iteration counter for build_user_prompt
         self._last_repl_exec_s: float = 0.0
-        self._chat_history: Optional[List[Dict[str, str]]] = None
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
@@ -500,11 +495,7 @@ class RLMEnv(BaseTextEnv):
         self.repl.add_context(context_payload, context_index=0)
 
         # Compute context metadata for the first user message
-        meta = _QueryMetadata(context_payload)
-        metadata_text = (
-            f"Your context is a {meta.context_type} with {meta.context_total_length} total characters, "
-            f"and is broken up into chunks of char lengths: {meta.context_lengths}."
-        )
+        metadata_text = _format_context_metadata(context_payload)
 
         system_content = self._build_system_prompt()
 
@@ -656,16 +647,12 @@ class RLMEnv(BaseTextEnv):
     def _build_metadata(self) -> Dict[str, Any]:
         return {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
 
-    def set_chat_history(self, chat_history: List[Dict[str, str]]) -> None:
-        self._chat_history = chat_history
-
     def get_metrics(self) -> Dict[str, Any]:
         return {
             "turns_used": self.turns,
             "final_value_set": self._final_answer is not None,
             "final_answer": self._final_answer,
             "reward": self._get_reward(True, self._final_answer),
-            "chat_history": self._chat_history,
         }
 
     def close(self):
