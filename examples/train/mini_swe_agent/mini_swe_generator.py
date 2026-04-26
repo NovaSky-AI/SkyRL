@@ -1,35 +1,48 @@
 import asyncio
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Tuple
-import yaml
 import traceback
-import ray
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, Optional
 
-from minisweagent.models import get_model
+import ray
+import yaml
 from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
-from .mini_swe_utils import evaluate_trajectory, get_sb_environment
+from minisweagent.models import get_model
+from minisweagent.run.utils.save import save_traj
 
-from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl.train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
+from .mini_swe_utils import evaluate_trajectory, get_sb_environment
+from .stepwise_utils import (
+    MiniSWEStepOutput,
+    build_stepwise_outputs_from_messages,
+    build_stepwise_sampling_params,
+)
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.generators.utils import (
-    get_rollout_metrics,
-    get_response_ids_and_loss_mask_from_messages,
+from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
+from skyrl.train.generators.base import (
+    BatchMetadata,
+    GeneratorInput,
+    GeneratorOutput,
+    TrajectoryID,
+    TrainingPhase,
 )
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.utils import apply_overlong_filtering, get_rollout_metrics
 
 
 @dataclass
 class MiniSWEGeneratorConfig(GeneratorConfig):
     """Extended generator config with Mini-SWE-Agent-specific fields."""
 
+    batched: bool = False
+    step_wise_trajectories: bool = True
     miniswe_config_path: str = ""
     miniswe_traj_dir: str = ""
+
+    def __post_init__(self):
+        super().__post_init__()
 
 
 class DefaultAgentWithReminder(DefaultAgent):
@@ -106,7 +119,15 @@ def init_and_run(
                 eval_error = str(e)
                 error = str(e)
 
-            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
+            save_traj(
+                agent,
+                path,
+                exit_status=exit_status,
+                result=result,
+                extra_info=extra_info,
+                reward=reward,
+                eval_error=eval_error,
+            )  # type: ignore[arg-type]
 
     return (agent.messages if agent is not None else [], reward, error)
 
@@ -136,6 +157,14 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         self.model_name = model_name
         self.litellm_model_name = "openai/" + self.model_name
 
+        if not self.generator_cfg.step_wise_trajectories:
+            raise ValueError("MiniSWEAgentGenerator requires `generator.step_wise_trajectories=true`.")
+        if self.generator_cfg.batched:
+            raise ValueError("MiniSWEAgentGenerator does not support `generator.batched=true`.")
+        if not self.generator_cfg.inference_engine.enable_http_endpoint:
+            raise ValueError(
+                "MiniSWEAgentGenerator requires `generator.inference_engine.enable_http_endpoint=true`."
+            )
         if self.generator_cfg.chat_template.name_or_path is not None:
             raise NotImplementedError("MiniSWEAgentGenerator doesn't support custom chat template")
 
@@ -148,9 +177,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         sampling_params: Dict[str, Any],
         trajectory_id: TrajectoryID,
         batch_metadata: BatchMetadata,
-    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
-
+    ) -> Optional[list[MiniSWEStepOutput]]:
+        sampling_params = build_stepwise_sampling_params(sampling_params, trajectory_id)
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
+
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         messages, reward, error = await init_and_run.remote(
             env_extras["instance"],
@@ -164,54 +194,24 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             batch_metadata.training_phase,
         )
         if not len(messages):
-            return None, None, None, None, None, None
+            if error:
+                return None
+            return None
 
-        # TODO (sumanthrh): This is currently hardcoded for SWEBench with 2 initial messages (system and user).
-        response_messages = messages[2:]
-
-        for message in messages[:2]:
-            assert message["role"] in (
-                "system",
-                "user",
-            ), "Expected the first two messages to be system and user messages"
-
-        initial_input_ids = self.tokenizer.apply_chat_template(
-            messages[:2], add_generation_prompt=False, return_dict=False, tokenize=True
+        step_outputs = build_stepwise_outputs_from_messages(
+            messages=messages,
+            reward=reward,
+            trajectory_id=trajectory_id,
+            max_seq_len=max_tokens + max_input_length,
         )
-        initial_prompt_length = len(initial_input_ids)
-
-        # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory
-        last_idx = len(response_messages) - 1
-        while response_messages[last_idx]["role"] == "user":
-            last_idx -= 1
-        if last_idx < 0:
+        if not step_outputs:
             raise ValueError(
-                "Found no assistant messages. Please ensure that your environment is configured correctly and the `OPENAI_BASE_URL` points to the HTTP server from the inference engine client"
+                "Found no assistant responses with exact token metadata. Please ensure Mini-SWE-Agent is using "
+                "SkyRL's HTTP endpoint and exact token IDs/logprobs are enabled."
             )
-        response_messages = response_messages[: last_idx + 1]
-
-        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
-            response_messages,
-            self.tokenizer,
-            assistant_logprobs=None,
-        )
-
-        # Extract prompt ids
-        prompt_ids = initial_input_ids
-
-        # Calculate maximum response tokens allowed
-        max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-
-        # Determine stop reason
-        stop_reason = "complete"  # Default for trial completion
-        if len(response_ids) > max_response_tokens:
-            stop_reason = "length"
-
-        # Truncate to maximum allowed length
-        response_ids = response_ids[:max_response_tokens]
-        loss_mask = loss_mask[:max_response_tokens]
-
-        return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
+        if any(step_output.rollout_logprobs is None for step_output in step_outputs):
+            raise ValueError("MiniSWEAgentGenerator requires per-token rollout logprobs for every assistant turn.")
+        return step_outputs
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -227,6 +227,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         env_extras = input_batch["env_extras"]
         trajectory_ids = input_batch["trajectory_ids"]
         batch_metadata = input_batch["batch_metadata"]
+        if trajectory_ids is None:
+            raise ValueError("MiniSWEAgentGenerator requires `trajectory_ids` for step-wise training.")
+        if batch_metadata is None:
+            raise ValueError("MiniSWEAgentGenerator requires `batch_metadata` to save Mini-SWE trajectories.")
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
         sampling_params = get_sampling_params_for_backend(
@@ -250,17 +254,36 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         all_outputs = await asyncio.gather(*tasks)
 
-        # Filter out the `None` entries, which means that trajectory generation failed
-        responses = [output[0] for output in all_outputs if output[0] is not None]
-        rewards = [output[1] for output in all_outputs if output[0] is not None]
-        stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
-        loss_masks = [output[3] for output in all_outputs if output[0] is not None]
-        prompt_token_ids = [output[4] for output in all_outputs if output[0] is not None]
-        if not len(responses):
+        step_outputs = [
+            step_output
+            for trajectory_steps in all_outputs
+            if trajectory_steps is not None
+            for step_output in trajectory_steps
+        ]
+        if not step_outputs:
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
             )
+
+        responses = [step_output.response_ids for step_output in step_outputs]
+        rewards = [step_output.rewards for step_output in step_outputs]
+        stop_reasons = [step_output.stop_reason for step_output in step_outputs]
+        loss_masks = [step_output.loss_mask for step_output in step_outputs]
+        prompt_token_ids = [step_output.prompt_token_ids for step_output in step_outputs]
+        rollout_logprobs = []
+        for step_output in step_outputs:
+            assert step_output.rollout_logprobs is not None
+            rollout_logprobs.append(step_output.rollout_logprobs)
+        out_trajectory_ids = [step_output.trajectory_id for step_output in step_outputs]
+        is_last_step = [step_output.is_last_step for step_output in step_outputs]
+
         rollout_metrics = get_rollout_metrics(responses, rewards)
+
+        if self.generator_cfg.zero_reward_on_non_stop:
+            rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
+
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
@@ -269,7 +292,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
+            "rollout_logprobs": rollout_logprobs,
+            "trajectory_ids": out_trajectory_ids,
+            "rollout_expert_indices": None,
+            "is_last_step": is_last_step,
         }
 
         return generator_output
