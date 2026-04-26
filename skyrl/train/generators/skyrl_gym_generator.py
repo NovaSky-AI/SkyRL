@@ -20,7 +20,7 @@ import skyrl_gym
 from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
-    InferenceEngineInterface,
+    InferenceEngineOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -268,6 +268,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Hook: post-episode finalization. Default just calls ``env.get_metrics()``."""
         return env.get_metrics()
 
+    async def _call_inference_engine(
+        self,
+        engine_input: InferenceEngineInput,
+        env_extras: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        """Hook: dispatch one generation call. Default uses ``self.inference_engine_client``.
+
+        Subclasses may override to route per-rollout (e.g. RLM child rollouts that
+        should hit an external API engine stashed in ``env_extras``).
+        """
+        return await self.inference_engine_client.generate(engine_input)
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -277,7 +289,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        inference_engine_client: Optional[InferenceEngineInterface] = None,
     ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -296,9 +307,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_tokens: int
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
-            inference_engine_client: Optional ``InferenceEngineInterface`` to use for generation
-                instead of ``self.inference_engine_client``. Useful for child rollouts that need
-                to route through a different model (e.g. an external API engine).
         Returns:
             response_ids: List[int]
             reward: Union[float, List[float]]
@@ -311,9 +319,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         # This is no longer needed now given that step wise training is supported
         # TODO (sumanthrh): This path can be deprecated
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
-
-        # Use the override client if provided (e.g. child rollouts routed through an external API).
-        engine_client = inference_engine_client if inference_engine_client is not None else self.inference_engine_client
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -404,7 +409,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
-            engine_output = await engine_client.generate(engine_input)
+            engine_output = await self._call_inference_engine(engine_input, env_extras)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]

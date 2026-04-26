@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
     InferenceEngineInterface,
+    InferenceEngineOutput,
 )
 
 from .openrouter_engine import OpenRouterInferenceEngine
@@ -61,23 +62,23 @@ class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
-    via two hooks: ``_setup_env_extras`` and ``_finalize_episode``. A thin
-    ``generate`` wrapper resolves the batch-level RLM overrides
-    (``child_system_prompt``) once and stashes them on
-    ``self`` for the hooks. Child rollouts that should hit an external model
-    (when ``generator.child_openrouter_model`` is set) are routed via a
-    lazily-built ``OpenRouterInferenceEngine`` passed through ``agent_loop``'s
-    ``inference_engine_client`` parameter. Children are inlined into
-    ``step_outputs`` at the end of ``_finalize_episode`` so the base flattener
-    in ``generate()`` picks them up without needing a flatten hook override.
+    via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
+    ``_call_inference_engine``. A thin ``generate`` wrapper resolves the
+    batch-level RLM overrides (``child_system_prompt``) once and stashes them
+    on ``self`` for the hooks. Child rollouts that should hit an external model
+    (when ``generator.child_openrouter_model`` is set) get an
+    ``OpenRouterInferenceEngine`` built per-rollout in ``_setup_env_extras``,
+    stashed in ``env_extras["rlm_setup_state"]``, and consumed by
+    ``_call_inference_engine`` for that rollout's generation calls. Children
+    are inlined into ``step_outputs`` at the end of ``_finalize_episode`` so
+    the base flattener in ``generate()`` picks them up without needing a
+    flatten hook override.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Set per-call by ``generate``; read by hooks. Reset in finally.
         self._batch_rlm_overrides: Dict[str, Optional[str]] = {}
-        # Lazily built on first child rollout when child_openrouter_model is set.
-        self._openrouter_engine: Optional[InferenceEngineInterface] = None
 
     # ------------------------------------------------------------------
     # generate(): thin wrapper that resolves batch-level overrides once
@@ -152,23 +153,24 @@ class RLMGymGenerator(SkyRLGymGenerator):
         return env_extras
 
     # ------------------------------------------------------------------
-    # OpenRouter engine for child rollouts (when configured)
+    # Hook 3: per-rollout inference engine dispatch
     # ------------------------------------------------------------------
 
-    def _get_openrouter_engine(self) -> InferenceEngineInterface:
-        """Lazily build the OpenRouter engine used for child rollouts.
+    async def _call_inference_engine(
+        self,
+        engine_input: InferenceEngineInput,
+        env_extras: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        """Use the per-rollout engine override stashed in ``env_extras`` if present.
 
-        Built once per generator instance and reused across all child rollouts.
-        Returns an ``InferenceEngineInterface`` that can be passed directly to
-        ``agent_loop(inference_engine_client=...)``.
+        ``_run_child`` puts an ``OpenRouterInferenceEngine`` here for child rollouts
+        when ``child_openrouter_model`` is configured, so children hit the external
+        API while the parent stays on the policy engine.
         """
-        if self._openrouter_engine is None:
-            self._openrouter_engine = OpenRouterInferenceEngine(
-                model=getattr(self.generator_cfg, "child_openrouter_model"),
-                tokenizer=self.tokenizer,
-                base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
-            )
-        return self._openrouter_engine
+        engine = env_extras.get("inference_engine_override")
+        if engine is None:
+            return await super()._call_inference_engine(engine_input, env_extras)
+        return await engine.generate(engine_input)
 
     # ------------------------------------------------------------------
     # Hook 3: post-episode finalize
@@ -286,7 +288,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         extra_info = env_extras.get("extra_info")
         if isinstance(extra_info, dict):
             extra_info.pop("context_text", None)
-        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_setup_state"):
+        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_setup_state", "inference_engine_override"):
             env_extras.pop(k, None)
         # reward_spec.reward_fn is a callable injected by some flows; same treatment.
         reward_spec = env_extras.get("reward_spec")
@@ -494,8 +496,16 @@ class RLMGymGenerator(SkyRLGymGenerator):
         leaving the policy engine for the depth-0 agent.
         """
         use_openrouter = getattr(self.generator_cfg, "child_openrouter_model", None) is not None
-        # Resolve the engine the child should use. None means "inherit parent's policy engine".
-        child_engine: Optional[InferenceEngineInterface] = self._get_openrouter_engine() if use_openrouter else None
+        # Build the per-rollout external engine for children. None means children inherit the policy engine.
+        child_engine: Optional[InferenceEngineInterface] = (
+            OpenRouterInferenceEngine(
+                model=getattr(self.generator_cfg, "child_openrouter_model"),
+                tokenizer=self.tokenizer,
+                base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
+            )
+            if use_openrouter
+            else None
+        )
         child_system_prompt = self._batch_rlm_overrides.get("child_system_prompt")
 
         # Reverse lookup: paper text → paper_id, for child-call attribution.
@@ -518,6 +528,12 @@ class RLMGymGenerator(SkyRLGymGenerator):
             child_prompt = [{"role": "user", "content": prompt}]
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
             child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, engine=child_engine)
+            # Stash the per-rollout engine override on env_extras so the child's
+            # _call_inference_engine hook picks it up. None means "use the policy engine".
+            if child_engine is not None:
+                child_extras["inference_engine_override"] = child_engine
+            else:
+                child_extras.pop("inference_engine_override", None)
             if child_system_prompt:
                 child_extras["custom_system_prompt"] = child_system_prompt
             if context is not None:
@@ -539,7 +555,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 max_tokens=max_tokens,
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
-                inference_engine_client=child_engine,
             )
             if child_results is not None and isinstance(result, StepWiseOutput):
                 child_results.append(result)
