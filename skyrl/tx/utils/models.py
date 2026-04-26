@@ -129,6 +129,8 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
         path = (*path[:-1], "weight")
     elif path[-1] == "conv1d_weight":
         path = (*path[:-1], "conv1d", "weight")
+    elif path[-1] == "gate":
+        path = (*path[:-1], "gate", "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
     return prefix + ".".join(map(str, path))
