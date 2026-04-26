@@ -173,12 +173,12 @@ def get_fused_expert_key(path: tuple) -> str:
     return key
 
 
-def get_fused_expert_tensor(tensors: safetensors.numpy.safe_open, path: tuple) -> np.ndarray | None:
+def get_fused_expert_tensor(tensors: dict[str, np.ndarray], path: tuple) -> np.ndarray | None:
     """Extract an expert tensor from packed Qwen3.5 MoE expert weights if present."""
     key = get_fused_expert_key(path)
     if key not in tensors:
         return None
-    tensor = tensors.get_tensor(key)
+    tensor = tensors[key]
     param_name = path[-2]
     if param_name in {"gate_proj", "up_proj"}:
         midpoint = tensor.shape[1] // 2
