@@ -597,12 +597,10 @@ class Qwen3_5MLP(nnx.Module):
 class Qwen3_5MoeSparseMoeBlock(nnx.Module):
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.router = nnx.Linear(
+        self.gate = Param(
             config.hidden_size,
             config.num_experts,
-            use_bias=False,
             dtype=dtype,
-            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
             rngs=rngs,
         )
@@ -618,7 +616,7 @@ class Qwen3_5MoeSparseMoeBlock(nnx.Module):
         batch_size, seq_len, hidden_size = hidden_states.shape
         flat_hidden = hidden_states.reshape(-1, hidden_size)
         flat_adapter_indices = jnp.repeat(adapter_indices, seq_len) if adapter_indices is not None else None
-        router_logits = self.router(flat_hidden)
+        router_logits = flat_hidden @ self.gate[...]
         routing_weights = nnx.softmax(router_logits, axis=-1)
         routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
         routing_weights = routing_weights / routing_weights.sum(axis=-1, keepdims=True)
