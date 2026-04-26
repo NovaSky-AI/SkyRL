@@ -8,7 +8,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 import asyncio
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -62,22 +62,6 @@ class StepWiseOutput:
     """Output from a single agent_loop execution for step-wise training."""
 
     step_outputs: List[TrajectoryOutput]
-    child_outputs: List["StepWiseOutput"] = field(default_factory=list)
-
-    @property
-    def response_ids(self) -> List[int]:
-        """Concatenated response_ids across all steps (used by _run_child to decode child output)."""
-        ids: List[int] = []
-        for step in self.step_outputs:
-            ids.extend(step.response_ids)
-        return ids
-
-    @property
-    def env_metrics(self) -> Dict[str, Any]:
-        """Env metrics from the last step (used by _run_child for child chat history)."""
-        if self.step_outputs:
-            return self.step_outputs[-1].env_metrics
-        return {}
 
 
 @dataclass

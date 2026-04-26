@@ -204,13 +204,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
         child_index_by_step: Dict[int, int] = {}  # id(step_output) → child_index
 
         if isinstance(agent_loop_output, StepWiseOutput):
-            agent_loop_output.child_outputs = child_results
             # Inline children into step_outputs so the base flattener (in generate())
             # picks them up without needing a hook override. Children come first per
             # parent, sharing the parent's trajectory_id; the parent's last step
             # remains the final entry, so is_last_step still marks the trajectory end.
-            # `child_outputs` is retained as a structural marker (not flattened);
-            # nothing reads it anymore, but kept for now as a debugging aid.
             if getattr(self.generator_cfg, "train_child_trajectories", False) and child_results:
                 children_flat: List[TrajectoryOutput] = []
                 for child_idx, child in enumerate(child_results):
@@ -556,9 +553,12 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
             )
-            if child_results is not None and isinstance(result, StepWiseOutput):
-                child_results.append(result)
-            child_env_metrics = result.env_metrics if isinstance(result.env_metrics, dict) else {}
+            if isinstance(result, StepWiseOutput):
+                if child_results is not None:
+                    child_results.append(result)
+                child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
+            else:
+                child_env_metrics = result.env_metrics or {}
             child_final = child_env_metrics.get("final_answer")
             if child_call_tracker is not None:
                 paper_id = context_to_pid.get(context) if isinstance(context, str) else None
