@@ -228,8 +228,8 @@ def load_safetensors(
             assert num_experts is not None
             fused_tensor = get_fused_expert_tensor(tensors, path)
             if fused_tensor is not None:
+                arr = param[...]
                 if adapter_index is not None:
-                    arr = param[...]
                     adapter_slice = get_adapter_slice(path, adapter_index, rank)
                     assert adapter_slice is not None
                     arr = arr.at[get_adapter_idx(path, adapter_index)].set(
