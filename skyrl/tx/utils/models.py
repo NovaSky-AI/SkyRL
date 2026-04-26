@@ -179,12 +179,10 @@ def get_fused_expert_tensor(tensors: safetensors.numpy.safe_open, path: tuple) -
     if key not in tensors:
         return None
     tensor = tensors.get_tensor(key)
-    param_name = path[-1]
+    param_name = path[-2]
     if param_name in {"gate_proj", "up_proj"}:
         midpoint = tensor.shape[1] // 2
         tensor = tensor[:, :midpoint, :] if param_name == "gate_proj" else tensor[:, midpoint:, :]
-    if param_name == "down_proj":
-        return tensor
     return tensor.transpose(0, 2, 1)
 
 
