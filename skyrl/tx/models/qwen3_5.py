@@ -559,7 +559,9 @@ class Qwen3_5MLP(nnx.Module):
         intermediate_size: int | None = None,
     ) -> None:
         hidden_size = config.hidden_size
-        intermediate_size = intermediate_size or config.intermediate_size
+        intermediate_size = intermediate_size or getattr(config, "intermediate_size", None)
+        if intermediate_size is None:
+            intermediate_size = config.moe_intermediate_size
 
         self.gate_up_proj = FusedLoRALinear(
             hidden_size,
