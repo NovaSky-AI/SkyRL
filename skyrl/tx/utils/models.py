@@ -161,6 +161,33 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     return ".".join(map(str, path))
 
 
+def get_fused_expert_key(path: tuple) -> str:
+    """Return the packed expert tensor key used by Qwen3.5 MoE checkpoints."""
+    key = ".".join(map(str, path))
+    if key.endswith(".gate_proj.weight"):
+        return key.removesuffix(".gate_proj.weight") + ".gate_up_proj"
+    if key.endswith(".up_proj.weight"):
+        return key.removesuffix(".up_proj.weight") + ".gate_up_proj"
+    if key.endswith(".down_proj.weight"):
+        return key.removesuffix(".down_proj.weight") + ".down_proj"
+    return key
+
+
+def get_fused_expert_tensor(tensors: safetensors.numpy.safe_open, path: tuple) -> np.ndarray | None:
+    """Extract an expert tensor from packed Qwen3.5 MoE expert weights if present."""
+    key = get_fused_expert_key(path)
+    if key not in tensors:
+        return None
+    tensor = tensors.get_tensor(key)
+    param_name = path[-1]
+    if param_name in {"gate_proj", "up_proj"}:
+        midpoint = tensor.shape[1] // 2
+        tensor = tensor[:, :midpoint, :] if param_name == "gate_proj" else tensor[:, midpoint:, :]
+    if param_name == "down_proj":
+        return tensor
+    return tensor.transpose(0, 2, 1)
+
+
 def load_safetensors(
     checkpoint_dir: str | os.PathLike,
     config: ModelConfig,
@@ -201,6 +228,18 @@ def load_safetensors(
         if "experts" in path:
             num_experts = config.get_num_experts()
             assert num_experts is not None
+            fused_tensor = get_fused_expert_tensor(tensors, path)
+            if fused_tensor is not None:
+                array = fused_tensor
+                if adapter_index is not None:
+                    arr = arr.at[get_adapter_idx(path, adapter_index)].set(
+                        array[get_adapter_slice(path, adapter_index, rank)]
+                    )
+                    array = arr
+                if array.shape != arr.shape:
+                    raise RuntimeError(f"Shape mismatch for {get_fused_expert_key(path)}: {array.shape} vs {arr.shape}")
+                state.update(path, array.astype(arr.dtype))
+                continue
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
             missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
             if missing_keys:
