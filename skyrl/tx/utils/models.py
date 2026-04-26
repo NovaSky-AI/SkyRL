@@ -240,7 +240,7 @@ def load_safetensors(
                     array = fused_tensor
                 if array.shape != arr.shape:
                     raise RuntimeError(f"Shape mismatch for {get_fused_expert_key(path)}: {array.shape} vs {arr.shape}")
-                state.update(path, array.astype(arr.dtype))
+                param.set_raw_value(jax.device_put(array.astype(arr.dtype), param.sharding))
                 continue
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
             missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
