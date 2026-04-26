@@ -70,6 +70,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     import skyrl.tx.models.qwen3_5
 
     for architecture in config.architectures or []:
+        if architecture == "Qwen3_5MoeForConditionalGeneration":
+            return skyrl.tx.models.qwen3_5.Qwen3_5ForConditionalGeneration
         if hasattr(skyrl.tx.models.llama3, architecture):
             return getattr(skyrl.tx.models.llama3, architecture)
         if hasattr(skyrl.tx.models.qwen3, architecture):
