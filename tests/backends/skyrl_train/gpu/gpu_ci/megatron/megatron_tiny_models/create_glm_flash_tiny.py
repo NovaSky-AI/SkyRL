@@ -99,4 +99,4 @@ for i in range(1, len(model.model.layers)):
 
 model.save_pretrained(save_folder)
 print(f"\nModel saved to {save_folder}")
-print("Upload with: hf upload eatang/glm-4.7-flash-tiny-random " + save_folder)
+print("Upload with: hf upload <org_name>/glm-4.7-flash-tiny-random " + save_folder)

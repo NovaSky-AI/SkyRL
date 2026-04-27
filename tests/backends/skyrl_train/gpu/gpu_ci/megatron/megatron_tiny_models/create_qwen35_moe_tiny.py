@@ -101,3 +101,5 @@ if keys_to_remove:
         new_state_dict[f"{prefix}.down_proj"] = down
     save_file(new_state_dict, str(weights_path))
     print(f"Fused expert weights for {len(layers)} MoE layers")
+
+print("Upload with: huggingface-cli upload <org_name>/qwen35-moe-tiny-random " + save_folder)

@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_models.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py
 """
 
 import pytest
@@ -57,56 +57,6 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         cfg.trainer.use_sample_packing = False
     validate_cfg(cfg)
     return cfg
-
-
-def build_training_input_from_text_samples(
-    tokenizer: AutoTokenizer, prompt_response_pairs: list[tuple[str, str]]
-) -> TrainingInputBatch:
-    prompts = []
-    responses = []
-    rewards = []
-    loss_masks = []
-
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    for prompt_text, response_text in prompt_response_pairs:
-        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-        response_ids = tokenizer.encode(response_text, add_special_tokens=False)
-        if tokenizer.eos_token_id is not None and (not response_ids or response_ids[-1] != tokenizer.eos_token_id):
-            response_ids.append(tokenizer.eos_token_id)
-
-        prompts.append(prompt_ids)
-        responses.append(response_ids)
-        rewards.append([0.0] * len(response_ids))
-        loss_masks.append([1] * len(response_ids))
-
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
-        prompts=prompts,
-        responses=responses,
-        rewards=rewards,
-        loss_masks=loss_masks,
-    )
-
-    num_actions = response_mask.shape[1]
-    batch_size = sequences.shape[0]
-    training_input = TrainingInputBatch(
-        {
-            "sequences": sequences,
-            "attention_mask": attention_mask,
-            "response_mask": response_mask,
-            "rewards": rewards_t,
-            "loss_mask": loss_mask_t,
-            "rollout_logprobs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_mask": response_mask.to(dtype=torch.int64),
-        }
-    )
-    training_input.metadata = {"response_length": num_actions}
-    return training_input
 
 
 def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
@@ -320,6 +270,10 @@ async def test_logprobs_matching_roundtrip(
 
             logprobs_t_valid = logprobs_t[response_mask.bool()]
             logprobs_t_2_valid = logprobs_t_2[response_mask_2.bool()]
+
+            assert (
+                logprobs_t_valid.shape == logprobs_t_2_valid.shape
+            ), f"generator output shapes should match before and after sync, got {logprobs_t_valid.shape} and {logprobs_t_2_valid.shape}"
 
             logprobs_diff = (logprobs_t_valid - logprobs_t_2_valid).abs()
             print(

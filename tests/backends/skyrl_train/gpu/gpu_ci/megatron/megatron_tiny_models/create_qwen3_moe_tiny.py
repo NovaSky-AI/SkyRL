@@ -53,4 +53,4 @@ with torch.no_grad():
 
 model.save_pretrained(save_folder)
 print(f"\nModel saved to {save_folder}")
-print("Upload with: huggingface-cli upload eatang/qwen3-moe-tiny-random " + save_folder)
+print("Upload with: huggingface-cli upload <org_name>/qwen3-moe-tiny-random " + save_folder)
