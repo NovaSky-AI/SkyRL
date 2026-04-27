@@ -67,5 +67,5 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
-          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml --timeout 5000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron-models --timeout 5000
+          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml --timeout 1000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron-models --timeout 1000
