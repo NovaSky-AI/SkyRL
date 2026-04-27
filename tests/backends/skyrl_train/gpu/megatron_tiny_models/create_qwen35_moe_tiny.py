@@ -18,7 +18,7 @@ from transformers import (
 )
 
 source_model_id = "Qwen/Qwen3.5-35B-A3B"
-save_folder = "/tmp/erictang000/qwen35-moe-tiny-random"
+save_folder = "/tmp/qwen35-moe-tiny-random"
 
 processor = AutoProcessor.from_pretrained(source_model_id, trust_remote_code=True)
 processor.save_pretrained(save_folder)

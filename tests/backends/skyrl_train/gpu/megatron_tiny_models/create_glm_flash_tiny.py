@@ -13,7 +13,7 @@ from transformers import (
 )
 
 source_model_id = "zai-org/GLM-4.7-Flash"
-save_folder = "/tmp/eatang/glm-4.7-flash-tiny-random"
+save_folder = "/tmp/glm-4.7-flash-tiny-random"
 
 processor = AutoProcessor.from_pretrained(source_model_id, trust_remote_code=True)
 processor.save_pretrained(save_folder)

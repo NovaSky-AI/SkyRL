@@ -8,7 +8,7 @@ from transformers import (
 )
 
 source_model_id = "Qwen/Qwen3-235B-A22B"
-save_folder = "/tmp/eatang/qwen3-moe-tiny-random"
+save_folder = "/tmp/qwen3-moe-tiny-random"
 
 tokenizer = AutoTokenizer.from_pretrained(source_model_id, trust_remote_code=True)
 tokenizer.save_pretrained(save_folder)
