@@ -547,34 +547,6 @@ def ppo_policy_loss(
     surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
     loss = -torch.min(surr1, surr2)
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
-    # ppo-debug: dump scalar moments to surface gradient signal
-    try:
-        import torch as _t
-        _mask = loss_mask if loss_mask is not None else _t.ones_like(loss)
-        _denom = _mask.sum().clamp_min(1.0)
-        _ratio_mean = (ratio * _mask).sum() / _denom
-        _ratio_max = (ratio * _mask).max()
-        _ratio_min = (ratio + (1 - _mask) * 1e9).min()
-        _adv_abs_mean = (advantages.abs() * _mask).sum() / _denom
-        _adv_sum = (advantages * _mask).sum()
-        _loss_sum_dbg = (loss * _mask).sum()
-        _loss_min = (loss * _mask).min()
-        _loss_max = (loss * _mask).max()
-        _logp_mean = (log_probs * _mask).sum() / _denom
-        _old_logp_mean = (old_log_probs * _mask).sum() / _denom
-        print(
-            "ppo-debug:",
-            f"eps_low={config.eps_clip_low}",
-            f"eps_high={config.eps_clip_high}",
-            f"ratio[mean/min/max]={_ratio_mean.item():.4f}/{_ratio_min.item():.4f}/{_ratio_max.item():.4f}",
-            f"adv[abs_mean/sum]={_adv_abs_mean.item():.4f}/{_adv_sum.item():.4f}",
-            f"logp[cur_mean/old_mean]={_logp_mean.item():.4f}/{_old_logp_mean.item():.4f}",
-            f"loss[sum/min/max]={_loss_sum_dbg.item():.4f}/{_loss_min.item():.4f}/{_loss_max.item():.4f}",
-            f"mask_sum={_denom.item():.1f}",
-            flush=True,
-        )
-    except Exception as _e:
-        print(f"ppo-debug-error: {_e}", flush=True)
     clip_pg_losses1 = loss
     if config.policy_loss_type == "dual_clip":
         pg_losses3 = -advantages * config.clip_ratio_c
