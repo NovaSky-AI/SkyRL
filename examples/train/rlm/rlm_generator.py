@@ -9,7 +9,9 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, Callable, Dict, List, Optional
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from loguru import logger
 
@@ -58,6 +60,28 @@ _RUBRIC_RESPONSE_FORMAT = {
 }
 
 
+@dataclass
+class _RLMRolloutContext:
+    """Per-rollout (per-tree-node) state for an RLM rollout.
+
+    One entry lives in ``RLMGymGenerator.active_rollouts`` keyed by ``rid`` for
+    the lifetime of an ``agent_loop`` invocation. Roots and children share the
+    same shape; the tree is reconstructed from ``parent_rid`` / ``children_rids``.
+    """
+
+    rid: str
+    trajectory_id: Optional[str]              # shared across the whole tree
+    parent_rid: Optional[str]                 # None for root
+    depth: int                                # 0 for root, +1 per level
+    child_index: Optional[int]                # None for root; assigned at registration
+    children_rids: List[str] = field(default_factory=list)
+    output: Optional[Union["StepWiseOutput", "TrajectoryOutput"]] = None
+    judge_scores: Dict[str, Any] = field(default_factory=dict)
+    call_record: Optional[Dict[str, Any]] = None  # set on a child by its parent's _run_child
+    child_engine: Optional[InferenceEngineInterface] = None
+    child_system_prompt: Optional[str] = None
+
+
 class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
@@ -65,20 +89,31 @@ class RLMGymGenerator(SkyRLGymGenerator):
     via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
     ``_call_inference_engine``. A thin ``generate`` wrapper resolves the
     batch-level RLM overrides (``child_system_prompt``) once and stashes them
-    on ``self`` for the hooks. Child rollouts that should hit an external model
-    (when ``generator.child_openrouter_model`` is set) get an
-    ``OpenRouterInferenceEngine`` built per-rollout in ``_setup_env_extras``,
-    stashed in ``env_extras["rlm_setup_state"]``, and consumed by
-    ``_call_inference_engine`` for that rollout's generation calls. Children
-    are inlined into ``step_outputs`` at the end of ``_finalize_episode`` so
-    the base flattener in ``generate()`` picks them up without needing a
-    flatten hook override.
+    on ``self`` for the hooks.
+
+    Per-rollout state — including children, judge scores, and the per-rollout
+    inference engine override — lives in ``self.active_rollouts``, a dict keyed
+    by an opaque ``rid`` minted in ``_setup_env_extras`` and threaded through
+    ``env_extras["rlm_rollout_id"]``. Each parent and each child rollout gets
+    its own entry; children link back to their parent via ``parent_rid`` and
+    parents track children via ``children_rids``. The whole subtree is popped
+    in the root's ``_finalize_episode``.
+
+    Children are inlined into the root's ``step_outputs`` at the end of
+    ``_finalize_episode`` (root branch only) so the base flattener in
+    ``generate()`` picks them up without needing a flatten hook override.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Set per-call by ``generate``; read by hooks. Reset in finally.
         self._batch_rlm_overrides: Dict[str, Optional[str]] = {}
+        # Per-rollout registry keyed by rid. Populated in _setup_env_extras /
+        # _run_child; the whole subtree is popped in the root's
+        # _finalize_episode. CPython dict ops on distinct keys are atomic so no
+        # lock is needed for set/get/pop; do not iterate concurrently with
+        # mutation.
+        self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
 
     # ------------------------------------------------------------------
     # generate(): thin wrapper that resolves batch-level overrides once
@@ -110,12 +145,15 @@ class RLMGymGenerator(SkyRLGymGenerator):
         max_tokens: int,
         max_input_length: int,
     ) -> Dict[str, Any]:
-        """Inject lm_callback / subcall_fn / judge_reward_fn for RLM envs.
+        """Register this rollout in ``self.active_rollouts`` and inject hook callbacks.
 
-        Stashes ``judge_scores`` / ``child_results`` / ``child_call_tracker`` into
-        ``env_extras["rlm_setup_state"]`` — a per-rollout handoff to
-        ``_finalize_episode``. Lives on ``env_extras`` (not ``self``) so concurrent
-        rollouts can't stomp on each other's state.
+        Two entry paths:
+        - Root rollout: no ``rlm_rollout_id`` on ``env_extras`` yet. Mint a fresh
+          rid and register a new root context.
+        - Child rollout: ``_run_child`` has already registered the child context
+          and stamped ``env_extras["rlm_rollout_id"]`` before calling
+          ``agent_loop``. Reuse the existing context; just (re)inject callbacks
+          since the child's ``env_extras`` was stripped of parent callables.
         """
         if env_class != "rlm":
             return env_extras
@@ -123,34 +161,56 @@ class RLMGymGenerator(SkyRLGymGenerator):
         env_extras = dict(env_extras)
         env_extras["step_wise"] = self.generator_cfg.step_wise_trajectories
 
+        rid = env_extras.get("rlm_rollout_id")
+        if rid is None:
+            # Root: mint id and register fresh context.
+            rid = uuid.uuid4().hex[:8]
+            env_extras["rlm_rollout_id"] = rid
+            self.active_rollouts[rid] = _RLMRolloutContext(
+                rid=rid,
+                trajectory_id=None,  # filled in by _finalize_episode (it has trajectory_id)
+                parent_rid=None,
+                depth=0,
+                child_index=None,
+                child_system_prompt=self._batch_rlm_overrides.get("child_system_prompt"),
+                child_engine=self._build_child_engine_if_configured(),
+            )
+        # else: child context already registered by _run_child; nothing to add here.
+
         judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
         enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
 
-        child_results: List[StepWiseOutput] = []
-        child_call_tracker: List[Dict[str, Any]] = []
-        judge_scores: Dict[str, Any] = {}
-
         loop = asyncio.get_running_loop()
         if "lm_callback" not in env_extras:
-            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            # Non-root nodes route in-REPL llm_query() through child_engine when configured;
+            # roots stay on the policy engine. Mirrors the _call_inference_engine routing.
+            ctx = self.active_rollouts[rid]
+            lm_engine = ctx.child_engine if ctx.parent_rid is not None else None
+            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, engine=lm_engine)
             if enable_child_agents:
                 env_extras["subcall_fn"] = self._make_subcall_fn(
-                    loop, env_extras, sampling_params, max_tokens, max_input_length,
-                    child_results=child_results,
-                    child_call_tracker=child_call_tracker,
+                    loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
                 )
 
         if judge_reward_model:
-            env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, judge_scores)
+            env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, rid)
 
-        # Per-rollout handoff to _finalize_episode. Lives on env_extras (not self) so
-        # concurrent rollouts each have their own copy and can't overwrite each other's.
-        env_extras["rlm_setup_state"] = {
-            "child_results": child_results,
-            "child_call_tracker": child_call_tracker,
-            "judge_scores": judge_scores,
-        }
         return env_extras
+
+    def _build_child_engine_if_configured(self) -> Optional[InferenceEngineInterface]:
+        """Build a per-rollout OpenRouter engine if ``child_openrouter_model`` is set.
+
+        Returned engine is shared by all children spawned from this root (and
+        their descendants). ``None`` means children inherit the policy engine.
+        """
+        model = getattr(self.generator_cfg, "child_openrouter_model", None)
+        if model is None:
+            return None
+        return OpenRouterInferenceEngine(
+            model=model,
+            tokenizer=self.tokenizer,
+            base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
+        )
 
     # ------------------------------------------------------------------
     # Hook 3: per-rollout inference engine dispatch
@@ -161,16 +221,20 @@ class RLMGymGenerator(SkyRLGymGenerator):
         engine_input: InferenceEngineInput,
         env_extras: Dict[str, Any],
     ) -> InferenceEngineOutput:
-        """Use the per-rollout engine override stashed in ``env_extras`` if present.
+        """Route to the per-rollout child engine if this rollout is a child.
 
-        ``_run_child`` puts an ``OpenRouterInferenceEngine`` here for child rollouts
-        when ``child_openrouter_model`` is configured, so children hit the external
-        API while the parent stays on the policy engine.
+        Reads ``rlm_rollout_id`` off ``env_extras`` and looks up the context in
+        ``self.active_rollouts``. Children carry a ``child_engine`` reference
+        (an ``OpenRouterInferenceEngine``) when ``child_openrouter_model`` is
+        configured. Roots have ``child_engine`` set too — but they shouldn't
+        use it for their *own* generation, only pass it down. Hence: only
+        non-root nodes route through it.
         """
-        engine = env_extras.get("inference_engine_override")
-        if engine is None:
-            return await super()._call_inference_engine(engine_input, env_extras)
-        return await engine.generate(engine_input)
+        rid = env_extras.get("rlm_rollout_id")
+        ctx = self.active_rollouts.get(rid) if rid else None
+        if ctx is not None and ctx.parent_rid is not None and ctx.child_engine is not None:
+            return await ctx.child_engine.generate(engine_input)
+        return await super()._call_inference_engine(engine_input, env_extras)
 
     # ------------------------------------------------------------------
     # Hook 3: post-episode finalize
@@ -186,7 +250,18 @@ class RLMGymGenerator(SkyRLGymGenerator):
         prompt: ConversationType,
         trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
-        # For non-RLM rollouts, fall back to the base behavior.
+        """Finalize one node of the rollout tree.
+
+        Non-root nodes do the minimum: fold judge_scores into env_metrics, stamp
+        their own per-step ``rlm_metadata`` from fields already on their context,
+        and stash ``agent_loop_output`` on their context for the root to pick up.
+
+        The root does the structural work: walk the tree via ``children_rids``
+        (DFS preorder by registration order), inline descendants' step_outputs,
+        promote the trajectory-level summary onto the root's final step,
+        compute ``child_rlm_metrics`` over the whole tree, then pop the entire
+        subtree from ``self.active_rollouts``.
+        """
         if env_class != "rlm":
             return await super()._finalize_episode(
                 env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id
@@ -194,32 +269,63 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         env_metrics = env.get_metrics()
 
-        setup = env_extras.get("rlm_setup_state") or {}
-        child_results: List[StepWiseOutput] = setup.get("child_results", [])
-        child_call_tracker: List[Dict[str, Any]] = setup.get("child_call_tracker", [])
-        judge_scores: Dict[str, Any] = setup.get("judge_scores", {})
+        rid = env_extras.get("rlm_rollout_id")
+        ctx = self.active_rollouts.get(rid) if rid else None
+        if ctx is None:
+            # Defensive: should not happen if _setup_env_extras ran. Fall back to
+            # base behavior so we don't crash a training run.
+            logger.warning(f"_finalize_episode: missing context for rid={rid!r}")
+            return env_metrics
 
-        # Track which steps came from which child (by index in child_results) so we can
-        # stamp depth/child_index metadata onto each step's env_metrics below.
-        child_index_by_step: Dict[int, int] = {}  # id(step_output) → child_index
+        # trajectory_id is only available here (not in _setup_env_extras), so
+        # backfill it onto the context. For children, _run_child already copied
+        # the parent's trajectory_id at registration time; this only matters for
+        # roots, where it's None until now.
+        tid_str = trajectory_id.to_string() if trajectory_id is not None else None
+        if ctx.trajectory_id is None:
+            ctx.trajectory_id = tid_str
 
+        # Local: judge scores merge into env_metrics for every node.
+        if ctx.judge_scores:
+            env_metrics.update(ctx.judge_scores)
+
+        # Local: stamp per-step rlm_metadata using fields already on ctx.
         if isinstance(agent_loop_output, StepWiseOutput):
-            # Inline children into step_outputs so the base flattener (in generate())
-            # picks them up without needing a hook override. Children come first per
-            # parent, sharing the parent's trajectory_id; the parent's last step
-            # remains the final entry, so is_last_step still marks the trajectory end.
-            if getattr(self.generator_cfg, "train_child_trajectories", False) and child_results:
-                children_flat: List[TrajectoryOutput] = []
-                for child_idx, child in enumerate(child_results):
-                    for step in child.step_outputs:
-                        child_index_by_step[id(step)] = child_idx
-                        children_flat.append(step)
+            for step_index, step in enumerate(agent_loop_output.step_outputs):
+                step.env_metrics["rlm_metadata"] = {
+                    "trajectory_id": ctx.trajectory_id,
+                    "depth": ctx.depth,
+                    "child_index": ctx.child_index,
+                    "step_index": step_index,
+                }
+
+        # Stash output for an ancestor to read.
+        ctx.output = agent_loop_output
+
+        # Non-root: done. Parent / root will inline us.
+        if ctx.parent_rid is not None:
+            return env_metrics
+
+        # ---- Root branch: tree-walk and collapse ----
+
+        descendants = self._dfs_descendants(rid)  # preorder, excludes root
+
+        # Inline descendants' step_outputs ahead of the root's. Root's last step
+        # remains the final entry so is_last_step still marks the trajectory end.
+        if isinstance(agent_loop_output, StepWiseOutput) \
+           and getattr(self.generator_cfg, "train_child_trajectories", False) \
+           and descendants:
+            children_flat: List[TrajectoryOutput] = []
+            for d in descendants:
+                if d.output is None or not isinstance(d.output, StepWiseOutput):
+                    continue
+                children_flat.extend(d.output.step_outputs)
+            if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
-        if judge_scores:
-            env_metrics.update(judge_scores)
-
-        if child_call_tracker:
+        # Whole-tree call records → child_rlm_metrics.
+        call_records = [d.call_record for d in descendants if d.call_record is not None]
+        if call_records:
             from skyrl_gym.envs.rlm.evidence_tools import compute_child_rlm_metrics
 
             reward_spec = env_extras.get("reward_spec") or {}
@@ -238,61 +344,49 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 parent_context = ctx_raw
 
             if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) and parent_context:
-                child_rlm_metrics = compute_child_rlm_metrics(child_call_tracker, evidence, parent_context)
+                child_rlm_metrics = compute_child_rlm_metrics(call_records, evidence, parent_context)
                 env_metrics.update(child_rlm_metrics)
                 if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
                     agent_loop_output.step_outputs[-1].env_metrics.update(child_rlm_metrics)
 
-        # Stamp per-step rlm_metadata onto each step's env_metrics so the upstream eval
-        # dump (dump_per_dataset_eval_results) carries enough info to reconstruct the
-        # parent/child structure of each rollout from the JSONL alone. Trajectory-level
-        # fields (final_answer, turns_used) live only on the parent's last step row.
+        # Promote trajectory-level summary onto root's final step.
         if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
-            tid_str = trajectory_id.to_string() if trajectory_id is not None else None
-            num_children_steps = len(agent_loop_output.step_outputs) - sum(
-                1 for s in agent_loop_output.step_outputs if id(s) not in child_index_by_step
-            )
-            parent_step_index = 0
-            child_step_index_by_idx: Dict[int, int] = {}
-            for step in agent_loop_output.step_outputs:
-                child_idx = child_index_by_step.get(id(step))
-                meta: Dict[str, Any] = {"trajectory_id": tid_str}
-                if child_idx is not None:
-                    meta["depth"] = 1
-                    meta["child_index"] = child_idx
-                    meta["step_index"] = child_step_index_by_idx.get(child_idx, 0)
-                    child_step_index_by_idx[child_idx] = child_step_index_by_idx.get(child_idx, 0) + 1
-                else:
-                    meta["depth"] = 0
-                    meta["child_index"] = None
-                    meta["step_index"] = parent_step_index
-                    parent_step_index += 1
-                step.env_metrics["rlm_metadata"] = meta
+            agent_loop_output.step_outputs[-1].env_metrics["rlm_metadata"].update({
+                "final_answer": env_metrics.get("final_answer"),
+                "turns_used":   env_metrics.get("turns_used"),
+                "evidence":     (env_extras.get("reward_spec") or {}).get("evidence"),
+                "num_children": len(ctx.children_rids),
+            })
 
-            # Promote trajectory-level summary onto the parent's final step.
-            agent_loop_output.step_outputs[-1].env_metrics["rlm_metadata"].update(
-                {
-                    "final_answer": env_metrics.get("final_answer"),
-                    "turns_used": env_metrics.get("turns_used"),
-                    "evidence": (env_extras.get("reward_spec") or {}).get("evidence"),
-                    "num_children": len(child_results),
-                }
-            )
+        # Tear down the whole subtree (root + every descendant) in one pass.
+        for r in [rid, *(d.rid for d in descendants)]:
+            self.active_rollouts.pop(r, None)
 
-        # Drop the (potentially huge) context payload and internal-only callables from
-        # env_extras now that the rollout is done. This makes env_extras safe to JSON-
-        # serialize in the upstream eval dump (dump_per_dataset_eval_results).
+        # Drop callables and the (potentially huge) context payload off env_extras
+        # so it's JSON-serializable for dump_per_dataset_eval_results.
         extra_info = env_extras.get("extra_info")
         if isinstance(extra_info, dict):
             extra_info.pop("context_text", None)
-        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_setup_state", "inference_engine_override"):
+        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_rollout_id"):
             env_extras.pop(k, None)
-        # reward_spec.reward_fn is a callable injected by some flows; same treatment.
         reward_spec = env_extras.get("reward_spec")
         if isinstance(reward_spec, dict):
             reward_spec.pop("reward_fn", None)
 
         return env_metrics
+
+    def _dfs_descendants(self, rid: str) -> List[_RLMRolloutContext]:
+        """DFS preorder over descendants of ``rid``, in registration order. Excludes ``rid`` itself."""
+        out: List[_RLMRolloutContext] = []
+        stack: List[str] = list(reversed(self.active_rollouts[rid].children_rids))
+        while stack:
+            cur = stack.pop()
+            ctx = self.active_rollouts.get(cur)
+            if ctx is None:
+                continue
+            out.append(ctx)
+            stack.extend(reversed(ctx.children_rids))
+        return out
 
     # ==================================================================
     # RLM-specific helpers (called by hooks above)
@@ -340,7 +434,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         loop: asyncio.AbstractEventLoop,
         env_extras: Dict[str, Any],
         prompt: ConversationType,
-        judge_scores: Optional[Dict[str, Any]] = None,
+        rid: str,
     ) -> Callable[[str], float]:
         """Score the final answer with an LLM judge. Replaces F1 reward when judge_reward_model is set."""
         import ast as _ast
@@ -464,9 +558,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
             precision = result.get("precision_score", 0) / 10.0
             recall = result.get("recall_score", 0) / 10.0
-            if judge_scores is not None:
-                judge_scores["judge_precision"] = precision
-                judge_scores["judge_recall"] = recall
+            ctx = self.active_rollouts.get(rid)
+            if ctx is not None:
+                ctx.judge_scores["judge_precision"] = precision
+                ctx.judge_scores["judge_recall"] = recall
             return (precision + recall) / 2.0
 
         def judge_reward_fn(final_answer: str) -> float:
@@ -481,58 +576,68 @@ class RLMGymGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]],
         max_tokens: int,
         max_input_length: int,
-        child_results: Optional[List] = None,
-        child_call_tracker: Optional[List] = None,
+        parent_rid: str,
     ) -> Callable[[str], str]:
         """Build a sync ``subcall_fn`` exposed to the parent's REPL as ``rlm_query``.
 
-        Spawns a child agent_loop with stripped extras (no ``lm_callback``/``subcall_fn``
-        from the parent) so the base hook re-injects fresh ones. When
-        ``child_openrouter_model`` is set, the child's agent_loop and its
-        ``lm_callback`` are both routed through an ``OpenRouterInferenceEngine``,
-        leaving the policy engine for the depth-0 agent.
-        """
-        use_openrouter = getattr(self.generator_cfg, "child_openrouter_model", None) is not None
-        # Build the per-rollout external engine for children. None means children inherit the policy engine.
-        child_engine: Optional[InferenceEngineInterface] = (
-            OpenRouterInferenceEngine(
-                model=getattr(self.generator_cfg, "child_openrouter_model"),
-                tokenizer=self.tokenizer,
-                base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
-            )
-            if use_openrouter
-            else None
-        )
-        child_system_prompt = self._batch_rlm_overrides.get("child_system_prompt")
+        Each invocation registers a child ``_RLMRolloutContext`` in
+        ``self.active_rollouts`` (linked to ``parent_rid``), then spawns a child
+        ``agent_loop``. The child's ``_setup_env_extras`` sees the pre-stamped
+        ``rlm_rollout_id`` and reuses the existing context. The child's
+        ``_finalize_episode`` parks its output on its context; the root's
+        finalize collects it via the tree.
 
+        The child's call record (paper_id / final_answer / had_final_answer) is
+        written onto the child's own context, not into a closure list. The root
+        gathers all descendants' records via DFS.
+
+        When ``child_openrouter_model`` is set, the parent's context carries a
+        ``child_engine``; we propagate it down so descendants share one engine.
+        """
         # Reverse lookup: paper text → paper_id, for child-call attribution.
         context_to_pid: Dict[str, str] = {}
-        if child_call_tracker is not None:
-            extra_info = env_extras.get("extra_info") or {}
-            if isinstance(extra_info, dict):
-                ctx_raw = extra_info.get("context_text")
-                if isinstance(ctx_raw, str):
-                    try:
-                        decoded = json.loads(ctx_raw)
-                        if isinstance(decoded, dict):
-                            context_to_pid = {v: k for k, v in decoded.items()}
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                elif isinstance(ctx_raw, dict):
-                    context_to_pid = {v: k for k, v in ctx_raw.items()}
+        extra_info = env_extras.get("extra_info") or {}
+        if isinstance(extra_info, dict):
+            ctx_raw = extra_info.get("context_text")
+            if isinstance(ctx_raw, str):
+                try:
+                    decoded = json.loads(ctx_raw)
+                    if isinstance(decoded, dict):
+                        context_to_pid = {v: k for k, v in decoded.items()}
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            elif isinstance(ctx_raw, dict):
+                context_to_pid = {v: k for k, v in ctx_raw.items()}
 
         async def _run_child(prompt: str, context=None) -> str:
-            child_prompt = [{"role": "user", "content": prompt}]
+            parent_ctx = self.active_rollouts.get(parent_rid)
+            if parent_ctx is None:
+                # Parent torn down between subcall registration and execution —
+                # should not happen, but degrade gracefully.
+                logger.warning(f"_run_child: parent context {parent_rid!r} is gone")
+                return ""
+
+            child_rid = uuid.uuid4().hex[:8]
+            child_ctx = _RLMRolloutContext(
+                rid=child_rid,
+                trajectory_id=parent_ctx.trajectory_id,
+                parent_rid=parent_rid,
+                depth=parent_ctx.depth + 1,
+                child_index=len(parent_ctx.children_rids),
+                child_engine=parent_ctx.child_engine,
+                child_system_prompt=parent_ctx.child_system_prompt,
+            )
+            self.active_rollouts[child_rid] = child_ctx
+            parent_ctx.children_rids.append(child_rid)
+
+            # Build child env_extras: strip parent callables (child's
+            # _setup_env_extras will re-inject), pre-stamp child_rid so the
+            # hook reuses the registered context.
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, engine=child_engine)
-            # Stash the per-rollout engine override on env_extras so the child's
-            # _call_inference_engine hook picks it up. None means "use the policy engine".
-            if child_engine is not None:
-                child_extras["inference_engine_override"] = child_engine
-            else:
-                child_extras.pop("inference_engine_override", None)
-            if child_system_prompt:
-                child_extras["custom_system_prompt"] = child_system_prompt
+            child_extras["rlm_rollout_id"] = child_rid
+
+            if child_ctx.child_system_prompt:
+                child_extras["custom_system_prompt"] = child_ctx.child_system_prompt
             if context is not None:
                 child_extra_info = dict(child_extras.get("extra_info", {}) or {})
                 if isinstance(context, str):
@@ -545,28 +650,29 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 # closing over the child's own context.
                 child_extras["reward_spec"] = {"ground_truth": None}
                 child_extras.pop("custom_tools", None)
+
             result = await self.agent_loop(
-                prompt=child_prompt,
+                prompt=[{"role": "user", "content": prompt}],
                 env_class="rlm",
                 env_extras=child_extras,
                 max_tokens=max_tokens,
                 max_input_length=max_input_length,
                 sampling_params=sampling_params,
             )
+
             if isinstance(result, StepWiseOutput):
-                if child_results is not None:
-                    child_results.append(result)
                 child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
             else:
                 child_env_metrics = result.env_metrics or {}
             child_final = child_env_metrics.get("final_answer")
-            if child_call_tracker is not None:
-                paper_id = context_to_pid.get(context) if isinstance(context, str) else None
-                child_call_tracker.append({
-                    "paper_id": paper_id,
-                    "final_answer": child_final,
-                    "had_final_answer": child_final is not None,
-                })
+
+            # Attribution record lives on the child's context; root's finalize
+            # gathers them via DFS over the tree.
+            child_ctx.call_record = {
+                "paper_id": context_to_pid.get(context) if isinstance(context, str) else None,
+                "final_answer": child_final,
+                "had_final_answer": child_final is not None,
+            }
             return child_final or ""
 
         def subcall_fn(prompt: str, context=None) -> str:
