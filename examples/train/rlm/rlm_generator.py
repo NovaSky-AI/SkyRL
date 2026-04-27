@@ -22,7 +22,7 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
 )
 
-from .openrouter_engine import OpenRouterInferenceEngine
+from skyrl.backends.skyrl_train.inference_engines.openrouter_engine import OpenRouterInferenceEngine
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     AgentLoopState,
