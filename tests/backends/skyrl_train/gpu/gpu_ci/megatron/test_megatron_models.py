@@ -193,7 +193,7 @@ async def construct_training_input_from_generator_output(generator_output, token
 
 
 @pytest.mark.asyncio
-@pytest.mark.megatron
+@pytest.mark.megatron_models
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold",
     [
