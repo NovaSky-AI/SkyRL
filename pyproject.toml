@@ -131,10 +131,6 @@ megatron = [
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
-mamba = [
-    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-]
-
 flashrl = [
     "skyrl[skyrl-train]",
     # NOTE: Custom vLLM wheel must be installed separately.
