@@ -1177,7 +1177,7 @@ def compute_grpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    grpo_norm_by_std: bool = True,
+    grpo_norm_by_std: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1271,7 +1271,7 @@ def compute_advantages_and_returns(
     adv_estimator: AdvantageEstimator,
     config: AlgorithmConfig,
     values: Optional[torch.Tensor] = None,
-    grpo_norm_by_std: bool = True,
+    grpo_norm_by_std: bool = False,
     gamma=1.0,
     lambd=1.0,
     **kwargs,

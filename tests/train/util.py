@@ -31,7 +31,6 @@ def example_dummy_config():
             use_kl_loss=True,
             kl_loss_coef=0.0,
             loss_reduction="token_mean",
-            grpo_norm_by_std=True,
         ),
     )
     generator_cfg = GeneratorConfig(
