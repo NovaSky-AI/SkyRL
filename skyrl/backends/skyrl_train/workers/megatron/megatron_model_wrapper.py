@@ -232,8 +232,17 @@ class MegatronModelWrapper:
         # Build config for loss function, applying any overrides
         loss_config = self.cfg.algorithm
         if loss_fn_config is not None:
-
-            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
+            # Translate Tinker JAX-style keys to SkyRL Megatron AlgorithmConfig field names.
+            tinker_to_megatron = {
+                "clip_low_threshold": "eps_clip_low",
+                "clip_high_threshold": "eps_clip_high",
+            }
+            translated_loss_fn_config = {
+                tinker_to_megatron.get(k, k): v for k, v in loss_fn_config.items()
+            }
+            new_loss_config = OmegaConf.merge(
+                OmegaConf.create(asdict(loss_config)), OmegaConf.create(translated_loss_fn_config)
+            )
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
 
