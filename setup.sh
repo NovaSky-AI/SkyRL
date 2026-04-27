@@ -17,7 +17,7 @@ apt update && apt-get install build-essential libnuma-dev && apt install -y tmux
 # Ideally I can do configuration here with env variables, not there yet
 
 # Prepare dataset 
-python examples/train/rlm/rlm_dataset.py
-python examples/train/rlm/multi_paper_dataset.py
-python examples/train/rlm/rlm_dataset_synthetic_multi.py
+python examples/train/rlm/datasets/rlm_dataset_qasper.py
+python examples/train/rlm/datasets/multi_paper_dataset.py
+python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py
 

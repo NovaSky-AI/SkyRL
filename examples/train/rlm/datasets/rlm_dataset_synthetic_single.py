@@ -15,8 +15,8 @@ Each example:
 - reward_spec.evidence: list of ground-truth text spans used to compute F1 reward
 
 Run:
-    uv run -- python examples/train/rlm/rlm_dataset_synthetic_single.py --output_dir ~/data/rlm-synthetic
-    uv run -- python examples/train/rlm/rlm_dataset_synthetic_single.py --output_dir ~/data/rlm-synthetic --n_val 200 --no_test
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_single.py --output_dir ~/data/rlm-synthetic
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_single.py --output_dir ~/data/rlm-synthetic --n_val 200 --no_test
 """
 
 import argparse

@@ -13,8 +13,8 @@ Each example:
   (reward_fn and search/extract_section tools are built at runtime by the generator)
 
 Run:
-    uv run -- python examples/train/rlm/rlm_dataset_qasper.py --output_dir ~/data/rlm
-    uv run -- python examples/train/rlm/rlm_dataset_qasper.py --output_dir ~/data/rlm --n_eval 200
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_qasper.py --output_dir ~/data/rlm
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_qasper.py --output_dir ~/data/rlm --n_eval 200
 """
 
 import argparse

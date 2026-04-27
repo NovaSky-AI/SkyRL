@@ -15,8 +15,8 @@ Each output example:
 - env_class: "rlm"
 
 Run:
-    uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir ~/data/multi-paper
-    uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir ~/data/multi-paper --n_val 200
+    uv run -- python examples/train/rlm/datasets/multi_paper_dataset.py --output_dir ~/data/multi-paper
+    uv run -- python examples/train/rlm/datasets/multi_paper_dataset.py --output_dir ~/data/multi-paper --n_val 200
 """
 
 import argparse

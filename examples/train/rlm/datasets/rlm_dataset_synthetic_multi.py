@@ -15,8 +15,8 @@ Each example:
 - reward_spec.evidence: list of {paperId, selections: [{text}]} (ground-truth spans, multipaper F1 reward)
 
 Run:
-    uv run -- python examples/train/rlm/rlm_dataset_synthetic_multi.py --output_dir ~/data/rlm-synthetic-multi
-    uv run -- python examples/train/rlm/rlm_dataset_synthetic_multi.py --output_dir ~/data/rlm-synthetic-multi --n_val 200 --no_test
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py --output_dir ~/data/rlm-synthetic-multi
+    uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py --output_dir ~/data/rlm-synthetic-multi --n_val 200 --no_test
 """
 
 import argparse

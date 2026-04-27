@@ -2,8 +2,8 @@ set -x
 
 # Multi-paper RLM eval-only: generate rollouts and report metrics (no training).
 #
-# 1. Create data: uv run -- python examples/train/rlm/multi_paper_dataset.py --output_dir $DATA_DIR
-# 2. Run: bash examples/train/rlm/run_multi_paper_eval.sh
+# 1. Create data: uv run -- python examples/train/rlm/datasets/multi_paper_dataset.py --output_dir $DATA_DIR
+# 2. Run: bash examples/train/rlm/eval_scripts/run_multi_paper_eval.sh
 #
 # ---------------------------------------------------------------------------
 # Fast iteration: forward to an already-running vLLM server
