@@ -51,7 +51,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
 
         cfg.trainer.flash_attn = False
-    if "qwen3.5" or "Qwen3.5" in model_name:
+    if "qwen3.5" in model_name.lower():
         # sample packing not yet supported for GDN
         # https://github.com/NVIDIA/Megatron-LM/pull/2644
         cfg.trainer.use_sample_packing = False
@@ -214,7 +214,6 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
-        pytest.param(),
     ],
 )
 async def test_logprobs_matching_roundtrip(
