@@ -11,6 +11,7 @@ from jaxtyping import Float, Integer
 from pytest import approx
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.ppo_utils import reduce_loss
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
@@ -130,6 +131,34 @@ def test_calculate_kl_create_experience_batched(dummy_config):
     assert metrics["avg_kl_max"] == approx(0.3143, abs=1e-4)
     # Note; the raw KL mean is 0.054, but then the masked mean is different.
     assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
+
+
+def test_normalize_advantages_prefers_max_response_length(dummy_config, dummy_generator):
+    dummy_config.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+    dummy_config.trainer.algorithm.max_seq_len = 99
+    dummy_config.trainer.algorithm.max_response_length = 5
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "advantages": torch.tensor([[2.0, 3.0], [9.0, 12.0]]),
+            "response_mask": torch.tensor([[1.0, 1.0], [1.0, 1.0]]),
+            "loss_mask": torch.tensor([[1.0, 1.0], [1.0, 0.0]]),
+        }
+    )
+    normalized = trainer._normalize_advantages(data, [(0, 2)])
+
+    loss = reduce_loss(normalized["advantages"], normalized["loss_mask"])
+    assert torch.allclose(loss, torch.tensor(1.4))
 
 
 @patch("skyrl.backends.skyrl_train.utils.ppo_utils.compute_advantages_and_returns", new_callable=MagicMock)

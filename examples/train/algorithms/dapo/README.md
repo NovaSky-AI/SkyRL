@@ -97,6 +97,10 @@ def skyrl_entrypoint(cfg):
 To add the overlong buffer length and penalty factor parameters to the config, you can subclass ``AlgorithmConfig`` with additional fields and use ``make_config`` to create a custom config class. See ``main_dapo.py`` for the full example:
 
 ```bash
+trainer.algorithm.max_response_length=1024 \
 trainer.algorithm.overlong_buffer_len=512 \
 trainer.algorithm.overlong_buffer_penalty_factor=1.0 \
 ```
+
+When `trainer.algorithm.max_response_length` is unset, the examples fall back to
+`generator.sampling_params.max_generate_length` for backward compatibility.
