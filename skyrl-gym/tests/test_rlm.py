@@ -6,7 +6,7 @@ All tests use mock callbacks — no real LLM or inference engine required.
 
 import pytest
 import skyrl_gym
-from skyrl_gym.tools.repl import PersistentREPL
+from skyrl_gym.envs.rlm.repl import PersistentREPL
 
 
 # ---------------------------------------------------------------------------

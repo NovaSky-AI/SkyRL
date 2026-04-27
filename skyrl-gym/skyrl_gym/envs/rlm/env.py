@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from skyrl_gym.tools.repl import PersistentREPL, REPLResult
+from .repl import PersistentREPL, REPLResult, _iter_tool_entries
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +370,17 @@ def _format_context_metadata(context_payload) -> str:
     )
 
 
+def _format_tools_for_prompt(custom_tools: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Format custom tools for inclusion in the system prompt."""
+    lines = []
+    for name, value, description in _iter_tool_entries(custom_tools):
+        if callable(value):
+            lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom function")
+        else:
+            lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom {type(value).__name__} value")
+    return "\n".join(lines) if lines else None
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -533,8 +544,7 @@ class RLMEnv(BaseTextEnv):
                 "- `rlm_query_batched(prompts)` — batch recursive calls in parallel, returns list[str]"
             )
         if self.rlm_config.custom_tools:
-            from skyrl_gym.tools.repl import format_tools_for_prompt
-            tools_formatted = format_tools_for_prompt(self.rlm_config.custom_tools)
+            tools_formatted = _format_tools_for_prompt(self.rlm_config.custom_tools)
             if tools_formatted:
                 section_num = 5 if self.lm_callback is not None else 4
                 custom_tools_section += f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"

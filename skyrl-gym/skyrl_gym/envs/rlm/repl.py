@@ -407,10 +407,6 @@ class PersistentREPL:
             )
 
 
-# ---------------------------------------------------------------------------
-# Custom tool helpers (ported from rlm/rlm/environments/base_env.py)
-# ---------------------------------------------------------------------------
-
 def _iter_tool_entries(custom_tools: Optional[Dict[str, Any]]):
     """Yield (name, value, description) for each custom tool.
 
@@ -426,17 +422,3 @@ def _iter_tool_entries(custom_tools: Optional[Dict[str, Any]]):
             yield name, entry["tool"], desc if isinstance(desc, str) else None
         else:
             yield name, entry, None
-
-
-def format_tools_for_prompt(custom_tools: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Format custom tools for inclusion in the system prompt.
-
-    Returns a formatted string describing available tools, or None if no tools.
-    """
-    lines = []
-    for name, value, description in _iter_tool_entries(custom_tools):
-        if callable(value):
-            lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom function")
-        else:
-            lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom {type(value).__name__} value")
-    return "\n".join(lines) if lines else None
