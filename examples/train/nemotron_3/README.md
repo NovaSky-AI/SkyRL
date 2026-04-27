@@ -27,4 +27,3 @@ On GSM8K with 8xH100/A100 GPUs, the model reaches ~96% pass@1 within 20 epochs. 
 ### Notes
 
 - Numerical differences between HF and Megatron forward passes are higher for this hybrid architecture (~0.9 max, ~0.17 avg) compared to pure transformer models (~0.3 max, ~0.05 avg), likely due to implementation differences. The vLLM-vs-Megatron logprob difference is ~0.01 on average, similar to other models like Qwen 2.5.
-- The `nano-v3` branch of Megatron-Bridge also supports other Nemotron-H variants (Nemotron-H, Nemotron-Nano-V2-VL).

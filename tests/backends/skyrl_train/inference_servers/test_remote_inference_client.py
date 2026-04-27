@@ -115,19 +115,44 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def render_chat_completion(request: Request):
         body = await request.json()
         messages = body.get("messages", [])
-        has_multimodal = any(
-            isinstance(msg.get("content"), list) and any(c.get("type") == "image_url" for c in msg["content"])
+
+        # Count image_url parts across all messages.
+        num_images = sum(
+            1
             for msg in messages
+            if isinstance(msg.get("content"), list)
+            for c in msg["content"]
+            if c.get("type") == "image_url"
         )
+
         features = None
-        if has_multimodal:
+        if num_images > 0:
+            # Each image gets 100 placeholder tokens.  Token IDs are laid out as:
+            # [0..3] preamble, then 100 tokens per image, then [N..N+5] suffix.
+            placeholder_size = 100
+            preamble_len = 4
+            total_len = preamble_len + num_images * placeholder_size + 6
+
+            mm_hashes = []
+            mm_placeholders = []
+            kwargs_items = []
+            for i in range(num_images):
+                offset = preamble_len + i * placeholder_size
+                mm_hashes.append(f"hash-{i}")
+                mm_placeholders.append({"offset": offset, "length": placeholder_size})
+                kwargs_items.append(f"mock-encoded-tensor-{i}")
+
             features = {
-                "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
-                "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+                "mm_hashes": {"image": mm_hashes},
+                "mm_placeholders": {"image": mm_placeholders},
+                "kwargs_data": {"image": kwargs_items},
             }
+        else:
+            total_len = 10
+
         return {
             "request_id": f"chatcmpl-mock-{server_id}",
-            "token_ids": list(range(110)) if has_multimodal else list(range(10)),
+            "token_ids": list(range(total_len)),
             "features": features,
             "sampling_params": {"temperature": 0.7, "max_tokens": 100},
             "model": body.get("model", "test"),
@@ -236,6 +261,7 @@ async def client(mock_servers):
     client = RemoteInferenceClient(
         proxy_url=mock_servers["proxy_url"],
         server_urls=mock_servers["server_urls"],
+        data_parallel_size=1,
     )
     yield client
     await client.teardown()
@@ -250,6 +276,7 @@ class TestRemoteInferenceClientInit:
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
             model_name="test-model",
+            data_parallel_size=1,
         )
 
         # Pickle and unpickle
@@ -434,7 +461,7 @@ class TestWeightSync:
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
 
-            def for_servers(self, world_size_per_server, num_servers):
+            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
                 return [self] * num_servers
 
             def to_api_payload(self):
@@ -581,6 +608,79 @@ class TestSample:
         assert result["prompt_logprobs"] is None
         assert result["topk_prompt_logprobs"] is None
 
+    @pytest.mark.asyncio
+    async def test_sample_with_image(self, client):
+        """Sample with [text, image, text] calls render and splices tokens correctly."""
+        import base64
+
+        image_bytes = base64.b64encode(b"fake-jpeg-data").decode("ascii")
+        request_payload = {
+            "json": {
+                "prompt": {
+                    "chunks": [
+                        {"type": "encoded_text", "tokens": [100, 101, 102]},
+                        {
+                            "type": "image",
+                            "data": image_bytes,
+                            "format": "jpeg",
+                        },
+                        {"type": "encoded_text", "tokens": [200, 201]},
+                    ]
+                },
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert "tokens" in seq
+        assert "logprobs" in seq
+        assert seq["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_with_image_asset_pointer(self, client):
+        """Sample with image_asset_pointer sends location URL to render."""
+        request_payload = {
+            "json": {
+                "prompt": {
+                    "chunks": [
+                        {"type": "encoded_text", "tokens": [10, 11]},
+                        {
+                            "type": "image_asset_pointer",
+                            "format": "png",
+                            "location": "https://example.com/image.png",
+                        },
+                        {"type": "encoded_text", "tokens": [20, 21]},
+                    ]
+                },
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_sample_text_only_no_features(self, client):
+        """Text-only sample does not include features in the generate payload."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"type": "encoded_text", "tokens": [1, 2, 3]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
 
 class TestRenderChatCompletion:
     """Test render_chat_completion method (multimodal and text-only)."""
@@ -640,8 +740,9 @@ class TestRenderChatCompletion:
         assert result["kv_transfer_params"] is None
 
         assert result["features"] == {
-            "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+            "mm_hashes": {"image": ["hash-0"]},
             "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+            "kwargs_data": {"image": ["mock-encoded-tensor-0"]},
         }
 
 
@@ -682,6 +783,7 @@ class TestContextManager:
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
         )
 
         async with client:

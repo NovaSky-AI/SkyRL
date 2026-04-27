@@ -9,7 +9,7 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 from ray import ObjectRef
@@ -69,6 +69,10 @@ class WorkerDispatch:
 
         # GPU state tracking (only matters when colocated)
         self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
+
+    def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
+        self._actor_groups[model] = actor_group
+        self._gpu_state[model] = GPUState()
 
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
@@ -150,7 +154,13 @@ class WorkerDispatch:
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:
-            self._gpu_state[model] = GPUState()
+            self.mark_as_offloaded(model)
+
+    def mark_as_offloaded(self, model: str) -> None:
+        """Mark a specific model as offloaded without changing others."""
+        if model not in self._actor_groups:
+            return
+        self._gpu_state[model] = GPUState()
 
     def forward(self, model: str, data: TrainingInputBatch) -> TrainingOutputBatch:
         """Run inference forward pass. Only loads model (not optimizer)."""
@@ -162,24 +172,28 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def stage_data(self, model: str, data: TrainingInputBatch, mini_batch_size: int) -> List[List[ObjectRef]]:
-        """
-        Pre-stage all mini-batch chunks in the Ray object store.
+    def stage_data(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        mini_batch_boundaries: List[Tuple[int, int]],
+    ) -> List[List[ObjectRef]]:
+        """Pre-stage mini-batch chunks in the Ray object store.
 
         Call this once before the training loop so that all serialization is
         done upfront and GPUs stay saturated during training.
 
         Args:
-            model: Model name (used to look up DP size)
-            data: Full training batch
-            mini_batch_size: Size of each mini-batch (before DP chunking)
+            model: Model name (used to look up DP size).
+            data: Full training batch.
+            mini_batch_boundaries: List of ``(start, end)`` index pairs.
+                The i-th mini-batch is data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
         Returns:
-            ``result[i][dp_rank]`` is the ObjectRef for mini-batch *i*,
-            DP rank *dp_rank*.
+            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_size)
+        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries)
 
     def forward_backward(
         self,
@@ -193,10 +207,11 @@ class WorkerDispatch:
         Args:
             model: Model identifier ("policy", "critic", or "ref")
             data: Training batch data
-            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
-                     If provided, overrides the config's policy_loss_type.
+            loss_fn: Optional resolved train loss name (for example, "cross_entropy"
+                     or "regular"). Public Tinker aliases like "ppo" should be
+                     normalized before dispatch.
             loss_fn_config: Optional config overrides for the loss function
-                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+                           (e.g., {"eps_clip_low": 0.1} for the regular PPO loss)
 
         Returns:
             Dictionary of training metrics
@@ -284,6 +299,11 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
+
+    def set_algorithm_config(self, model: str, **kwargs) -> None:
+        """Update algorithm config fields on all workers for a model."""
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
@@ -382,10 +402,10 @@ class WorkerDispatch:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model."""
+        """Finish weight sync: offload model weights and optimizer state."""
         if not self.colocate_all:
             return
-        self._offload("policy", offload_optimizer=False, offload_model=True)
+        self._offload("policy", offload_optimizer=True, offload_model=True)
 
     async def save_weights_for_sampler(self) -> None:
         """

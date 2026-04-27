@@ -5,7 +5,13 @@ import pytest
 import ray
 import torch
 
-from skyrl.backends.skyrl_train.training_batch import TensorBatch, TensorList
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorBatch,
+    TensorList,
+    TrainingInput,
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 
 
 def test_train_batch_initialization():
@@ -520,3 +526,174 @@ def test_tensor_batch_none_tensor_list():
     pickled = pickle.dumps(batch)
     unpickled = pickle.loads(pickled)
     assert unpickled["pixel_values"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for pad_training_input_batch
+# ---------------------------------------------------------------------------
+
+
+# The canonical set of TrainingInput fields. Adding a new field to the TrainingInput TypedDict
+# without updating `pad_training_input_batch()` and this set will make
+# `test_pad_batch_typeddict_matches_expected_fields` fail, forcing the author to decide how the
+# new field should be padded.
+EXPECTED_TRAINING_INPUT_FIELDS = {
+    "sequences",
+    "attention_mask",
+    "loss_mask",
+    "response_mask",
+    "action_log_probs",
+    "base_action_log_probs",
+    "values",
+    "returns",
+    "advantages",
+    "kl",
+    "rewards",
+    "rollout_logprobs",
+    "rollout_expert_indices",
+    "pixel_values",
+    "image_grid_thw",
+}
+
+
+def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> TrainingInputBatch:
+    """Build a TrainingInputBatch populated with every TrainingInput field.
+
+    ``pixel_values`` and ``image_grid_thw`` use variable per-row shapes to exercise TensorList.
+    """
+    torch.manual_seed(0)
+    data = {
+        "sequences": torch.arange(batch_size * seq_len).reshape(batch_size, seq_len).long(),
+        "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+        "loss_mask": torch.ones(batch_size, seq_len, dtype=torch.float),
+        "response_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+        "action_log_probs": torch.randn(batch_size, seq_len),
+        "base_action_log_probs": torch.randn(batch_size, seq_len),
+        "values": torch.randn(batch_size, seq_len),
+        "returns": torch.randn(batch_size, seq_len),
+        "advantages": torch.randn(batch_size, seq_len),
+        "kl": torch.randn(batch_size, seq_len),
+        "rewards": torch.randn(batch_size, seq_len),
+        "rollout_logprobs": torch.randn(batch_size, seq_len),
+        "rollout_expert_indices": torch.randint(0, 8, (batch_size, seq_len, 2, 3), dtype=torch.long),
+        "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
+        "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
+    }
+    batch = TrainingInputBatch(data)
+    batch.metadata = {
+        "uids": [f"u{i}" for i in range(batch_size)],
+        "is_last_step": [i % 2 == 1 for i in range(batch_size)],  # [False, True, False, True, ...]
+        "response_length": seq_len,
+    }
+    return batch
+
+
+def test_pad_batch_typeddict_matches_expected_fields():
+    """
+    Guard: if TrainingInput gains a new field, bump EXPECTED_TRAINING_INPUT_FIELDS and make sure it is
+    well handled by pad_training_input_batch().
+    """
+    typed_dict_fields = set(TrainingInput.__annotations__.keys())
+    assert typed_dict_fields == EXPECTED_TRAINING_INPUT_FIELDS, (
+        "TrainingInput fields changed. Update EXPECTED_TRAINING_INPUT_FIELDS AND make sure "
+        "pad_training_input_batch() handles the new field."
+    )
+
+
+def test_pad_batch_all_fields():
+    """Comprehensive test: pad_training_input_batch pads every field correctly.
+
+    Verifies: all tensor fields have correct batch dim, original rows are untouched,
+    loss_mask padding is zero, other tensor padding is row-0 clones, TensorList padding
+    is row-0 clones, metadata (uids, is_last_step) is extended correctly, and
+    the input batch is not mutated.
+    """
+    batch_size, seq_len, pad_size = 4, 5, 3
+    batch = _make_full_training_batch(batch_size=batch_size, seq_len=seq_len)
+
+    # Sanity: the test fixture must exercise every TrainingInput field.
+    assert (
+        set(batch.keys()) == EXPECTED_TRAINING_INPUT_FIELDS
+    ), "Test fixture is missing TrainingInput fields; update _make_full_training_batch."
+
+    # Snapshot input metadata before padding to verify immutability.
+    original_uids = list(batch.metadata["uids"])
+    original_is_last_step = list(batch.metadata["is_last_step"])
+
+    padded = pad_training_input_batch(batch, pad_size=pad_size)
+    assert padded.batch_size == batch_size + pad_size
+    assert set(padded.keys()) == EXPECTED_TRAINING_INPUT_FIELDS, "Padded batch is missing TrainingInput fields"
+
+    # --- Tensor fields ---
+    for key in EXPECTED_TRAINING_INPUT_FIELDS:
+        value = padded[key]
+        assert value is not None, f"Field {key!r} became None after padding"
+        assert len(value) == batch_size + pad_size, f"Field {key!r} has wrong batch dim"
+
+    # loss_mask: original rows untouched, padding rows all-zero.
+    assert torch.equal(padded["loss_mask"][:batch_size], batch["loss_mask"])
+    assert torch.all(padded["loss_mask"][batch_size:] == 0)
+
+    # Regular tensor fields (not loss_mask, not TensorList): original rows untouched,
+    # padding rows are copies of row 0.
+    regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {"loss_mask", "pixel_values", "image_grid_thw"}
+    for key in regular_tensor_keys:
+        assert torch.equal(padded[key][:batch_size], batch[key]), f"Original rows changed for {key!r}"
+        for i in range(batch_size, batch_size + pad_size):
+            assert torch.equal(padded[key][i], batch[key][0]), f"Padding row {i} of {key!r} is not row 0"
+
+    # TensorList fields (pixel_values, image_grid_thw): original rows untouched,
+    # padding rows are clones of row 0.
+    for key in ("pixel_values", "image_grid_thw"):
+        tl = padded[key]
+        assert isinstance(tl, TensorList)
+        for i in range(batch_size):
+            assert torch.equal(tl[i], batch[key][i]), f"Original TensorList row {i} changed for {key!r}"
+        for i in range(batch_size, batch_size + pad_size):
+            assert torch.equal(tl[i], batch[key][0]), f"TensorList padding row {i} of {key!r} is not row 0"
+
+    # --- Metadata ---
+    assert padded.metadata["uids"] == [f"u{i}" for i in range(batch_size)] + [f"pad{i}" for i in range(pad_size)]
+    assert padded.metadata["is_last_step"] == [i % 2 == 1 for i in range(batch_size)] + [True] * pad_size
+    assert padded.metadata["pad_size"] == pad_size
+    assert padded.metadata["response_length"] == seq_len
+
+    # --- Input immutability ---
+    assert batch.metadata["uids"] == original_uids, "pad_training_input_batch mutated input uids"
+    assert (
+        batch.metadata["is_last_step"] == original_is_last_step
+    ), "pad_training_input_batch mutated input is_last_step"
+
+
+def test_pad_batch_zero_pad_size_returns_same_batch():
+    batch = _make_full_training_batch(batch_size=3, seq_len=5)
+    padded = pad_training_input_batch(batch, pad_size=0)
+    assert padded is batch
+
+
+def test_pad_batch_rejects_non_cpu_device():
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA available")
+    batch = _make_full_training_batch(batch_size=2, seq_len=5)
+    cuda_data = {
+        "sequences": batch["sequences"].cuda(),
+        "loss_mask": batch["loss_mask"].cuda(),
+    }
+    cuda_batch = TrainingInputBatch(cuda_data)
+    cuda_batch.metadata = {"uids": ["u0", "u1"]}
+    with pytest.raises(AssertionError, match="expects batch on CPU"):
+        pad_training_input_batch(cuda_batch, pad_size=1)
+
+
+def test_pad_batch_preserves_none_fields():
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.arange(12).reshape(3, 4).long(),
+            "loss_mask": torch.ones(3, 4, dtype=torch.float),
+            "values": None,
+        }
+    )
+    batch.metadata = {"uids": ["a", "b", "c"]}
+    padded = pad_training_input_batch(batch, pad_size=1)
+    assert padded["values"] is None
+    assert padded.batch_size == 4

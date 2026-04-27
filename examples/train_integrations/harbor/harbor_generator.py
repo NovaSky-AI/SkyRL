@@ -5,14 +5,15 @@ from typing import List, Optional
 from loguru import logger
 from uuid import uuid4
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
+from skyrl.train.generators.utils import get_rollout_metrics
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 from tqdm import tqdm
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
+from harbor.models.agent.rollout_detail import RolloutDetail
 
 # Suppress LiteLLM verbose logging
 
@@ -29,15 +30,158 @@ MAX_NUM_RETRIES_PER_TRIAL = 2
 
 
 @dataclass
-class HarborAgentOutput:
-    response_ids: List[int]
-    reward: float
-    stop_reason: str
-    loss_mask: List[int]
-    prompt_ids: List[int]
+class HarborTrajectoryOutput:
+    """One trajectory's raw output from Harbor.
+
+    Holds the entire ``rollout_details`` from ``agent_result``. Per-step interpretation
+    (loss-mask / reward broadcast / overlong filtering) is done downstream in
+    `build_step_wise_generator_output`.
+    """
+
     trajectory_id: TrajectoryID
-    summarization_count: Optional[int] = None
-    num_turns: Optional[int] = None
+    # Entire rollout_details list as returned by harbor's agent_result. None for failed trajectories
+    # (agent_timeout / error) that we will mask in `build_step_wise_generator_output`.
+    rollout_details: Optional[List[RolloutDetail]] = None
+    reward: float = 0.0
+    num_turns: int = 0
+    # One of: "complete", "context_length", "agent_timeout", "error". Used by
+    # `build_step_wise_generator_output` to decide whether to skip the entire prompt group.
+    stop_reason: str = "complete"
+
+
+def build_step_wise_generator_output(
+    trajectory_outputs: List[HarborTrajectoryOutput], overlong_filtering: bool
+) -> GeneratorOutput:
+    """Flatten per-trajectory rollout details into one entry per LLM turn.
+
+    Steps for one trajectory are emitted contiguously and the last step has
+    ``is_last_step=True``. Failures (timeout / unknown error / empty rollout
+    details) are batched per ``instance_id``: if any rollout for prompt P
+    failed, all rollouts for P are replaced with single zeroed-out
+    placeholder steps.
+    """
+    # 1. Identify failed instances. If any rollout for prompt P failed, mask all rollouts for P (conservative).
+    timeout_instance_ids = set()
+    error_instance_ids = set()
+    all_instance_ids = set()
+    num_timeout_trajectories = 0
+    num_error_trajectories = 0
+    for traj in trajectory_outputs:
+        instance_id = traj.trajectory_id.instance_id
+        all_instance_ids.add(instance_id)
+        if traj.stop_reason == "agent_timeout":
+            num_timeout_trajectories += 1
+            timeout_instance_ids.add(instance_id)
+        elif traj.stop_reason == "error" or traj.rollout_details is None:
+            num_error_trajectories += 1
+            error_instance_ids.add(instance_id)
+    masked_instance_ids = timeout_instance_ids | error_instance_ids
+
+    # 2. Walk trajectories and emit one entry of GeneratorOutput per step.
+    prompt_token_ids: List[List[int]] = []
+    response_ids: List[List[int]] = []
+    rewards: List[float] = []
+    loss_masks: List[List[int]] = []
+    stop_reasons: List[str] = []
+    is_last_step_list: List[bool] = []
+    out_trajectory_ids: List[TrajectoryID] = []
+    rollout_logprobs_list: List[List[float]] = []
+
+    successful_trajectories: List[HarborTrajectoryOutput] = []
+    response_ids_for_metrics: List[List[int]] = []
+    rewards_for_metrics: List[float] = []
+    for traj in trajectory_outputs:
+        tid = traj.trajectory_id
+
+        # 2.1. For failed trajectories, set loss mask to [0] and stop reason to "error".
+        if tid.instance_id in masked_instance_ids:
+            prompt_token_ids.append([0])
+            response_ids.append([0])
+            rewards.append(0.0)
+            loss_masks.append([0])
+            stop_reasons.append("error")
+            is_last_step_list.append(True)
+            out_trajectory_ids.append(tid)
+            rollout_logprobs_list.append([0.0])
+            continue
+
+        # 2.2. For successful trajectories, emit one entry per step.
+        successful_trajectories.append(traj)
+
+        # 2.3. Check rollout_details expected format.
+        # Expect no summarization; rollout_details is a single linear chat segment from the main agent.
+        # TODO(Charlie): Support summarization.
+        assert len(traj.rollout_details) == 1, f"Expected exactly one rollout segment, got {len(traj.rollout_details)}."
+        rollout_detail = traj.rollout_details[0]
+        prompt_token_ids_per_turn = rollout_detail["prompt_token_ids"]
+        completion_token_ids_per_turn = rollout_detail["completion_token_ids"]
+        logprobs_per_turn = rollout_detail["logprobs"]
+        n_turns = len(completion_token_ids_per_turn)
+        assert len(prompt_token_ids_per_turn) == n_turns and len(logprobs_per_turn) == n_turns, (
+            f"Malformed rollout_details (prompts={len(prompt_token_ids_per_turn)}, completions={n_turns}, "
+            f"logprobs={len(logprobs_per_turn)})."
+        )
+
+        # 2.4. Emit one entry per step, following SkyRL's step-wise convention.
+        for t in range(n_turns):
+            comp_ids = completion_token_ids_per_turn[t]
+            p_ids = prompt_token_ids_per_turn[t]
+            lp = logprobs_per_turn[t]
+            assert len(lp) == len(comp_ids), "logprobs and completion token ids must have the same length."
+
+            # Record actual reward in last turn, and zeros for all other turns.
+            is_last = t == n_turns - 1
+            reward = traj.reward if is_last else 0.0
+
+            # Loss mask.
+            step_loss_mask = [1] * len(comp_ids)
+            step_stop_reason = "complete"
+            if traj.stop_reason == "context_length":
+                step_stop_reason = "context_length"
+                if overlong_filtering:
+                    step_loss_mask = [0] * len(comp_ids)
+
+            prompt_token_ids.append(p_ids)
+            response_ids.append(comp_ids)
+            rewards.append(reward)
+            loss_masks.append(step_loss_mask)
+            stop_reasons.append(step_stop_reason)
+            is_last_step_list.append(is_last)
+            out_trajectory_ids.append(tid)
+            rollout_logprobs_list.append(lp)
+
+        # 2.5. For trajectory-level metrics, record the last turn's prompt IDs and response IDs which
+        # contains the entire trajectory.
+        response_ids_for_metrics.append(prompt_token_ids_per_turn[-1] + completion_token_ids_per_turn[-1])
+        rewards_for_metrics.append(traj.reward)
+
+    # 3. Aggregate trajectory-level metrics for logging.
+    if successful_trajectories:
+        rollout_metrics = get_rollout_metrics(response_ids_for_metrics, rewards_for_metrics)
+        rollout_metrics["generate/trajectories_context_length_exceeded"] = sum(
+            1 for t in successful_trajectories if t.stop_reason == "context_length"
+        )
+        rollout_metrics["generate/avg_num_turns"] = sum(t.num_turns for t in successful_trajectories) / len(
+            successful_trajectories
+        )
+    else:
+        rollout_metrics = {}
+
+    rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
+    rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
+    rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
+
+    return GeneratorOutput(
+        prompt_token_ids=prompt_token_ids,
+        response_ids=response_ids,
+        rewards=rewards,
+        loss_masks=loss_masks,
+        stop_reasons=stop_reasons,
+        rollout_metrics=rollout_metrics,
+        rollout_logprobs=rollout_logprobs_list,
+        trajectory_ids=out_trajectory_ids,
+        is_last_step=is_last_step_list,
+    )
 
 
 class HarborGenerator(GeneratorInterface):
@@ -63,8 +207,16 @@ class HarborGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
 
-        # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
-        # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
+        if not getattr(generator_cfg, "step_wise_trajectories", False):
+            raise ValueError(
+                "HarborGenerator only supports step-wise training. " "Set generator.step_wise_trajectories=true."
+            )
+        if not getattr(generator_cfg, "merge_stepwise_output", False):
+            logger.warning(
+                "merge_stepwise_output=true is not set; will not merge step-wise outputs. This "
+                "may result in much slower training."
+            )
+
         self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
         # Set model_name and api_base once (constant across all trials)
@@ -77,26 +229,29 @@ class HarborGenerator(GeneratorInterface):
         ] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
+        # Step-wise needs per-turn token IDs and logprobs from vLLM via Harbor.
+        agent_kwargs = self._harbor_trial_config_template["agent"]["kwargs"]
+        if not agent_kwargs.get("collect_rollout_details", False):
+            logger.warning("step_wise_trajectories=true requires collect_rollout_details=true; enabling automatically.")
+            agent_kwargs["collect_rollout_details"] = True
+
+        # Can support summarization in future.
+        if agent_kwargs.get("enable_summarize", False):
+            raise ValueError(
+                "step_wise_trajectories=true is incompatible with enable_summarize=true. "
+                "Set harbor_trial_config.agent.kwargs.enable_summarize=false."
+            )
+
         logger.info(
             f"HarborGenerator initialized with Harbor config. "
             f"Agent: {self._harbor_trial_config_template.get('agent', {}).get('name')}, "
             f"Trials dir: {self._harbor_trial_config_template.get('trials_dir', 'trials')}"
         )
 
-        # Read custom chat template
-        custom_chat_template_path = ie_cfg.engine_init_kwargs.get("chat_template", None)
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template_content = f.read()
-            logger.info(f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}")
-        else:
-            self.custom_chat_template_content = None
-
-        # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
         rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         prompts = input_batch["prompts"]
         trajectory_ids = input_batch["trajectory_ids"]
 
@@ -104,11 +259,12 @@ class HarborGenerator(GeneratorInterface):
             raise ValueError("`trajectory_ids` is required in the input batch")
         if len(prompts) != len(trajectory_ids):
             raise ValueError(
-                f"Prompt count ({len(prompts)}) doesn't match " f"trajectory_ids count ({len(trajectory_ids)})"
+                f"Prompt count ({len(prompts)}) doesn't match trajectory_ids count ({len(trajectory_ids)})"
             )
 
-        all_outputs: List[HarborAgentOutput] = [None] * len(prompts)  # type: ignore[list-item]
+        all_outputs: List[HarborTrajectoryOutput] = [None] * len(prompts)  # type: ignore[list-item]
         progress = tqdm(
+            disable=disable_tqdm,  # disable for fully async training
             total=len(prompts),
             desc="Generating Trajectories",
             miniters=max(1, len(prompts) // 10),
@@ -116,7 +272,7 @@ class HarborGenerator(GeneratorInterface):
         )
 
         async def _worker(idx, prompt, trajectory_id):
-            result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            result = await self._harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
             all_outputs[idx] = result
             progress.update(1)
 
@@ -126,110 +282,27 @@ class HarborGenerator(GeneratorInterface):
                     tg.create_task(_worker(idx, prompt, trajectory_id))
         finally:
             progress.close()
-        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
-        generator_output: GeneratorOutput = {
-            "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": [output.response_ids for output in all_outputs],
-            "rewards": [output.reward for output in all_outputs],
-            "loss_masks": [output.loss_mask for output in all_outputs],
-            "stop_reasons": [output.stop_reason for output in all_outputs],
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
-        }
-
-        return generator_output
-
-    @staticmethod
-    def _mask_failed_instances_and_compute_metrics(
-        all_outputs: List[HarborAgentOutput],
-    ) -> tuple[List[HarborAgentOutput], dict]:
-        """Mutates all_outputs in-place: zeros out every output belonging to a failed instance.
-
-        For a group of trajectories (n_samples_per_prompt for the same prompt),
-        if one trajectory fails we skip training the entire group.
-
-        Returns:
-            all_outputs: The same list, with failed-instance outputs zeroed out.
-            rollout_metrics: Dict of rollout metrics for logging.
-        """
-        # Count failures by type before grouping overwrites stop_reason.
-        num_timeout_trajectories = 0
-        num_error_trajectories = 0
-        timeout_instance_ids = set()
-        error_instance_ids = set()
-        all_instance_ids = set()
-        for output in all_outputs:
-            cur_instance_id = output.trajectory_id.instance_id
-            all_instance_ids.add(cur_instance_id)
-            if output.stop_reason == "agent_timeout":
-                num_timeout_trajectories += 1
-                timeout_instance_ids.add(cur_instance_id)
-            elif output.stop_reason == "error":
-                num_error_trajectories += 1
-                error_instance_ids.add(cur_instance_id)
-
-        masked_instance_ids = timeout_instance_ids | error_instance_ids
-
-        # Zero-out all outputs belonging to any timeout or error instance so we skip training on them.
-        successful_outputs: List[HarborAgentOutput] = []
-        for output in all_outputs:
-            if output.trajectory_id.instance_id in masked_instance_ids:
-                output.response_ids = [0]
-                output.stop_reason = "error"
-                output.loss_mask = [0]
-                output.prompt_ids = [0]
-                output.reward = 0
-            else:
-                successful_outputs.append(output)
-
-        # Rollout metrics for successful outputs.
-        if len(successful_outputs) > 0:
-            rollout_metrics = get_rollout_metrics(
-                [output.response_ids for output in successful_outputs],
-                [output.reward for output in successful_outputs],
-            )
-            rollout_metrics["generate/trajectories_summarized"] = sum(
-                1 for output in successful_outputs if output.summarization_count > 0
-            )
-            rollout_metrics["generate/trajectories_context_length_exceeded"] = sum(
-                1 for output in successful_outputs if output.stop_reason == "context_length"
-            )
-            rollout_metrics["generate/avg_num_turns"] = sum(output.num_turns for output in successful_outputs) / len(
-                successful_outputs
-            )
-        else:
-            rollout_metrics = {}
-
-        # Failure metrics: timeout vs unknown error trajectories, and masked instances.
-        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
-        rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-        rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
-
-        logger.info(
-            f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
-            f"# of timeout trajectories: {num_timeout_trajectories}\n"
-            f"# of error trajectories: {num_error_trajectories}"
+        return build_step_wise_generator_output(
+            all_outputs, overlong_filtering=self.generator_cfg.apply_overlong_filtering
         )
 
-        return all_outputs, rollout_metrics
-
-    async def harbor_agent_loop(
+    async def _harbor_agent_loop(
         self,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
-    ) -> HarborAgentOutput:
+    ) -> HarborTrajectoryOutput:
+        """Run a single Harbor trial and return the rollout details plus a trajectory-level reward.
+        Retries on unknown errors; context length errors train with reward=0; agent timeouts mask the trajectory.
         """
-        Run a single harbor agent.
-        """
-        # Run the trial to get `reward`, `chat_history`, `summarization_count`, and `num_turns`
         reward = None
-        chat_history = None
-        summarization_count = None
+        results = None
+        rollout_details = None
         num_turns = None
         successful = False
         is_context_length_error = False
         is_agent_timeout_error = False
+
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
@@ -239,7 +312,7 @@ class HarborGenerator(GeneratorInterface):
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = uuid4().hex
                 trial_config = TrialConfig.model_validate(config)
-                trial = Trial(trial_config)
+                trial = await Trial.create(trial_config)
 
                 async with self._rate_limiter:
                     results = await trial.run()
@@ -249,101 +322,52 @@ class HarborGenerator(GeneratorInterface):
                 is_context_length_error = exc_type == "ContextLengthExceededError"
                 is_agent_timeout_error = exc_type == "AgentTimeoutError"
 
-                # --- Determine reward ---
+                # Determine reward.
                 if is_agent_timeout_error:
                     # AgentTimeoutError: not successful, no retry, loss-masked
                     logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
                     break
                 elif is_context_length_error:
                     # ContextLengthExceededError: always train with reward=0.
-                    logger.debug(
-                        f"{prefix} hit ContextLengthExceededError, will train with reward=0. Results: {results}"
-                    )
-                    reward = 0
+                    logger.debug(f"{prefix} hit ContextLengthExceededError, setting reward=0. Results: {results}")
+                    reward = 0.0
                 elif not results.verifier_result:
                     # Does not have a verifier result, so it's not successful, will retry
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
                 else:
-                    reward = results.verifier_result.rewards["reward"]
+                    reward = float(results.verifier_result.rewards["reward"])
 
-                # --- Extract chat history and check for success ---
-                chat_history = results.agent_result.metadata["all_messages"]
-                summarization_count = results.agent_result.metadata["summarization_count"]
+                # Extract rollout details and check for success
+                rollout_details = results.agent_result.rollout_details
                 num_turns = results.agent_result.metadata["n_episodes"]
-                if len(chat_history) > 1 and chat_history[0]["role"] == "user":
+
+                if (
+                    rollout_details
+                    and len(rollout_details) >= 1
+                    and len(rollout_details[0].get("completion_token_ids", [])) > 0
+                ):
                     successful = True
-                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
+                    logger.debug(f"{prefix} successful: reward={reward}.")
                     break
                 else:
-                    logger.warning(
-                        f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
-                    )
+                    logger.warning(f"{prefix} failed: empty/missing rollout_details. Results: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
 
         if not successful:
-            # We make loss mask 0 so it does not contribute to model updates
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
             error_message = f"Trajectory {trajectory_id} failed (stop_reason={stop_reason}), will set loss mask to [0]."
             if stop_reason == "error":
                 error_message += f" Results: {results}"
             logger.warning(error_message)
-            return HarborAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason=stop_reason,
-                loss_mask=[0],
-                prompt_ids=[0],
-                trajectory_id=trajectory_id,
-            )
-
-        # Use the first message as the prompt. We assume to be no systems messages.
-        assert chat_history[0]["role"] == "user", "The first message should be a user message"
-        prompt = [chat_history[0]]
-        prompt_ids = self.tokenizer.apply_chat_template(
-            prompt,
-            add_generation_prompt=False,  # the message below will add it themselves
-            return_dict=False,
-            tokenize=True,
-            chat_template=self.custom_chat_template_content,
-        )
-        initial_prompt_length = len(prompt_ids)
-
-        # Process response messages (everything after the first message)
-        response_messages = chat_history[1:]
-        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
-        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs, chat_template=self.custom_chat_template_content
-        )
-
-        # Determine stop reason
-        max_response_tokens = max(0, self.max_seq_len - initial_prompt_length)
-        if is_context_length_error or len(response_ids) > max_response_tokens:
-            stop_reason = "context_length"
+            return HarborTrajectoryOutput(trajectory_id=trajectory_id, rollout_details=None, stop_reason=stop_reason)
         else:
-            stop_reason = "complete"
-
-        # Apply overlong filtering.
-        # TODO(Charlie): should this also apply when the end reason is max_turns in Harbor?
-        # Revisit. We would like to reuse `utils.py`'s implementation for overlong filtering.
-        if self.generator_cfg.apply_overlong_filtering and stop_reason == "context_length":
-            loss_mask = [0] * len(loss_mask)
-
-        # Truncate to maximum allowed length.
-        # NOTE(Charlie): though it shouldn't happen since it'd reach `ContextLengthExceededError`
-        # from Harbor first. We do it anyway to be safe.
-        response_ids = response_ids[:max_response_tokens]
-        loss_mask = loss_mask[:max_response_tokens]
-
-        return HarborAgentOutput(
-            response_ids=response_ids,
-            reward=reward,
-            stop_reason=stop_reason,
-            loss_mask=loss_mask,
-            prompt_ids=prompt_ids,
-            trajectory_id=trajectory_id,
-            summarization_count=summarization_count,
-            num_turns=num_turns,
-        )
+            return HarborTrajectoryOutput(
+                trajectory_id=trajectory_id,
+                rollout_details=rollout_details,
+                reward=reward,
+                num_turns=num_turns,
+                stop_reason="context_length" if is_context_length_error else "complete",
+            )

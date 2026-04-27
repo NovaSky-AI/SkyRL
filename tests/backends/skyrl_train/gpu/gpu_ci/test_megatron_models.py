@@ -214,8 +214,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
-        pytest.param(
-        )
+        pytest.param(),
     ],
 )
 async def test_logprobs_matching_roundtrip(

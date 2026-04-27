@@ -393,8 +393,7 @@ def ray_init_for_tests():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
     env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
-    if _SKYRL_USE_NEW_INFERENCE:
-        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
     ray.init(runtime_env={"env_vars": env_vars})
 
 
@@ -432,6 +431,7 @@ class InferenceEngineState:
         # internal attribute to track if the inference engines need a wake_up()
         # call before generation
         self._needs_wake_up = False
+        self._cleanup_pg = False
 
     def _close_common(self):
         """Shutdown router, server_group, and Ray actors (sync resources).
@@ -446,6 +446,17 @@ class InferenceEngineState:
             if group_list is not None:
                 for group in group_list:
                     group.shutdown()
+                if self._cleanup_pg:
+                    if len(group_list):
+                        # TODO (sumanthrh): This is a bit hacky, this assumes pg is the same
+                        # for groups in the group list - which is true for creation in
+                        # `create_inference_servers`
+                        # we should have a better way for cleaning up pg state
+                        group = group_list[0]
+                        try:
+                            ray.util.remove_placement_group(group._get_placement_group())
+                        except Exception as e:
+                            logger.info(f"Encountered error at pg cleanup: {e}")
 
         if isinstance(self.client, InferenceEngineClient):
             for engine in self.client.engines:
@@ -581,8 +592,8 @@ class InferenceEngineState:
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
-                if active_lora_name is None:
-                    active_lora_name = "skyrl-lora"
+            if cli_args.enable_lora and active_lora_name is None:
+                active_lora_name = "skyrl-lora"
 
             setup = create_inference_servers(
                 ie_cfg,
@@ -603,6 +614,7 @@ class InferenceEngineState:
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 active_lora_name=active_lora_name,
+                data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:
@@ -656,6 +668,7 @@ class InferenceEngineState:
             decode_server_groups=decode_server_groups,
         )
         state._needs_wake_up = needs_wake_up
+        state._cleanup_pg = not shared_pg
         return state
 
 

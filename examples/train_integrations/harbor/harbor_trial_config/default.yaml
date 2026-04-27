@@ -44,8 +44,8 @@ agent:
     # Whether to enable context summarization when approaching token limits
     enable_summarize: false
 
-    # Store all messages in the trial output (required for SkyRL training)
-    store_all_messages: true
+    # Collect per-turn rollout details (required for step-wise training)
+    collect_rollout_details: true
 
     # The only sampling param that directly gets passed to Terminus
     temperature: 1.0

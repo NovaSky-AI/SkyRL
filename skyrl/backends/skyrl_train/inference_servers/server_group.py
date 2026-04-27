@@ -250,3 +250,7 @@ class ServerGroup:
         if self._pool:
             logger.info("Shutting down servers...")
             self._pool.shutdown()
+
+        if self._internal_pg:
+            # created pg internally, teardown
+            ray.util.remove_placement_group(self._internal_pg)

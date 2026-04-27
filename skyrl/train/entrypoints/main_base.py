@@ -225,9 +225,16 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        if cfg.generator.vision_language_generator:
+            from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
 
-        return SkyRLGymGenerator(
+            generator_cls = SkyRLVLMGymGenerator
+        else:
+            from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+            generator_cls = SkyRLGymGenerator
+
+        return generator_cls(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
@@ -384,13 +391,18 @@ class BasePPOExp:
             server_urls = setup.server_urls
 
         lora_cfg = self.cfg.trainer.policy.model.lora
-        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
+        active_lora_name = (
+            _SKYRL_LORA_ADAPTER_NAME
+            if lora_cfg and lora_cfg.rank > 0 and self.cfg.trainer.strategy != "megatron"
+            else None
+        )
         client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             active_lora_name=active_lora_name,
+            data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self.tokenizer,
         )
 

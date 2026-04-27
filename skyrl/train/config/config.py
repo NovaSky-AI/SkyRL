@@ -128,6 +128,7 @@ class MegatronTorchProfilerConfig(BaseConfig):
 @dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
+    merge_lora: bool = True
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -172,6 +173,9 @@ class MegatronConfig(BaseConfig):
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
+    freeze_moe_router: bool = False
+    """If True, freeze MoE router parameters so they are not updated during training. No-op on
+    non-MoE models."""
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +358,7 @@ class AlgorithmConfig(BaseConfig):
     policy_loss_type: str = "regular"
     """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, or custom via ``PolicyLossRegistry``."""
     loss_reduction: str = "token_mean"
-    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``."""
+    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``. ``max_seq_len`` must be set explicitly for ``"seq_mean_token_sum_norm"``."""
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
@@ -379,8 +383,8 @@ class AlgorithmConfig(BaseConfig):
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
     max_seq_len: Optional[int] = None
-    """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
-    If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""
+    """Used for ``seq_mean_token_sum_norm`` loss reduction.
+    Must be set explicitly for that reduction mode; otherwise can remain ``None``."""
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +540,11 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    vision_language_generator: bool = False
+    """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts)"""
+    merge_stepwise_output: bool = False
+    """When True (and step_wise_trajectories is True), apply prefix-aware merging
+    to collapse multi-turn step-wise sequences into single sequences before training."""
 
     def __post_init__(self):
 
@@ -735,26 +744,14 @@ class SkyRLTrainConfig(BaseConfig):
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
-        if self.trainer.algorithm.max_seq_len is None:
-            # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-            # per batch can be variable based on the prompt length. This is used to normalize the loss for
-            # seq_mean_token_sum_norm loss reduction.
-            # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
-            # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
-            # multi-turn or not?
-            self.trainer.algorithm.max_seq_len = (
-                self.generator.max_input_length + self.generator.sampling_params.max_generate_length
-            )
-
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            _uses_lora_weight_sync,
+        )
+
         ie_cfg = self.generator.inference_engine
-        if (
-            self.trainer.policy.model.lora.rank > 0
-            and self.trainer.strategy != "megatron"
-            and ie_cfg.enforce_eager
-            and ie_cfg.backend == "vllm"
-        ):
+        if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 
             warnings.warn(

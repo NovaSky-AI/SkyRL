@@ -44,6 +44,12 @@ def test_delete_model_basic():
     assert not backend.has_model(model_id)
 
 
+def test_create_model_rejects_non_policy_role():
+    backend = create_backend()
+    with pytest.raises(ValueError, match="model_role='policy'"):
+        backend.create_model("critic_model", LoraConfig(rank=LORA_RANK, alpha=16, seed=0), model_role="critic")
+
+
 def test_delete_non_existent_model():
     """Test deleting a non-existent model raises ValueError."""
     backend = create_backend()

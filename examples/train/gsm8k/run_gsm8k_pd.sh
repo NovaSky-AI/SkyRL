@@ -16,7 +16,6 @@ set -x
 
 : "${INFERENCE_BACKEND:=vllm}"
 
-export _SKYRL_USE_NEW_INFERENCE=1
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \

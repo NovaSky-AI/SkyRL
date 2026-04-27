@@ -6,7 +6,7 @@ from sqlmodel import Session, SQLModel
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import ModelDB, SessionDB
+from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
 from skyrl.tinker.engine import TinkerEngine, prepare_model_pass_batch
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -83,23 +83,29 @@ def test_cleanup_stale_sessions():
 
 
 @pytest.mark.parametrize(
-    ("loss_fn", "loss_fn_config", "advantages", "logprobs"),
+    ("loss_fn", "loss_fn_config", "advantages", "logprobs", "values", "returns"),
     [
         pytest.param(
             "ppo",
             {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
             [],
             [],
+            [],
+            [],
             id="ppo_with_loss_fn_config",
         ),
-        pytest.param("cross_entropy", None, [], [], id="cross_entropy_default_config"),
+        pytest.param("ppo", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_with_value_clip"),
+        pytest.param("cross_entropy", None, [], [], [], [], id="cross_entropy_default_config"),
         pytest.param(
             "cispo",
             {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
             [0.1, 0.2, 0.3],
             [-1.1, -1.0, -0.9],
+            [],
+            [],
             id="cispo",
         ),
+        pytest.param("ppo_critic", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_critic"),
     ],
 )
 def test_prepare_model_pass_batch_loss_fn_and_config(
@@ -107,6 +113,8 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     loss_fn_config: dict[str, float] | None,
     advantages: list[float],
     logprobs: list[float],
+    values: list[float],
+    returns: list[float],
 ):
     """Test that prepare_model_pass_batch preserves loss_fn and loss_fn_config values."""
     datum = types.Datum(
@@ -116,6 +124,8 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
             weights=types.TensorData(data=[1.0, 1.0, 1.0]),
             advantages=types.TensorData(data=advantages),
             logprobs=types.TensorData(data=logprobs),
+            values=types.TensorData(data=values),
+            returns=types.TensorData(data=returns),
         ),
     )
 
@@ -134,3 +144,114 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     assert batch.all_loss_fns == [loss_fn]
     assert batch.all_loss_fn_configs == [loss_fn_config]
     assert batch.all_model_inputs == [datum.model_input]
+    assert batch.all_values == [values]
+    assert batch.all_returns == [returns]
+
+
+@pytest.fixture()
+def scheduling_engine():
+    """Create a TinkerEngine with only the DB initialized (no backend) for scheduling tests."""
+    from sqlalchemy import create_engine
+
+    from skyrl.tinker.db_models import enable_sqlite_wal
+
+    engine = object.__new__(TinkerEngine)
+    engine.db_engine = create_engine("sqlite:///:memory:", echo=False)
+    enable_sqlite_wal(engine.db_engine)
+    SQLModel.metadata.create_all(engine.db_engine)
+    return engine
+
+
+def test_find_single_requests_respects_forward_backward_barriers(scheduling_engine):
+    """Regression: optim_step must not run before a preceding forward_backward for the same model.
+
+    Given pending requests [fwdbwd1, optim1, fwdbwd2, optim2] for the same model,
+    find_single_requests should only return optim1 (not optim2), because fwdbwd2
+    acts as a barrier — optim2 depends on fwdbwd2's gradients.
+    """
+    engine = scheduling_engine
+    model_id = "test_model"
+
+    with Session(engine.db_engine) as session:
+        # Insert requests in order: fwdbwd1, optim1, fwdbwd2, optim2
+        for req_type in [
+            types.RequestType.FORWARD_BACKWARD,
+            types.RequestType.OPTIM_STEP,
+            types.RequestType.FORWARD_BACKWARD,
+            types.RequestType.OPTIM_STEP,
+        ]:
+            session.add(
+                FutureDB(
+                    request_type=req_type,
+                    model_id=model_id,
+                    request_data={},
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.commit()
+
+    with Session(engine.db_engine) as session:
+        # find_single_requests should return only optim1 (request_id=2), NOT optim2 (request_id=4)
+        singles = engine.find_single_requests(session)
+        assert list(singles.keys()) == ["2"]
+
+
+def test_find_single_requests_no_barrier_when_no_pending_passes(scheduling_engine):
+    """When there are no pending forward/forward_backward requests, all single requests are returned."""
+    engine = scheduling_engine
+
+    with Session(engine.db_engine) as session:
+        for model_id in ["model_a", "model_b"]:
+            session.add(
+                FutureDB(
+                    request_type=types.RequestType.OPTIM_STEP,
+                    model_id=model_id,
+                    request_data={},
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.commit()
+
+    with Session(engine.db_engine) as session:
+        singles = engine.find_single_requests(session)
+        assert len(singles) == 2
+
+
+def test_find_single_requests_barrier_is_per_model(scheduling_engine):
+    """A blocked forward_backward on model_a should not block an optim_step on model_b."""
+    engine = scheduling_engine
+
+    with Session(engine.db_engine) as session:
+        # model_a: fwdbwd(1), optim(2), fwdbwd(3), optim(4)
+        # model_b: optim(5)
+        for req_type in [
+            types.RequestType.FORWARD_BACKWARD,
+            types.RequestType.OPTIM_STEP,
+            types.RequestType.FORWARD_BACKWARD,
+            types.RequestType.OPTIM_STEP,
+        ]:
+            session.add(
+                FutureDB(
+                    request_type=req_type,
+                    model_id="model_a",
+                    request_data={},
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.add(
+            FutureDB(
+                request_type=types.RequestType.OPTIM_STEP,
+                model_id="model_b",
+                request_data={},
+                status=RequestStatus.PENDING,
+            )
+        )
+        session.commit()
+
+    with Session(engine.db_engine) as session:
+        singles = engine.find_single_requests(session)
+        # model_a: optim(2) returned, optim(4) blocked by fwdbwd(3)
+        # model_b: optim(5) returned (not affected by model_a's barrier)
+        assert list(singles.keys()) == ["2", "5"]
+        assert singles["2"][0] == "model_a"
+        assert singles["5"][0] == "model_b"

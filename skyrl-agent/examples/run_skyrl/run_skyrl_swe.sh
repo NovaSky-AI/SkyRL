@@ -65,6 +65,7 @@ uv run --isolated --env-file .env --extra skyrl-train \
   trainer.algorithm.eps_clip_low=0.2 \
   trainer.algorithm.eps_clip_high=0.28 \
   trainer.algorithm.loss_reduction="seq_mean_token_sum_norm" \
+  trainer.algorithm.max_seq_len=40768 \
   trainer.algorithm.grpo_norm_by_std=false \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \

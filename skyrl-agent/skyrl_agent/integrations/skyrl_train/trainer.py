@@ -354,7 +354,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])

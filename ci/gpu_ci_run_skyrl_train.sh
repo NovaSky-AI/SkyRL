@@ -29,12 +29,3 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 #     --with torch==2.7.0 \
 #     --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
 #     -- pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation
-
-# Run tests for new inference layer
-# TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_gym_generator.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_expert_parallel_inference.py
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_router_replay.py
