@@ -25,7 +25,7 @@ export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 uv run --extra fsdp -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  environment.env_class=rlm \
+  environment.env_class=evidence_rlm \
   generator.step_wise_trajectories=true \
   generator.enable_child_agents=true \
   generator.train_child_trajectories=true \

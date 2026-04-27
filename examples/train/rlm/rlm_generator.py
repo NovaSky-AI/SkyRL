@@ -70,6 +70,7 @@ class _RLMRolloutContext:
     """
 
     rid: str
+    env_class: str                            # the env id this rollout is using (used to recurse children with the same env)
     trajectory_id: Optional[str]              # shared across the whole tree
     parent_rid: Optional[str]                 # None for root
     depth: int                                # 0 for root, +1 per level
@@ -102,7 +103,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
     Children are inlined into the root's ``step_outputs`` at the end of
     ``_finalize_episode`` (root branch only) so the base flattener in
     ``generate()`` picks them up without needing a flatten hook override.
+
+    Subclasses building new RLM-style tasks should add their env id to
+    ``RLM_ENV_CLASSES`` so the hooks below recognize it.
     """
+
+    # Env-class ids this generator should treat as RLM-shaped. Subclass and
+    # extend if you register a new BaseRLMEnv subclass with a different id.
+    RLM_ENV_CLASSES: frozenset = frozenset({"evidence_rlm"})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -155,7 +163,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
           ``agent_loop``. Reuse the existing context; just (re)inject callbacks
           since the child's ``env_extras`` was stripped of parent callables.
         """
-        if env_class != "rlm":
+        if env_class not in self.RLM_ENV_CLASSES:
             return env_extras
 
         env_extras = dict(env_extras)
@@ -168,6 +176,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
             env_extras["rlm_rollout_id"] = rid
             self.active_rollouts[rid] = _RLMRolloutContext(
                 rid=rid,
+                env_class=env_class,
                 trajectory_id=None,  # filled in by _finalize_episode (it has trajectory_id)
                 parent_rid=None,
                 depth=0,
@@ -262,7 +271,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         compute ``child_rlm_metrics`` over the whole tree, then pop the entire
         subtree from ``self.active_rollouts``.
         """
-        if env_class != "rlm":
+        if env_class not in self.RLM_ENV_CLASSES:
             return await super()._finalize_episode(
                 env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id
             )
@@ -326,7 +335,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # Whole-tree call records → child_rlm_metrics.
         call_records = [d.call_record for d in descendants if d.call_record is not None]
         if call_records:
-            from skyrl_gym.envs.rlm.evidence_tools import compute_child_rlm_metrics
+            from .envs.evidence_rewards import compute_child_rlm_metrics
 
             reward_spec = env_extras.get("reward_spec") or {}
             evidence = reward_spec.get("evidence") or []
@@ -620,6 +629,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
             child_rid = uuid.uuid4().hex[:8]
             child_ctx = _RLMRolloutContext(
                 rid=child_rid,
+                env_class=parent_ctx.env_class,
                 trajectory_id=parent_ctx.trajectory_id,
                 parent_rid=parent_rid,
                 depth=parent_ctx.depth + 1,
@@ -653,7 +663,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
             result = await self.agent_loop(
                 prompt=[{"role": "user", "content": prompt}],
-                env_class="rlm",
+                env_class=parent_ctx.env_class,
                 env_extras=child_extras,
                 max_tokens=max_tokens,
                 max_input_length=max_input_length,

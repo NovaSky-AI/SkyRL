@@ -1,6 +1,5 @@
 import json
 import re
-import textwrap
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -11,7 +10,7 @@ from .repl import PersistentREPL, REPLResult, _iter_tool_entries
 
 
 # ---------------------------------------------------------------------------
-# System prompt (official RLM prompt from rlm/rlm/utils/prompts.py)
+# Default system prompt
 # ---------------------------------------------------------------------------
 
 DEFAULT_RLM_SYSTEM_PROMPT = """\
@@ -37,211 +36,6 @@ WARNING: FINAL_VAR retrieves an EXISTING variable. You MUST create and assign th
 
 Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this". Output to the REPL environment as much as possible.\
 """
-
-
-# ---------------------------------------------------------------------------
-# Multi-paper system prompts (parent + child)
-# ---------------------------------------------------------------------------
-
-MULTIPAPER_PARENT_SYSTEM_PROMPT = textwrap.dedent(
-    """\
-You are an evidence extraction coordinator. You find VERBATIM text from the context relevant to a query.
-
-The context is a DICTIONARY where each key is a paper ID (like "2205.05212") and each value is the full text of that paper starting with `### PAPER: <title>`.
-
-REPL tools:
-- `context`: a dictionary where keys are paper IDs and values are full paper texts.
-- `list_papers(context)` — list all paper IDs with the first 1000 characters of their content.
-- `search(text, keyword, window=300)` — keyword search. Pass `context` to search ALL papers at once (results are grouped by paper ID and title), or pass `context[paper_id]` to search a single paper. Returns plain text snippets (no line-number prefixes).
-- `get_paper_abstract(context, paper_id)` — return a formatted string with the paper ID, title, and abstract for the given paper.
-- `rlm_query_batched(prompts, context_list=None)` — dispatch child agents. Each child gets the paper text you provide. Returns list of results (each a Python list of extracted strings).
-- `FINAL_VAR(variable_name)` — return your final answer.
-
-Access individual papers directly using: `context["paper_id"]` (e.g., `context["2205.05212"]`)
-
-CRITICAL: You MUST write exactly ONE ```repl block per response. The engine ONLY executes the first block and IGNORES all others. Do NOT revise, retry, or "start fresh" with additional blocks — you will lose that code. Get it right in a single block.
-
-ABOUT THE DATASET:
-Questions fall into one of four tiers based on how many papers are involved:
-- **Wide-net**: The answer involves 5+ papers (often many more). These ask about prevalence, counting, shared patterns, or benchmark comparisons across the collection.
-- **Mid-range**: The answer involves 3-4 papers. These ask about methodology clusters, numerical comparisons, or consensus vs. outlier.
-- **Focused**: The answer involves exactly 2 papers. Head-to-head comparisons, contradictions, or methodology differences.
-- **Singleton**: The answer comes from a single paper only. Specific results, ablation findings, or methodology details.
-
-You must gauge the tier from the query. Wide-net and mid-range questions are common — for these you need to be GENEROUS about which papers you assign to child agents. When in doubt, include more papers rather than fewer. For wide-net questions, it is normal to dispatch 10-20+ papers. Missing a relevant paper is a much worse failure than including an irrelevant one (the child will simply return an empty list).
-
-STRATEGY (follow exactly):
-
-**Turn 1**: List all papers and search the full context with your primary keywords.
-```repl
-paper_list = list_papers(context)
-hits1 = search(context, "<QUERY_KEYWORD>", window=300)
-hits2 = search(context, "<SYNONYM_OR_RELATED_TERM>", window=300)
-```
-`list_papers()` shows each paper ID with content preview. `search(context, ...)` searches all papers at once and groups results by paper ID — use this to quickly identify which papers are relevant.
-
-*(code runs, you receive the output and analyze it)*
-
-**Turn 2**: Search with additional keywords to catch papers the first search missed.
-```repl
-hits3 = search(context, "<ANOTHER_ANGLE>", window=300)
-hits4 = search(context, "<ABBREVIATION_OR_VARIANT>", window=300)
-```
-After this turn, compile the full list of relevant paper IDs from ALL searches so far. For targeted follow-up on a specific paper, use `search(context[paper_id], keyword)`. For wide-net questions, err on the side of including MORE papers.
-
-*(code runs, you receive the output and analyze it)*
-
-**Turn 3+**: Get relevant papers and dispatch child agents via `rlm_query_batched`.
-
-IMPORTANT: `rlm_query_batched` processes AT MOST 4 papers per call. If you have more papers, you MUST split them across multiple calls (4 at a time). For wide-net questions with 12+ relevant papers, that means 3-4 calls across multiple turns — plan your turn budget accordingly.
-
-Write a focused query for each paper — ask about THAT paper specifically, not the full cross-paper question. CRITICAL: You MUST call `get_paper_abstract(context, paper_id)` to append the paper's title and abstract to EVERY prompt. Never pass a bare string — always concatenate the result of `get_paper_abstract`. This is mandatory so the child agent knows which paper it is working with.
-```repl
-ids1 = ["2205.05212", "1234.5678", "9876.5432", "1111.2222"]
-papers1 = [context[pid] for pid in ids1]
-prompts1 = [
-    f"<QUERY focused on paper {{ids1[0]}}>\\n\\nPaper preview:\\n" + get_paper_abstract(context, ids1[0]),
-    f"<QUERY focused on paper {{ids1[1]}}>\\n\\nPaper preview:\\n" + get_paper_abstract(context, ids1[1]),
-    f"<QUERY focused on paper {{ids1[2]}}>\\n\\nPaper preview:\\n" + get_paper_abstract(context, ids1[2]),
-    f"<QUERY focused on paper {{ids1[3]}}>\\n\\nPaper preview:\\n" + get_paper_abstract(context, ids1[3]),
-]
-results1 = rlm_query_batched(prompts1, context_list=papers1)
-```
-Then in the next turn, do the next batch of 4 (using `ids2`, `papers2`, `prompts2`, `results2`), and so on until ALL relevant papers are covered. Keep the `idsN` list in sync with `resultsN` — you'll need them together in the final turn.
-
-*(code runs, you receive the output)*
-
-**Final turn**: Flatten all child results into a single list of evidence strings and return it. Do NOT filter or verify.
-```repl
-evidence = []
-for r in results1:
-    if isinstance(r, list):
-        evidence.extend(r)
-for r in results2:
-    if isinstance(r, list):
-        evidence.extend(r)
-FINAL_VAR("evidence")
-```
-
-RULES:
-- You have a HARD LIMIT of 10 rounds total. Plan accordingly — spend 2-4 turns searching, then dispatch.
-- EXACTLY ONE ```repl block per response. Never two, never zero (unless returning final answer without code).
-- No `#` comments in REPL code.
-- For 2+ papers: ALWAYS use `rlm_query_batched`. Never extract evidence yourself.
-- `rlm_query_batched` takes MAX 4 papers per call. Split into multiple turns of 4 if you have more papers.
-- Each prompt passed to `rlm_query_batched` MUST end with `+ get_paper_abstract(context, paper_id)`. Never pass a plain string without it.
-- For wide-net questions: dispatch ALL plausibly relevant papers (even 5+). That means multiple batches of 4 across several turns. Missing a relevant paper is far worse than including an irrelevant one (the child will just return an empty list).
-- Do NOT verify or filter child results. Just flatten and return them directly.
-- Final answer = list of VERBATIM substrings from context.\
-"""
-)
-
-MULTIPAPER_CHILD_SYSTEM_PROMPT = textwrap.dedent(
-    """\
-You are a PRECISE evidence extraction worker. You have a single paper in `context` and a query. Find ALL verbatim passages that directly and precisely answer the query — only include a passage if it clearly and specifically addresses the question.
-
-REPL tools:
-- `context`: full text of your paper.
-- `search(text, keyword, window=300, bidirectional=True)` — keyword search. Always pass `context` as first arg. \
-Returns a list of plain text snippets (no line-number prefixes). If no exact match is found, fuzzy matching is used automatically.
-- `extract_section(snippet, start_phrase, end_phrase)` — extract a substring from a snippet. \
-Pass the snippet (e.g. an element from a search result), a short phrase from the START of the target text, \
-and a short phrase from the END of the target text (inclusive). Both phrases are matched case-insensitively.
-- `FINAL_VAR(variable_name)` — return your final answer.
-
-RULES:
-- Output ONLY ```repl code blocks. No narration, no explanation, no text outside code blocks.
-- CRITICAL: Each response you give must contain EXACTLY ONE ```repl block. Never two, never zero. \
-You will be called multiple times. Each call = one block.
-- You can only see the output of a block AFTER you submit it. \
-So you CANNOT call extract_section() based on search() results in the same response — you haven't seen the snippets yet.
-- NEVER call FINAL_VAR in the same block as extract_section. You must first extract, READ the output \
-to verify it looks correct, and ONLY THEN call FINAL_VAR in the next block.
-- Your final answer MUST be FINAL_VAR(list_of_strings) where each string is an exact slice of `context`.
-- Each evidence string should be the MINIMUM contiguous span that contains the evidence — the key \
-sentences plus just enough surrounding context to make them interpretable. Do NOT include setup \
-text, section headers, or surrounding sentences that don't add to the answer. Tighter is better: \
-a few precise sentences is preferable to a whole paragraph of padding.
-- If you put two ```repl blocks in one response, the second block will be SILENTLY DROPPED. You will lose that work.
-- Do NOT answer the question. Return the evidence substrings, nothing else.
-- No `#` comments in REPL code.
-- You can call search() multiple times in a single repl block to search for different keywords in parallel.
-- If your initial search results lack promising snippets, search again with different \
-query terms (synonyms, rephrased concepts, abbreviations). Don't repeat the same keywords. \
-You can also try natural-language phrases — if exact matching fails, fuzzy matching kicks in automatically.
-- IMPORTANT: You have a HARD LIMIT of 10 rounds total. Aim for 5-7 rounds. \
-Do NOT return after only 2-3 rounds — that is too shallow. You should search with multiple \
-different keywords, read the expanded context around each promising hit, and only THEN extract. \
-But also don't exceed 10 rounds.
-- Tables and figures are often missing from the text. If a question asks about specific numbers from a table \
-and you can find the paragraph that REFERENCES the table but not the table data itself, return that \
-referencing paragraph — do not keep searching for the numeric values.
-- To expand a snippet, call search() on the snippet itself with a larger window \
-and bidirectional=False. This re-finds the same location and returns more surrounding context. \
-NOTE: snippets are stored in variables so you can index them directly: search(context, s1[0], window=1200, bidirectional=False). \
-When expanding, use window sizes of 1000+ characters.
-- NEVER include section headers (like "4.1. Method") as part of your extraction — use a start_phrase from the first sentence of the paragraph.
-- Return ALL passages that directly and precisely answer the query. Do not include tangentially related text — every passage must clearly address the question. Do not artificially limit the count, but also do not cast a wide net; quality over quantity.
-- If this paper has no content relevant to the query, return an empty list.
-- Final answer = list of VERBATIM substrings from `context`.
-- No narration, no explanation, no text outside code blocks.
-
-BE THOROUGH: Do NOT rush to extract after seeing the first promising snippet. Papers discuss the same \
-concept in multiple places (abstract, introduction, methods, experiments, conclusion). Search all \
-of them. Prioritize methods/experiments for DETAILED evidence (mechanisms, specifics), but if the \
-abstract or introduction contains the specific answer (e.g. a precise number, a direct conclusion), \
-extract it too — it is valid evidence. If the same key fact (e.g. a specific speedup number) \
-appears in multiple sections, extract EACH occurrence separately — they are all valid evidence. \
-Always search with at least 2-3 different keyword sets before deciding which passages to extract.
-
-search() prints every snippet as plain text. After searching, identify ALL snippets that could be \
-relevant — evidence is often spread across multiple sections of a paper (e.g. abstract, intro, \
-methods, experiments may all contain relevant details). Expand each promising snippet. \
-Then in the NEXT response (after you have read the expanded text), use extract_section with the \
-tightest span that captures just the evidence sentences. Prefer precision over breadth — do not \
-include sentences that are not part of the answer.
-
-Here is the expected procedure (5-7 responses, NEVER fewer than 5 unless the paper is clearly irrelevant):
-
-Turn 1 — initial broad search with 2-3 keywords:
-```repl
-s1 = search(context, "keyword1", window=400)
-s2 = search(context, "keyword2", window=400)
-```
-
-*(code runs, you receive the output)*
-
-Turn 2 — search with DIFFERENT keywords to find passages the first search missed:
-```repl
-s3 = search(context, "synonym_or_related_term", window=400)
-s4 = search(context, "another_angle", window=400)
-```
-
-*(code runs, you receive the output)*
-
-Turn 3 — expand the most promising snippets from ALL prior searches:
-```repl
-e1 = search(context, s1[0], window=1200, bidirectional=False)
-e2 = search(context, s2[3], window=1200, bidirectional=False)
-e3 = search(context, s3[1], window=1200, bidirectional=False)
-```
-
-*(code runs, you receive the output)*
-
-Turn 4 — extract the best paragraph(s) using start/end phrases:
-```repl
-p1 = extract_section(e1[0], "first few words of target span", "last few words of target span.")
-p2 = extract_section(e2[0], "first few words of target span", "last few words of target span.")
-```
-
-*(code runs, you receive the output)*
-
-Turn 5 — verify the extractions look correct, then return:
-```repl
-FINAL_VAR([p1, p2])
-```\
-"""
-)
 
 
 # ---------------------------------------------------------------------------
@@ -395,12 +189,23 @@ class RLMEnvConfig:
 
 
 # ---------------------------------------------------------------------------
-# Environment
+# Base environment
 # ---------------------------------------------------------------------------
 
-class RLMEnv(BaseTextEnv):
-    """
-    Recursive Language Model environment.
+class BaseRLMEnv(BaseTextEnv):
+    """Base class for Recursive Language Model (RLM) environments.
+
+    Provides REPL plumbing, parent/child rollout wiring, the multi-turn loop,
+    and FINAL/FINAL_VAR parsing. Task-specific behavior — reward, system
+    prompt, REPL tools — is supplied by subclasses via three override hooks:
+
+      • ``_get_reward(final_answer)``   — score the final answer
+      • ``_get_system_prompt()``        — return the system prompt template
+      • ``_get_repl_tools()``           — return task-specific REPL helpers
+                                          (called after ``self._context`` is set,
+                                          so closures can capture it)
+
+    See ``examples/train/rlm/envs/evidence_rlm_env.py`` for a worked example.
 
     init() returns:
         [system_msg, context_metadata_msg, turn_0_user_prompt_msg]
@@ -410,13 +215,6 @@ class RLMEnv(BaseTextEnv):
 
     The model always sees the per-turn user prompt as the last message before
     it generates, keeping root_prompt visible every turn.
-
-    Context is loaded into the REPL via a temp file (add_context) so it
-    appears as a genuine REPL variable in SHOW_VARS() and format_execution_result().
-
-    Final answer is detected via:
-      1. REPLResult.final_answer — set when FINAL_VAR() is called inside a repl block
-      2. Text parsing of FINAL(...) / FINAL_VAR(...) in the model's response
     """
 
     def __init__(self, env_config: Any = None, extras: Dict[str, Any] = None):
@@ -424,11 +222,6 @@ class RLMEnv(BaseTextEnv):
         extras = extras or {}
         self.extras = extras
 
-        assert "reward_spec" in extras, "reward_spec field is required"
-        self.ground_truth = extras["reward_spec"].get("ground_truth")
-        # reward_fn: optional callable(final_answer: str) -> float
-        # Can be passed directly or will be built lazily in init() from reward_spec data.
-        self.reward_fn = extras["reward_spec"].get("reward_fn")
         self.max_turns = extras.get("max_turns", 10)
 
         if isinstance(env_config, RLMEnvConfig):
@@ -438,8 +231,7 @@ class RLMEnv(BaseTextEnv):
         else:
             self.rlm_config = RLMEnvConfig()
 
-        # Per-example custom tools (e.g. search/extract_section that close over context)
-        # merged on top of any static config-level tools
+        # Per-example custom tools merged on top of any static config-level tools
         if extras.get("custom_tools"):
             merged = dict(self.rlm_config.custom_tools or {})
             merged.update(extras["custom_tools"])
@@ -451,10 +243,51 @@ class RLMEnv(BaseTextEnv):
 
         self.step_wise = extras.get("step_wise", True)
 
+        # Subclasses may set self.reward_fn in their __init__ if they want the
+        # default _get_reward to delegate. Otherwise they should override _get_reward.
+        self.reward_fn: Optional[Any] = None
+
         self.repl: Optional[PersistentREPL] = None
+        self._context: Any = None
         self._final_answer: Optional[str] = None
-        self._turn_index = 0  # iteration counter for build_user_prompt
+        self._turn_index = 0
         self._last_repl_exec_s: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Override hooks — subclasses customize task-specific behavior here
+    # ------------------------------------------------------------------
+
+    def _get_reward(self, final_answer: Optional[str]) -> float:
+        """Score the final answer. Override or set ``self.reward_fn``.
+
+        Default: delegates to ``self.reward_fn(final_answer)`` if set, else 0.0.
+        """
+        if final_answer is None:
+            return 0.0
+        if self.reward_fn is not None:
+            return float(self.reward_fn(final_answer))
+        return 0.0
+
+    def _get_system_prompt(self) -> str:
+        """Return the system prompt template. Override for custom prompts.
+
+        The returned string may contain ``{custom_tools_section}`` which the
+        base will replace with auto-rendered descriptions of LM-query tools
+        (when ``lm_callback`` is set) and ``rlm_config.custom_tools``.
+        """
+        return DEFAULT_RLM_SYSTEM_PROMPT
+
+    def _get_repl_tools(self) -> Dict[str, Any]:
+        """Return task-specific REPL helpers as ``{name: callable_or_value}``.
+
+        Called after ``self._context`` is populated, so subclasses can return
+        closures that capture per-rollout context. Default: empty.
+        """
+        return {}
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
@@ -473,27 +306,13 @@ class RLMEnv(BaseTextEnv):
             except (json.JSONDecodeError, ValueError):
                 pass
         self._root_prompt = root_prompt
+        self._context = context_payload
 
-        # Build per-context REPL tools (search, extract_section, etc.) and optionally
-        # an evidence-based reward function from the serializable reward_spec data.
-        # If judge_reward_fn was injected via extras it takes precedence over F1.
-        reward_spec = self.extras.get("reward_spec", {})
-        if self.extras.get("judge_reward_fn") is not None:
-            self.reward_fn = self.extras["judge_reward_fn"]
-        elif self.reward_fn is None and reward_spec.get("evidence") is not None:
-            evidence = reward_spec["evidence"]
-            if isinstance(context_payload, dict):
-                from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn_multipaper
-                self.reward_fn = make_reward_fn_multipaper(context_payload, evidence)
-            else:
-                from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn
-                self.reward_fn = make_reward_fn(context_payload, evidence)
-
-        if not self.rlm_config.custom_tools or "search" not in self.rlm_config.custom_tools:
-            from skyrl_gym.envs.rlm.evidence_tools import make_tools
-            tools = make_tools()
+        # Subclass-supplied REPL tools (closures may capture self._context)
+        subclass_tools = self._get_repl_tools()
+        if subclass_tools:
             merged = dict(self.rlm_config.custom_tools or {})
-            merged.update(tools)
+            merged.update(subclass_tools)
             self.rlm_config.custom_tools = merged
 
         repl_timeout = self.rlm_config.parent_repl_timeout if self.subcall_fn is not None else self.rlm_config.repl_timeout
@@ -523,16 +342,11 @@ class RLMEnv(BaseTextEnv):
             return init_messages, {"next_user_message": turn0_prompt}
         else:
             init_messages.append(turn0_prompt)
-        
+
         return init_messages, {}
 
     def _build_system_prompt(self) -> str:
-        prompt_key = self.rlm_config.custom_system_prompt
-        if prompt_key == "multipaper":
-            return MULTIPAPER_PARENT_SYSTEM_PROMPT
-        if prompt_key == "multipaper_child":
-            return MULTIPAPER_CHILD_SYSTEM_PROMPT
-        template = prompt_key or DEFAULT_RLM_SYSTEM_PROMPT
+        template = self._get_system_prompt()
 
         custom_tools_section = ""
         if self.lm_callback is not None:
@@ -560,27 +374,28 @@ class RLMEnv(BaseTextEnv):
 
         if code is None:
             obs_text = "[No ```repl``` code block found. Wrap your code in ```repl\\n...\\n``` blocks.]"
+            reward = self._get_reward(None) if done else 0.0
             if not done:
                 next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
                 if self.step_wise:
                     return BaseTextEnvStepOutput(
                         observations=[{"role": "user", "content": obs_text}],
                         next_user_message=next_prompt,
-                        reward=self._get_reward(done, None),
+                        reward=reward,
                         done=done,
                         metadata={},
                     )
-                else: 
+                else:
                     return BaseTextEnvStepOutput(
                         observations=[{"role": "user", "content": obs_text}, next_prompt],
                         next_user_message=None,
-                        reward=self._get_reward(done, None),
+                        reward=reward,
                         done=done,
                         metadata={},
                     )
 
             return BaseTextEnvStepOutput(
-                observations=[], next_user_message=None, reward=self._get_reward(done, None), done=done, metadata={}
+                observations=[], next_user_message=None, reward=reward, done=done, metadata={}
             )
 
         _t_repl = time.perf_counter()
@@ -595,7 +410,7 @@ class RLMEnv(BaseTextEnv):
             self._final_answer = final_answer
             done = True
 
-        reward = self._get_reward(done, final_answer)
+        reward = self._get_reward(final_answer) if done else 0.0
 
         if done:
             return BaseTextEnvStepOutput(
@@ -626,33 +441,9 @@ class RLMEnv(BaseTextEnv):
                 metadata=self._build_metadata(),
             )
 
-
     def _extract_prompt_text(self, prompt: ConversationType) -> str:
         parts = [msg["content"] for msg in prompt if msg.get("content")]
         return "\n".join(parts)
-
-    def _get_reward(self, done: bool, final_answer: Optional[str]) -> float:
-        if not done:
-            return 0.0
-        if final_answer is None:
-            return 0.0
-
-        if self.reward_fn is not None:
-            return float(self.reward_fn(final_answer))
-
-        final_str = str(final_answer).strip()
-        gt_str = str(self.ground_truth).strip()
-
-        if final_str == gt_str:
-            return 1.0
-        try:
-            if abs(float(final_str) - float(gt_str)) < 1e-6:
-                return 1.0
-        except (ValueError, TypeError):
-            pass
-        if gt_str.lower() in final_str.lower():
-            return 0.5
-        return 0.0
 
     def _build_metadata(self) -> Dict[str, Any]:
         return {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
@@ -662,62 +453,10 @@ class RLMEnv(BaseTextEnv):
             "turns_used": self.turns,
             "final_value_set": self._final_answer is not None,
             "final_answer": self._final_answer,
-            "reward": self._get_reward(True, self._final_answer),
+            "reward": self._get_reward(self._final_answer),
         }
 
     def close(self):
         if self.repl is not None:
             self.repl.cleanup()
             self.repl = None
-
-
-if __name__ == "__main__":
-    direct_prompt = "What is the capital of France? Extract it from the context."
-    context_text = (
-        "The population of France is approximately 67 million people. "
-        "The capital city is Paris. France is known for the Eiffel Tower, "
-        "fine cuisine, and its contributions to art and philosophy."
-    )
-
-    env = RLMEnv(
-        env_config=RLMEnvConfig(repl_timeout=30.0),
-        extras={
-            "reward_spec": {"ground_truth": "Paris"},
-            "max_turns": 5,
-            "extra_info": {"context_text": context_text},
-        },
-    )
-
-    prompt = [{"role": "user", "content": direct_prompt}]
-    init_messages, info = env.init(prompt)
-
-    print("=== Init Messages ===")
-    for msg in init_messages:
-        preview = msg["content"][:300].replace("\n", "\\n")
-        print(f"  [{msg['role']}] {preview}...")
-
-    action_1 = (
-        "Let me inspect the context.\n\n"
-        "```repl\nprint(context[:100])\n```"
-    )
-    step_out = env.step(action_1)
-    print("\n=== Turn 1 ===")
-    print(f"  Reward: {step_out['reward']}, Done: {step_out['done']}")
-    for obs in step_out["observations"]:
-        preview = obs["content"][:200].replace("\n", "\\n")
-        print(f"  [{obs['role']}] {preview}")
-
-    action_2 = (
-        "I can see the answer is Paris.\n\n"
-        "```repl\nmy_answer = \"Paris\"\nprint(my_answer)\n```\n\n"
-        "FINAL_VAR(my_answer)"
-    )
-    step_out = env.step(action_2)
-    print("\n=== Turn 2 ===")
-    print(f"  Reward: {step_out['reward']}, Done: {step_out['done']}")
-
-    print("\n=== Metrics ===")
-    for k, v in env.get_metrics().items():
-        print(f"  {k}: {v}")
-
-    env.close()

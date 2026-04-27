@@ -14,6 +14,7 @@ from loguru import logger
 from skyrl.train.config import make_config
 from skyrl.train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
+from skyrl_gym.envs import register
 
 from .rlm_config import RLMGeneratorConfig
 from .rlm_generator import RLMGymGenerator
@@ -34,6 +35,7 @@ class RLMEvalEntrypoint(EvalOnlyEntrypoint):
 
 @ray.remote(num_cpus=1)
 def eval_entrypoint(cfg) -> dict:
+    register(id="evidence_rlm", entry_point="examples.train.rlm.envs.evidence_rlm_env:EvidenceRLMEnv")
     exp = RLMEvalEntrypoint(cfg)
     inference_engine_client = exp.get_inference_client()
     return asyncio.run(exp.run(inference_engine_client))

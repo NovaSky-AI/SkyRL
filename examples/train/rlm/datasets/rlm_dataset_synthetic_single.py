@@ -35,7 +35,7 @@ def convert(row: dict, max_turns: int) -> dict:
     evidence = [item["text"] for item in evidence_raw]
     return {
         "prompt": [{"role": "user", "content": f"Find snippets of text that can be used to answer the query: {row['question']}"}],
-        "env_class": "rlm",
+        "env_class": "evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
             "evidence": evidence,

@@ -60,7 +60,7 @@ _YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
 uv run --isolated --extra fsdp -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  environment.env_class=rlm \
+  environment.env_class=evidence_rlm \
   generator.step_wise_trajectories=true \
   generator.max_turns=10 \
   generator.batched=false \

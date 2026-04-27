@@ -12,6 +12,7 @@ import ray
 from skyrl.train.config import make_config
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils import initialize_ray, validate_cfg
+from skyrl_gym.envs import register
 
 from .rlm_config import RLMGeneratorConfig
 from .rlm_generator import RLMGymGenerator
@@ -32,6 +33,7 @@ class RLMPPOExp(BasePPOExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
+    register(id="evidence_rlm", entry_point="examples.train.rlm.envs.evidence_rlm_env:EvidenceRLMEnv")
     RLMPPOExp(cfg).run()
 
 

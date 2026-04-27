@@ -6,7 +6,24 @@ All tests use mock callbacks — no real LLM or inference engine required.
 
 import pytest
 import skyrl_gym
+from skyrl_gym.envs.registration import register, registry
+from skyrl_gym.envs.rlm.env import BaseRLMEnv
 from skyrl_gym.envs.rlm.repl import PersistentREPL
+
+
+# ---------------------------------------------------------------------------
+# Test subclass — BaseRLMEnv is abstract (not registered); these tests only
+# need the inherited REPL / lm_callback / step-loop plumbing, so subclass with
+# trivial defaults and register under a test-only id.
+# ---------------------------------------------------------------------------
+
+class _TestRLMEnv(BaseRLMEnv):
+    pass
+
+
+_TEST_ENV_ID = "_test_rlm"
+if _TEST_ENV_ID not in registry:
+    register(id=_TEST_ENV_ID, entry_point=_TestRLMEnv)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +212,7 @@ class TestRLMEnvWithLMCallback:
             extras["lm_callback"] = lm_callback
         if subcall_fn is not None:
             extras["subcall_fn"] = subcall_fn
-        return skyrl_gym.make("rlm", extras=extras)
+        return skyrl_gym.make(_TEST_ENV_ID, extras=extras)
 
     def test_env_init_without_callback(self):
         env = self._make_env()

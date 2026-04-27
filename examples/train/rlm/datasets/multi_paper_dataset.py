@@ -12,7 +12,7 @@ Each output example:
 - prompt: "Extract verbatim text passages from the context that serve as evidence for the query: <question>"
 - extra_info.context_text: dict {paperId -> "### PAPER: title\\n<abstract>\\ntext"}
 - reward_spec.evidence: list of {paperId, selections: [{text}]} (ground-truth spans)
-- env_class: "rlm"
+- env_class: "evidence_rlm"
 
 Run:
     uv run -- python examples/train/rlm/datasets/multi_paper_dataset.py --output_dir ~/data/multi-paper
@@ -46,7 +46,7 @@ def convert_datapoint(datapoint: dict, max_turns: int) -> dict:
             f"Extract verbatim text passages from the context that serve as evidence for the query: {q_text}\n"
             f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
         )}],
-        "env_class": "rlm",
+        "env_class": "evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
             "evidence": datapoint["evidence"],

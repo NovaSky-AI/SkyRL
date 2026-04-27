@@ -42,7 +42,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  environment.env_class=rlm \
+  environment.env_class=evidence_rlm \
   generator.step_wise_trajectories=true \
   generator.max_turns=10 \
   generator.batched=false \
