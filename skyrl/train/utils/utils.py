@@ -117,6 +117,28 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
         f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
         f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
     )
+    if cfg.trainer.strategy == "megatron":
+        vpp_size = cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size
+        if vpp_size is not None and vpp_size > 1:
+            policy_train_num_microbatches = policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu
+            assert policy_train_num_microbatches % pp == 0, (
+                f"normalized policy training num_microbatches {policy_train_num_microbatches} should be divisible by "
+                f"pipeline_model_parallel_size {pp} when "
+                f"virtual_pipeline_model_parallel_size={vpp_size}"
+            )
+            assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_forward_batch_size_per_gpu == 0, (
+                f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+                f"by micro_forward_batch_size_per_gpu {cfg.trainer.micro_forward_batch_size_per_gpu} when "
+                f"virtual_pipeline_model_parallel_size={vpp_size}"
+            )
+            policy_forward_num_microbatches = (
+                policy_mini_batch_size_per_gpu // cfg.trainer.micro_forward_batch_size_per_gpu
+            )
+            assert policy_forward_num_microbatches % pp == 0, (
+                f"normalized policy forward num_microbatches {policy_forward_num_microbatches} should be divisible "
+                f"by pipeline_model_parallel_size {pp} when "
+                f"virtual_pipeline_model_parallel_size={vpp_size}"
+            )
     policy_train_batch_size_per_gpu = (
         cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -212,6 +234,11 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        vpp_size = config.megatron_config.virtual_pipeline_model_parallel_size
+        assert vpp_size is None or vpp_size > 1, (
+            f"{worker_type}.megatron_config.virtual_pipeline_model_parallel_size must be greater than 1 when set, "
+            f"got {vpp_size}"
+        )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"

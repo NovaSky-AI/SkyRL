@@ -165,9 +165,15 @@ class MegatronStrategy(DistributedStrategy):
         if local_rank != -1:
             torch.cuda.set_device(local_rank)
 
+        vpp_size = self.megatron_config.virtual_pipeline_model_parallel_size
+        assert (
+            vpp_size is None or vpp_size > 1
+        ), f"virtual_pipeline_model_parallel_size must be greater than 1 when set (got {vpp_size})"
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.megatron_config.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=vpp_size,
             expert_model_parallel_size=self.megatron_config.expert_model_parallel_size,
             expert_tensor_parallel_size=self.megatron_config.expert_tensor_parallel_size,
             use_sharp=False,
@@ -245,6 +251,29 @@ class MegatronStrategy(DistributedStrategy):
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
 
+    def _get_unwrapped_model_chunks(self, model: List[nn.Module]) -> List[nn.Module]:
+        unwrapped_models = []
+        for chunk in model:
+            while hasattr(chunk, "module"):
+                chunk = chunk.module
+            unwrapped_models.append(chunk)
+        if self.is_lora and len(unwrapped_models) > 1:
+            raise NotImplementedError("Checkpointing with VPP + LoRA is not yet supported")
+        return unwrapped_models
+
+    def _get_sharded_model_state_dicts(self, model: List[nn.Module]) -> tuple[List[nn.Module], List[dict], dict]:
+        unwrapped_models = self._get_unwrapped_model_chunks(model)
+        model_sharded_state_dicts = [chunk.sharded_state_dict() for chunk in unwrapped_models]
+        if self.is_lora:
+            return unwrapped_models, model_sharded_state_dicts, {}
+        if len(model_sharded_state_dicts) == 1:
+            return unwrapped_models, model_sharded_state_dicts, {"model": model_sharded_state_dicts[0]}
+        return (
+            unwrapped_models,
+            model_sharded_state_dicts,
+            {f"model{i}": state_dict for i, state_dict in enumerate(model_sharded_state_dicts)},
+        )
+
     def save_checkpoint(
         self,
         model: MegatronModelWrapper,
@@ -256,10 +285,7 @@ class MegatronStrategy(DistributedStrategy):
     ):
         # Extract base model.
         model: List[nn.Module] = model.actor_module
-        assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
-        unwrapped_model = model[0]
-        while hasattr(unwrapped_model, "module"):
-            unwrapped_model = unwrapped_model.module
+        unwrapped_models, model_sharded_state_dicts, sharded_state_dict = self._get_sharded_model_state_dicts(model)
 
         # Create checkpoint directory if it doesn't exist.
         if node_local_rank == 0:
@@ -269,14 +295,10 @@ class MegatronStrategy(DistributedStrategy):
         dist.barrier()
 
         # Collect the sharded state dicts for model and optimizer, and full state dict for the scheduler.
-        sharded_state_dict = {}
-        model_sharded_state_dict = unwrapped_model.sharded_state_dict()
-        if not self.is_lora:
-            sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             self._ensure_optimizer_state_initialized(optimizer)
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
+                model_sharded_state_dicts[0] if len(model_sharded_state_dicts) == 1 else model_sharded_state_dicts,
                 is_loading=False,
                 metadata=self._dist_ckpt_optim_metadata,
             )
@@ -309,7 +331,7 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
         if self.is_lora:
-            self._save_lora_adapters(unwrapped_model, ckpt_dir)
+            self._save_lora_adapters(unwrapped_models[0], ckpt_dir)
 
         dist.barrier()
         ckpt_base.async_calls.close()
@@ -360,19 +382,12 @@ class MegatronStrategy(DistributedStrategy):
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
-        assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
-        unwrapped_model = model[0]
-        while hasattr(unwrapped_model, "module"):
-            unwrapped_model = unwrapped_model.module
+        unwrapped_models, model_sharded_state_dicts, sharded_state_dict = self._get_sharded_model_state_dicts(model)
 
         # Extract sharded state dicts.
-        sharded_state_dict = {}
-        model_sharded_state_dict = unwrapped_model.sharded_state_dict()
-        if not self.is_lora:
-            sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
+                model_sharded_state_dicts[0] if len(model_sharded_state_dicts) == 1 else model_sharded_state_dicts,
                 is_loading=True,
                 metadata=self._dist_ckpt_optim_metadata,
             )
@@ -392,14 +407,17 @@ class MegatronStrategy(DistributedStrategy):
             )
 
         if not self.is_lora:
-            # Load the model, optimizer, and scheduler state dicts.
-            assert (
-                "model" in state_dict
-            ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
-            model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+            model_keys = ["model"] if len(model) == 1 else [f"model{i}" for i in range(len(model))]
+            missing = [key for key in model_keys if key not in state_dict]
+            assert not missing, (
+                f"Model state dict keys {missing} not found in checkpoint loaded from {ckpt_dir}. "
+                f"Available keys: {state_dict.keys()}"
+            )
+            for key, chunk in zip(model_keys, model):
+                chunk.load_state_dict(state_dict[key], strict=load_module_strict)
             self.print("Loaded model state dict.")
         else:
-            self._load_lora_adapters(unwrapped_model, ckpt_dir)
+            self._load_lora_adapters(unwrapped_models[0], ckpt_dir)
 
         if optimizer and load_optimizer_states:
             assert (

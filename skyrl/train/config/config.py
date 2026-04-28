@@ -151,6 +151,7 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
 class MegatronConfig(BaseConfig):
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
+    virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None

@@ -99,12 +99,14 @@ def test_cli_overrides():
         "trainer.seed=123",
         "generator.inference_engine.engine_init_kwargs.field=value",
         "generator.sampling_params.temperature=0.7",
+        "trainer.policy.megatron_config.virtual_pipeline_model_parallel_size=2",
     ]
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
     assert cfg.trainer.policy.model.path == "path/to/model"
     assert cfg.trainer.seed == 123
     assert cfg.generator.inference_engine.engine_init_kwargs["field"] == "value"
     assert cfg.generator.sampling_params.temperature == 0.7
+    assert cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size == 2
 
     # check that temperature is propagated to algorithm config
     assert cfg.trainer.algorithm.temperature == 0.7
@@ -114,6 +116,7 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+    assert cfg.trainer.policy.megatron_config.virtual_pipeline_model_parallel_size is None
 
 
 def test_cli_overrides_plus_prefix_rejected():
