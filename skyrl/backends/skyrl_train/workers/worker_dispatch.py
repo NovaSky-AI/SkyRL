@@ -8,8 +8,10 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
 from ray import ObjectRef
@@ -18,15 +20,17 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     concatenate_outputs_after_mesh_dispatch,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
+
+if TYPE_CHECKING:
+    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+        InferenceEngineClient,
+    )
+    from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 
 
 @dataclass
@@ -35,6 +39,36 @@ class GPUState:
 
     model_on_gpu: bool = False
     optimizer_on_gpu: bool = False
+
+
+LossFnOutput = dict[str, Any]
+ForwardBackwardStatusValue = float | int | list[LossFnOutput]
+ForwardBackwardStatus = dict[str, ForwardBackwardStatusValue]
+
+
+def _merge_forward_backward_statuses(statuses: List[ForwardBackwardStatus]) -> ForwardBackwardStatus:
+    """Normalize forward/backward statuses from per-rank results into one dict.
+
+    Scalar metrics are already reduced across data-parallel ranks on the workers,
+    so they are taken from the first returned status. If workers emit
+    ``loss_fn_outputs``, concatenate them in rank order to reconstruct the full
+    logical batch.
+    """
+
+    assert statuses, "Expected at least one status from forward_backward"
+
+    result = dict(statuses[0])
+    if not any("loss_fn_outputs" in status for status in statuses):
+        return result
+
+    all_loss_fn_outputs: list[LossFnOutput] = []
+    for status in statuses:
+        loss_fn_outputs = status.get("loss_fn_outputs")
+        if isinstance(loss_fn_outputs, list):
+            all_loss_fn_outputs.extend(loss_fn_outputs)
+
+    result["loss_fn_outputs"] = all_loss_fn_outputs
+    return result
 
 
 class WorkerDispatch:
@@ -201,7 +235,7 @@ class WorkerDispatch:
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+    ) -> ForwardBackwardStatus:
         """Run forward/backward pass. Needs model + optimizer.
 
         Args:
@@ -214,7 +248,7 @@ class WorkerDispatch:
                            (e.g., {"eps_clip_low": 0.1} for the regular PPO loss)
 
         Returns:
-            Dictionary of training metrics
+            Reduced scalar metrics and optional ``loss_fn_outputs`` for the full batch.
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
@@ -229,19 +263,7 @@ class WorkerDispatch:
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
-
-        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
-        # Concatenate them in rank order to get the full batch's outputs.
-        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
-        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
-            all_loss_fn_outputs = []
-            for status in statuses:
-                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
-            result = statuses[0]
-            result["loss_fn_outputs"] = all_loss_fn_outputs
-            return result
-
-        return statuses[0]
+        return _merge_forward_backward_statuses(statuses)
 
     def forward_backward_from_staged(
         self,
@@ -249,7 +271,7 @@ class WorkerDispatch:
         chunk_refs: List[ObjectRef],
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+    ) -> ForwardBackwardStatus:
         """
         Run forward/backward pass using pre-staged per-DP chunks.
 
@@ -261,7 +283,7 @@ class WorkerDispatch:
             chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_data``)
 
         Returns:
-            Aggregated metrics dict from training
+            Reduced scalar metrics and optional ``loss_fn_outputs`` for the full batch.
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
@@ -281,7 +303,7 @@ class WorkerDispatch:
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
-        return statuses[0]
+        return _merge_forward_backward_statuses(statuses)
 
     def optim_step(self, model: str) -> Optional[float]:
         """Run optimizer step. Model should already be on GPU from forward_backward."""
