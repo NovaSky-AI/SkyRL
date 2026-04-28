@@ -18,11 +18,6 @@ class RLMGeneratorConfig(GeneratorConfig):
     enable_child_agents: bool = True
     """When False, skip subcall_fn injection for RLM envs so the top-level agent runs without
     child-spawning capability (single-paper mode)."""
-    judge_reward_model: Optional[str] = None
-    """When set, replace F1 reward with an LLM judge score (via OpenAI-compatible API) for RLM envs.
-    Requires ``OPENAI_API_KEY``. E.g. 'openai/gpt-4.1-nano'."""
-    judge_reward_base_url: str = "https://api.openai.com/v1"
-    """Base URL for the OpenAI-compatible endpoint used by the judge reward model."""
     child_openrouter_model: Optional[str] = None
     """When set, child RLM agents (depth >= 1) use this model via an OpenAI-compatible API instead of
     the policy inference engine. Requires ``OPENROUTER_API_KEY``."""

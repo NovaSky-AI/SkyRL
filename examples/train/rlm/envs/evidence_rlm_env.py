@@ -12,9 +12,10 @@ precedence over the evidence-F1 reward.
 from __future__ import annotations
 
 import textwrap
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
+from skyrl_gym.metrics import default_aggregate_metrics
 
 from .evidence_rewards import JudgeRewardFn, make_reward_fn, make_reward_fn_multipaper
 from .paper_tools import make_tools
@@ -238,8 +239,8 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     Reward: F1 over retrieved text intervals vs. ground-truth evidence spans
     in ``reward_spec.evidence``. Multipaper math when the context is a dict,
-    single-paper math when it is a string. When ``extras["judge_model"]`` is
-    set, an LLM-judge reward replaces F1; per-component precision/recall
+    single-paper math when it is a string. Set ``USE_JUDGE_REWARD = True`` on
+    the class to swap in an LLM-judge reward; per-component precision/recall
     are surfaced via ``get_metrics()``.
 
     Tools: paper-aware ``list_papers``/``search``/``extract_section``/
@@ -248,15 +249,19 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     SYSTEM_PROMPT = MULTIPAPER_CHILD_SYSTEM_PROMPT
 
+    # Hardcoded judge config. Set USE_JUDGE_REWARD=True to swap the F1 reward
+    # for an LLM-judge reward; OPENAI_API_KEY must be set in the environment.
+    USE_JUDGE_REWARD = False
+    JUDGE_MODEL = "openai/gpt-4.1-nano"
+    JUDGE_BASE_URL = "https://api.openai.com/v1"
+
     def _get_reward(self, final_answer: str) -> float:
         # Bind reward_fn lazily on first call (when self._context is populated).
-        # Judge mode (extras["judge_model"] set) wins over evidence-F1.
         if self.reward_fn is None:
-            judge_model = self.extras.get("judge_model")
-            if judge_model:
+            if self.USE_JUDGE_REWARD:
                 self.reward_fn = JudgeRewardFn(
-                    model=judge_model,
-                    base_url=self.extras.get("judge_base_url", "https://api.openai.com/v1"),
+                    model=self.JUDGE_MODEL,
+                    base_url=self.JUDGE_BASE_URL,
                     question=self._root_prompt,
                     evidence=(self.extras.get("reward_spec") or {}).get("evidence") or [],
                 )
@@ -272,9 +277,18 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     def get_metrics(self) -> Dict[str, Any]:
         metrics = super().get_metrics()
+        metrics["depth"] = self.extras.get("depth", 0)
         if isinstance(self.reward_fn, JudgeRewardFn):
             metrics["judge_precision"] = self.reward_fn.last_precision
             metrics["judge_recall"] = self.reward_fn.last_recall
+        # paper_id: which paper this rollout was about, when a parent dispatched
+        # us with a single paper from a dict-of-papers context.
+        parent_context = self.extras.get("parent_context")
+        if isinstance(parent_context, dict) and isinstance(self._context, str):
+            for pid, paper_text in parent_context.items():
+                if paper_text == self._context:
+                    metrics["paper_id"] = pid
+                    break
         return metrics
 
     def _get_system_prompt(self) -> str:
@@ -299,3 +313,13 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
     def _get_system_prompt(self) -> str:
         depth = self.extras.get("depth", 0)
         return MULTIPAPER_PARENT_SYSTEM_PROMPT if depth == 0 else MULTIPAPER_CHILD_SYSTEM_PROMPT
+
+    @staticmethod
+    def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Split rollouts by depth: depth=0 → parent/*, depth>=1 → child/*."""
+        parents = [m for m in metrics if m.get("depth", 0) == 0]
+        children = [m for m in metrics if m.get("depth", 0) > 0]
+        out: Dict[str, Any] = {}
+        out.update({f"parent/{k}": v for k, v in default_aggregate_metrics(parents).items()})
+        out.update({f"child/{k}": v for k, v in default_aggregate_metrics(children).items()})
+        return out

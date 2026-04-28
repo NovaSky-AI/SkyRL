@@ -18,8 +18,6 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${JUDGE_MODEL:=gpt-5.4-mini-2026-03-17}"
-
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp -m examples.train.rlm.main_rlm \
@@ -79,5 +77,4 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
-  generator.judge_reward_model="$JUDGE_MODEL" \
   "$@"

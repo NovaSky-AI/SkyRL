@@ -47,7 +47,6 @@ class _RLMRolloutContext:
     child_index: Optional[int]                # None for root; assigned at registration
     children_rids: List[str] = field(default_factory=list)
     output: Optional[Union["StepWiseOutput", "TrajectoryOutput"]] = None
-    call_record: Optional[Dict[str, Any]] = None  # set on a child by its parent's _run_child
     child_engine: Optional[InferenceEngineInterface] = None
 
 
@@ -132,14 +131,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # else: child context already registered by _run_child; nothing to add here.
 
         env_extras["depth"] = self.active_rollouts[rid].depth
-
-        # Forward judge config so the env can build its own judge reward.
-        judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
-        if judge_reward_model:
-            env_extras["judge_model"] = judge_reward_model
-            env_extras["judge_base_url"] = getattr(
-                self.generator_cfg, "judge_reward_base_url", "https://api.openai.com/v1"
-            )
 
         enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
 
@@ -279,32 +270,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
-        # Whole-tree call records → child_rlm_metrics.
-        call_records = [d.call_record for d in descendants if d.call_record is not None]
-        if call_records:
-            from .envs.evidence_rewards import compute_child_rlm_metrics
-
-            reward_spec = env_extras.get("reward_spec") or {}
-            evidence = reward_spec.get("evidence") or []
-            extra_info = env_extras.get("extra_info") or {}
-            ctx_raw = extra_info.get("context_text") if isinstance(extra_info, dict) else None
-            parent_context: Dict[str, str] = {}
-            if isinstance(ctx_raw, str):
-                try:
-                    decoded = json.loads(ctx_raw)
-                    if isinstance(decoded, dict):
-                        parent_context = decoded
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            elif isinstance(ctx_raw, dict):
-                parent_context = ctx_raw
-
-            if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) and parent_context:
-                child_rlm_metrics = compute_child_rlm_metrics(call_records, evidence, parent_context)
-                env_metrics.update(child_rlm_metrics)
-                if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
-                    agent_loop_output.step_outputs[-1].env_metrics.update(child_rlm_metrics)
-
         # Promote trajectory-level summary onto root's final step.
         if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
             agent_loop_output.step_outputs[-1].env_metrics["rlm_metadata"].update({
@@ -403,27 +368,26 @@ class RLMGymGenerator(SkyRLGymGenerator):
         ``_finalize_episode`` parks its output on its context; the root's
         finalize collects it via the tree.
 
-        The child's call record (paper_id / final_answer / had_final_answer) is
-        written onto the child's own context, not into a closure list. The root
-        gathers all descendants' records via DFS.
+        Task-specific per-child attribution (e.g. paper_id) is the env's job:
+        the child env reads ``extras["parent_context"]`` and surfaces whatever
+        it wants via its own ``get_metrics()``.
 
         When ``child_openrouter_model`` is set, the parent's context carries a
         ``child_engine``; we propagate it down so descendants share one engine.
         """
-        # Reverse lookup: paper text → paper_id, for child-call attribution.
-        context_to_pid: Dict[str, str] = {}
+        # Decode the parent's context once so children can reverse-lookup their
+        # own attribution against it (e.g. paper_id from paper text).
+        parent_context: Any = None
         extra_info = env_extras.get("extra_info") or {}
         if isinstance(extra_info, dict):
             ctx_raw = extra_info.get("context_text")
             if isinstance(ctx_raw, str):
                 try:
-                    decoded = json.loads(ctx_raw)
-                    if isinstance(decoded, dict):
-                        context_to_pid = {v: k for k, v in decoded.items()}
+                    parent_context = json.loads(ctx_raw)
                 except (json.JSONDecodeError, ValueError):
-                    pass
-            elif isinstance(ctx_raw, dict):
-                context_to_pid = {v: k for k, v in ctx_raw.items()}
+                    parent_context = ctx_raw
+            else:
+                parent_context = ctx_raw
 
         async def _run_child(prompt: str, context=None) -> str:
             parent_ctx = self.active_rollouts.get(parent_rid)
@@ -451,6 +415,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
             # hook reuses the registered context.
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
             child_extras["rlm_rollout_id"] = child_rid
+            if parent_context is not None:
+                child_extras["parent_context"] = parent_context
 
             if context is not None:
                 child_extra_info = dict(child_extras.get("extra_info", {}) or {})
@@ -476,16 +442,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
             else:
                 child_env_metrics = result.env_metrics or {}
-            child_final = child_env_metrics.get("final_answer")
-
-            # Attribution record lives on the child's context; root's finalize
-            # gathers them via DFS over the tree.
-            child_ctx.call_record = {
-                "paper_id": context_to_pid.get(context) if isinstance(context, str) else None,
-                "final_answer": child_final,
-                "had_final_answer": child_final is not None,
-            }
-            return child_final or ""
+            return child_env_metrics.get("final_answer") or ""
 
         def subcall_fn(prompt: str, context=None) -> str:
             future = asyncio.run_coroutine_threadsafe(_run_child(prompt, context=context), loop)
