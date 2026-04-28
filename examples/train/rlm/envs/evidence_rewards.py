@@ -92,68 +92,6 @@ def _parse_answer_substrings(final_answer: str) -> List[str]:
     return substrings
 
 
-def make_reward_fn(ctx: str, evidence: List[str]):
-    """Return a reward_fn(final_answer: str) -> float that scores F1.
-
-    final_answer is expected to be a Python list literal of retrieved text
-    snippets (as produced by FINAL_VAR on a list variable), or a plain string.
-    Evidence intervals are located by substring search in ctx.
-    """
-    evidence_intervals: List[Tuple[int, int]] = []
-    for ev in evidence:
-        idx = ctx.find(ev.strip())
-        if idx != -1:
-            evidence_intervals.append((idx, idx + len(ev.strip())))
-
-    def reward_fn(final_answer: str) -> float:
-        substrings = _parse_answer_substrings(final_answer)
-        retrieved_intervals: List[Tuple[int, int]] = []
-        for s in substrings:
-            idx = ctx.find(s)
-            if idx != -1:
-                retrieved_intervals.append((idx, idx + len(s)))
-        metrics = compute_metrics(retrieved_intervals, evidence_intervals)
-        return metrics["f1"]
-
-    return reward_fn
-
-
-def make_reward_fn_multipaper(ctx: Dict[str, str], evidence: List[Dict]):
-    """Return a reward_fn(final_answer: str) -> float for multi-paper F1.
-
-    evidence is a list of {paperId, selections: [{text: ...}]} dicts.
-    final_answer is expected to be a Python list literal of retrieved text
-    snippets (exact substrings from any paper in ctx).
-    """
-    evidence_intervals: List[Tuple[str, int, int]] = []
-    for ev in evidence:
-        paper_id = ev.get("paperId", "")
-        paper_text = ctx.get(paper_id) or ""
-        for sel in ev.get("selections", []):
-            text = sel.get("text", "").strip()
-            if not text:
-                continue
-            idx = paper_text.find(text)
-            if idx != -1:
-                evidence_intervals.append((paper_id, idx, idx + len(text)))
-
-    def reward_fn(final_answer: str) -> float:
-        substrings = _parse_answer_substrings(final_answer)
-        retrieved_intervals: List[Tuple[str, int, int]] = []
-        for s in substrings:
-            for paper_id, paper_text in ctx.items():
-                if not paper_text:
-                    continue
-                idx = paper_text.find(s)
-                if idx != -1:
-                    retrieved_intervals.append((paper_id, idx, idx + len(s)))
-                    break
-        metrics = compute_metrics_multipaper(retrieved_intervals, evidence_intervals)
-        return metrics["f1"]
-
-    return reward_fn
-
-
 # ---------------------------------------------------------------------------
 # Per-trajectory child RLM metrics (logged under environment/ on wandb)
 # ---------------------------------------------------------------------------

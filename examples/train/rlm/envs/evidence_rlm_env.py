@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
 from skyrl_gym.metrics import default_aggregate_metrics
 
-from .evidence_rewards import JudgeRewardFn, make_reward_fn, make_reward_fn_multipaper
+from .evidence_rewards import JudgeRewardFn
 from .paper_tools import make_tools
 
 
@@ -251,28 +251,19 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     # Hardcoded judge config. Set USE_JUDGE_REWARD=True to swap the F1 reward
     # for an LLM-judge reward; OPENAI_API_KEY must be set in the environment.
-    USE_JUDGE_REWARD = True
     JUDGE_MODEL = "openai/gpt-4.1-nano"
     JUDGE_BASE_URL = "https://api.openai.com/v1"
 
     def _get_reward(self, final_answer: str) -> float:
         # Bind reward_fn lazily on first call (when self._context is populated).
         if self.reward_fn is None:
-            if self.USE_JUDGE_REWARD:
-                self.reward_fn = JudgeRewardFn(
-                    model=self.JUDGE_MODEL,
-                    base_url=self.JUDGE_BASE_URL,
-                    question=self._root_prompt,
-                    evidence=(self.extras.get("reward_spec") or {}).get("evidence") or [],
-                )
-            else:
-                evidence = (self.extras.get("reward_spec") or {}).get("evidence")
-                if evidence is not None:
-                    self.reward_fn = (
-                        make_reward_fn_multipaper(self._context, evidence)
-                        if isinstance(self._context, dict)
-                        else make_reward_fn(self._context, evidence)
-                    )
+            self.reward_fn = JudgeRewardFn(
+                model=self.JUDGE_MODEL,
+                base_url=self.JUDGE_BASE_URL,
+                question=self._root_prompt,
+                evidence=(self.extras.get("reward_spec") or {}).get("evidence") or [],
+            )
+
         return super()._get_reward(final_answer)
 
     def get_metrics(self) -> Dict[str, Any]:
