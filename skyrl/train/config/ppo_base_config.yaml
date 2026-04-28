@@ -37,6 +37,13 @@ trainer:
         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights
         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
         init_method: "kaiming"
+        # Maximum number of LoRA adapters that can be active concurrently in a
+        # single GPU batch. Maps to vLLM's `max_loras`. Increase past 1 to
+        # serve multiple LoRA adapters from the same engine.
+        max_loras: 1
+        # Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
+        # `max_cpu_loras`; when null, vLLM defaults it to `max_loras`.
+        max_cpu_loras: null
     optimizer_config:
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]

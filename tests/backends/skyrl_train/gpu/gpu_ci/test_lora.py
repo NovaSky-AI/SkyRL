@@ -4,6 +4,11 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # Run Megatron tests:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron"
+
+Multi-LoRA serving tests live separately in
+``tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_multi_lora_serving.py``
+since they exercise the inference-server LoRA control plane, not the
+trainer + weight-sync path covered here.
 """
 
 import pytest

@@ -27,6 +27,7 @@ from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGrou
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     build_router_args,
     build_vllm_cli_args,
+    resolve_policy_model_name,
 )
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
@@ -46,9 +47,6 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
-
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -381,17 +379,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
             )
 
-        lora_cfg = self._cfg.trainer.policy.model.lora
-        active_lora_name = (
-            _SKYRL_LORA_ADAPTER_NAME
-            if lora_cfg and lora_cfg.rank > 0 and self._cfg.trainer.strategy != "megatron"
-            else None
-        )
         self._inference_engine_client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self._cfg.trainer.policy.model.path,
-            active_lora_name=active_lora_name,
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self._tokenizer,
         )
@@ -938,6 +929,13 @@ class SkyRLTrainBackend(AbstractBackend):
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
 
+        # Every sample() body must explicitly identify the target model/LoRA
+        # adapter — the client does not fall back to any default. Resolve
+        # what name the inference engine knows the policy by from config
+        # (LoRA adapter when LoRA weights are sync'd as an adapter, base
+        # model otherwise).
+        model_name = resolve_policy_model_name(self._cfg)
+
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_model_inputs)):
@@ -946,6 +944,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 request_payload = {
                     "json": {
+                        "model": model_name,
                         "prompt": model_input.model_dump(),
                         "num_samples": 1,
                         "sampling_params": sampling_params.model_dump(),
@@ -1154,10 +1153,13 @@ def create_ray_wrapped_inference_engines_from_config(
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+        lora_cfg = cfg.trainer.policy.model.lora
         engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["max_lora_rank"] = lora_cfg.rank
         engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = 1
+        engine_kwargs["max_loras"] = lora_cfg.max_loras
+        if lora_cfg.max_cpu_loras is not None:
+            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
         engine_kwargs["fully_sharded_loras"] = cfg.generator.inference_engine.fully_sharded_loras
 
         if cfg.generator.inference_engine.enforce_eager and cfg.generator.inference_engine.backend == "vllm":

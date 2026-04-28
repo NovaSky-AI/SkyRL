@@ -21,7 +21,10 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
     create_remote_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_vllm_cli_args,
+    resolve_policy_model_name,
+)
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
@@ -35,9 +38,6 @@ from skyrl.train.utils.utils import (
     initialize_ray,
 )
 from skyrl.utils.tok import get_tokenizer
-
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -88,10 +88,13 @@ def create_ray_wrapped_inference_engines_from_config(
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+        lora_cfg = cfg.trainer.policy.model.lora
         engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["max_lora_rank"] = lora_cfg.rank
         engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = 1
+        engine_kwargs["max_loras"] = lora_cfg.max_loras
+        if lora_cfg.max_cpu_loras is not None:
+            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
         engine_kwargs["fully_sharded_loras"] = ie_cfg.fully_sharded_loras
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
@@ -239,6 +242,7 @@ class BasePPOExp:
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            policy_model_name=resolve_policy_model_name(cfg),
         )
 
     def get_trainer(
@@ -390,18 +394,11 @@ class BasePPOExp:
             proxy_url = setup.proxy_url
             server_urls = setup.server_urls
 
-        lora_cfg = self.cfg.trainer.policy.model.lora
-        active_lora_name = (
-            _SKYRL_LORA_ADAPTER_NAME
-            if lora_cfg and lora_cfg.rank > 0 and self.cfg.trainer.strategy != "megatron"
-            else None
-        )
         client = RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-            active_lora_name=active_lora_name,
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=self.tokenizer,
         )

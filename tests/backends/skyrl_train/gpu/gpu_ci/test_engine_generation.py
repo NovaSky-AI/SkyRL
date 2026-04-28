@@ -41,7 +41,7 @@ def get_test_actor_config(model: str = MODEL) -> SkyRLTrainConfig:
 
 async def run_batch_generation(client, prompts, sampling_params):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
-    engine_output = await client.generate(engine_input)
+    engine_output = await client.generate(engine_input, model=client.model_name)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
@@ -49,7 +49,7 @@ async def run_single_generation(client, prompts, sampling_params):
     tasks = []
     for prompt in prompts:
         engine_input = InferenceEngineInput(prompts=[prompt], sampling_params=sampling_params)
-        task = client.generate(engine_input)
+        task = client.generate(engine_input, model=client.model_name)
         tasks.append(task)
 
     results = await asyncio.gather(*tasks)
@@ -65,7 +65,7 @@ async def run_single_generation(client, prompts, sampling_params):
 
 async def run_batch_generation_with_tokens(client, prompt_token_ids, sampling_params):
     engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-    engine_output = await client.generate(engine_input)
+    engine_output = await client.generate(engine_input, model=client.model_name)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
@@ -73,7 +73,7 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
     tasks = []
     for tokens in prompt_token_ids:
         engine_input = InferenceEngineInput(prompt_token_ids=[tokens], sampling_params=sampling_params)
-        task = client.generate(engine_input)
+        task = client.generate(engine_input, model=client.model_name)
         tasks.append(task)
 
     results = await asyncio.gather(*tasks)
