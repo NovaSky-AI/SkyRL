@@ -104,49 +104,53 @@ class RLMGymGenerator(SkyRLGymGenerator):
         max_input_length: int,
         trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
-        """Register this rollout in ``self.active_rollouts`` and inject hook callbacks.
+        """Register this rollout in ``active_rollouts`` and inject hook callables.
 
-        Two entry paths:
-        - Root rollout: no ``rlm_rollout_id`` on ``env_extras`` yet. Mint a fresh
-          rid and register a new root context.
-        - Child rollout: ``_run_child`` has already registered the child context
-          and stamped ``env_extras["rlm_rollout_id"]`` before calling
-          ``agent_loop``. Reuse the existing context; just (re)inject callbacks
-          since the child's ``env_extras`` was stripped of parent callables.
+        Sole entry point for registration. Roots arrive with no extras keys set
+        and get a fresh root context. Children arrive with ``_rlm_parent_rid``
+        stamped by ``_run_child`` (consumed and stripped here) and get a child
+        context that inherits ``env_class`` / ``trajectory_id`` from the parent.
         """
         if env_class not in self.RLM_ENV_CLASSES:
             return env_extras
 
         env_extras = dict(env_extras)
 
-        rid = env_extras.get("rlm_rollout_id")
-        if rid is None:
-            # Root: mint id and register fresh context.
-            rid = uuid.uuid4().hex[:8]
-            env_extras["rlm_rollout_id"] = rid
-            self.active_rollouts[rid] = _RLMRolloutContext(
+        parent_rid = env_extras.pop("_rlm_parent_rid", None)
+        rid = uuid.uuid4().hex[:8]
+        if parent_rid is None:
+            tid = trajectory_id.to_string() if trajectory_id is not None else None
+            ctx = _RLMRolloutContext(
                 rid=rid,
                 env_class=env_class,
-                trajectory_id=trajectory_id.to_string() if trajectory_id is not None else None,
+                trajectory_id=tid,
                 parent_rid=None,
                 depth=0,
                 child_index=None,
             )
-        # else: child context already registered by _run_child; nothing to add here.
-
-        env_extras["depth"] = self.active_rollouts[rid].depth
-
-        enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
+        else:
+            parent = self.active_rollouts[parent_rid]
+            child_index = sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid)
+            ctx = _RLMRolloutContext(
+                rid=rid,
+                env_class=parent.env_class,
+                trajectory_id=parent.trajectory_id,
+                parent_rid=parent_rid,
+                depth=parent.depth + 1,
+                child_index=child_index,
+            )
+        self.active_rollouts[rid] = ctx
+        env_extras["rlm_rollout_id"] = rid
+        env_extras["depth"] = ctx.depth
 
         loop = asyncio.get_running_loop()
-        if "lm_callback" not in env_extras:
-            # In-REPL llm_query() always goes through the frozen engine when
-            # configured; otherwise falls back to the policy engine.
-            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
-            if enable_child_agents:
-                env_extras["subcall_fn"] = self._make_subcall_fn(
-                    loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
-                )
+        # In-REPL llm_query() always goes through the frozen engine when
+        # configured; otherwise falls back to the policy engine.
+        env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+        if getattr(self.generator_cfg, "enable_child_agents", True):
+            env_extras["subcall_fn"] = self._make_subcall_fn(
+                loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
+            )
 
         return env_extras
 
@@ -340,12 +344,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
     ) -> Callable[[str], str]:
         """Build a sync ``subcall_fn`` exposed to the parent's REPL as ``rlm_query``.
 
-        Each invocation registers a child ``_RLMRolloutContext`` in
-        ``self.active_rollouts`` (linked to ``parent_rid``), then spawns a child
-        ``agent_loop``. The child's ``_setup_env_extras`` sees the pre-stamped
-        ``rlm_rollout_id`` and reuses the existing context. The child's
-        ``_finalize_episode`` parks its output on its context; the root's
-        finalize collects it via the tree.
+        Each invocation spawns a child ``agent_loop`` with ``_rlm_parent_rid``
+        set on its extras; the child's ``_setup_env_extras`` consumes that
+        sentinel and registers the child context (linked to ``parent_rid``).
+        The child's ``_finalize_episode`` parks its output on its context;
+        the root's finalize collects it via the tree.
 
         Task-specific per-child attribution (e.g. paper_id) is the env's job:
         the child env reads ``extras["parent_context"]`` and surfaces whatever
@@ -373,22 +376,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 logger.warning(f"_run_child: parent context {parent_rid!r} is gone")
                 return ""
 
-            child_rid = uuid.uuid4().hex[:8]
-            child_ctx = _RLMRolloutContext(
-                rid=child_rid,
-                env_class=parent_ctx.env_class,
-                trajectory_id=parent_ctx.trajectory_id,
-                parent_rid=parent_rid,
-                depth=parent_ctx.depth + 1,
-                child_index=sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid),
-            )
-            self.active_rollouts[child_rid] = child_ctx
-
             # Build child env_extras: strip parent callables (child's
-            # _setup_env_extras will re-inject), pre-stamp child_rid so the
-            # hook reuses the registered context.
+            # _setup_env_extras will re-inject), set the parent sentinel so
+            # the hook registers a child context linked to this parent.
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            child_extras["rlm_rollout_id"] = child_rid
+            child_extras["_rlm_parent_rid"] = parent_rid
             if parent_context is not None:
                 child_extras["parent_context"] = parent_context
 
