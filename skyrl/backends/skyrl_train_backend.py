@@ -23,7 +23,7 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.setup import create_inference_servers
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     build_router_args,
     build_vllm_cli_args,
@@ -141,7 +141,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
 
         # New inference infrastructure
-        self._server_group = None
+        self._server_groups: list = []
         self._inference_router = None
 
     def has_model(self, model_id: str) -> bool:
@@ -362,24 +362,18 @@ class SkyRLTrainBackend(AbstractBackend):
 
         else:
             cli_args = build_vllm_cli_args(self._cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
+            setup = create_inference_servers(
+                ie_cfg,
+                cli_args,
+                log_path=self._cfg.trainer.log_path,
                 placement_group=self._colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            router_args = build_router_args(ie_cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            self._inference_router = setup.router
+            self._server_groups = list(
+                (setup.server_groups or []) + (setup.prefill_server_groups or []) + (setup.decode_server_groups or [])
             )
+            proxy_url = setup.proxy_url
+            server_urls = setup.server_urls
 
         lora_cfg = self._cfg.trainer.policy.model.lora
         active_lora_name = (
@@ -479,9 +473,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # deleting any model tears down the whole backend and it will be
         # re-initialized on the next create_model() call.
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
-        if self._server_group:
-            self._server_group.shutdown()
-            self._server_group = None
+        for group in self._server_groups:
+            group.shutdown()
+        self._server_groups = []
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
