@@ -21,7 +21,7 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 )
 
 from skyrl.backends.skyrl_train.inference_engines.openrouter_engine import OpenRouterInferenceEngine
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     AgentLoopState,
     SkyRLGymGenerator,
@@ -36,7 +36,9 @@ class _RLMRolloutContext:
 
     One entry lives in ``RLMGymGenerator.active_rollouts`` keyed by ``rid`` for
     the lifetime of an ``agent_loop`` invocation. Roots and children share the
-    same shape; the tree is reconstructed from ``parent_rid`` / ``children_rids``.
+    same shape; the parent->children direction is reconstructed by scanning
+    ``active_rollouts`` for matching ``parent_rid`` (insertion order preserves
+    registration order, which preserves child order).
     """
 
     rid: str
@@ -45,9 +47,7 @@ class _RLMRolloutContext:
     parent_rid: Optional[str]                 # None for root
     depth: int                                # 0 for root, +1 per level
     child_index: Optional[int]                # None for root; assigned at registration
-    children_rids: List[str] = field(default_factory=list)
     output: Optional[Union["StepWiseOutput", "TrajectoryOutput"]] = None
-    child_engine: Optional[InferenceEngineInterface] = None
 
 
 class RLMGymGenerator(SkyRLGymGenerator):
@@ -57,13 +57,13 @@ class RLMGymGenerator(SkyRLGymGenerator):
     via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
     ``_call_inference_engine``.
 
-    Per-rollout state — including children, judge scores, and the per-rollout
-    inference engine override — lives in ``self.active_rollouts``, a dict keyed
-    by an opaque ``rid`` minted in ``_setup_env_extras`` and threaded through
-    ``env_extras["rlm_rollout_id"]``. Each parent and each child rollout gets
-    its own entry; children link back to their parent via ``parent_rid`` and
-    parents track children via ``children_rids``. The whole subtree is popped
-    in the root's ``_finalize_episode``.
+    Per-rollout state — including children and judge scores — lives in
+    ``self.active_rollouts``, a dict keyed by an opaque ``rid`` minted in
+    ``_setup_env_extras`` and threaded through ``env_extras["rlm_rollout_id"]``.
+    Each parent and each child rollout gets its own entry; children link back
+    to their parent via ``parent_rid``, and the parent->children direction is
+    reconstructed at finalize time by scanning ``active_rollouts``. The whole
+    subtree is popped in the root's ``_finalize_episode``.
 
     Children are inlined into the root's ``step_outputs`` at the end of
     ``_finalize_episode`` (root branch only) so the base flattener in
@@ -85,6 +85,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # lock is needed for set/get/pop; do not iterate concurrently with
         # mutation.
         self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
+        # Optional frozen engine used by non-root rollouts when
+        # ``generator_cfg.child_openrouter_model`` is set. ``None`` means
+        # children inherit the policy engine.
+        self.frozen_inference_engine: Optional[InferenceEngineInterface] = self._build_frozen_inference_engine()
 
     # ------------------------------------------------------------------
     # Hook 1: env-extras setup (runs inside agent_loop, before env construction)
@@ -98,6 +102,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]],
         max_tokens: int,
         max_input_length: int,
+        trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
         """Register this rollout in ``self.active_rollouts`` and inject hook callbacks.
 
@@ -122,11 +127,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
             self.active_rollouts[rid] = _RLMRolloutContext(
                 rid=rid,
                 env_class=env_class,
-                trajectory_id=None,  # filled in by _finalize_episode (it has trajectory_id)
+                trajectory_id=trajectory_id.to_string() if trajectory_id is not None else None,
                 parent_rid=None,
                 depth=0,
                 child_index=None,
-                child_engine=self._build_child_engine_if_configured(),
             )
         # else: child context already registered by _run_child; nothing to add here.
 
@@ -136,11 +140,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         loop = asyncio.get_running_loop()
         if "lm_callback" not in env_extras:
-            # Non-root nodes route in-REPL llm_query() through child_engine when configured;
-            # roots stay on the policy engine. Mirrors the _call_inference_engine routing.
-            ctx = self.active_rollouts[rid]
-            lm_engine = ctx.child_engine if ctx.parent_rid is not None else None
-            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, engine=lm_engine)
+            # In-REPL llm_query() always goes through the frozen engine when
+            # configured; otherwise falls back to the policy engine.
+            env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
             if enable_child_agents:
                 env_extras["subcall_fn"] = self._make_subcall_fn(
                     loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
@@ -148,11 +150,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         return env_extras
 
-    def _build_child_engine_if_configured(self) -> Optional[InferenceEngineInterface]:
-        """Build a per-rollout OpenRouter engine if ``child_openrouter_model`` is set.
+    def _build_frozen_inference_engine(self) -> Optional[InferenceEngineInterface]:
+        """Build the frozen OpenRouter engine if ``child_openrouter_model`` is set.
 
-        Returned engine is shared by all children spawned from this root (and
-        their descendants). ``None`` means children inherit the policy engine.
+        Shared across all non-root rollouts. ``None`` means children inherit
+        the policy engine.
         """
         model = getattr(self.generator_cfg, "child_openrouter_model", None)
         if model is None:
@@ -172,19 +174,16 @@ class RLMGymGenerator(SkyRLGymGenerator):
         engine_input: InferenceEngineInput,
         env_extras: Dict[str, Any],
     ) -> InferenceEngineOutput:
-        """Route to the per-rollout child engine if this rollout is a child.
+        """Route non-root rollouts to ``self.frozen_inference_engine`` if configured.
 
         Reads ``rlm_rollout_id`` off ``env_extras`` and looks up the context in
-        ``self.active_rollouts``. Children carry a ``child_engine`` reference
-        (an ``OpenRouterInferenceEngine``) when ``child_openrouter_model`` is
-        configured. Roots have ``child_engine`` set too — but they shouldn't
-        use it for their *own* generation, only pass it down. Hence: only
-        non-root nodes route through it.
+        ``self.active_rollouts``. Roots always run on the policy engine; only
+        non-root nodes route through the frozen engine.
         """
         rid = env_extras.get("rlm_rollout_id")
         ctx = self.active_rollouts.get(rid) if rid else None
-        if ctx is not None and ctx.parent_rid is not None and ctx.child_engine is not None:
-            return await ctx.child_engine.generate(engine_input)
+        if ctx is not None and ctx.parent_rid is not None and self.frozen_inference_engine is not None:
+            return await self.frozen_inference_engine.generate(engine_input)
         return await super()._call_inference_engine(engine_input, env_extras)
 
     # ------------------------------------------------------------------
@@ -207,7 +206,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         from fields already on their context, and stash ``agent_loop_output``
         on their context for the root to pick up.
 
-        The root does the structural work: walk the tree via ``children_rids``
+        The root does the structural work: walk the tree via ``_dfs_descendants``
         (DFS preorder by registration order), inline descendants' step_outputs,
         promote the trajectory-level summary onto the root's final step,
         compute ``child_rlm_metrics`` over the whole tree, then pop the entire
@@ -228,14 +227,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             logger.warning(f"_finalize_episode: missing context for rid={rid!r}")
             return env_metrics
 
-        # trajectory_id is only available here (not in _setup_env_extras), so
-        # backfill it onto the context. For children, _run_child already copied
-        # the parent's trajectory_id at registration time; this only matters for
-        # roots, where it's None until now.
-        tid_str = trajectory_id.to_string() if trajectory_id is not None else None
-        if ctx.trajectory_id is None:
-            ctx.trajectory_id = tid_str
-
         # Local: stamp per-step rlm_metadata using fields already on ctx.
         if isinstance(agent_loop_output, StepWiseOutput):
             for step_index, step in enumerate(agent_loop_output.step_outputs):
@@ -254,7 +245,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             return env_metrics
 
         # ---- Root branch: tree-walk and collapse ----
-
         descendants = self._dfs_descendants(rid)  # preorder, excludes root
 
         # Inline descendants' step_outputs ahead of the root's. Root's last step
@@ -270,43 +260,33 @@ class RLMGymGenerator(SkyRLGymGenerator):
             if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
-        # Promote trajectory-level summary onto root's final step.
-        if isinstance(agent_loop_output, StepWiseOutput) and agent_loop_output.step_outputs:
-            agent_loop_output.step_outputs[-1].env_metrics["rlm_metadata"].update({
-                "final_answer": env_metrics.get("final_answer"),
-                "turns_used":   env_metrics.get("turns_used"),
-                "evidence":     (env_extras.get("reward_spec") or {}).get("evidence"),
-                "num_children": len(ctx.children_rids),
-            })
-
         # Tear down the whole subtree (root + every descendant) in one pass.
         for r in [rid, *(d.rid for d in descendants)]:
             self.active_rollouts.pop(r, None)
 
         # Drop callables and the (potentially huge) context payload off env_extras
         # so it's JSON-serializable for dump_per_dataset_eval_results.
-        extra_info = env_extras.get("extra_info")
-        if isinstance(extra_info, dict):
-            extra_info.pop("context_text", None)
         for k in ("lm_callback", "subcall_fn", "rlm_rollout_id"):
             env_extras.pop(k, None)
-        reward_spec = env_extras.get("reward_spec")
-        if isinstance(reward_spec, dict):
-            reward_spec.pop("reward_fn", None)
 
         return env_metrics
 
     def _dfs_descendants(self, rid: str) -> List[_RLMRolloutContext]:
         """DFS preorder over descendants of ``rid``, in registration order. Excludes ``rid`` itself."""
+        children_by_parent: Dict[str, List[str]] = {}
+        for r, ctx in self.active_rollouts.items():
+            if ctx.parent_rid is not None:
+                children_by_parent.setdefault(ctx.parent_rid, []).append(r)
+
         out: List[_RLMRolloutContext] = []
-        stack: List[str] = list(reversed(self.active_rollouts[rid].children_rids))
+        stack: List[str] = list(reversed(children_by_parent.get(rid, [])))
         while stack:
             cur = stack.pop()
             ctx = self.active_rollouts.get(cur)
             if ctx is None:
                 continue
             out.append(ctx)
-            stack.extend(reversed(ctx.children_rids))
+            stack.extend(reversed(children_by_parent.get(cur, [])))
         return out
 
     # ==================================================================
@@ -317,15 +297,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
         self,
         loop: asyncio.AbstractEventLoop,
         sampling_params: Optional[Dict[str, Any]],
-        engine: Optional[InferenceEngineInterface] = None,
     ) -> Callable[[List[str]], List[str]]:
         """Sync callback that dispatches batched text prompts to an inference engine.
 
         Safe to call from a non-async thread (e.g. inside a REPL ``exec()``).
-        ``engine`` defaults to ``self.inference_engine_client``; child rollouts pass
-        the OpenRouter engine when ``child_openrouter_model`` is set.
+        Routes through ``self.frozen_inference_engine`` when configured; falls
+        back to the policy engine otherwise.
         """
-        target_engine = engine if engine is not None else self.inference_engine_client
+        target_engine = self.inference_engine_client
 
         async def _generate(prompts: List[str]) -> List[str]:
             token_ids = [
@@ -371,9 +350,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         Task-specific per-child attribution (e.g. paper_id) is the env's job:
         the child env reads ``extras["parent_context"]`` and surfaces whatever
         it wants via its own ``get_metrics()``.
-
-        When ``child_openrouter_model`` is set, the parent's context carries a
-        ``child_engine``; we propagate it down so descendants share one engine.
         """
         # Decode the parent's context once so children can reverse-lookup their
         # own attribution against it (e.g. paper_id from paper text).
@@ -404,11 +380,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 trajectory_id=parent_ctx.trajectory_id,
                 parent_rid=parent_rid,
                 depth=parent_ctx.depth + 1,
-                child_index=len(parent_ctx.children_rids),
-                child_engine=parent_ctx.child_engine,
+                child_index=sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid),
             )
             self.active_rollouts[child_rid] = child_ctx
-            parent_ctx.children_rids.append(child_rid)
 
             # Build child env_extras: strip parent callables (child's
             # _setup_env_extras will re-inject), pre-stamp child_rid so the

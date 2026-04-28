@@ -235,6 +235,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         sampling_params: Optional[Dict[str, Any]],
         max_tokens: int,
         max_input_length: int,
+        trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
         """Hook: subclasses may inject env-specific callables/extras before env construction."""
         return env_extras
@@ -307,7 +308,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_extras = self._setup_env_extras(
-            env_class, env_extras, prompt, sampling_params, max_tokens, max_input_length
+            env_class, env_extras, prompt, sampling_params, max_tokens, max_input_length, trajectory_id
         )
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
