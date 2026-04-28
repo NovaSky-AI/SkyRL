@@ -1,8 +1,6 @@
 import json
 import re
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
@@ -176,19 +174,6 @@ def _format_tools_for_prompt(custom_tools: Optional[Dict[str, Any]]) -> Optional
 
 
 # ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RLMEnvConfig:
-    repl_timeout: float = 60.0
-    parent_repl_timeout: float = 180.0  # timeout for parent REPL (with child RLM calls)
-    custom_system_prompt: Optional[str] = None
-    child_system_prompt: Optional[str] = None
-    custom_tools: Optional[Dict[str, Any]] = field(default=None)
-
-
-# ---------------------------------------------------------------------------
 # Base environment
 # ---------------------------------------------------------------------------
 
@@ -207,6 +192,13 @@ class BaseRLMEnv(BaseTextEnv):
 
     See ``examples/train/rlm/envs/evidence_rlm_env.py`` for a worked example.
 
+    All per-rollout knobs come through ``extras``:
+      • ``repl_timeout`` — REPL execution timeout in seconds (default 180)
+      • ``max_turns`` — turn budget (default 10)
+      • ``step_wise`` — step-wise vs. inline next_user_message (default True)
+      • ``lm_callback`` / ``subcall_fn`` — LM query callbacks injected by the generator
+      • ``depth`` — rollout depth in a parent/child tree (default 0)
+
     init() returns:
         [system_msg, context_metadata_msg, turn_0_user_prompt_msg]
 
@@ -218,24 +210,13 @@ class BaseRLMEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: Any = None, extras: Dict[str, Any] = None):
+        # env_config is accepted for skyrl_gym.make() kwarg compatibility but ignored:
+        # all knobs come through extras.
         super().__init__()
         extras = extras or {}
         self.extras = extras
 
         self.max_turns = extras.get("max_turns", 10)
-
-        if isinstance(env_config, RLMEnvConfig):
-            self.rlm_config = env_config
-        elif isinstance(env_config, Mapping):
-            self.rlm_config = RLMEnvConfig(**{k: v for k, v in env_config.items() if k in RLMEnvConfig.__dataclass_fields__})
-        else:
-            self.rlm_config = RLMEnvConfig()
-
-        # Per-example custom tools merged on top of any static config-level tools
-        if extras.get("custom_tools"):
-            merged = dict(self.rlm_config.custom_tools or {})
-            merged.update(extras["custom_tools"])
-            self.rlm_config.custom_tools = merged
 
         # LM query callbacks — passed via extras to stay serialization-friendly
         self.lm_callback = extras.get("lm_callback", None)
@@ -249,7 +230,9 @@ class BaseRLMEnv(BaseTextEnv):
 
         self.repl: Optional[PersistentREPL] = None
         self._context: Any = None
+        self._tools: Dict[str, Any] = {}  # populated in init() from _get_repl_tools()
         self._final_answer: Optional[str] = None
+        self._reward: float = 0.0  # set once when done=True; read by get_metrics
         self._turn_index = 0
         self._last_repl_exec_s: float = 0.0
 
@@ -257,13 +240,14 @@ class BaseRLMEnv(BaseTextEnv):
     # Override hooks — subclasses customize task-specific behavior here
     # ------------------------------------------------------------------
 
-    def _get_reward(self, final_answer: Optional[str]) -> float:
+    def _get_reward(self, final_answer: str) -> float:
         """Score the final answer. Override or set ``self.reward_fn``.
 
-        Default: delegates to ``self.reward_fn(final_answer)`` if set, else 0.0.
+        Only called when the rollout produced a final answer; turn-limit
+        timeouts and other no-answer terminations score 0 without invoking
+        this method. Default: delegates to ``self.reward_fn(final_answer)``
+        if set, else 0.0.
         """
-        if final_answer is None:
-            return 0.0
         if self.reward_fn is not None:
             return float(self.reward_fn(final_answer))
         return 0.0
@@ -273,7 +257,7 @@ class BaseRLMEnv(BaseTextEnv):
 
         The returned string may contain ``{custom_tools_section}`` which the
         base will replace with auto-rendered descriptions of LM-query tools
-        (when ``lm_callback`` is set) and ``rlm_config.custom_tools``.
+        (when ``lm_callback`` is set) and the tools from ``_get_repl_tools()``.
         """
         return DEFAULT_RLM_SYSTEM_PROMPT
 
@@ -290,14 +274,10 @@ class BaseRLMEnv(BaseTextEnv):
     # ------------------------------------------------------------------
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
-        extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
-        if not isinstance(extra_info, dict):
-            extra_info = {}
-
         # root_prompt: the user question shown every turn
         # context_text: data payload loaded into the REPL `context` variable
         root_prompt = self._extract_prompt_text(prompt)
-        context_payload = extra_info.get("context_text") or root_prompt
+        context_payload = self.extras.get("extra_info", {}).get("context_text") or root_prompt
         if isinstance(context_payload, str):
             try:
                 decoded = json.loads(context_payload)
@@ -309,16 +289,11 @@ class BaseRLMEnv(BaseTextEnv):
         self._context = context_payload
 
         # Subclass-supplied REPL tools (closures may capture self._context)
-        subclass_tools = self._get_repl_tools()
-        if subclass_tools:
-            merged = dict(self.rlm_config.custom_tools or {})
-            merged.update(subclass_tools)
-            self.rlm_config.custom_tools = merged
+        self._tools = self._get_repl_tools() or {}
 
-        repl_timeout = self.rlm_config.parent_repl_timeout if self.subcall_fn is not None else self.rlm_config.repl_timeout
         self.repl = PersistentREPL(
-            timeout=repl_timeout,
-            custom_tools=self.rlm_config.custom_tools or {},
+            timeout=self.extras.get("repl_timeout", 180.0),
+            custom_tools=self._tools,
             lm_callback=self.lm_callback,
             subcall_fn=self.subcall_fn,
         )
@@ -357,8 +332,8 @@ class BaseRLMEnv(BaseTextEnv):
                 "- `rlm_query(prompt)` — recursive LM call that spawns a child agent with its own REPL, returns str\n"
                 "- `rlm_query_batched(prompts)` — batch recursive calls in parallel, returns list[str]"
             )
-        if self.rlm_config.custom_tools:
-            tools_formatted = _format_tools_for_prompt(self.rlm_config.custom_tools)
+        if self._tools:
+            tools_formatted = _format_tools_for_prompt(self._tools)
             if tools_formatted:
                 section_num = 5 if self.lm_callback is not None else 4
                 custom_tools_section += f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"
@@ -372,74 +347,61 @@ class BaseRLMEnv(BaseTextEnv):
         done = self.turns >= self.max_turns
         code = _find_code_block(action)
 
+        # Branch 1: model didn't produce a repl block.
         if code is None:
             obs_text = "[No ```repl``` code block found. Wrap your code in ```repl\\n...\\n``` blocks.]"
-            reward = self._get_reward(None) if done else 0.0
-            if not done:
-                next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-                if self.step_wise:
-                    return BaseTextEnvStepOutput(
-                        observations=[{"role": "user", "content": obs_text}],
-                        next_user_message=next_prompt,
-                        reward=reward,
-                        done=done,
-                        metadata={},
-                    )
-                else:
-                    return BaseTextEnvStepOutput(
-                        observations=[{"role": "user", "content": obs_text}, next_prompt],
-                        next_user_message=None,
-                        reward=reward,
-                        done=done,
-                        metadata={},
-                    )
+            return self._make_step_output([{"role": "user", "content": obs_text}], done=done)
 
-            return BaseTextEnvStepOutput(
-                observations=[], next_user_message=None, reward=reward, done=done, metadata={}
-            )
-
+        # Branch 2: execute the repl block.
         _t_repl = time.perf_counter()
         result = self.repl.execute(code)
         self._last_repl_exec_s = time.perf_counter() - _t_repl
 
-        # Two-stage final answer detection
-        final_answer = result.final_answer  # set by FINAL_VAR() callable during execution
-        if final_answer is None:
-            final_answer = _find_final_answer(action, self.repl)
+        # Two-stage final answer detection: FINAL_VAR() inside exec, or text-parsed FINAL/FINAL_VAR.
+        final_answer = result.final_answer or _find_final_answer(action, self.repl)
         if final_answer is not None:
             self._final_answer = final_answer
-            done = True
+            self._reward = self._get_reward(final_answer)
+            return self._make_step_output([], done=True)
 
-        reward = self._get_reward(final_answer) if done else 0.0
-
+        # Hit max_turns without an answer: terminate with reward 0 (the default _reward).
         if done:
-            return BaseTextEnvStepOutput(
-                observations=[], next_user_message=None, reward=reward, done=True, metadata=self._build_metadata()
-            )
+            return self._make_step_output([], done=True)
 
-        # Format REPL output observation
+        # Otherwise emit the REPL output and continue.
         result_str = _format_execution_result(result)
         if len(result_str) > _MAX_RESULT_LEN:
             result_str = result_str[:_MAX_RESULT_LEN] + f"... + [{len(result_str) - _MAX_RESULT_LEN} chars...]"
-        repl_obs_text = f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result_str}"
+        obs_text = f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result_str}"
+        return self._make_step_output([{"role": "user", "content": obs_text}], done=False)
 
+    def _make_step_output(self, observations: List[Dict[str, str]], done: bool) -> BaseTextEnvStepOutput:
+        """Build a step output, handling step_wise vs. inline next_user_message conventions."""
+        metadata = self._build_metadata()
+        if done:
+            return BaseTextEnvStepOutput(
+                observations=observations,
+                next_user_message=None,
+                reward=self._reward,
+                done=True,
+                metadata=metadata,
+            )
         next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
         if self.step_wise:
             return BaseTextEnvStepOutput(
-                observations=[{"role": "user", "content": repl_obs_text}],
+                observations=observations,
                 next_user_message=next_prompt,
-                reward=reward,
+                reward=0.0,
                 done=False,
-                metadata=self._build_metadata(),
+                metadata=metadata,
             )
-        else:
-            return BaseTextEnvStepOutput(
-                observations=[{"role": "user", "content": repl_obs_text}, next_prompt],
-                next_user_message=None,
-                reward=reward,
-                done=False,
-                metadata=self._build_metadata(),
-            )
+        return BaseTextEnvStepOutput(
+            observations=observations + [next_prompt],
+            next_user_message=None,
+            reward=0.0,
+            done=False,
+            metadata=metadata,
+        )
 
     def _extract_prompt_text(self, prompt: ConversationType) -> str:
         parts = [msg["content"] for msg in prompt if msg.get("content")]
@@ -453,7 +415,7 @@ class BaseRLMEnv(BaseTextEnv):
             "turns_used": self.turns,
             "final_value_set": self._final_answer is not None,
             "final_answer": self._final_answer,
-            "reward": self._get_reward(self._final_answer),
+            "reward": self._reward,
         }
 
     def close(self):

@@ -80,7 +80,6 @@ class _RLMRolloutContext:
     judge_scores: Dict[str, Any] = field(default_factory=dict)
     call_record: Optional[Dict[str, Any]] = None  # set on a child by its parent's _run_child
     child_engine: Optional[InferenceEngineInterface] = None
-    child_system_prompt: Optional[str] = None
 
 
 class RLMGymGenerator(SkyRLGymGenerator):
@@ -88,9 +87,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
     via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
-    ``_call_inference_engine``. A thin ``generate`` wrapper resolves the
-    batch-level RLM overrides (``child_system_prompt``) once and stashes them
-    on ``self`` for the hooks.
+    ``_call_inference_engine``.
 
     Per-rollout state — including children, judge scores, and the per-rollout
     inference engine override — lives in ``self.active_rollouts``, a dict keyed
@@ -110,35 +107,16 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     # Env-class ids this generator should treat as RLM-shaped. Subclass and
     # extend if you register a new BaseRLMEnv subclass with a different id.
-    RLM_ENV_CLASSES: frozenset = frozenset({"evidence_rlm"})
+    RLM_ENV_CLASSES: frozenset = frozenset({"evidence_rlm", "multipaper_evidence_rlm"})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Set per-call by ``generate``; read by hooks. Reset in finally.
-        self._batch_rlm_overrides: Dict[str, Optional[str]] = {}
         # Per-rollout registry keyed by rid. Populated in _setup_env_extras /
         # _run_child; the whole subtree is popped in the root's
         # _finalize_episode. CPython dict ops on distinct keys are atomic so no
         # lock is needed for set/get/pop; do not iterate concurrently with
         # mutation.
         self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
-
-    # ------------------------------------------------------------------
-    # generate(): thin wrapper that resolves batch-level overrides once
-    # ------------------------------------------------------------------
-
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
-        rlm_cfg = getattr(self.skyrl_gym_cfg, "rlm", None)
-        overrides: Dict[str, Optional[str]] = {"child_system_prompt": None}
-        if rlm_cfg is not None:
-            cfg_dict = vars(rlm_cfg) if hasattr(rlm_cfg, "__dict__") else dict(rlm_cfg)
-            overrides["child_system_prompt"] = cfg_dict.get("child_system_prompt")
-
-        self._batch_rlm_overrides = overrides
-        try:
-            return await super().generate(input_batch, disable_tqdm)
-        finally:
-            self._batch_rlm_overrides = {}
 
     # ------------------------------------------------------------------
     # Hook 1: env-extras setup (runs inside agent_loop, before env construction)
@@ -181,10 +159,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 parent_rid=None,
                 depth=0,
                 child_index=None,
-                child_system_prompt=self._batch_rlm_overrides.get("child_system_prompt"),
                 child_engine=self._build_child_engine_if_configured(),
             )
         # else: child context already registered by _run_child; nothing to add here.
+
+        env_extras["depth"] = self.active_rollouts[rid].depth
 
         judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
         enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
@@ -635,7 +614,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 depth=parent_ctx.depth + 1,
                 child_index=len(parent_ctx.children_rids),
                 child_engine=parent_ctx.child_engine,
-                child_system_prompt=parent_ctx.child_system_prompt,
             )
             self.active_rollouts[child_rid] = child_ctx
             parent_ctx.children_rids.append(child_rid)
@@ -646,8 +624,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
             child_extras["rlm_rollout_id"] = child_rid
 
-            if child_ctx.child_system_prompt:
-                child_extras["custom_system_prompt"] = child_ctx.child_system_prompt
             if context is not None:
                 child_extra_info = dict(child_extras.get("extra_info", {}) or {})
                 if isinstance(context, str):
@@ -656,10 +632,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
                     child_extra_info["context_text"] = json.dumps(context)
                 child_extras["extra_info"] = child_extra_info
                 # Children aren't scored independently; clear evidence-based reward_spec
-                # and drop parent's custom_tools so the child's env.init() rebuilds them
-                # closing over the child's own context.
+                # so the child's env builds its own (per-context) reward.
                 child_extras["reward_spec"] = {"ground_truth": None}
-                child_extras.pop("custom_tools", None)
 
             result = await self.agent_loop(
                 prompt=[{"role": "user", "content": prompt}],

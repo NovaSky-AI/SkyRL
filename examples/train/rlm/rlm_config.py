@@ -17,8 +17,7 @@ class RLMGeneratorConfig(GeneratorConfig):
     """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
     enable_child_agents: bool = True
     """When False, skip subcall_fn injection for RLM envs so the top-level agent runs without
-    child-spawning capability (single-paper mode). Also uses the shorter ``repl_timeout`` instead
-    of ``parent_repl_timeout``."""
+    child-spawning capability (single-paper mode)."""
     judge_reward_model: Optional[str] = None
     """When set, replace F1 reward with an LLM judge score (via OpenAI-compatible API) for RLM envs.
     Requires ``OPENAI_API_KEY``. E.g. 'openai/gpt-4.1-nano'."""

@@ -42,7 +42,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  environment.env_class=evidence_rlm \
+  environment.env_class=multipaper_evidence_rlm \
   generator.step_wise_trajectories=true \
   generator.max_turns=10 \
   generator.batched=false \
@@ -70,7 +70,5 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   trainer.logger="$LOGGER" \
   trainer.project_name="rlm" \
   trainer.run_name="multi_paper_eval" \
-  environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
-  environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
   generator.child_openrouter_model="openai/gpt-5.4-nano" \
   "$@"

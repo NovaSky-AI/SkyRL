@@ -12,7 +12,7 @@ precedence over the evidence-F1 reward.
 from __future__ import annotations
 
 import textwrap
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
 
@@ -230,66 +230,59 @@ FINAL_VAR([p1, p2])
 # ---------------------------------------------------------------------------
 
 class EvidenceRLMEnv(BaseRLMEnv):
-    """RLM environment for evidence-extraction tasks.
+    """RLM environment for single-paper evidence extraction.
+
+    Acts as the worker role: one paper in ``context``, returns a list of
+    verbatim evidence spans. Always uses ``MULTIPAPER_CHILD_SYSTEM_PROMPT``
+    (it is the worker prompt, regardless of whether a parent dispatched it).
 
     Reward: F1 over retrieved text intervals vs. ground-truth evidence spans
-    in ``reward_spec.evidence``. Multipaper if the context is a dict, single
-    if it's a string. A ``judge_reward_fn`` in extras takes precedence.
+    in ``reward_spec.evidence``. Multipaper math when the context is a dict,
+    single-paper math when it is a string. A ``judge_reward_fn`` injected
+    via extras takes precedence over evidence-F1.
 
     Tools: paper-aware ``list_papers``/``search``/``extract_section``/
     ``get_paper_abstract`` injected into the REPL.
-
-    System prompts: ``rlm_config.custom_system_prompt`` may be set to
-    ``"multipaper"`` (parent) or ``"multipaper_child"`` (child) to select
-    the multipaper prompt; otherwise the base RLM prompt is used.
     """
 
-    # ------------------------------------------------------------------
-    # Reward
-    # ------------------------------------------------------------------
+    SYSTEM_PROMPT = MULTIPAPER_CHILD_SYSTEM_PROMPT
 
-    def _get_reward(self, final_answer: Optional[str]) -> float:
-        # Lazy: build reward_fn on first call so self._context is populated.
+    def _get_reward(self, final_answer: str) -> float:
+        # Bind reward_fn lazily on first call (when self._context is populated).
+        # judge_reward_fn (injected via extras by the generator) wins over evidence-F1.
         if self.reward_fn is None:
-            self.reward_fn = self._build_reward_fn()
+            judge = self.extras.get("judge_reward_fn")
+            if judge is not None:
+                self.reward_fn = judge
+            else:
+                evidence = (self.extras.get("reward_spec") or {}).get("evidence")
+                if evidence is not None:
+                    self.reward_fn = (
+                        make_reward_fn_multipaper(self._context, evidence)
+                        if isinstance(self._context, dict)
+                        else make_reward_fn(self._context, evidence)
+                    )
         return super()._get_reward(final_answer)
 
-    def _build_reward_fn(self):
-        # judge_reward_fn (if injected via extras by the generator) wins over evidence-F1.
-        judge = self.extras.get("judge_reward_fn")
-        if judge is not None:
-            return judge
-
-        reward_spec = self.extras.get("reward_spec", {}) or {}
-        evidence = reward_spec.get("evidence")
-        if evidence is None:
-            return None  # base class default returns 0.0 when reward_fn is None
-
-        if isinstance(self._context, dict):
-            return make_reward_fn_multipaper(self._context, evidence)
-        return make_reward_fn(self._context, evidence)
-
-    # ------------------------------------------------------------------
-    # System prompt
-    # ------------------------------------------------------------------
-
     def _get_system_prompt(self) -> str:
-        prompt_key = self.rlm_config.custom_system_prompt
-        if prompt_key == "multipaper":
-            return MULTIPAPER_PARENT_SYSTEM_PROMPT
-        if prompt_key == "multipaper_child":
-            return MULTIPAPER_CHILD_SYSTEM_PROMPT
-        if prompt_key:
-            return prompt_key
-        return super()._get_system_prompt()
-
-    # ------------------------------------------------------------------
-    # REPL tools
-    # ------------------------------------------------------------------
+        return self.SYSTEM_PROMPT
 
     def _get_repl_tools(self) -> Dict[str, Any]:
-        # Don't override tools the user has already configured under the same names.
-        existing = self.rlm_config.custom_tools or {}
-        if "search" in existing:
-            return {}
         return make_tools()
+
+
+class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
+    """Multi-paper evidence extraction with parent/child orchestration.
+
+    Root agent (depth 0) gets ``MULTIPAPER_PARENT_SYSTEM_PROMPT`` and
+    coordinates: it picks relevant papers and dispatches child agents via
+    ``rlm_query_batched``. Each child rollout (depth >= 1) runs as a
+    worker with ``MULTIPAPER_CHILD_SYSTEM_PROMPT`` over a single paper.
+
+    The generator stamps ``extras["depth"]`` per rollout; this class reads
+    it to pick the right prompt.
+    """
+
+    def _get_system_prompt(self) -> str:
+        depth = self.extras.get("depth", 0)
+        return MULTIPAPER_PARENT_SYSTEM_PROMPT if depth == 0 else MULTIPAPER_CHILD_SYSTEM_PROMPT

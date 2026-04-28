@@ -25,7 +25,7 @@ export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 uv run --extra fsdp -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  environment.env_class=evidence_rlm \
+  environment.env_class=multipaper_evidence_rlm \
   generator.step_wise_trajectories=true \
   generator.enable_child_agents=true \
   generator.train_child_trajectories=true \
@@ -77,7 +77,5 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
-  environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
-  environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
   generator.judge_reward_model="$JUDGE_MODEL" \
   "$@"
