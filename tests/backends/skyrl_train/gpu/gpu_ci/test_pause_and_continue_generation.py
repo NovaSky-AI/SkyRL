@@ -234,7 +234,7 @@ async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixt
                     "sampling_params": dict(sampling_params),
                     "session_ids": [i],
                 }
-                return await client.generate(engine_input)
+                return await client.generate(engine_input, model=client.model_name)
 
             tasks = [asyncio.create_task(one_req(i)) for i in range(num_requests)]
             # Let requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait per engine

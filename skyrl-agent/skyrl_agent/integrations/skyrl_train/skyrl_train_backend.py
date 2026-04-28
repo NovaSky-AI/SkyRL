@@ -1,10 +1,18 @@
 from typing import Any, List
+
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+
 from ..base import AsyncInferBackend, GeneratorOutput, GeneratorInput
 
 
 class SkyRLBackend(AsyncInferBackend):
     def __init__(self, infer_engine, tokenizer: Any = None, cfg: Any = None):
         self.client = infer_engine
+        # Resolve the name the inference engine knows the policy by (base
+        # model or registered LoRA adapter) once at construction. Threaded
+        # into every ``client.generate`` call so the data plane never has
+        # to guess the target adapter.
+        self.policy_model_name = resolve_policy_model_name(cfg) if cfg is not None else self.client.model_name
 
     async def async_generate_prompts(self, prompts: Any, sampling_params: Any, **kwargs) -> List[str]:
         input_obj = {
@@ -12,7 +20,7 @@ class SkyRLBackend(AsyncInferBackend):
             "session_ids": [kwargs.get("request_id", None)],
             "sampling_params": sampling_params,
         }
-        output = await self.client.generate(input_obj)
+        output = await self.client.generate(input_obj, model=self.policy_model_name)
         return output["responses"][0], output["stop_reasons"][0]
 
     async def async_generate_ids(self, input_ids: List[int], sampling_params: Any, **kwargs) -> List[str]:
@@ -21,7 +29,7 @@ class SkyRLBackend(AsyncInferBackend):
             "session_ids": [kwargs.get("request_id", None)],
             "sampling_params": sampling_params,
         }
-        output = await self.client.generate(input_obj)
+        output = await self.client.generate(input_obj, model=self.policy_model_name)
         # todo(@csy) probably need to be finish_reason
         # https://github.com/vllm-project/vllm/blob/a0f8a7964694a6077689b242b5eca95de392d4bb/vllm/v1/engine/__init__.py#L22
         meta_info = {

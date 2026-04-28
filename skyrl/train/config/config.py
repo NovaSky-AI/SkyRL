@@ -61,6 +61,16 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
+    max_loras: int = 1
+    """Maximum number of LoRA adapters that can be active concurrently in a
+    single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
+    multi-tenant LoRA serving via ``RemoteInferenceClient.load_lora_adapter``."""
+
+    max_cpu_loras: Optional[int] = None
+    """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
+    ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
+    >= ``max_loras`` if explicitly set."""
+
 
 @dataclass
 class ModelConfig(BaseConfig):

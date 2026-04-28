@@ -150,6 +150,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                 skyrl_gym_cfg=cfg.environment.skyrl_gym,
                 inference_engine_client=client,
                 tokenizer=tokenizer,
+                policy_model_name=client.model_name,
             )
 
             input_batch: GeneratorInput = get_test_generator_input(

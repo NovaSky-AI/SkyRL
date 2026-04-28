@@ -186,7 +186,7 @@ async def fire_client_generate(
 
     async def _call(idx: int):
         try:
-            return await client.generate(input_batch)
+            return await client.generate(input_batch, model=client.model_name)
         except Exception as e:
             raise RuntimeError(f"request {idx}: {type(e).__name__}: {e}") from e
 

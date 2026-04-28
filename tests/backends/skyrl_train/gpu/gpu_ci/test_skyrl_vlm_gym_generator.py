@@ -191,6 +191,7 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
             skyrl_gym_cfg=env_cfg,
             inference_engine_client=inference_client,
             tokenizer=tokenizer,
+            policy_model_name=inference_client.model_name,
         )
 
         num_prompts = 2

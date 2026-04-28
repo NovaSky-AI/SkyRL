@@ -563,7 +563,7 @@ async def test_client_generate(vllm_server: InferenceEngineState):
         sampling_params=sampling_params,
     )
 
-    output = await client.generate(engine_input)
+    output = await client.generate(engine_input, model=client.model_name)
 
     assert len(output["responses"]) == 1
     assert len(output["response_ids"]) == 1
@@ -595,6 +595,7 @@ async def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngine
 
 def _build_sample_payload(
     token_ids: List[int],
+    model: str = MODEL_QWEN2_5,
     num_samples: int = 1,
     sampling_params: Dict[str, Any] | None = None,
     session_id: str | None = None,
@@ -603,6 +604,7 @@ def _build_sample_payload(
 ) -> Dict[str, Any]:
     """Build a Tinker-format sample request payload."""
     body: Dict[str, Any] = {
+        "model": model,
         "prompt": {"chunks": [{"tokens": token_ids}]},
         "num_samples": num_samples,
         "sampling_params": sampling_params or {"temperature": 0.7, "max_tokens": 64},

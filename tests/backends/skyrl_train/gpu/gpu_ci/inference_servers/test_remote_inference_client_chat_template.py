@@ -90,7 +90,7 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
             prompt_token_ids=[prompt_token_ids],
             sampling_params={"max_tokens": 10},
         )
-        output = await client.generate(engine_input)
+        output = await client.generate(engine_input, model=client.model_name)
         assert len(output["responses"]) == 1
         assert isinstance(output["responses"][0], str)
 
