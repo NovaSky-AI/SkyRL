@@ -75,28 +75,32 @@ def _build_user_prompt(root_prompt: Optional[str], iteration: int) -> Dict[str, 
 # Parsing helpers (from rlm/rlm/utils/parsing.py)
 # ---------------------------------------------------------------------------
 
-_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
-
-
-def _strip_thinking(text: str) -> str:
-    return _THINK_RE.sub("", text).strip()
+_REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```", re.DOTALL)
+_FINAL_VAR_RE = re.compile(r"^\s*FINAL_VAR\((.*?)\)", re.MULTILINE | re.DOTALL)
+_FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 
 
 def _find_code_block(text: str) -> Optional[str]:
-    """Return the first ```repl ... ``` code block, or None."""
-    text = _strip_thinking(text)
-    match = re.search(r"```repl\s*\n(.*?)\n```", text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    """Return the LAST ```repl ... ``` code block in the response, or None.
+
+    Last-match wins so that any ```repl examples nested inside <think> tags
+    or earlier scratch reasoning are ignored — the model's actual action is
+    whatever it commits to at the end.
+    """
+    matches = _REPL_BLOCK_RE.findall(text)
+    return matches[-1].strip() if matches else None
 
 
 def _find_final_answer(text: str, repl: Optional[PersistentREPL]) -> Optional[str]:
-    """Parse FINAL_VAR(...) or FINAL(...) from the model's text response."""
-    text = _strip_thinking(text)
+    """Parse FINAL_VAR(...) or FINAL(...) from the model's text response.
 
-    # FINAL_VAR — retrieves a variable from the REPL
-    match = re.search(r"^\s*FINAL_VAR\((.*?)\)", text, re.MULTILINE | re.DOTALL)
-    if match:
-        variable_name = match.group(1).strip().strip('"').strip("'")
+    Takes the LAST occurrence of either marker (FINAL_VAR preferred over FINAL
+    when both are present) so markers inside <think> tags or earlier reasoning
+    are ignored.
+    """
+    var_matches = _FINAL_VAR_RE.findall(text)
+    if var_matches:
+        variable_name = var_matches[-1].strip().strip('"').strip("'")
         if repl is not None:
             result = repl.execute(f"print(FINAL_VAR({variable_name!r}))")
             answer = result.stdout.strip()
@@ -107,10 +111,9 @@ def _find_final_answer(text: str, repl: Optional[PersistentREPL]) -> Optional[st
             return answer
         return None
 
-    # FINAL — inline literal
-    match = re.search(r"^\s*FINAL\((.*)\)\s*$", text, re.MULTILINE | re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    final_matches = _FINAL_RE.findall(text)
+    if final_matches:
+        return final_matches[-1].strip()
 
     return None
 
@@ -195,9 +198,12 @@ class BaseRLMEnv(BaseTextEnv):
     All per-rollout knobs come through ``extras``:
       • ``repl_timeout`` — REPL execution timeout in seconds (default 180)
       • ``max_turns`` — turn budget (default 10)
-      • ``step_wise`` — step-wise vs. inline next_user_message (default True)
       • ``lm_callback`` / ``subcall_fn`` — LM query callbacks injected by the generator
       • ``depth`` — rollout depth in a parent/child tree (default 0)
+
+    Step output shape: always returns ``next_user_message`` as a separate
+    field (the step-wise shape). The agent loop is free to inject it
+    after model generation or concatenate it inline; this env doesn't care.
 
     init() returns:
         [system_msg, context_metadata_msg, turn_0_user_prompt_msg]
@@ -221,8 +227,6 @@ class BaseRLMEnv(BaseTextEnv):
         # LM query callbacks — passed via extras to stay serialization-friendly
         self.lm_callback = extras.get("lm_callback", None)
         self.subcall_fn = extras.get("subcall_fn", None)
-
-        self.step_wise = extras.get("step_wise", True)
 
         # Subclasses may set self.reward_fn in their __init__ if they want the
         # default _get_reward to delegate. Otherwise they should override _get_reward.
@@ -276,7 +280,7 @@ class BaseRLMEnv(BaseTextEnv):
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         # root_prompt: the user question shown every turn
         # context_text: data payload loaded into the REPL `context` variable
-        root_prompt = self._extract_prompt_text(prompt)
+        root_prompt = "\n".join(msg["content"] for msg in prompt if msg.get("content"))
         context_payload = self.extras.get("extra_info", {}).get("context_text") or root_prompt
         if isinstance(context_payload, str):
             try:
@@ -312,13 +316,7 @@ class BaseRLMEnv(BaseTextEnv):
             {"role": "system", "content": system_content},
             {"role": "user", "content": metadata_text},
         ]
-
-        if self.step_wise:
-            return init_messages, {"next_user_message": turn0_prompt}
-        else:
-            init_messages.append(turn0_prompt)
-
-        return init_messages, {}
+        return init_messages, {"next_user_message": turn0_prompt}
 
     def _build_system_prompt(self) -> str:
         template = self._get_system_prompt()
@@ -376,8 +374,10 @@ class BaseRLMEnv(BaseTextEnv):
         return self._make_step_output([{"role": "user", "content": obs_text}], done=False)
 
     def _make_step_output(self, observations: List[Dict[str, str]], done: bool) -> BaseTextEnvStepOutput:
-        """Build a step output, handling step_wise vs. inline next_user_message conventions."""
-        metadata = self._build_metadata()
+        """Build a step output. Always returns next_user_message as a separate
+        field; the agent loop decides whether to inject it post-generation
+        (step-wise) or concatenate it inline."""
+        metadata = {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
         if done:
             return BaseTextEnvStepOutput(
                 observations=observations,
@@ -386,29 +386,13 @@ class BaseRLMEnv(BaseTextEnv):
                 done=True,
                 metadata=metadata,
             )
-        next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-        if self.step_wise:
-            return BaseTextEnvStepOutput(
-                observations=observations,
-                next_user_message=next_prompt,
-                reward=0.0,
-                done=False,
-                metadata=metadata,
-            )
         return BaseTextEnvStepOutput(
-            observations=observations + [next_prompt],
-            next_user_message=None,
+            observations=observations,
+            next_user_message=_build_user_prompt(self._root_prompt, self._turn_index),
             reward=0.0,
             done=False,
             metadata=metadata,
         )
-
-    def _extract_prompt_text(self, prompt: ConversationType) -> str:
-        parts = [msg["content"] for msg in prompt if msg.get("content")]
-        return "\n".join(parts)
-
-    def _build_metadata(self) -> Dict[str, Any]:
-        return {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
 
     def get_metrics(self) -> Dict[str, Any]:
         return {

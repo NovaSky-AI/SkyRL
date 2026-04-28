@@ -145,7 +145,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             return env_extras
 
         env_extras = dict(env_extras)
-        env_extras["step_wise"] = self.generator_cfg.step_wise_trajectories
 
         rid = env_extras.get("rlm_rollout_id")
         if rid is None:
