@@ -247,3 +247,178 @@ def compute_child_rlm_metrics(
         "paper_selection_f1": paper_selection_f1,
         "child_evidence_char_f1": child_evidence_char_f1,
     }
+
+
+# ---------------------------------------------------------------------------
+# LLM-judge reward
+# ---------------------------------------------------------------------------
+
+_RUBRIC_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "RubricScore",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "precision_score": {
+                    "type": "integer",
+                    "description": "1-10: how tight and accurate the spans are (no extraneous sentences, no off-topic padding)",
+                },
+                "recall_score": {
+                    "type": "integer",
+                    "description": "1-10: how thoroughly the evidence covers what is needed to answer the question",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Brief explanation of the scores",
+                },
+            },
+            "required": ["precision_score", "recall_score", "reasoning"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+class JudgeRewardFn:
+    """Callable that scores a final answer with an LLM judge.
+
+    After each call, ``last_precision`` and ``last_recall`` carry the
+    component scores (0-1) so the caller can surface them as separate
+    telemetry fields. Combined reward returned from ``__call__`` is
+    ``(precision + recall) / 2``.
+    """
+
+    def __init__(self, model: str, base_url: str, question: str, evidence: List[Any]):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.question = question
+        self.gt_strings = self._extract_gt_strings(evidence)
+        self.last_precision: float = 0.0
+        self.last_recall: float = 0.0
+
+    @staticmethod
+    def _extract_gt_strings(evidence: List[Any]) -> List[str]:
+        out: List[str] = []
+        for ev in evidence or []:
+            if isinstance(ev, str):
+                out.append(ev)
+            elif isinstance(ev, dict):
+                for sel in ev.get("selections", []):
+                    text = sel.get("text", "").strip()
+                    if text:
+                        out.append(text)
+        return out
+
+    def __call__(self, final_answer: str) -> float:
+        import ast
+        import json
+        import os
+        import textwrap
+        import time
+
+        import httpx
+        from loguru import logger
+
+        try:
+            predicted = ast.literal_eval(final_answer)
+            if isinstance(predicted, str):
+                predicted = [predicted]
+            elif isinstance(predicted, (list, tuple)):
+                predicted = [s if isinstance(s, str) else str(s) for s in predicted]
+            else:
+                predicted = [str(predicted)]
+        except (ValueError, SyntaxError):
+            predicted = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
+
+        gt_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(self.gt_strings)) or "(none)"
+        pred_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(predicted)) or "(none)"
+
+        user_msg = textwrap.dedent(f"""\
+            You are evaluating predicted evidence extractions against ground truth evidence for a question.
+            Treat the ground truth evidence as a perfect 10/10 reference for all dimensions.
+
+            Question: {self.question}
+
+            Ground truth evidence (reference — treat as 10/10 on all dimensions):
+            {gt_block}
+
+            Predicted evidence:
+            {pred_block}
+
+            Score the predicted evidence on two dimensions (1-10 each):
+
+            PRECISION SCORE — are the spans tight and free of off-topic padding?
+              10 — every span contains only directly relevant sentences; no extraneous setup, headers, or filler
+               9 — essentially tight; one trivially redundant phrase but no real noise
+               8 — minor padding (1-2 extra sentences) but core content is accurate
+               7 — a few extra sentences that are related but not strictly necessary
+               6 — noticeable extraneous text in some spans, but the relevant parts are present
+               5 — roughly half the content is relevant; half is filler or tangential
+               4 — spans are significantly bloated with irrelevant surrounding text
+               3 — small fraction of each span is on-topic; most is irrelevant context
+               2 — most of each span is irrelevant; the relevant fragment is buried
+               1 — extractions are almost entirely off-topic or wrong
+
+            RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
+              10 — all key facts from the ground truth are present; nothing important missing
+               9 — all key facts present; only a trivially minor detail absent
+               8 — most key facts covered; one minor detail from the ground truth absent
+               7 — core answer present; a couple of supporting details from the ground truth missing
+               6 — core answer present but a meaningful portion of the ground truth evidence is missing
+               5 — about half the ground truth evidence is covered; half is missing
+               4 — partial answer only; several important aspects from the ground truth are absent
+               3 — a few relevant facts retrieved but most of the ground truth evidence is missing
+               2 — barely touches the question; most of the ground truth evidence is missing
+               1 — no relevant content retrieved
+
+            Provide a brief reasoning string (2-4 sentences) explaining the scores.
+        """)
+
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable must be set when using a judge reward")
+
+        result = None
+        for attempt in range(5):
+            if attempt > 0:
+                time.sleep(2 ** attempt)
+            try:
+                with httpx.Client(timeout=60) as client:
+                    resp = client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": self.model,
+                            "messages": [{"role": "user", "content": user_msg}],
+                            "temperature": 0,
+                            "response_format": _RUBRIC_RESPONSE_FORMAT,
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as e:
+                if attempt == 4:
+                    logger.warning(f"Judge reward model failed after 5 attempts: {e}")
+                    return 0.0
+                logger.warning(f"Judge reward model attempt {attempt + 1} failed: {e}, retrying...")
+                continue
+
+            try:
+                result = json.loads(data["choices"][0]["message"]["content"])
+                break
+            except json.JSONDecodeError:
+                if attempt == 4:
+                    return 0.0
+                continue
+
+        if result is None:
+            return 0.0
+
+        self.last_precision = result.get("precision_score", 0) / 10.0
+        self.last_recall = result.get("recall_score", 0) / 10.0
+        return (self.last_precision + self.last_recall) / 2.0

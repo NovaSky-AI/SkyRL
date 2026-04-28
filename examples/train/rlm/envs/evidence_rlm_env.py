@@ -16,7 +16,7 @@ from typing import Any, Dict
 
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
 
-from .evidence_rewards import make_reward_fn, make_reward_fn_multipaper
+from .evidence_rewards import JudgeRewardFn, make_reward_fn, make_reward_fn_multipaper
 from .paper_tools import make_tools
 
 
@@ -238,8 +238,9 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     Reward: F1 over retrieved text intervals vs. ground-truth evidence spans
     in ``reward_spec.evidence``. Multipaper math when the context is a dict,
-    single-paper math when it is a string. A ``judge_reward_fn`` injected
-    via extras takes precedence over evidence-F1.
+    single-paper math when it is a string. When ``extras["judge_model"]`` is
+    set, an LLM-judge reward replaces F1; per-component precision/recall
+    are surfaced via ``get_metrics()``.
 
     Tools: paper-aware ``list_papers``/``search``/``extract_section``/
     ``get_paper_abstract`` injected into the REPL.
@@ -249,11 +250,16 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     def _get_reward(self, final_answer: str) -> float:
         # Bind reward_fn lazily on first call (when self._context is populated).
-        # judge_reward_fn (injected via extras by the generator) wins over evidence-F1.
+        # Judge mode (extras["judge_model"] set) wins over evidence-F1.
         if self.reward_fn is None:
-            judge = self.extras.get("judge_reward_fn")
-            if judge is not None:
-                self.reward_fn = judge
+            judge_model = self.extras.get("judge_model")
+            if judge_model:
+                self.reward_fn = JudgeRewardFn(
+                    model=judge_model,
+                    base_url=self.extras.get("judge_base_url", "https://api.openai.com/v1"),
+                    question=self._root_prompt,
+                    evidence=(self.extras.get("reward_spec") or {}).get("evidence") or [],
+                )
             else:
                 evidence = (self.extras.get("reward_spec") or {}).get("evidence")
                 if evidence is not None:
@@ -263,6 +269,13 @@ class EvidenceRLMEnv(BaseRLMEnv):
                         else make_reward_fn(self._context, evidence)
                     )
         return super()._get_reward(final_answer)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        metrics = super().get_metrics()
+        if isinstance(self.reward_fn, JudgeRewardFn):
+            metrics["judge_precision"] = self.reward_fn.last_precision
+            metrics["judge_recall"] = self.reward_fn.last_recall
+        return metrics
 
     def _get_system_prompt(self) -> str:
         return self.SYSTEM_PROMPT

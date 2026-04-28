@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -32,34 +30,6 @@ from skyrl.train.generators.skyrl_gym_generator import (
 )
 
 
-_RUBRIC_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "RubricScore",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "precision_score": {
-                    "type": "integer",
-                    "description": "1-10: how tight and accurate the spans are (no extraneous sentences, no off-topic padding)",
-                },
-                "recall_score": {
-                    "type": "integer",
-                    "description": "1-10: how thoroughly the evidence covers what is needed to answer the question",
-                },
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief explanation of the scores",
-                },
-            },
-            "required": ["precision_score", "recall_score", "reasoning"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-
 @dataclass
 class _RLMRolloutContext:
     """Per-rollout (per-tree-node) state for an RLM rollout.
@@ -77,7 +47,6 @@ class _RLMRolloutContext:
     child_index: Optional[int]                # None for root; assigned at registration
     children_rids: List[str] = field(default_factory=list)
     output: Optional[Union["StepWiseOutput", "TrajectoryOutput"]] = None
-    judge_scores: Dict[str, Any] = field(default_factory=dict)
     call_record: Optional[Dict[str, Any]] = None  # set on a child by its parent's _run_child
     child_engine: Optional[InferenceEngineInterface] = None
 
@@ -164,7 +133,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         env_extras["depth"] = self.active_rollouts[rid].depth
 
+        # Forward judge config so the env can build its own judge reward.
         judge_reward_model = getattr(self.generator_cfg, "judge_reward_model", None)
+        if judge_reward_model:
+            env_extras["judge_model"] = judge_reward_model
+            env_extras["judge_base_url"] = getattr(
+                self.generator_cfg, "judge_reward_base_url", "https://api.openai.com/v1"
+            )
+
         enable_child_agents = getattr(self.generator_cfg, "enable_child_agents", True)
 
         loop = asyncio.get_running_loop()
@@ -178,9 +154,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 env_extras["subcall_fn"] = self._make_subcall_fn(
                     loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
                 )
-
-        if judge_reward_model:
-            env_extras["judge_reward_fn"] = self._make_judge_reward_fn(loop, env_extras, prompt, rid)
 
         return env_extras
 
@@ -239,9 +212,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
     ) -> Dict[str, Any]:
         """Finalize one node of the rollout tree.
 
-        Non-root nodes do the minimum: fold judge_scores into env_metrics, stamp
-        their own per-step ``rlm_metadata`` from fields already on their context,
-        and stash ``agent_loop_output`` on their context for the root to pick up.
+        Non-root nodes do the minimum: stamp their own per-step ``rlm_metadata``
+        from fields already on their context, and stash ``agent_loop_output``
+        on their context for the root to pick up.
 
         The root does the structural work: walk the tree via ``children_rids``
         (DFS preorder by registration order), inline descendants' step_outputs,
@@ -271,10 +244,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         tid_str = trajectory_id.to_string() if trajectory_id is not None else None
         if ctx.trajectory_id is None:
             ctx.trajectory_id = tid_str
-
-        # Local: judge scores merge into env_metrics for every node.
-        if ctx.judge_scores:
-            env_metrics.update(ctx.judge_scores)
 
         # Local: stamp per-step rlm_metadata using fields already on ctx.
         if isinstance(agent_loop_output, StepWiseOutput):
@@ -354,7 +323,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         extra_info = env_extras.get("extra_info")
         if isinstance(extra_info, dict):
             extra_info.pop("context_text", None)
-        for k in ("lm_callback", "subcall_fn", "judge_reward_fn", "rlm_rollout_id"):
+        for k in ("lm_callback", "subcall_fn", "rlm_rollout_id"):
             env_extras.pop(k, None)
         reward_spec = env_extras.get("reward_spec")
         if isinstance(reward_spec, dict):
@@ -415,146 +384,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             return future.result(timeout=300)
 
         return callback
-
-    def _make_judge_reward_fn(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        env_extras: Dict[str, Any],
-        prompt: ConversationType,
-        rid: str,
-    ) -> Callable[[str], float]:
-        """Score the final answer with an LLM judge. Replaces F1 reward when judge_reward_model is set."""
-        import ast as _ast
-        import json as _json
-        import textwrap as _textwrap
-
-        question = " ".join(msg["content"] for msg in prompt if msg.get("content"))
-
-        reward_spec = env_extras.get("reward_spec", {})
-        raw_evidence = reward_spec.get("evidence") or []
-        gt_strings: List[str] = []
-        for ev in raw_evidence:
-            if isinstance(ev, str):
-                gt_strings.append(ev)
-            elif isinstance(ev, dict):
-                for sel in ev.get("selections", []):
-                    text = sel.get("text", "").strip()
-                    if text:
-                        gt_strings.append(text)
-
-        model = getattr(self.generator_cfg, "judge_reward_model", None)
-        base_url = getattr(self.generator_cfg, "judge_reward_base_url", "https://api.openai.com/v1").rstrip("/")
-
-        def _judge(final_answer: str) -> float:
-            import httpx as _httpx
-
-            try:
-                predicted = _ast.literal_eval(final_answer)
-                if isinstance(predicted, str):
-                    predicted = [predicted]
-                elif isinstance(predicted, (list, tuple)):
-                    predicted = [s if isinstance(s, str) else str(s) for s in predicted]
-                else:
-                    predicted = [str(predicted)]
-            except (ValueError, SyntaxError):
-                predicted = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
-
-            gt_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(gt_strings)) or "(none)"
-            pred_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(predicted)) or "(none)"
-
-            user_msg = _textwrap.dedent(f"""\
-                You are evaluating predicted evidence extractions against ground truth evidence for a question.
-                Treat the ground truth evidence as a perfect 10/10 reference for all dimensions.
-
-                Question: {question}
-
-                Ground truth evidence (reference — treat as 10/10 on all dimensions):
-                {gt_block}
-
-                Predicted evidence:
-                {pred_block}
-
-                Score the predicted evidence on two dimensions (1-10 each):
-
-                PRECISION SCORE — are the spans tight and free of off-topic padding?
-                  10 — every span contains only directly relevant sentences; no extraneous setup, headers, or filler
-                   9 — essentially tight; one trivially redundant phrase but no real noise
-                   8 — minor padding (1-2 extra sentences) but core content is accurate
-                   7 — a few extra sentences that are related but not strictly necessary
-                   6 — noticeable extraneous text in some spans, but the relevant parts are present
-                   5 — roughly half the content is relevant; half is filler or tangential
-                   4 — spans are significantly bloated with irrelevant surrounding text
-                   3 — small fraction of each span is on-topic; most is irrelevant context
-                   2 — most of each span is irrelevant; the relevant fragment is buried
-                   1 — extractions are almost entirely off-topic or wrong
-
-                RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
-                  10 — all key facts from the ground truth are present; nothing important missing
-                   9 — all key facts present; only a trivially minor detail absent
-                   8 — most key facts covered; one minor detail from the ground truth absent
-                   7 — core answer present; a couple of supporting details from the ground truth missing
-                   6 — core answer present but a meaningful portion of the ground truth evidence is missing
-                   5 — about half the ground truth evidence is covered; half is missing
-                   4 — partial answer only; several important aspects from the ground truth are absent
-                   3 — a few relevant facts retrieved but most of the ground truth evidence is missing
-                   2 — barely touches the question; most of the ground truth evidence is missing
-                   1 — no relevant content retrieved
-
-                Provide a brief reasoning string (2-4 sentences) explaining the scores.
-            """)
-
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY environment variable must be set when using judge_reward_model")
-
-            result = None
-            for attempt in range(5):
-                if attempt > 0:
-                    time.sleep(2 ** attempt)
-                try:
-                    with _httpx.Client(timeout=60) as client:
-                        resp = client.post(
-                            f"{base_url}/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {api_key}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": model,
-                                "messages": [{"role": "user", "content": user_msg}],
-                                "temperature": 0,
-                                "response_format": _RUBRIC_RESPONSE_FORMAT,
-                            },
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                except Exception as e:
-                    if attempt == 4:
-                        logger.warning(f"Judge reward model failed after 5 attempts: {e}")
-                        return 0.0
-                    logger.warning(f"Judge reward model attempt {attempt + 1} failed: {e}, retrying...")
-                    continue
-
-                try:
-                    result = _json.loads(data["choices"][0]["message"]["content"])
-                    break
-                except _json.JSONDecodeError:
-                    if attempt == 4:
-                        return 0.0
-                    continue
-
-            precision = result.get("precision_score", 0) / 10.0
-            recall = result.get("recall_score", 0) / 10.0
-            ctx = self.active_rollouts.get(rid)
-            if ctx is not None:
-                ctx.judge_scores["judge_precision"] = precision
-                ctx.judge_scores["judge_recall"] = recall
-            return (precision + recall) / 2.0
-
-        def judge_reward_fn(final_answer: str) -> float:
-            return _judge(final_answer)
-
-        return judge_reward_fn
 
     def _make_subcall_fn(
         self,
