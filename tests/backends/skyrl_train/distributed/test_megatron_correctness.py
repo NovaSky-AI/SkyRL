@@ -125,14 +125,14 @@ class TestWeightSyncPauseFlush:
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch._inference_engine_client = AsyncMock()
-        dispatch.broadcast_to_inference_engines = MagicMock()
-        dispatch.prepare_for_weight_sync = MagicMock()
-        dispatch.finish_weight_sync = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock()
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
-        dispatch.broadcast_to_inference_engines.assert_called_once()
+        dispatch._broadcast_to_inference_engines.assert_called_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -142,9 +142,9 @@ class TestWeightSyncPauseFlush:
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = True
         dispatch._inference_engine_client = AsyncMock()
-        dispatch.broadcast_to_inference_engines = MagicMock()
-        dispatch.prepare_for_weight_sync = MagicMock()
-        dispatch.finish_weight_sync = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock()
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
@@ -163,9 +163,9 @@ class TestWeightSyncPauseFlush:
         dispatch._inference_engine_client = AsyncMock()
         dispatch._inference_engine_client.pause_generation = AsyncMock(side_effect=lambda: call_order.append("pause"))
         dispatch._inference_engine_client.resume_generation = AsyncMock(side_effect=lambda: call_order.append("resume"))
-        dispatch.broadcast_to_inference_engines = MagicMock(side_effect=lambda _: call_order.append("broadcast"))
-        dispatch.prepare_for_weight_sync = MagicMock()
-        dispatch.finish_weight_sync = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=lambda _: call_order.append("broadcast"))
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
@@ -179,9 +179,9 @@ class TestWeightSyncPauseFlush:
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch._inference_engine_client = AsyncMock()
-        dispatch.broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
-        dispatch.prepare_for_weight_sync = MagicMock()
-        dispatch.finish_weight_sync = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
 
         with pytest.raises(RuntimeError, match="broadcast failed"):
             await dispatch.save_weights_for_sampler()

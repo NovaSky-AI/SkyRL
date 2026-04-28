@@ -57,7 +57,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
              if idx != len(self.train_dataloader) - 1:
                  await self.generation_ack.wait()
              # Synchronize weights after training.
-             await self.async_sync_policy_weights_to_inference_engines()
+             await self.dispatch.save_weights_for_sampler()
              # Signal that weight sync is done, ready for next round of generation.
              self.sync_finished.set()
              self.generation_ack.clear()
