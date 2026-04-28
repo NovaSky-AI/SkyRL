@@ -46,7 +46,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
     # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
     cfg.trainer.logger = "console"
-    is_mla_model = "Moonlight" in model_name or "glm-4" in model_name.lower()
+    is_mla_model = "moonlight" in model_name.lower() or "glm-4" in model_name.lower()
     if is_mla_model:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
@@ -57,7 +57,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # pre-Hopper GPUs (sm < 90), FA2 doesn't support MLA, and FA3 is
         # Hopper-only, so there is no viable TE attention backend for
         # MLA + sample_packing on Ada/Ampere.  Fall back to BSHD.
-        if torch.cuda.get_device_capability()[0] < 9:
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9:
             cfg.trainer.use_sample_packing = False
     if "qwen3.5" in model_name.lower():
         # sample packing not yet supported for GDN
@@ -70,7 +70,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
 def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
     # MLA models need cuDNN fused attention (the conftest globally sets
     # NVTE_FUSED_ATTN=0; re-enable it here so the fused backend is available).
-    if "Moonlight" in model_name or "glm-4" in model_name.lower():
+    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
         return {"NVTE_FUSED_ATTN": "1"}
     return None
 
