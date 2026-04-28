@@ -116,6 +116,7 @@ megatron = [
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
+    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.19.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
@@ -128,10 +129,6 @@ megatron = [
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
     "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
-]
-
-mamba = [
-    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
 ]
 
 flashrl = [

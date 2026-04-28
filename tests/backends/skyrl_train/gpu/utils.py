@@ -516,6 +516,7 @@ class InferenceEngineState:
         expert_parallel_size: Optional[int] = None,
         enable_pd: bool = False,
         num_prefill: int = 0,
+        language_model_only: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -552,6 +553,8 @@ class InferenceEngineState:
         if enable_pd:
             ie_cfg.enable_pd = True
             ie_cfg.num_prefill = num_prefill
+        if language_model_only is not None:
+            ie_cfg.language_model_only = language_model_only
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
