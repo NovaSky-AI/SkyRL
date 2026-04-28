@@ -518,6 +518,7 @@ class InferenceEngineState:
         expert_parallel_size: Optional[int] = None,
         enable_pd: bool = False,
         num_prefill: int = 0,
+        language_model_only: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -561,6 +562,8 @@ class InferenceEngineState:
             cfg.trainer.policy.model.lora.max_loras = lora_max_loras
         if lora_max_cpu_loras is not None:
             cfg.trainer.policy.model.lora.max_cpu_loras = lora_max_cpu_loras
+        if language_model_only is not None:
+            ie_cfg.language_model_only = language_model_only
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
