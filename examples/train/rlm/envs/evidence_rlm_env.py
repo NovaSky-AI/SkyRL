@@ -251,7 +251,7 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     # Hardcoded judge config. Set USE_JUDGE_REWARD=True to swap the F1 reward
     # for an LLM-judge reward; OPENAI_API_KEY must be set in the environment.
-    USE_JUDGE_REWARD = False
+    USE_JUDGE_REWARD = True
     JUDGE_MODEL = "openai/gpt-4.1-nano"
     JUDGE_BASE_URL = "https://api.openai.com/v1"
 
@@ -281,14 +281,6 @@ class EvidenceRLMEnv(BaseRLMEnv):
         if isinstance(self.reward_fn, JudgeRewardFn):
             metrics["judge_precision"] = self.reward_fn.last_precision
             metrics["judge_recall"] = self.reward_fn.last_recall
-        # paper_id: which paper this rollout was about, when a parent dispatched
-        # us with a single paper from a dict-of-papers context.
-        parent_context = self.extras.get("parent_context")
-        if isinstance(parent_context, dict) and isinstance(self._context, str):
-            for pid, paper_text in parent_context.items():
-                if paper_text == self._context:
-                    metrics["paper_id"] = pid
-                    break
         return metrics
 
     def _get_system_prompt(self) -> str:

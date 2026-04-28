@@ -308,7 +308,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         Routes through ``self.frozen_inference_engine`` when configured; falls
         back to the policy engine otherwise.
         """
-        target_engine = self.inference_engine_client
+        target_engine = self.frozen_inference_engine or self.inference_engine_client
 
         async def _generate(prompts: List[str]) -> List[str]:
             token_ids = [
@@ -349,25 +349,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         sentinel and registers the child context (linked to ``parent_rid``).
         The child's ``_finalize_episode`` parks its output on its context;
         the root's finalize collects it via the tree.
-
-        Task-specific per-child attribution (e.g. paper_id) is the env's job:
-        the child env reads ``extras["parent_context"]`` and surfaces whatever
-        it wants via its own ``get_metrics()``.
         """
-        # Decode the parent's context once so children can reverse-lookup their
-        # own attribution against it (e.g. paper_id from paper text).
-        parent_context: Any = None
-        extra_info = env_extras.get("extra_info") or {}
-        if isinstance(extra_info, dict):
-            ctx_raw = extra_info.get("context_text")
-            if isinstance(ctx_raw, str):
-                try:
-                    parent_context = json.loads(ctx_raw)
-                except (json.JSONDecodeError, ValueError):
-                    parent_context = ctx_raw
-            else:
-                parent_context = ctx_raw
-
         async def _run_child(prompt: str, context=None) -> str:
             parent_ctx = self.active_rollouts.get(parent_rid)
             if parent_ctx is None:
@@ -381,8 +363,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
             # the hook registers a child context linked to this parent.
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
             child_extras["_rlm_parent_rid"] = parent_rid
-            if parent_context is not None:
-                child_extras["parent_context"] = parent_context
 
             if context is not None:
                 child_extra_info = dict(child_extras.get("extra_info", {}) or {})

@@ -287,7 +287,7 @@ class PersistentREPL:
                 except Exception as e:
                     results[index] = f"Error: RLM query failed - {e}"
 
-            with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as executor:
+            with ThreadPoolExecutor(max_workers=min(2, len(prompts))) as executor:
                 futures = [executor.submit(_run, i, p, c) for i, (p, c) in enumerate(zip(prompts, contexts))]
                 for f in as_completed(futures):
                     f.result()
