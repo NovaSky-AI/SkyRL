@@ -282,6 +282,21 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
     The generator stamps ``extras["depth"]`` per rollout; this class reads
     it to pick the right prompt.
     """
+    def _get_reward(self, final_answer: str) -> float:
+        depth = self.extras.get("depth", 0)
+        if depth > 0: return 0.0 # short circuit child rewards to 0
+
+        evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
+        reward, precision, recall = judge_reward(
+            final_answer,
+            question=self._root_prompt,
+            evidence=evidence,
+            model=self.JUDGE_MODEL,
+            base_url=self.JUDGE_BASE_URL,
+        )
+        self._judge_precision = precision
+        self._judge_recall = recall
+        return reward
 
     def _get_system_prompt(self) -> str:
         depth = self.extras.get("depth", 0)

@@ -1,5 +1,5 @@
 """
-RLM-specific generator: extends SkyRLGymGenerator via four hooks plus a thin
+RLM-specific generator: extends SkyRLGymGenerator via two hooks plus a thin
 ``generate`` wrapper that resolves batch-level RLM overrides once.
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from loguru import logger
@@ -22,7 +22,6 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 from skyrl.backends.skyrl_train.inference_engines.openrouter_engine import OpenRouterInferenceEngine
 from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
-    AgentLoopState,
     SkyRLGymGenerator,
     StepWiseOutput,
     TrajectoryOutput,
@@ -53,19 +52,20 @@ class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
-    via two hooks: ``_setup_env_extras`` and ``_finalize_episode``.
+    via two hooks:
 
-    Per-rollout state — including children and judge scores — lives in
-    ``self.active_rollouts``, a dict keyed by an opaque ``rid`` minted in
-    ``_setup_env_extras`` and threaded through ``env_extras["rlm_rollout_id"]``.
-    Each parent and each child rollout gets its own entry; children link back
-    to their parent via ``parent_rid``, and the parent->children direction is
-    reconstructed at finalize time by scanning ``active_rollouts``. The whole
-    subtree is popped in the root's ``_finalize_episode``.
+    * ``_setup_env_extras`` — register the rollout context, inject callbacks.
+    * ``_post_process_agent_loop_output`` — stamp per-step RLM metadata, stash
+      output on the context, inline child trajectories (whose rewards were
+      already assigned by their own ``agent_loop`` calls), and tear down the
+      rollout tree.  Runs after the base class assigns per-step rewards, so
+      the upstream reward code needs no modification.
 
-    Children are inlined into the root's ``step_outputs`` at the end of
-    ``_finalize_episode`` (root branch only) so the base flattener in
-    ``generate()`` picks them up without needing a flatten hook override.
+    Per-rollout state lives in ``self.active_rollouts``, a dict keyed by an
+    opaque ``rid`` minted in ``_setup_env_extras``.  Each parent and each child
+    rollout gets its own entry; children link back via ``parent_rid``, and the
+    parent->children direction is reconstructed by scanning ``active_rollouts``.
+    The whole subtree is popped in the root's ``_post_process_agent_loop_output``.
 
     Subclasses building new RLM-style tasks should add their env id to
     ``RLM_ENV_CLASSES`` so the hooks below recognize it.
@@ -161,47 +161,25 @@ class RLMGymGenerator(SkyRLGymGenerator):
         return env_extras
 
     # ------------------------------------------------------------------
-    # Hook 2: post-episode finalize
+    # Hook 2: post-reward output assembly
     # ------------------------------------------------------------------
 
-    async def _finalize_episode(
+    def _post_process_agent_loop_output(
         self,
-        env,
-        env_class: str,
-        agent_loop_state: AgentLoopState,
         agent_loop_output,
         env_extras: Dict[str, Any],
-        prompt: ConversationType,
         trajectory_id: Optional[TrajectoryID],
-    ) -> Dict[str, Any]:
-        """Finalize one node of the rollout tree.
+    ):
+        """Stamp RLM metadata, stash output, inline children, and tear down the tree.
 
-        Non-root nodes do the minimum: stamp their own per-step ``rlm_metadata``
-        from fields already on their context, and stash ``agent_loop_output``
-        on their context for the root to pick up.
-
-        The root does the structural work: walk the tree via ``_dfs_descendants``
-        (DFS preorder by registration order), inline descendants' step_outputs,
-        promote the trajectory-level summary onto the root's final step,
-        compute ``child_rlm_metrics`` over the whole tree, then pop the entire
-        subtree from ``self.active_rollouts``.
+        Runs after the base class assigns per-step rewards.  Children already
+        carry their own rewards from their independent ``agent_loop`` calls.
         """
-        if env_class not in self.RLM_ENV_CLASSES:
-            return await super()._finalize_episode(
-                env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id
-            )
-
-        env_metrics = env.get_metrics()
-
         rid = env_extras.get("rlm_rollout_id")
         ctx = self.active_rollouts.get(rid) if rid else None
         if ctx is None:
-            # Defensive: should not happen if _setup_env_extras ran. Fall back to
-            # base behavior so we don't crash a training run.
-            logger.warning(f"_finalize_episode: missing context for rid={rid!r}")
-            return env_metrics
+            return agent_loop_output
 
-        # Local: stamp per-step rlm_metadata using fields already on ctx.
         if isinstance(agent_loop_output, StepWiseOutput):
             for step_index, step in enumerate(agent_loop_output.step_outputs):
                 step.env_metrics["rlm_metadata"] = {
@@ -211,21 +189,20 @@ class RLMGymGenerator(SkyRLGymGenerator):
                     "step_index": step_index,
                 }
 
-        # Stash output for an ancestor to read.
         ctx.output = agent_loop_output
 
-        # Non-root: done. Parent / root will inline us.
+        # Non-root: parent/root will inline us later.
         if ctx.parent_rid is not None:
-            return env_metrics
+            for k in ("lm_callback", "subcall_fn"):
+                env_extras.pop(k, None)
+            return agent_loop_output
 
-        # ---- Root branch: tree-walk and collapse ----
-        descendants = self._dfs_descendants(rid)  # preorder, excludes root
+        # ---- Root: coalesce children and tear down ----
+        descendants = self._dfs_descendants(rid)
 
-        # Inline descendants' step_outputs ahead of the root's. Root's last step
-        # remains the final entry so is_last_step still marks the trajectory end.
-        if isinstance(agent_loop_output, StepWiseOutput) \
-           and getattr(self.generator_cfg, "train_child_trajectories", False) \
-           and descendants:
+        if (isinstance(agent_loop_output, StepWiseOutput)
+                and getattr(self.generator_cfg, "train_child_trajectories", False)
+                and descendants):
             children_flat: List[TrajectoryOutput] = []
             for d in descendants:
                 if d.output is None or not isinstance(d.output, StepWiseOutput):
@@ -234,16 +211,12 @@ class RLMGymGenerator(SkyRLGymGenerator):
             if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
-        # Tear down the whole subtree (root + every descendant) in one pass.
         for r in [rid, *(d.rid for d in descendants)]:
             self.active_rollouts.pop(r, None)
 
-        # Drop callables and the (potentially huge) context payload off env_extras
-        # so it's JSON-serializable for dump_per_dataset_eval_results.
-        for k in ("lm_callback", "subcall_fn", "rlm_rollout_id"):
+        for k in ("lm_callback", "subcall_fn"):
             env_extras.pop(k, None)
-
-        return env_metrics
+        return agent_loop_output
 
     def _dfs_descendants(self, rid: str) -> List[_RLMRolloutContext]:
         """DFS preorder over descendants of ``rid``, in registration order. Excludes ``rid`` itself."""
@@ -323,15 +296,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
         async def _run_child(prompt: str, context=None) -> str:
             parent_ctx = self.active_rollouts.get(parent_rid)
             if parent_ctx is None:
-                # Parent torn down between subcall registration and execution —
-                # should not happen, but degrade gracefully.
-                logger.warning(f"_run_child: parent context {parent_rid!r} is gone")
+                logger.warning(f"_run_child: parent rollout {parent_rid!r} was never registered. Returning from subcall early.")
                 return ""
 
-            # Build child env_extras: strip parent callables (child's
-            # _setup_env_extras will re-inject), set the parent sentinel so
-            # the hook registers a child context linked to this parent.
-            child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
+            child_extras = dict(env_extras)
             child_extras["_rlm_parent_rid"] = parent_rid
 
             if context is not None:
@@ -341,9 +309,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 else:
                     child_extra_info["context_text"] = json.dumps(context)
                 child_extras["extra_info"] = child_extra_info
-                # Children aren't scored independently; clear evidence-based reward_spec
-                # so the child's env builds its own (per-context) reward.
-                child_extras["reward_spec"] = {"ground_truth": None}
 
             result = await self.agent_loop(
                 prompt=[{"role": "user", "content": prompt}],

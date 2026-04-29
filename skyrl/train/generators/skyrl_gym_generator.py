@@ -20,7 +20,6 @@ import skyrl_gym
 from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
-    InferenceEngineOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -240,18 +239,19 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Hook: subclasses may inject env-specific callables/extras before env construction."""
         return env_extras
 
-    async def _finalize_episode(
+    def _post_process_agent_loop_output(
         self,
-        env,
-        env_class: str,
-        agent_loop_state: "AgentLoopState",
         agent_loop_output,
         env_extras: Dict[str, Any],
-        prompt: ConversationType,
         trajectory_id: Optional[TrajectoryID],
-    ) -> Dict[str, Any]:
-        """Hook: post-episode finalization. Default just calls ``env.get_metrics()``."""
-        return env.get_metrics()
+    ):
+        """Hook: transform agent_loop_output after per-step rewards are stamped.
+
+        Called at the end of ``agent_loop``, after reward allocation but before
+        return.  Subclasses can override to e.g. inline child trajectory steps
+        whose rewards were already assigned by their own ``agent_loop`` calls.
+        """
+        return agent_loop_output
 
     async def agent_loop(
         self,
@@ -356,13 +356,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         while not agent_loop_state.done:
+
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
 
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
-                # re-apply whole chat template so length check is correct.
+                # re-apply whole chat template so length check is correct
                 # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
                 _chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
@@ -486,11 +487,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
-        # Episode finished: subclasses may merge extra metrics, attach children, etc.
-        env_metrics = await self._finalize_episode(
-            env, env_class, agent_loop_state, agent_loop_output, env_extras, prompt, trajectory_id,
-        )
-
+        # Get environment-specific metrics after the episode is done
+        env_metrics = env.get_metrics()
         # Close the environment
         await self._run_in_executor_if_available(env.close)
 
@@ -554,11 +552,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 appended_eos_token = True
 
         if self.generator_cfg.step_wise_trajectories:
-            n = len(per_step_rewards)
-            own_step_outputs = agent_loop_output.step_outputs[-n:] if n else []
-            for per_step_output, (reward, resp_end_idx) in zip(own_step_outputs, per_step_rewards):
+            for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
                 per_token_reward = [0.0] * len(per_step_output.response_ids)
                 per_token_reward[resp_end_idx] = float(reward)
+                # in-place update to per-token reward
                 per_step_output.reward = per_token_reward
         else:
             reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
@@ -574,6 +571,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_expert_indices=rollout_expert_indices_out,
             )
 
+        agent_loop_output = self._post_process_agent_loop_output(
+            agent_loop_output, env_extras, trajectory_id,
+        )
         return agent_loop_output
 
     def _build_per_token_rewards(
