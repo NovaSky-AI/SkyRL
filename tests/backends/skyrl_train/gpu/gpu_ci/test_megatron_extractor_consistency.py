@@ -15,15 +15,6 @@ small dense model that serves as a non-MoE sanity check -- builds a fresh
 two iteration sequences are identical (same length and same per-position
 ``name``).
 
-Parallelism: ``megatron_tp=2``, ``pp=1``, ``ep=2`` on 4 GPUs. ``tp=2`` is
-the maximum for ``Qwen3.5-35B-A3B``: the text decoder's GQA configuration
-(``num_key_value_heads=2``, equivalent to Megatron's ``num_query_groups=2``)
-caps ``tensor_model_parallel_size`` at 2. With the model split four ways
-(~19.5 GB per rank at bf16; 9.73 B params x 2 bytes = ~19.46 GB) the test
-fits an L4 (24 GB) CI target -- but the headroom is thinner than expected
-(~4.5 GB for framework overhead + activations + KV-cache), so any growth
-in per-rank state risks OOM on L4.
-
 Run with::
     uv run --isolated --extra megatron --extra dev pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_extractor_consistency.py
 
@@ -80,15 +71,7 @@ _ProbeRefWorker = ray.remote(num_gpus=1)(_ProbeMegatronRefWorker)
 
 
 def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
-    """Build a minimal Megatron ref-worker config for the consistency check.
-
-    Sets ``trainer.ref.megatron_config`` to ``tp=2, pp=1`` on 4 GPUs.
-    ``ep=2`` for MoE models (so Megatron actually shards experts across
-    ranks and exercises the bucketed grouped-export path), ``ep=1`` for
-    dense models (Megatron rejects ``ep>1`` when ``num_moe_experts`` is
-    unset). ``policy.model.path`` is set because ``init_worker_with_type``
-    reads the model path from there regardless of worker type.
-    """
+    """Build a minimal Megatron ref-worker config for the consistency check."""
     is_moe = "A3B" in model_name or "MoE" in model_name
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
@@ -98,7 +81,7 @@ def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 4
     cfg.trainer.placement.ref_num_gpus_per_node = 4
     cfg.trainer.ref.megatron_config.tensor_model_parallel_size = 2
-    cfg.trainer.ref.megatron_config.pipeline_model_parallel_size = 2
+    cfg.trainer.ref.megatron_config.pipeline_model_parallel_size = 1
     cfg.trainer.ref.megatron_config.expert_model_parallel_size = 2 if is_moe else 1
     cfg.trainer.ref.megatron_config.expert_tensor_parallel_size = 1
     cfg.trainer.ref.megatron_config.transformer_config_kwargs = dict(fp8="e4m3")
