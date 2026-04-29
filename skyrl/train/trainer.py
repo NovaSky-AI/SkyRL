@@ -684,13 +684,21 @@ class RayPPOTrainer:
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
         is_stepwise = self.cfg.generator.step_wise_trajectories
         training_input.metadata["policy_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
-            uids, self.cfg.trainer.policy_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt,
-            is_training=is_training
+            uids,
+            self.cfg.trainer.policy_mini_batch_size,
+            train_batch_size,
+            is_stepwise,
+            n_samples_per_prompt,
+            is_training=is_training,
         )
         if self.cfg.trainer.critic.model.path is not None:
             training_input.metadata["critic_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
-                uids, self.cfg.trainer.critic_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt,
-                is_training=is_training
+                uids,
+                self.cfg.trainer.critic_mini_batch_size,
+                train_batch_size,
+                is_stepwise,
+                n_samples_per_prompt,
+                is_training=is_training,
             )
 
         # 5. Record metadata and metrics.

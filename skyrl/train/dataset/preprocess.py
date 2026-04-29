@@ -250,9 +250,9 @@ def compute_prompt_mini_batch_boundaries(
     # Check that num_prompts matches expected batch size
     num_prompts = len(prompt_end_indices)
     if is_training:
-        assert num_prompts == train_batch_size and len(seen_uids) == train_batch_size, (
-            f"Expected {train_batch_size} prompts in training batch, got {num_prompts}."
-        )
+        assert (
+            num_prompts == train_batch_size and len(seen_uids) == train_batch_size
+        ), f"Expected {train_batch_size} prompts in training batch, got {num_prompts}."
         assert train_batch_size % mini_batch_size == 0
     else:
         if num_prompts != train_batch_size:

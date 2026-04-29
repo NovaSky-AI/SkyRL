@@ -203,7 +203,7 @@ class TestComputePromptMiniBatchBoundaries:
 
     def test_eval_partial_batch_nonstepwise(self):
         """Test eval mode with partial batches during non-stepwise training.
-        
+
         This addresses the issue where evaluation crashes when val set size is
         not divisible by train_batch_size. With is_training=False, partial
         batches should be allowed.
@@ -212,10 +212,10 @@ class TestComputePromptMiniBatchBoundaries:
         spp = 2
         is_stepwise = False
         mini_batch_size = 2
-        
+
         # Only 3 prompts instead of 4 (partial batch)
         uids = ["p0", "p0", "p1", "p1", "p2", "p2"]
-        
+
         # Should work fine with is_training=False
         boundaries = compute_prompt_mini_batch_boundaries(
             uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
@@ -231,10 +231,10 @@ class TestComputePromptMiniBatchBoundaries:
         spp = 2
         is_stepwise = False
         mini_batch_size = 2
-        
+
         # Only 1 prompt instead of 4 (very partial batch)
         uids = ["p0", "p0"]
-        
+
         boundaries = compute_prompt_mini_batch_boundaries(
             uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
         )
@@ -249,7 +249,7 @@ class TestComputePromptMiniBatchBoundaries:
         mini_batch_size = 2
         # Non-contiguous uids: p0 appears at index 0-1 and 4-5
         uids = ["p0", "p0", "p1", "p1", "p0", "p0"]
-        
+
         with pytest.raises(AssertionError, match="uid 'p0' appears in non-contiguous positions"):
             compute_prompt_mini_batch_boundaries(
                 uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
@@ -261,7 +261,7 @@ class TestComputePromptMiniBatchBoundaries:
         train_batch_size = 4
         spp = 2
         is_stepwise = True
-        
+
         # Only 3 prompts instead of 4
         uids = _make_uids_stepwise(
             [
@@ -270,7 +270,7 @@ class TestComputePromptMiniBatchBoundaries:
                 ("p2", 2, [2, 1]),  # 3 seqs
             ]
         )
-        
+
         # Should work fine with is_training=False
         boundaries = compute_prompt_mini_batch_boundaries(
             uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
