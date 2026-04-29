@@ -65,7 +65,6 @@ from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     configure_ray_worker_logging,
     get_ray_pg_ready_with_timeout,
-    ray_noset_visible_devices,
 )
 
 _SET_AFFINITY = False
@@ -96,10 +95,11 @@ class DistributedTorchRayActor:
         os.environ["MASTER_PORT"] = str(self._master_port)
         os.environ["WORLD_SIZE"] = str(self._world_size)
         os.environ["RANK"] = str(self._rank)
-        # NOTE: Ray will automatically set the CUDA_VISIBLE_DEVICES
-        # environment variable for each actor, so always set device to 0
-        # os.environ["LOCAL_RANK"] = str(self._local_rank)
-        os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
+        # Narrow CUDA_VISIBLE_DEVICES to the Ray-assigned GPU so LOCAL_RANK="0"
+        # is correct regardless of whether Ray or Slurm set
+        # CUDA_VISIBLE_DEVICES before actor init
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+        os.environ["LOCAL_RANK"] = "0"
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
