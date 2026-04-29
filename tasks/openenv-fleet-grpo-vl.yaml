@@ -14,13 +14,16 @@ name: fleet-vl-grpo-qwen3-5-9b
 resources:
   disk_size: 750
   ports: 6479
-  any_of:
+  ordered:
+    # RunPod reserved H200s (priority)
+    - accelerators: H200:8
+      cloud: runpod
+    # GCP fallback
     - accelerators: H200:8
       cloud: gcp
       use_spot: true
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
-    - accelerators: H200:8
-      cloud: runpod
+    # Other providers
     - accelerators: H200:8
       cloud: lambda
     - accelerators: H200:8
