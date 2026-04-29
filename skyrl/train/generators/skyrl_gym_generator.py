@@ -253,18 +253,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         """Hook: post-episode finalization. Default just calls ``env.get_metrics()``."""
         return env.get_metrics()
 
-    async def _call_inference_engine(
-        self,
-        engine_input: InferenceEngineInput,
-        env_extras: Dict[str, Any],
-    ) -> InferenceEngineOutput:
-        """Hook: dispatch one generation call. Default uses ``self.inference_engine_client``.
-
-        Subclasses may override to route per-rollout (e.g. RLM child rollouts that
-        should hit an external API engine stashed in ``env_extras``).
-        """
-        return await self.inference_engine_client.generate(engine_input)
-
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -394,7 +382,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
-            engine_output = await self._call_inference_engine(engine_input, env_extras)
+            engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]

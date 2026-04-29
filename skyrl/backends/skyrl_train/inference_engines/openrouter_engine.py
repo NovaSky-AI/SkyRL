@@ -1,11 +1,9 @@
 """``OpenRouterInferenceEngine``: an ``InferenceEngineInterface`` that routes
 generation to the OpenRouter chat-completions API.
 
-Used by ``RLMGymGenerator`` when ``generator.child_openrouter_model`` is set —
-the depth-0 (parent) agent uses the policy ``inference_engine_client`` as
-usual, while child rollouts spawned via ``rlm_query()`` are routed here so
-they hit a frozen external model (e.g. ``openai/gpt-5.4-nano``) instead of
-the policy.
+Used by ``RLMGymGenerator`` when ``generator.frozen_openrouter_model`` is set —
+in-REPL ``llm_query`` calls are routed here so they hit a frozen external
+model (e.g. ``openai/gpt-5.4-nano``) instead of the policy.
 
 Implemented as a thin subclass of ``RemoteInferenceEngine`` to inherit
 abstract-method satisfaction (``wake_up``/``sleep``/weight-sync, etc.) — none
@@ -44,17 +42,18 @@ class OpenRouterInferenceEngine(RemoteInferenceEngine):
     inherited implementations are dead code paths.
     """
 
+    BASE_URL = "https://openrouter.ai/api/v1"
+
     def __init__(
         self,
         model: str,
         tokenizer: PreTrainedTokenizerBase,
-        base_url: str = "https://openrouter.ai/api/v1",
         api_key: Optional[str] = None,
     ):
         # Skip RemoteInferenceEngine.__init__ deliberately: it prepends "http://" to
         # the URL and assumes a vLLM/SGLang server with weight-sync hooks. We have a
         # full https URL and no weight loader.
-        self.url = base_url.rstrip("/")
+        self.url = self.BASE_URL
         self.model_name = model
         self.engine_backend = "openrouter"
         self.tokenizer = tokenizer

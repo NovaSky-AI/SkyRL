@@ -17,7 +17,6 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     ConversationType,
     InferenceEngineInput,
     InferenceEngineInterface,
-    InferenceEngineOutput,
 )
 
 from skyrl.backends.skyrl_train.inference_engines.openrouter_engine import OpenRouterInferenceEngine
@@ -54,8 +53,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
     """SkyRLGymGenerator extended for the RLM environment.
 
     Lives entirely in user code (``examples/train/rlm/``). Plugs into the base
-    via three hooks: ``_setup_env_extras``, ``_finalize_episode``, and
-    ``_call_inference_engine``.
+    via two hooks: ``_setup_env_extras`` and ``_finalize_episode``.
 
     Per-rollout state — including children and judge scores — lives in
     ``self.active_rollouts``, a dict keyed by an opaque ``rid`` minted in
@@ -85,10 +83,18 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # lock is needed for set/get/pop; do not iterate concurrently with
         # mutation.
         self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
-        # Optional frozen engine used by non-root rollouts when
-        # ``generator_cfg.child_openrouter_model`` is set. ``None`` means
-        # children inherit the policy engine.
         self.frozen_inference_engine: Optional[InferenceEngineInterface] = self._build_frozen_inference_engine()
+
+    def _build_frozen_inference_engine(self) -> Optional[InferenceEngineInterface]:
+        """Build a frozen OpenRouter engine for in-REPL ``llm_query`` calls.
+
+        Returns ``None`` when ``frozen_openrouter_model`` is not set, in which
+        case ``_make_lm_callback`` falls back to the policy engine.
+        """
+        model = getattr(self.generator_cfg, "frozen_openrouter_model", None)
+        if model is None:
+            return None
+        return OpenRouterInferenceEngine(model=model, tokenizer=self.tokenizer)
 
     # ------------------------------------------------------------------
     # Hook 1: env-extras setup (runs inside agent_loop, before env construction)
@@ -154,44 +160,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         return env_extras
 
-    def _build_frozen_inference_engine(self) -> Optional[InferenceEngineInterface]:
-        """Build the frozen OpenRouter engine if ``child_openrouter_model`` is set.
-
-        Shared across all non-root rollouts. ``None`` means children inherit
-        the policy engine.
-        """
-        model = getattr(self.generator_cfg, "child_openrouter_model", None)
-        if model is None:
-            return None
-        return OpenRouterInferenceEngine(
-            model=model,
-            tokenizer=self.tokenizer,
-            base_url=getattr(self.generator_cfg, "child_openrouter_base_url", "https://openrouter.ai/api/v1"),
-        )
-
     # ------------------------------------------------------------------
-    # Hook 3: per-rollout inference engine dispatch
-    # ------------------------------------------------------------------
-
-    async def _call_inference_engine(
-        self,
-        engine_input: InferenceEngineInput,
-        env_extras: Dict[str, Any],
-    ) -> InferenceEngineOutput:
-        """Route non-root rollouts to ``self.frozen_inference_engine`` if configured.
-
-        Reads ``rlm_rollout_id`` off ``env_extras`` and looks up the context in
-        ``self.active_rollouts``. Roots always run on the policy engine; only
-        non-root nodes route through the frozen engine.
-        """
-        rid = env_extras.get("rlm_rollout_id")
-        ctx = self.active_rollouts.get(rid) if rid else None
-        if ctx is not None and ctx.parent_rid is not None and self.frozen_inference_engine is not None:
-            return await self.frozen_inference_engine.generate(engine_input)
-        return await super()._call_inference_engine(engine_input, env_extras)
-
-    # ------------------------------------------------------------------
-    # Hook 3: post-episode finalize
+    # Hook 2: post-episode finalize
     # ------------------------------------------------------------------
 
     async def _finalize_episode(
@@ -305,8 +275,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
         """Sync callback that dispatches batched text prompts to an inference engine.
 
         Safe to call from a non-async thread (e.g. inside a REPL ``exec()``).
-        Routes through ``self.frozen_inference_engine`` when configured; falls
-        back to the policy engine otherwise.
+        Uses ``frozen_inference_engine`` when configured; otherwise falls back
+        to the policy engine.
         """
         target_engine = self.frozen_inference_engine or self.inference_engine_client
 

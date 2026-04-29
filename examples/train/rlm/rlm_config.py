@@ -18,8 +18,6 @@ class RLMGeneratorConfig(GeneratorConfig):
     enable_child_agents: bool = True
     """When False, skip subcall_fn injection for RLM envs so the top-level agent runs without
     child-spawning capability (single-paper mode)."""
-    child_openrouter_model: Optional[str] = None
-    """When set, child RLM agents (depth >= 1) use this model via an OpenAI-compatible API instead of
-    the policy inference engine. Requires ``OPENROUTER_API_KEY``."""
-    child_openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    """Base URL for the OpenAI-compatible chat completions endpoint used by child agents."""
+    frozen_openrouter_model: Optional[str] = None
+    """When set, in-REPL ``llm_query`` calls use this frozen model via OpenRouter
+    instead of the policy engine."""

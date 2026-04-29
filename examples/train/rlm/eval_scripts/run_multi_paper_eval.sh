@@ -70,5 +70,5 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm_eval \
   trainer.logger="$LOGGER" \
   trainer.project_name="rlm" \
   trainer.run_name="multi_paper_eval" \
-  generator.child_openrouter_model="openai/gpt-5.4-nano" \
+  generator.frozen_openrouter_model="openai/gpt-5.4-nano" \
   "$@"
