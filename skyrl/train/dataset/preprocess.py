@@ -2,6 +2,7 @@ import logging
 from typing import List, Optional, Tuple
 
 import torch
+from jaxtyping import Float, Integer
 from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
@@ -38,13 +39,13 @@ def convert_prompts_responses_to_batch_tensors(
     rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
     max_seq_len: Optional[int] = None,
 ) -> Tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
+    Float[torch.Tensor, "batch seq_len"],
+    Float[torch.Tensor, "batch seq_len"],
+    Float[torch.Tensor, "batch response_len"],
+    Float[torch.Tensor, "batch response_len"],
+    Float[torch.Tensor, "batch response_len"],
+    Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
