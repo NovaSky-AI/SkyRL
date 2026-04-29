@@ -38,8 +38,6 @@ from skyrl.train.utils.utils import (
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.

@@ -22,6 +22,7 @@ from .vllm_router import VLLMRouter
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
 VLLM_START_PORT = 8000
 
+# Fixed LoRA adapter name used for generation requests when LoRA is active.
 _SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 
