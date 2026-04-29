@@ -194,6 +194,8 @@ class MegatronWeightExtractor(WeightExtractor):
         dtype_names = []
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
+        # Collect parameter metadata in the same order
+        # as provided by `.extract_weights`.
         if not self.enable_bucketing:
             for name, tensor in self.bridge.export_hf_weights(
                 self.actor_module,
