@@ -602,30 +602,6 @@ class PPORayActorGroup:
             return refs
         return ray.get(refs)
 
-    def run_method(self, dispatch_type: str, method_name: str, *args, **kwargs) -> Optional[TrainingOutputBatch]:
-        """Run a method on all actors using specified dispatch type synchronously.
-
-        The method should either return `None` or a `TrainingOutputBatch` object.
-
-        Args:
-            dispatch_type: Type of dispatch to use ("mesh" or "pass_through")
-            method_name: Name of the method to call on actors
-            *args: Positional arguments to pass to the method
-            **kwargs: Keyword arguments to pass to the method
-
-        Returns:
-            Collect results from all the actors.
-        """
-        dispatch_class: Dispatch = DispatchRegistry.get(dispatch_type)
-        # validate the dispatch args to be sent to `.dispatch`
-        args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
-
-        # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
-        # Collect results from all the actors
-        ret = dispatch_class.sync_collect(self.actor_infos, object_refs)
-        return ret
-
     def async_run_ray_method(self, dispatch_type: str, method_name: str, *args, **kwargs) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.
 
@@ -645,28 +621,6 @@ class PPORayActorGroup:
         # Dispatch the method call
         object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
         return object_refs
-
-    async def async_run_method(
-        self, dispatch_type: str, method_name: str, *args, **kwargs
-    ) -> Optional[TrainingOutputBatch]:
-        """Run a method on all actors using specified dispatch type in an asyncio-compatible way.
-
-        Args:
-            dispatch_type: Type of dispatch to use ("mesh" or "pass_through")
-            method_name: Name of the method to call on actors
-            *args: Positional arguments to pass to the method
-            **kwargs: Keyword arguments to pass to the method
-
-        Returns:
-            TrainingOutputBatch: concatenated results from all actors
-        """
-        dispatch_class: Dispatch = DispatchRegistry.get(dispatch_type)
-        # validate the dispatch args to be sent to `.dispatch`
-        args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
-
-        # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
-        return await dispatch_class.async_collect(self.actor_infos, object_refs)
 
 
 class PolicyWorkerBase(Worker):
