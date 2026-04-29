@@ -199,6 +199,85 @@ class TestComputePromptMiniBatchBoundaries:
 
         assert len(stepwise_bounds) == len(non_stepwise_bounds) == 2
 
+    def test_eval_partial_batch_nonstepwise(self):
+        """Test eval mode with partial batches during non-stepwise training.
+        
+        This addresses the issue where evaluation crashes when val set size is
+        not divisible by train_batch_size. With is_training=False, partial
+        batches should be allowed.
+        """
+        train_batch_size = 4
+        spp = 2
+        is_stepwise = False
+        mini_batch_size = 2
+        
+        # Only 3 prompts instead of 4 (partial batch)
+        uids = ["p0", "p0", "p1", "p1", "p2", "p2"]
+        
+        # Should work fine with is_training=False
+        boundaries = compute_prompt_mini_batch_boundaries(
+            uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
+        )
+        # With 3 prompts and mini_batch_size=2, we get 2 mini-batches:
+        # First mini-batch: prompts 0-1 (sequences 0-4)
+        # Second mini-batch: prompt 2 (sequences 4-6)
+        assert boundaries == [(0, 4), (4, 6)]
+
+    def test_eval_partial_batch_single_minibatch(self):
+        """Test eval mode with partial batch that fits in single mini-batch."""
+        train_batch_size = 4
+        spp = 2
+        is_stepwise = False
+        mini_batch_size = 2
+        
+        # Only 1 prompt instead of 4 (very partial batch)
+        uids = ["p0", "p0"]
+        
+        boundaries = compute_prompt_mini_batch_boundaries(
+            uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
+        )
+        # With 1 prompt and mini_batch_size=2, we get 1 mini-batch
+        assert boundaries == [(0, 2)]
+
+    def test_eval_rejects_noncontiguous_uids(self):
+        """Test that eval mode still enforces contiguous uids."""
+        train_batch_size = 4
+        spp = 2
+        is_stepwise = False
+        mini_batch_size = 2
+        # Non-contiguous uids: p0 appears at index 0-1 and 4-5
+        uids = ["p0", "p0", "p1", "p1", "p0", "p0"]
+        
+        with pytest.raises(AssertionError, match="uid 'p0' appears in non-contiguous positions"):
+            compute_prompt_mini_batch_boundaries(
+                uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
+            )
+
+    def test_eval_stepwise_partial_batch(self):
+        """Test eval mode with stepwise training and partial batch."""
+        mini_batch_size = 2
+        train_batch_size = 4
+        spp = 2
+        is_stepwise = True
+        
+        # Only 3 prompts instead of 4
+        uids = _make_uids_stepwise(
+            [
+                ("p0", 2, [3, 2]),  # 5 seqs
+                ("p1", 2, [1, 4]),  # 5 seqs
+                ("p2", 2, [2, 1]),  # 3 seqs
+            ]
+        )
+        
+        # Should work fine with is_training=False
+        boundaries = compute_prompt_mini_batch_boundaries(
+            uids, mini_batch_size, train_batch_size, is_stepwise, spp, is_training=False
+        )
+        # With 3 prompts and mini_batch_size=2, we get 2 mini-batches:
+        # First: prompts 0-1 (sequences 0-10)
+        # Second: prompt 2 (sequences 10-13)
+        assert boundaries == [(0, 10), (10, 13)]
+
         # Non-step-wise boundaries should be uniform
         assert non_stepwise_bounds == [(0, 640), (640, 1280)]
 
