@@ -5,8 +5,7 @@ Subclasses ``BaseRLMEnv`` and supplies:
 - paper-aware REPL tools (``list_papers``, ``search``, ``extract_section``, ``get_paper_abstract``)
 - multipaper parent / child system prompts
 
-A ``judge_reward_fn`` injected via extras (e.g. by ``RLMGymGenerator``) takes
-precedence over the evidence-F1 reward.
+The subclass overrides ``_get_reward`` with an LLM-judge scorer.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from typing import Any, Dict, List
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
 from skyrl_gym.metrics import default_aggregate_metrics
 
-from .evidence_rewards import JudgeRewardFn
+from .evidence_rewards import judge_reward
 from .paper_tools import make_tools
 
 
@@ -234,44 +233,35 @@ class EvidenceRLMEnv(BaseRLMEnv):
     """RLM environment for single-paper evidence extraction.
 
     Acts as the worker role: one paper in ``context``, returns a list of
-    verbatim evidence spans. Always uses ``MULTIPAPER_CHILD_SYSTEM_PROMPT``
-    (it is the worker prompt, regardless of whether a parent dispatched it).
+    verbatim evidence spans. Uses ``MULTIPAPER_CHILD_SYSTEM_PROMPT``.
 
-    Reward: F1 over retrieved text intervals vs. ground-truth evidence spans
-    in ``reward_spec.evidence``. Multipaper math when the context is a dict,
-    single-paper math when it is a string. Set ``USE_JUDGE_REWARD = True`` on
-    the class to swap in an LLM-judge reward; per-component precision/recall
-    are surfaced via ``get_metrics()``.
-
-    Tools: paper-aware ``list_papers``/``search``/``extract_section``/
-    ``get_paper_abstract`` injected into the REPL.
+    Reward: LLM-judge precision/recall over predicted vs. ground-truth
+    evidence from ``extras["reward_spec"]["evidence"]``.
     """
 
     SYSTEM_PROMPT = MULTIPAPER_CHILD_SYSTEM_PROMPT
-
-    # Hardcoded judge config. Set USE_JUDGE_REWARD=True to swap the F1 reward
-    # for an LLM-judge reward; OPENAI_API_KEY must be set in the environment.
     JUDGE_MODEL = "gpt-4.1-nano"
     JUDGE_BASE_URL = "https://api.openai.com/v1"
 
     def _get_reward(self, final_answer: str) -> float:
-        # Bind reward_fn lazily on first call (when self._context is populated).
-        if self.reward_fn is None:
-            self.reward_fn = JudgeRewardFn(
-                model=self.JUDGE_MODEL,
-                base_url=self.JUDGE_BASE_URL,
-                question=self._root_prompt,
-                evidence=(self.extras.get("reward_spec") or {}).get("evidence") or [],
-            )
-
-        return super()._get_reward(final_answer)
+        evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
+        reward, precision, recall = judge_reward(
+            final_answer,
+            question=self._root_prompt,
+            evidence=evidence,
+            model=self.JUDGE_MODEL,
+            base_url=self.JUDGE_BASE_URL,
+        )
+        self._judge_precision = precision
+        self._judge_recall = recall
+        return reward
 
     def get_metrics(self) -> Dict[str, Any]:
         metrics = super().get_metrics()
         metrics["depth"] = self.extras.get("depth", 0)
-        if isinstance(self.reward_fn, JudgeRewardFn):
-            metrics["judge_precision"] = self.reward_fn.last_precision
-            metrics["judge_recall"] = self.reward_fn.last_recall
+        if hasattr(self, "_judge_precision") and hasattr(self, "_judge_recall"):
+            metrics["judge_precision"] = self._judge_precision
+            metrics["judge_recall"] = self._judge_recall
         return metrics
 
     def _get_system_prompt(self) -> str:

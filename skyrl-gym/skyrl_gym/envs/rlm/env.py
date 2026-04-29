@@ -1,6 +1,6 @@
 import json
 import re
-import time
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
@@ -37,7 +37,7 @@ Think step by step carefully, plan, and execute this plan immediately in your re
 
 
 # ---------------------------------------------------------------------------
-# Per-turn user prompt injection (from rlm/rlm/utils/prompts.py)
+# Per-turn user prompt injection
 # ---------------------------------------------------------------------------
 
 _USER_PROMPT = (
@@ -75,17 +75,16 @@ def _build_user_prompt(root_prompt: Optional[str], iteration: int) -> Dict[str, 
 # Parsing helpers (from rlm/rlm/utils/parsing.py)
 # ---------------------------------------------------------------------------
 
+# Matches: ```repl\n<code>\n```
 _REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```", re.DOTALL)
+# Matches: FINAL_VAR(<expr>)  — non-greedy, first closing paren wins
 _FINAL_VAR_RE = re.compile(r"^\s*FINAL_VAR\((.*?)\)", re.MULTILINE | re.DOTALL)
+# Matches: FINAL(<anything>)  — greedy, entire rest of line
 _FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 
 
 def _find_code_block(text: str) -> Optional[str]:
     """Return the LAST ```repl ... ``` code block in the response, or None.
-
-    Last-match wins so that any ```repl examples nested inside <think> tags
-    or earlier scratch reasoning are ignored — the model's actual action is
-    whatever it commits to at the end.
     """
     matches = _REPL_BLOCK_RE.findall(text)
     return matches[-1].strip() if matches else None
@@ -95,8 +94,7 @@ def _find_final_answer(text: str, repl: Optional[PersistentREPL]) -> Optional[st
     """Parse FINAL_VAR(...) or FINAL(...) from the model's text response.
 
     Takes the LAST occurrence of either marker (FINAL_VAR preferred over FINAL
-    when both are present) so markers inside <think> tags or earlier reasoning
-    are ignored.
+    when both are present).
     """
     var_matches = _FINAL_VAR_RE.findall(text)
     if var_matches:
@@ -135,9 +133,6 @@ def _format_execution_result(result: REPLResult) -> str:
     if important_vars:
         parts.append(f"REPL variables: {list(important_vars.keys())}\n")
     return "\n\n".join(parts) if parts else "No output"
-
-
-_MAX_RESULT_LEN = 20_000
 
 
 def _format_context_metadata(context_payload) -> str:
@@ -187,11 +182,11 @@ class BaseRLMEnv(BaseTextEnv):
     and FINAL/FINAL_VAR parsing. Task-specific behavior — reward, system
     prompt, REPL tools — is supplied by subclasses via three override hooks:
 
-      • ``_get_reward(final_answer)``   — score the final answer
-      • ``_get_system_prompt()``        — return the system prompt template
-      • ``_get_repl_tools()``           — return task-specific REPL helpers
-                                          (called after ``self._context`` is set,
-                                          so closures can capture it)
+      • ``_get_reward(final_answer)``  — score the final answer (default: 0.0)
+      • ``_get_system_prompt()``       — return the system prompt template
+      • ``_get_repl_tools()``          — return task-specific REPL helpers
+                                         (called after ``self._context`` is set,
+                                         so closures can capture it)
 
     See ``examples/train/rlm/envs/evidence_rlm_env.py`` for a worked example.
 
@@ -228,33 +223,25 @@ class BaseRLMEnv(BaseTextEnv):
         self.lm_callback = extras.get("lm_callback", None)
         self.subcall_fn = extras.get("subcall_fn", None)
 
-        # Subclasses may set self.reward_fn in their __init__ if they want the
-        # default _get_reward to delegate. Otherwise they should override _get_reward.
-        self.reward_fn: Optional[Any] = None
-
         self.repl: Optional[PersistentREPL] = None
         self._context: Any = None
         self._tools: Dict[str, Any] = {}  # populated in init() from _get_repl_tools()
         self._final_answer: Optional[str] = None
         self._reward: float = 0.0  # set once when done=True; read by get_metrics
         self._turn_index = 0
-        self._last_repl_exec_s: float = 0.0
 
     # ------------------------------------------------------------------
     # Override hooks — subclasses customize task-specific behavior here
     # ------------------------------------------------------------------
 
     def _get_reward(self, final_answer: str) -> float:
-        """Score the final answer. Override or set ``self.reward_fn``.
+        """Score the final answer. **Subclasses should override.**
 
         Only called when the rollout produced a final answer; turn-limit
         timeouts and other no-answer terminations score 0 without invoking
-        this method. Default: delegates to ``self.reward_fn(final_answer)``
-        if set, else 0.0.
+        this method.
         """
-        if self.reward_fn is not None:
-            return float(self.reward_fn(final_answer))
-        return 0.0
+        return 1.0 if final_answer else 0.0
 
     def _get_system_prompt(self) -> str:
         """Return the system prompt template. Override for custom prompts.
@@ -351,9 +338,7 @@ class BaseRLMEnv(BaseTextEnv):
             return self._make_step_output([{"role": "user", "content": obs_text}], done=done)
 
         # Branch 2: execute the repl block.
-        _t_repl = time.perf_counter()
         result = self.repl.execute(code)
-        self._last_repl_exec_s = time.perf_counter() - _t_repl
 
         # Two-stage final answer detection: FINAL_VAR() inside exec, or text-parsed FINAL/FINAL_VAR.
         final_answer = result.final_answer or _find_final_answer(action, self.repl)
@@ -368,6 +353,7 @@ class BaseRLMEnv(BaseTextEnv):
 
         # Otherwise emit the REPL output and continue.
         result_str = _format_execution_result(result)
+        _MAX_RESULT_LEN = 20_000
         if len(result_str) > _MAX_RESULT_LEN:
             result_str = result_str[:_MAX_RESULT_LEN] + f"... + [{len(result_str) - _MAX_RESULT_LEN} chars...]"
         obs_text = f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result_str}"
@@ -377,21 +363,18 @@ class BaseRLMEnv(BaseTextEnv):
         """Build a step output. Always returns next_user_message as a separate
         field; the agent loop decides whether to inject it post-generation
         (step-wise) or concatenate it inline."""
-        metadata = {"turns": self.turns, "repl_exec_s": self._last_repl_exec_s}
         if done:
             return BaseTextEnvStepOutput(
                 observations=observations,
                 next_user_message=None,
                 reward=self._reward,
                 done=True,
-                metadata=metadata,
             )
         return BaseTextEnvStepOutput(
             observations=observations,
             next_user_message=_build_user_prompt(self._root_prompt, self._turn_index),
             reward=0.0,
             done=False,
-            metadata=metadata,
         )
 
     def get_metrics(self) -> Dict[str, Any]:

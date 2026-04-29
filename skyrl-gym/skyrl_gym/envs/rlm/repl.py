@@ -62,14 +62,6 @@ class REPLResult:
     final_answer: Optional[str]  # set if FINAL_VAR() was called during execution
 
 
-class _REPLTimeout(Exception):
-    pass
-
-
-def _timeout_handler(signum, frame):
-    raise _REPLTimeout("Code execution timed out")
-
-
 def _can_use_sigalrm() -> bool:
     """SIGALRM is only usable from the main thread on Unix."""
     return hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread()
@@ -319,6 +311,16 @@ class PersistentREPL:
     # ------------------------------------------------------------------
 
     def execute(self, code: str) -> REPLResult:
+        # SIGALRM is preferred because the OS delivers the signal directly into
+        # the executing frame, cleanly interrupting even infinite loops or
+        # blocking I/O.  The thread-based fallback can only *abandon* a stuck
+        # thread (Python has no way to kill a thread), so runaway code keeps
+        # burning CPU as a leaked daemon thread.
+        #
+        # However, SIGALRM is only available on Unix *and* only from the main
+        # thread (Python raises ValueError if you call signal.signal() from a
+        # non-main thread).  In practice this means Ray workers — which run env
+        # logic on spawned threads — must use the thread fallback.
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
         error_str: Optional[str] = None
@@ -341,9 +343,12 @@ class PersistentREPL:
     def _execute_with_sigalrm(
         self, code: str, stdout_buf: io.StringIO, stderr_buf: io.StringIO
     ) -> Optional[str]:
+        def _raise_timeout(*_):
+            raise TimeoutError("Code execution timed out")
+
         old_alarm = None
         try:
-            old_alarm = signal.signal(signal.SIGALRM, _timeout_handler)
+            old_alarm = signal.signal(signal.SIGALRM, _raise_timeout)
             signal.alarm(int(self.timeout))
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 combined = {**self.globals, **self.locals}
@@ -354,7 +359,7 @@ class PersistentREPL:
                     if key not in self.globals and not key.startswith("_"):
                         self.locals[key] = value
                 self._restore_scaffold()
-        except _REPLTimeout:
+        except TimeoutError:
             self._exec_combined = None
             return f"Timeout after {int(self.timeout)} seconds\n"
         except Exception:
