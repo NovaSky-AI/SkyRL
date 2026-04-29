@@ -196,6 +196,7 @@ def compute_prompt_mini_batch_boundaries(
     train_batch_size: int,
     is_stepwise: bool,
     n_samples_per_prompt: int,
+    is_training: bool = True,
 ) -> List[Tuple[int, int]]:
     """Compute mini-batch ``(start, end)`` slices from a flat ``uids`` list.
 
@@ -206,10 +207,12 @@ def compute_prompt_mini_batch_boundaries(
         train_batch_size: Number of prompts in a training batch. For sanity check.
         is_stepwise: Whether the training is step-wise. For sanity check.
         n_samples_per_prompt: how many samples per prompt. For sanity check.
+        is_training: Whether this is a training batch (strict validation) or eval batch (allows partial batches).
+            Defaults to True for backward compatibility.
     Returns:
         List of (start, end) indices of the mini-batches. The length of the list is the number of
-        mini-batches, guaranteed to be `train_batch_size // mini_batch_size` regardless of whether
-        the training is step-wise or not.
+        mini-batches, guaranteed to be `train_batch_size // mini_batch_size` during training, but may differ
+        during evaluation if the final batch is partial.
 
     Consecutive equal entries in ``uids`` belong to the same prompt. Each mini batch spans exactly
     ``mini_batch_size`` prompts (the last may be smaller if the total prompt count is not divisible
@@ -244,23 +247,35 @@ def compute_prompt_mini_batch_boundaries(
             prompt_end_indices.append(i)
     prompt_end_indices.append(len(uids))
 
-    # seen_uids should equal to the number of prompts and equal to `train_batch_size`
+    # Check that num_prompts matches expected batch size
     num_prompts = len(prompt_end_indices)
-    assert num_prompts == train_batch_size and len(seen_uids) == train_batch_size
-    assert train_batch_size % mini_batch_size == 0
+    if is_training:
+        assert (
+            num_prompts == train_batch_size and len(seen_uids) == train_batch_size
+        ), f"Expected {train_batch_size} prompts in training batch, got {num_prompts}."
+        assert train_batch_size % mini_batch_size == 0
+    else:
+        if num_prompts != train_batch_size:
+            logger.info(
+                f"Partial batch detected during eval: got {num_prompts} prompts but "
+                f"train_batch_size={train_batch_size}. Using actual batch size for mini-batch boundaries."
+            )
 
-    # Compute boundaries.
+    # Compute boundaries. Handle partial batches during eval.
     boundaries: List[Tuple[int, int]] = []
     start_seq = 0
+
     for i in range(0, num_prompts, mini_batch_size):
-        end_prompt_idx = i + mini_batch_size - 1  # i + mini_batch_size is next mini-batch's first prompt's end index
+        end_prompt_idx = min(i + mini_batch_size - 1, num_prompts - 1)
         end_seq = prompt_end_indices[end_prompt_idx]
         boundaries.append((start_seq, end_seq))
         start_seq = end_seq
-    assert len(boundaries) == train_batch_size // mini_batch_size
+
+    if is_training:
+        assert len(boundaries) == train_batch_size // mini_batch_size
 
     # Assert that the mini-batch boundaries are uniform for non-step-wise training.
-    if not is_stepwise:
+    if not is_stepwise and is_training:
         expected_num_seq_in_mini_batch = n_samples_per_prompt * mini_batch_size
         for i, (start, end) in enumerate(boundaries):
             assert start == i * expected_num_seq_in_mini_batch
