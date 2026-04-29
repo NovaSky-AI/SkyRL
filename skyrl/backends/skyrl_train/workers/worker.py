@@ -98,8 +98,14 @@ class DistributedTorchRayActor:
         # Narrow CUDA_VISIBLE_DEVICES to the Ray-assigned GPU so LOCAL_RANK="0"
         # is correct regardless of whether Ray or Slurm set
         # CUDA_VISIBLE_DEVICES before actor init
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
-        os.environ["LOCAL_RANK"] = "0"
+        gpu_ids = ray.get_gpu_ids()
+        if gpu_ids:
+            assert len(gpu_ids) == 1, f"Expected 1 GPU per actor, got {gpu_ids}"
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
+            os.environ["LOCAL_RANK"] = "0"
+        else:
+            os.environ["LOCAL_RANK"] = str(self._local_rank)
+
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
