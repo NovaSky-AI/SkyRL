@@ -28,12 +28,10 @@ _SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 @dataclass
 class InferenceServerSetup:
-    """Result of :func:`create_inference_servers` and
-    :func:`build_new_inference_client` (paired with the client in the
-    latter).
+    """Inference server setup result with optional router and groups.
 
-    ``router`` is ``None`` when the caller reuses a fully-external proxy
-    as-is (no internal :class:`VLLMRouter` is started). The three
+    ``router`` is ``None`` when the caller reuses a fully-external
+    proxy (no internal ``VLLMRouter`` is started). The three
     server-group lists default to empty when servers are external or
     when the relevant branch (PD vs non-PD) is not active.
     """
@@ -215,33 +213,28 @@ def build_new_inference_client(
     tokenizer,
     placement_group: Optional[ResolvedPlacementGroup] = None,
 ) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
-    """Build the new HTTP-based inference client and any supporting state.
+    """Build the new HTTP-based inference client and supporting state.
 
     Resolves the ``(external_proxy_url, external_server_urls)`` matrix:
-
-    - Both set: fully external — reuse both as-is, no internal router/groups.
-    - Proxy only: external proxy serves both data and control planes.
-    - Servers only: spawn an internal ``VLLMRouter`` over the external servers.
-    - Neither: spawn internal server groups + router via
-      :func:`create_inference_servers`.
-
-    Then builds the :class:`RemoteInferenceClient` against the resolved
-    endpoints.
+    both set means fully external (reuse both as-is); proxy only means
+    the external proxy serves both data and control planes; servers
+    only spawns an internal router over the external servers; neither
+    spawns internal server groups + router via
+    ``create_inference_servers``. Then builds the
+    ``RemoteInferenceClient`` against the resolved endpoints.
 
     Args:
         cfg: SkyRL train config.
         tokenizer: HF tokenizer for the policy model.
         placement_group: Resolved placement group when colocated, ``None``
-            otherwise. Passed through to :func:`create_inference_servers` in
+            otherwise. Passed through to ``create_inference_servers`` in
             the internal-servers branch; ignored on external branches.
 
     Returns:
-        ``(client, server_setup)`` — the constructed
-        :class:`RemoteInferenceClient` and the :class:`InferenceServerSetup`
-        describing whatever router and server groups (if any) were
-        internally started. ``server_setup.router`` is ``None`` for fully
-        external setups; the three group lists are empty when servers are
-        external or when their PD branch is inactive.
+        Tuple of (client, server_setup). ``server_setup.router`` is
+        ``None`` for fully external setups; the three group lists are
+        empty when servers are external or when their PD branch is
+        inactive.
     """
     ie_cfg = cfg.generator.inference_engine
     external_proxy_url = ie_cfg.external_proxy_url
