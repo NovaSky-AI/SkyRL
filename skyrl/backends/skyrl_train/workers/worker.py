@@ -659,11 +659,16 @@ class PolicyWorkerBase(Worker):
         micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        total_tokens = data["loss_mask"].sum().clamp(min=1).item()
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
             microbatch_weight = micro_batch_size / len(data)
             metrics = self._forward_backward_micro(
-                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+                micro_batch,
+                microbatch_weight,
+                total_tokens=total_tokens,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
@@ -673,10 +678,11 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # TODO: SFT path still averages metrics across microbatches and workers.
-        # This needs to be unified with the RL path which sums.
+        # "token_mean_legacy" preserves the old per-microbatch averaging behavior.
         resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+        sum_loss_metrics = not (
+            resolved_loss_name == "cross_entropy" and self.cfg.algorithm.loss_reduction == "token_mean_legacy"
+        )
 
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
@@ -694,6 +700,7 @@ class PolicyWorkerBase(Worker):
         self,
         experience: Experience,
         microbatch_weight: float,
+        total_tokens: float,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
@@ -772,10 +779,20 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
+        # DP all-reduce averages gradients, but policy losses are pre-scaled sums
+        # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
+        # dp_size to recover the correct sum reduction across workers.
+        grad_sum_correction_factor = self.mesh_rank.dp_size
+
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
             unscaled_loss = policy_loss
-            loss = unscaled_loss * microbatch_weight
+
+            if self.cfg.algorithm.loss_reduction == "token_mean_legacy":
+                loss = unscaled_loss * microbatch_weight
+            else:
+                loss = (unscaled_loss / total_tokens) * grad_sum_correction_factor
+
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -808,7 +825,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": loss.item(),
+                "sft_loss": (unscaled_loss / total_tokens).item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
@@ -839,11 +856,6 @@ class PolicyWorkerBase(Worker):
             else:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
-
-            # DP all-reduce averages gradients, but policy losses are pre-scaled sums
-            # (see `apply_loss_reduction_to_advantages_minibatch`), so we multiply by
-            # dp_size to recover the correct sum reduction across workers.
-            grad_sum_correction_factor = self.mesh_rank.dp_size
 
             # NOTE: The KL and entropy loss terms are not pre-scaled,
             # so we just average them across microbatches and DP workers.

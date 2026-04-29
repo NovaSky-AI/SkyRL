@@ -268,7 +268,7 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
         all_loss_fn_outputs = []
         for result in results:
             assert isinstance(result, dict)
-            assert "loss" in result
+            assert "sft_loss" in result
             assert "loss_fn_outputs" in result, "SFT path should return loss_fn_outputs"
 
             loss_fn_outputs = result["loss_fn_outputs"]
@@ -288,3 +288,38 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sft_cross_entropy_microbatch_invariance(ray_init_fixture):
+    """Loss should be identical regardless of micro_train_batch_size_per_gpu."""
+    batch_size = 4
+    num_actions = 4
+    # Variable-length sequences to exercise the bug (uniform lengths would hide it)
+    dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions, action_lengths=[1, 2, 3, 4])
+
+    losses = []
+    for micro_batch_size in [1, 2]:
+        cfg = get_test_actor_config()
+        cfg.trainer.placement.policy_num_gpus_per_node = 1
+        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_batch_size
+        cfg.trainer.use_sample_packing = False
+        validate_cfg(cfg)
+
+        try:
+            actor_group = init_worker_with_type(
+                "policy",
+                shared_pg=None,
+                colocate_all=False,
+                num_gpus_per_node=1,
+                cfg=cfg,
+            )
+            results = ray.get(
+                actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch, loss_fn="cross_entropy")
+            )
+            losses.append(results[0]["sft_loss"])
+        finally:
+            ray.shutdown()
+
+    assert abs(losses[0] - losses[1]) < 1e-5, f"Loss should be microbatch-invariant but got {losses[0]} vs {losses[1]}"
