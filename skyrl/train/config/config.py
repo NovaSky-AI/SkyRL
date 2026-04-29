@@ -621,6 +621,11 @@ class TrainerConfig(BaseConfig):
     critic_mini_batch_size: int = 256
     micro_train_batch_size_per_gpu: int = 1
     micro_forward_batch_size_per_gpu: int = 1
+    max_tokens_per_microbatch: int = -1
+    """Maximum number of tokens per microbatch. When > 0, microbatches are formed by bin-packing
+    samples based on their token counts (from attention_mask) instead of using a fixed sample count.
+    -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
+    Applies to both forward and training micro-batching."""
     update_ref_every_epoch: bool = False
     use_sample_packing: bool = True
     eval_batch_size: int = 1024

@@ -50,8 +50,12 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BaseBatchIterator,
     BatchIterator,
+    SampleBasedBatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
+    get_microbatch_iterator,
     reduce_metrics,
 )
 from skyrl.env_vars import (
@@ -380,16 +384,22 @@ class Worker(DistributedTorchRayActor):
     ) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.micro_forward_batch_size_per_gpu`.
+        This is a wrapper around `_forward_micro_batch` that runs in micro batches.
+        Uses token-based chunking if `max_tokens_per_microbatch` is configured, otherwise
+        falls back to sample-based chunking with `micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
 
         outputs = []
-        for micro_batch in micro_batches:
-            outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
+        for microbatch in microbatch_iterator:
+            outputs.append(self._forward_micro_batch(microbatch))
+        output = microbatch_iterator.reorder_and_combine_batches(outputs)
+
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
@@ -702,14 +712,19 @@ class PolicyWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            microbatch_weight = micro_batch_size / len(data)
+        for microbatch in microbatch_iterator:
+            experience = BaseBatchIterator.batch_to_experience(microbatch)
+            microbatch_weight = len(microbatch) / len(data)
             metrics = self._forward_backward_micro(
-                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+                experience, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
@@ -1046,7 +1061,8 @@ class CriticWorkerBase(Worker):
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu,
+        or by token count if max_tokens_per_microbatch is configured.
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
@@ -1055,12 +1071,26 @@ class CriticWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
         all_metrics = defaultdict(list)
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            metrics = self._forward_backward_micro(micro_batch)
-            self._micro_batches_accumulated += 1
+        for microbatch in microbatch_iterator:
+            experience = BaseBatchIterator.batch_to_experience(microbatch)
+
+            if use_token_batching:
+                # With token-based batching, microbatches may have different sizes.
+                # Scale loss by microbatch_weight so gradients are correctly weighted.
+                microbatch_weight = len(microbatch) / len(data)
+                metrics = self._forward_backward_micro(experience, microbatch_weight=microbatch_weight)
+            else:
+                metrics = self._forward_backward_micro(experience)
+                self._micro_batches_accumulated += 1
+
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -1072,14 +1102,17 @@ class CriticWorkerBase(Worker):
 
         return result
 
-    def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
+    def _forward_backward_micro(
+        self, experience: Experience, microbatch_weight: Optional[float] = None
+    ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
 
-        Loss is NOT scaled here - gradient scaling happens at optim_step time.
-
         Args:
             experience: Experience object for one micro batch
+            microbatch_weight: If provided, scale loss by this weight before backward.
+                Used with token-based batching where microbatches have variable sizes.
+                If None, loss is unscaled (gradient scaling happens at optim_step time).
 
         Returns:
             All-reduced metrics dict for this micro batch
@@ -1111,7 +1144,11 @@ class CriticWorkerBase(Worker):
                 config=self.cfg.algorithm,
                 loss_mask=loss_mask,
             )
-        # NO loss scaling here - gradient scaling happens at optim_step
+
+        if microbatch_weight is not None:
+            # Token-based batching: scale loss by weight so gradients are properly weighted
+            loss = loss * microbatch_weight
+        # else: NO loss scaling here - gradient scaling happens at optim_step
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {
@@ -1131,6 +1168,8 @@ class CriticWorkerBase(Worker):
             The gradient norm (before scaling, after clipping)
         """
         # Scale accumulated gradients by 1/N to get correct average
+        # NOTE: When using token-based batching, loss is pre-scaled by microbatch_weight
+        # in forward_backward, so _micro_batches_accumulated stays 0 and no scaling needed.
         if self._micro_batches_accumulated > 0:
             scale = 1.0 / self._micro_batches_accumulated
             for param in self.model.parameters():
