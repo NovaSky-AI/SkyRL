@@ -195,21 +195,39 @@ class MegatronWeightExtractor(WeightExtractor):
         if hasattr(self, "_weight_metadata_cache"):
             return self._weight_metadata_cache
 
+        self._ensure_buckets_initialized()
         names = []
         dtype_names = []
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
-        device = torch.cuda.current_device()
-        for name, tensor in self.bridge.export_hf_weights(
-            self.actor_module,
-            show_progress=False,
-            conversion_tasks=None,
-        ):
-            tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
-            names.append(name)
-            dtype_names.append(dtype_name)
-            shapes.append(list(tensor.shape))
-            del tensor
+        # Collect parameter metadata in the same order
+        # as provided by `.extract_weights`.
+        if not self.enable_bucketing:
+            for name, tensor in self.bridge.export_hf_weights(
+                self.actor_module,
+                show_progress=False,
+                conversion_tasks=None,
+            ):
+                names.append(name)
+                dtype_names.append(dtype_name)
+                shapes.append(list(tensor.shape))
+                del tensor
+        else:
+            # Build fresh tasks each sync so mapping objects have clean
+            # PP-collective caches; reuse the pre-computed bucket structure.
+            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+            for index_group in self.bucket_index_groups:
+                bucket_tasks = [fresh_tasks[i] for i in index_group]
+                for name, tensor in self.bridge.export_hf_weights(
+                    self.actor_module,
+                    show_progress=False,
+                    conversion_tasks=bucket_tasks,
+                ):
+                    names.append(name)
+                    shapes.append(list(tensor.shape))
+                    dtype_names.append(dtype_name)
+                    del tensor
+
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         return self._weight_metadata_cache
 
