@@ -255,7 +255,7 @@ def compute_prompt_mini_batch_boundaries(
         assert train_batch_size % mini_batch_size == 0
     else:
         if num_prompts != train_batch_size:
-            logger.warning(
+            logger.info(
                 f"Partial batch detected during eval: got {num_prompts} prompts but "
                 f"train_batch_size={train_batch_size}. Using actual batch size for mini-batch boundaries."
             )

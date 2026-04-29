@@ -198,6 +198,8 @@ class TestComputePromptMiniBatchBoundaries:
         )
 
         assert len(stepwise_bounds) == len(non_stepwise_bounds) == 2
+        # Non-step-wise boundaries should be uniform
+        assert non_stepwise_bounds == [(0, 640), (640, 1280)]
 
     def test_eval_partial_batch_nonstepwise(self):
         """Test eval mode with partial batches during non-stepwise training.
@@ -277,9 +279,6 @@ class TestComputePromptMiniBatchBoundaries:
         # First: prompts 0-1 (sequences 0-10)
         # Second: prompt 2 (sequences 10-13)
         assert boundaries == [(0, 10), (10, 13)]
-
-        # Non-step-wise boundaries should be uniform
-        assert non_stepwise_bounds == [(0, 640), (640, 1280)]
 
 
 # ---------------------------------------------------------------------------
