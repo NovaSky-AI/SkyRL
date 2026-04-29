@@ -322,9 +322,7 @@ class SkyRLTrainBackend(AbstractBackend):
             placement_group=self._colocate_pg if is_colocated else None,
         )
         self._inference_router = server_setup.router
-        self._server_groups = list(
-            server_setup.server_groups + server_setup.prefill_server_groups + server_setup.decode_server_groups
-        )
+        self._server_groups = server_setup.server_groups
         self._inference_engine_client = client
 
     def _ensure_inference_engines(self):

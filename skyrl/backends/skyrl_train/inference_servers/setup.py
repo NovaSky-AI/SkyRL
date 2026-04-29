@@ -159,6 +159,7 @@ def create_inference_servers(
             router=router,
             proxy_url=proxy_url,
             server_urls=server_urls,
+            server_groups=prefill_server_groups + decode_server_groups,
             prefill_server_groups=prefill_server_groups,
             decode_server_groups=decode_server_groups,
         )
