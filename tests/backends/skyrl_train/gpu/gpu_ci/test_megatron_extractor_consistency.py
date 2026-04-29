@@ -49,6 +49,7 @@ class _ProbeMegatronRefWorker(MegatronRefWorkerBase):
         """Return per-rank ``get_weight_metadata`` and ``extract_weights``
         name sequences captured from a fresh ``MegatronWeightExtractor``."""
         dtype = str_to_torch_dtype(dtype_str)
+
         extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
@@ -64,7 +65,11 @@ class _ProbeMegatronRefWorker(MegatronRefWorkerBase):
         for chunk in extractor.extract_weights(dtype):
             extract_names.extend(chunk.names)
             del chunk
-        return {"meta_names": meta_names, "extract_names": extract_names}
+
+        return {
+            "meta_names": meta_names,
+            "extract_names": extract_names,
+        }
 
 
 _ProbeRefWorker = ray.remote(num_gpus=1)(_ProbeMegatronRefWorker)
@@ -81,10 +86,15 @@ def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 4
     cfg.trainer.placement.ref_num_gpus_per_node = 4
     cfg.trainer.ref.megatron_config.tensor_model_parallel_size = 2
-    cfg.trainer.ref.megatron_config.pipeline_model_parallel_size = 1
+    # Pipeline parallelism halves per-rank parameter storage by sharding
+    # transformer layers across 2 stages. Combined with tp=2 and ep=2, this
+    # yields ~8.75 B params per rank for the 35B-A3B MoE model under the L4 24 GB budget.
+    cfg.trainer.ref.megatron_config.pipeline_model_parallel_size = 2 if is_moe else 1
     cfg.trainer.ref.megatron_config.expert_model_parallel_size = 2 if is_moe else 1
     cfg.trainer.ref.megatron_config.expert_tensor_parallel_size = 1
-    cfg.trainer.ref.megatron_config.transformer_config_kwargs = dict(fp8="e4m3")
+    if cfg.trainer.ref.megatron_config.transformer_config_kwargs is None:
+        cfg.trainer.ref.megatron_config.transformer_config_kwargs = dict()
+    cfg.trainer.ref.megatron_config.transformer_config_kwargs["fp8"] = "e4m3"
     if is_moe:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
     validate_cfg(cfg)
@@ -146,7 +156,7 @@ def test_megatron_extractor_iteration_order_consistency(ray_init_fixture, model_
             )
             print(
                 f"[rank {rank_idx}] iteration sequences match: N={len(meta_names)} params, "
-                f"first={meta_names[0]!r}, last={meta_names[-1]!r}"
+                f"first={meta_names[0]!r}, last={meta_names[-1]!r},"
             )
     finally:
         _megatron_worker_mod.RefWorker = _orig_ref_worker
