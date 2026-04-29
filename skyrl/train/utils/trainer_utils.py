@@ -271,13 +271,17 @@ def dump_per_dataset_eval_results(
 
         with open(filename, "w") as f:
             for i in indices:
+                is_last = concat_generator_outputs.get("is_last_step")
+                if is_last is not None and not is_last[i]:
+                    continue
+                env_extras_clean = {k: v for k, v in concat_env_extras[i].items() if k != "extra_info"}
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    "score": concat_generator_outputs["rewards"][i],
+                    # "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": concat_env_extras[i],
+                    "env_extras": env_extras_clean,
                     "data_source": data_source,
                 }
                 if env_metrics_list is not None and i < len(env_metrics_list):

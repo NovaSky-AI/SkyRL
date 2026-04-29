@@ -1,7 +1,7 @@
 set -x
 
-# Single-paper RLM training.
-# The top-level agent runs as a child-style evidence extractor (no parent orchestration layer).
+# Multi-paper RLM training with parent/child orchestration.
+# The root agent (depth 0) coordinates by dispatching child agents to individual papers.
 #
 # 1. Create data: uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/train_scripts/run_multi_paper_rlm.sh
@@ -70,7 +70,7 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
-  trainer.run_name="rlm_single_paper_grpo" \
+  trainer.run_name="rlm_multi_paper_grpo" \
   trainer.log_path="$(pwd)/.neer/artifacts/skyrl-logs" \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \

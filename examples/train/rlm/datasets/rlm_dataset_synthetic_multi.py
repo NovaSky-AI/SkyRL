@@ -59,12 +59,13 @@ def convert(row: dict, max_turns: int) -> dict:
             f"Extract verbatim text passages from the context that serve as evidence for the query: {row['question']}\n"
             f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
         )}],
-        "env_class": "evidence_rlm",
+        "env_class": "multipaper_evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
             "evidence": evidence,
         },
         "max_turns": max_turns,
+        "question": row["question"],
         "extra_info": {
             "context_text": json.dumps(ctx),
         },

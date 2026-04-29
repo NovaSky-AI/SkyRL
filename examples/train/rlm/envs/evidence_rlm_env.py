@@ -251,7 +251,7 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     # Hardcoded judge config. Set USE_JUDGE_REWARD=True to swap the F1 reward
     # for an LLM-judge reward; OPENAI_API_KEY must be set in the environment.
-    JUDGE_MODEL = "openai/gpt-4.1-nano"
+    JUDGE_MODEL = "gpt-4.1-nano"
     JUDGE_BASE_URL = "https://api.openai.com/v1"
 
     def _get_reward(self, final_answer: str) -> float:

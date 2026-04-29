@@ -566,10 +566,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 appended_eos_token = True
 
         if self.generator_cfg.step_wise_trajectories:
-            for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
+            n = len(per_step_rewards)
+            own_step_outputs = agent_loop_output.step_outputs[-n:] if n else []
+            for per_step_output, (reward, resp_end_idx) in zip(own_step_outputs, per_step_rewards):
                 per_token_reward = [0.0] * len(per_step_output.response_ids)
                 per_token_reward[resp_end_idx] = float(reward)
-                # in-place update to per-token reward
                 per_step_output.reward = per_token_reward
         else:
             reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
