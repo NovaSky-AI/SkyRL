@@ -70,6 +70,10 @@ class WorkerDispatch:
         # GPU state tracking (only matters when colocated)
         self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
 
+    def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
+        self._actor_groups[model] = actor_group
+        self._gpu_state[model] = GPUState()
+
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
         import math
@@ -150,7 +154,13 @@ class WorkerDispatch:
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:
-            self._gpu_state[model] = GPUState()
+            self.mark_as_offloaded(model)
+
+    def mark_as_offloaded(self, model: str) -> None:
+        """Mark a specific model as offloaded without changing others."""
+        if model not in self._actor_groups:
+            return
+        self._gpu_state[model] = GPUState()
 
     def forward(self, model: str, data: TrainingInputBatch) -> TrainingOutputBatch:
         """Run inference forward pass. Only loads model (not optimizer)."""
@@ -197,10 +207,11 @@ class WorkerDispatch:
         Args:
             model: Model identifier ("policy", "critic", or "ref")
             data: Training batch data
-            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
-                     If provided, overrides the config's policy_loss_type.
+            loss_fn: Optional resolved train loss name (for example, "cross_entropy"
+                     or "regular"). Public Tinker aliases like "ppo" should be
+                     normalized before dispatch.
             loss_fn_config: Optional config overrides for the loss function
-                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+                           (e.g., {"eps_clip_low": 0.1} for the regular PPO loss)
 
         Returns:
             Dictionary of training metrics
@@ -289,6 +300,11 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
 
+    def set_algorithm_config(self, model: str, **kwargs) -> None:
+        """Update algorithm config fields on all workers for a model."""
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
+
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
         ray.get(
@@ -353,73 +369,6 @@ class WorkerDispatch:
         self._gpu_state[model].model_on_gpu = True
         self._gpu_state[model].optimizer_on_gpu = model != "ref"  # ref has no optimizer
 
-    def init_weight_sync_state(self, inference_engine_client) -> None:
-        """Initialize weight sync state for policy model."""
-        ray.get(
-            self._actor_groups["policy"].async_run_ray_method(
-                "pass_through",
-                "init_weight_sync_state",
-                inference_engine_client,
-                self.cfg.generator.inference_engine,
-            )
-        )
-
-    def broadcast_to_inference_engines(self, inference_engine_client) -> None:
-        """Broadcast policy weights to inference engines."""
-        ray.get(
-            self._actor_groups["policy"].async_run_ray_method(
-                "pass_through",
-                "broadcast_to_inference_engines",
-                inference_engine_client,
-                self.cfg.generator.inference_engine,
-            )
-        )
-
-    def prepare_for_weight_sync(self) -> None:
-        """Prepare for weight sync: ensure policy model is on GPU, offload optimizer."""
-        if not self.colocate_all:
-            return
-        # Ensure policy model is on GPU (will offload others in colocation group)
-        self._ensure_on_gpu("policy", need_optimizer=False, need_model=True)
-        # Offload optimizer if it's on GPU
-        if self._gpu_state["policy"].optimizer_on_gpu:
-            self._offload("policy", offload_optimizer=True, offload_model=False)
-
-    def finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model weights and optimizer state."""
-        if not self.colocate_all:
-            return
-        self._offload("policy", offload_optimizer=True, offload_model=True)
-
-    async def save_weights_for_sampler(self) -> None:
-        """
-        Tinker API method to prepare updated parameters for sampling.
-
-        Syncs weights to inference engine for sampling.
-        """
-        if self._inference_engine_client is None:
-            raise RuntimeError(
-                "Cannot save_weights_for_sampler: no inference_engine_client configured. "
-                "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
-            )
-
-        # Sync weights to inference engine
-        self.prepare_for_weight_sync()
-        if self.colocate_all:
-            await self._inference_engine_client.wake_up(tags=["weights"])
-            self.broadcast_to_inference_engines(self._inference_engine_client)
-            self.finish_weight_sync()
-            await self._inference_engine_client.wake_up(tags=["kv_cache"])
-        else:
-            # Non-colocated: pause generation to prevent in-flight requests from
-            # reading partially-updated weights during the NCCL broadcast.
-            await self._inference_engine_client.pause_generation()
-            try:
-                self.broadcast_to_inference_engines(self._inference_engine_client)
-                self.finish_weight_sync()
-            finally:
-                await self._inference_engine_client.resume_generation()
-
     def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
         """Set the inference engine client for weight sync.
 
@@ -444,3 +393,74 @@ class WorkerDispatch:
             node_ids = ray.get(group.async_run_ray_method("pass_through", "get_ray_node_id"))
             all_node_ids.extend(node_ids)
         return list(set(all_node_ids))
+
+    # ----------------------------------
+    # Weight sync methods
+    # ----------------------------------
+
+    def init_weight_sync_state(self, inference_engine_client) -> None:
+        """Initialize weight sync state for policy model."""
+        ray.get(
+            self._actor_groups["policy"].async_run_ray_method(
+                "pass_through",
+                "init_weight_sync_state",
+                inference_engine_client,
+                self.cfg.generator.inference_engine,
+            )
+        )
+
+    def _broadcast_to_inference_engines(self, inference_engine_client) -> None:
+        """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler."""
+        ray.get(
+            self._actor_groups["policy"].async_run_ray_method(
+                "pass_through",
+                "broadcast_to_inference_engines",
+                inference_engine_client,
+                self.cfg.generator.inference_engine,
+            )
+        )
+
+    def _prepare_for_weight_sync(self) -> None:
+        """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
+        if not self.colocate_all:
+            return
+        # Ensure policy model is on GPU (will offload others in colocation group)
+        self._ensure_on_gpu("policy", need_optimizer=False, need_model=True)
+        # Offload optimizer if it's on GPU
+        if self._gpu_state["policy"].optimizer_on_gpu:
+            self._offload("policy", offload_optimizer=True, offload_model=False)
+
+    def _finish_weight_sync(self) -> None:
+        """Finish weight sync: offload model weights and optimizer state. Helper for save_weights_for_sampler."""
+        if not self.colocate_all:
+            return
+        self._offload("policy", offload_optimizer=True, offload_model=True)
+
+    async def save_weights_for_sampler(self) -> None:
+        """
+        Tinker API method to prepare updated parameters for sampling.
+
+        Syncs weights to inference engine for sampling.
+        """
+        if self._inference_engine_client is None:
+            raise RuntimeError(
+                "Cannot save_weights_for_sampler: no inference_engine_client configured. "
+                "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
+            )
+
+        # Sync weights to inference engine
+        self._prepare_for_weight_sync()
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["weights"])
+            self._broadcast_to_inference_engines(self._inference_engine_client)
+            self._finish_weight_sync()
+            await self._inference_engine_client.wake_up(tags=["kv_cache"])
+        else:
+            # Non-colocated: pause generation to prevent in-flight requests from
+            # reading partially-updated weights during the NCCL broadcast.
+            await self._inference_engine_client.pause_generation()
+            try:
+                self._broadcast_to_inference_engines(self._inference_engine_client)
+                self._finish_weight_sync()
+            finally:
+                await self._inference_engine_client.resume_generation()

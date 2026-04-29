@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import gc
+from typing import List, Union
 
 import torch
 import torch.nn as nn
@@ -94,18 +95,20 @@ def get_model_size(model: nn.Module, scale="auto"):
     return n_params, scale
 
 
-def freeze_moe_router(model):
-    for layer in model.decoder.layers:
-        if hasattr(layer.mlp, "router"):
-            if hasattr(layer.mlp.router, "weight"):
-                layer.mlp.router.weight.requires_grad = False
-            if hasattr(layer.mlp.router, "bias"):
-                layer.mlp.router.bias.requires_grad = False
-        if hasattr(layer.mlp, "shared_experts"):
-            if hasattr(layer.mlp.shared_experts, "gate_weight"):
-                layer.mlp.shared_experts.gate_weight.requires_grad = False
-            if hasattr(layer.mlp.shared_experts, "gate_bias"):
-                layer.mlp.shared_experts.gate_bias.requires_grad = False
+def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
+    models = model_or_models
+    if not isinstance(model_or_models, list):
+        models = [model_or_models]
+
+    for model in models:
+        for layer in model.decoder.layers:
+            if hasattr(layer.mlp, "router"):
+                if getattr(layer.mlp.router, "weight", None) is not None:
+                    layer.mlp.router.weight.requires_grad = False
+                if getattr(layer.mlp.router, "bias", None) is not None:
+                    layer.mlp.router.bias.requires_grad = False
+    # modified in-place
+    return model_or_models
 
 
 @torch.no_grad()

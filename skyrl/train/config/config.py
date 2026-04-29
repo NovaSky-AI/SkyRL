@@ -128,6 +128,7 @@ class MegatronTorchProfilerConfig(BaseConfig):
 @dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
+    merge_lora: bool = True
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -172,6 +173,9 @@ class MegatronConfig(BaseConfig):
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
+    freeze_moe_router: bool = False
+    """If True, freeze MoE router parameters so they are not updated during training. No-op on
+    non-MoE models."""
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +637,8 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    log_example_interval: int = 1
+    """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -742,13 +748,12 @@ class SkyRLTrainConfig(BaseConfig):
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            _uses_lora_weight_sync,
+        )
+
         ie_cfg = self.generator.inference_engine
-        if (
-            self.trainer.policy.model.lora.rank > 0
-            and self.trainer.strategy != "megatron"
-            and ie_cfg.enforce_eager
-            and ie_cfg.backend == "vllm"
-        ):
+        if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 
             warnings.warn(

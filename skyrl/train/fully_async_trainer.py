@@ -356,7 +356,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines"):
-            await self.async_sync_policy_weights_to_inference_engines()
+            await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
@@ -420,9 +420,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                     # 4. After training: pause generation, sync weights, resume.
                     with Timer("sync_weights", self.all_timings):
-                        await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        await self.inference_engine_client.resume_generation()
+                        await self.dispatch.save_weights_for_sampler()
 
                 # 5. Set logs for this training step.
                 logger.info(status)
@@ -606,14 +604,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if "slot_acquired" in locals() and slot_acquired:
                 raise RuntimeError("Generation workers should only run into error when they finish running.")
             sys.exit(1)
-
-    async def async_sync_policy_weights_to_inference_engines(self):
-        return await self.policy_model.async_run_method(
-            "pass_through",
-            "broadcast_to_inference_engines",
-            self.inference_engine_client,
-            self.cfg.generator.inference_engine,
-        )
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]

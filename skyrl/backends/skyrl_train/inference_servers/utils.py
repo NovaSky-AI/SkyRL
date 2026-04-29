@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +13,22 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     get_config_as_dict,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
+    """Return True when the trainer syncs LoRA adapters (not merged weights).
+
+    FSDP always syncs LoRA adapters when ``lora.rank > 0``.
+    Megatron merges LoRA into the base weights by default
+    (``merge_lora=True``), so the inference engine should not enable LoRA.
+    """
+    if cfg.trainer.policy.model.lora.rank <= 0:
+        return False
+    if cfg.trainer.strategy == "megatron":
+        return not cfg.trainer.policy.megatron_config.lora_config.merge_lora
+    return True
 
 
 # TODO: Add a test for validation
@@ -63,12 +80,27 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     for key, value in overrides.items():
         setattr(args, key, value)
 
-    # Add LoRA params if enabled
-    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+    # Enable LoRA on the inference engine only when the trainer will sync
+    # LoRA adapters (not merged weights).  Megatron merges by default
+    # (merge_lora=True), so the inference engine must NOT have LoRA wrapping.
+    if _uses_lora_weight_sync(cfg):
         args.enable_lora = True
         args.max_lora_rank = cfg.trainer.policy.model.lora.rank
         args.max_loras = 1
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+
+        if not cfg.trainer.placement.colocate_all:
+            lora_path = cfg.trainer.policy.model.lora.lora_sync_path
+            logger.warning(
+                "LoRA weight sync is enabled but training and inference are not "
+                "colocated (placement.colocate_all=false). The trainer saves LoRA "
+                "adapters to disk for the inference engine to load, so both must "
+                "share a filesystem. Set trainer.policy.model.lora.lora_sync_path "
+                "to a shared mount (current value: %s).",
+                lora_path,
+            )
+    else:
+        args.enable_lora = False
 
     # Add any extra engine_init_kwargs
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)

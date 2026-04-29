@@ -1,0 +1,71 @@
+name: Megatron-Model-GPU-CI
+
+on: 
+  push: 
+    branches: 
+      - main
+    paths:
+      - 'ci/**'
+      - 'skyrl/backends/skyrl_train/workers/**'
+      - 'skyrl/backends/skyrl_train/distributed/megatron/**'
+      - 'skyrl/train/config/**'
+      - 'skyrl/train/trainer.py'
+      - 'tests/backends/skyrl_train/gpu/gpu_ci/**'
+      - 'pyproject.toml'
+      - '!docs/**'
+      - '!examples/**'
+      - '.github/workflows/**'
+  pull_request_target:
+    types: [labeled]
+  workflow_dispatch:
+
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+jobs:
+  
+  skyrl_train_tests_megatron_models:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models') &&
+        (
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR'
+        )
+      )
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install basic dependencies
+        run: uv pip install anyscale==0.24.79 typer==0.9.0
+      # Run tests
+      - name: GPU tests
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: |
+          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml --timeout 1000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron-models --timeout 1000

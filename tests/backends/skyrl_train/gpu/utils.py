@@ -442,7 +442,13 @@ class InferenceEngineState:
         """
         if self.router is not None:
             self.router.shutdown()
-        for group_list in (self.server_groups, self.prefill_server_groups, self.decode_server_groups):
+        # Handle shutdown for prefill and decode server groups separately
+        group_lists = (
+            [self.server_groups]
+            if not self.prefill_server_groups
+            else [self.prefill_server_groups, self.decode_server_groups]
+        )
+        for group_list in group_lists:
             if group_list is not None:
                 for group in group_list:
                     group.shutdown()
@@ -516,6 +522,7 @@ class InferenceEngineState:
         expert_parallel_size: Optional[int] = None,
         enable_pd: bool = False,
         num_prefill: int = 0,
+        language_model_only: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -552,6 +559,8 @@ class InferenceEngineState:
         if enable_pd:
             ie_cfg.enable_pd = True
             ie_cfg.num_prefill = num_prefill
+        if language_model_only is not None:
+            ie_cfg.language_model_only = language_model_only
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
@@ -589,8 +598,8 @@ class InferenceEngineState:
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
-                if active_lora_name is None:
-                    active_lora_name = "skyrl-lora"
+            if cli_args.enable_lora and active_lora_name is None:
+                active_lora_name = "skyrl-lora"
 
             setup = create_inference_servers(
                 ie_cfg,

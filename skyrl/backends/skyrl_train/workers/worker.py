@@ -244,6 +244,10 @@ class Worker(DistributedTorchRayActor):
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
 
+    def set_algorithm_config(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self.cfg.algorithm, key, value)
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
 
@@ -745,8 +749,10 @@ class PolicyWorkerBase(Worker):
         Args:
             experience: Experience object for one micro batch
             microbatch_weight: Weight of the micro batch in the overall batch
-            loss_fn: Optional loss function name to use instead of config default
-            loss_fn_config: Optional config overrides for the loss function
+            loss_fn: Optional train loss function name to use instead of config default.
+                Public Tinker aliases such as ``ppo`` should be normalized by the backend
+                before reaching the worker.
+            loss_fn_config: Optional config overrides for the resolved train loss function
 
         Returns:
             Metrics dict for the worker's local micro batch
