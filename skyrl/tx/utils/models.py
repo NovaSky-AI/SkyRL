@@ -70,6 +70,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     import skyrl.tx.models.qwen3_5
 
     for architecture in config.architectures or []:
+        if architecture == "Qwen3_5MoeForConditionalGeneration":
+            return skyrl.tx.models.qwen3_5.Qwen3_5ForConditionalGeneration
         if hasattr(skyrl.tx.models.llama3, architecture):
             return getattr(skyrl.tx.models.llama3, architecture)
         if hasattr(skyrl.tx.models.qwen3, architecture):
@@ -127,6 +129,8 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
         path = (*path[:-1], "weight")
     elif path[-1] == "conv1d_weight":
         path = (*path[:-1], "conv1d", "weight")
+    elif path[-1] == "gate":
+        path = (*path[:-1], "gate", "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
     return prefix + ".".join(map(str, path))
@@ -157,6 +161,31 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     "Get the safetensors key for an expert weight model path."
     path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
     return ".".join(map(str, path))
+
+
+def get_fused_expert_key(path: tuple) -> str:
+    """Return the packed expert tensor key used by Qwen3.5 MoE checkpoints."""
+    key = ".".join(map(str, path))
+    if key.endswith(".gate_proj.weight"):
+        return key.removesuffix(".gate_proj.weight") + ".gate_up_proj"
+    if key.endswith(".up_proj.weight"):
+        return key.removesuffix(".up_proj.weight") + ".gate_up_proj"
+    if key.endswith(".down_proj.weight"):
+        return key.removesuffix(".down_proj.weight") + ".down_proj"
+    return key
+
+
+def get_fused_expert_tensor(tensors: dict[str, np.ndarray], path: tuple) -> np.ndarray | None:
+    """Extract an expert tensor from packed Qwen3.5 MoE expert weights if present."""
+    key = get_fused_expert_key(path)
+    if key not in tensors:
+        return None
+    tensor = tensors[key]
+    param_name = path[-2]
+    if param_name in {"gate_proj", "up_proj"}:
+        midpoint = tensor.shape[1] // 2
+        tensor = tensor[:, :midpoint, :] if param_name == "gate_proj" else tensor[:, midpoint:, :]
+    return tensor.transpose(0, 2, 1)
 
 
 def load_safetensors(
@@ -199,6 +228,22 @@ def load_safetensors(
         if "experts" in path:
             num_experts = config.get_num_experts()
             assert num_experts is not None
+            fused_tensor = get_fused_expert_tensor(tensors, path)
+            if fused_tensor is not None:
+                arr = param[...]
+                if adapter_index is not None:
+                    adapter_slice = get_adapter_slice(path, adapter_index, rank)
+                    assert adapter_slice is not None
+                    arr = arr.at[get_adapter_idx(path, adapter_index)].set(
+                        fused_tensor[adapter_slice]
+                    )
+                    array = arr
+                else:
+                    array = fused_tensor
+                if array.shape != arr.shape:
+                    raise RuntimeError(f"Shape mismatch for {get_fused_expert_key(path)}: {array.shape} vs {arr.shape}")
+                param.set_raw_value(jax.device_put(array.astype(arr.dtype), param.sharding))
+                continue
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
             missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
             if missing_keys:

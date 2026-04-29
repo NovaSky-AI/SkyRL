@@ -103,6 +103,10 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
     )
+    local_device_ids: list[int] | None = Field(
+        default=None,
+        description="Optional local JAX device indices to use for the mesh. Useful for single-device smoke tests on multi-GPU nodes.",
+    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
@@ -180,6 +184,27 @@ class AccumulatedGradients:
         )
 
 
+def _mesh_devices(config: JaxBackendConfig) -> list[jax.Device] | None:
+    if config.local_device_ids is None:
+        return None
+    local_devices = jax.local_devices()
+    devices: list[jax.Device] = []
+    for idx in config.local_device_ids:
+        if idx < 0 or idx >= len(local_devices):
+            raise ValueError(f"local_device_id={idx} is out of range for {len(local_devices)} local devices")
+        devices.append(local_devices[idx])
+    mesh_size = (
+        config.fully_sharded_data_parallel_size * config.expert_parallel_size * config.tensor_parallel_size
+    )
+    if len(devices) != mesh_size:
+        raise ValueError(
+            f"local_device_ids length ({len(devices)}) must match mesh size ({mesh_size}); "
+            "set fsdp_size * ep_size * tp_size to the number of selected devices"
+        )
+    logger.info(f"Using local JAX devices {[d.id for d in devices]} for mesh")
+    return devices
+
+
 class JaxBackendImpl(AbstractBackend):
     """JAX backend implementation for models with LoRA adapters.
 
@@ -224,6 +249,7 @@ class JaxBackendImpl(AbstractBackend):
                 config.tensor_parallel_size,
             ),
             ("fsdp", "ep", "tp"),
+            devices=_mesh_devices(config),
             axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
