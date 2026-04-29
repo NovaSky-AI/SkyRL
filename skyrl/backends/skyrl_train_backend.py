@@ -20,15 +20,6 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    RemoteInferenceClient,
-)
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import (
-    build_router_args,
-    build_vllm_cli_args,
-)
-from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -46,9 +37,6 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
-
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -141,7 +129,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
 
         # New inference infrastructure
-        self._server_group = None
+        self._server_groups: list = []
         self._inference_router = None
 
     def has_model(self, model_id: str) -> bool:
@@ -322,79 +310,20 @@ class SkyRLTrainBackend(AbstractBackend):
         )
 
     def _create_new_inference_client(self):
-        """Create new HTTP-based inference client.
+        """Create new HTTP-based inference client."""
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            build_new_inference_client,
+        )
 
-        Possible config combinations:
-        - Both external_proxy_url and external_server_urls → fully external setup
-        - external_proxy_url only → proxy for both data + control plane
-        - external_server_urls only → create internal router over them
-        - Neither → build servers and router internally
-        """
-        ie_cfg = self._cfg.generator.inference_engine
         is_colocated = self._cfg.trainer.placement.colocate_all
-        external_proxy_url = ie_cfg.external_proxy_url
-        external_server_urls = ie_cfg.external_server_urls
-
-        has_external_proxy = external_proxy_url is not None
-        has_external_servers = external_server_urls is not None
-
-        if has_external_proxy and has_external_servers:
-            proxy_url = external_proxy_url
-            server_urls = list(external_server_urls)
-            logger.info(
-                f"HTTP Inference: Using fully external setup - proxy_url={proxy_url}, server_urls={server_urls}"
-            )
-
-        elif has_external_proxy and not has_external_servers:
-            proxy_url = external_proxy_url
-            server_urls = [proxy_url]
-            logger.info(f"HTTP Inference: Using external proxy for both data and control plane - proxy_url={proxy_url}")
-
-        elif has_external_servers and not has_external_proxy:
-            server_urls = list(external_server_urls)
-            router_args = build_router_args(ie_cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Created router over external servers - "
-                f"server_urls={server_urls}, proxy_url={proxy_url}"
-            )
-
-        else:
-            cli_args = build_vllm_cli_args(self._cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
-                placement_group=self._colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
-            )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            router_args = build_router_args(ie_cfg, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args, log_path=self._cfg.trainer.log_path)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-            )
-
-        lora_cfg = self._cfg.trainer.policy.model.lora
-        active_lora_name = (
-            _SKYRL_LORA_ADAPTER_NAME
-            if lora_cfg and lora_cfg.rank > 0 and self._cfg.trainer.strategy != "megatron"
-            else None
+        client, server_setup = build_new_inference_client(
+            self._cfg,
+            self._tokenizer,
+            placement_group=self._colocate_pg if is_colocated else None,
         )
-        self._inference_engine_client = RemoteInferenceClient(
-            proxy_url=proxy_url,
-            server_urls=server_urls,
-            model_name=self._cfg.trainer.policy.model.path,
-            active_lora_name=active_lora_name,
-            data_parallel_size=ie_cfg.data_parallel_size,
-            tokenizer=self._tokenizer,
-        )
+        self._inference_router = server_setup.router
+        self._server_groups = server_setup.server_groups
+        self._inference_engine_client = client
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -479,9 +408,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # deleting any model tears down the whole backend and it will be
         # re-initialized on the next create_model() call.
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
-        if self._server_group:
-            self._server_group.shutdown()
-            self._server_group = None
+        for group in self._server_groups:
+            group.shutdown()
+        self._server_groups = []
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None

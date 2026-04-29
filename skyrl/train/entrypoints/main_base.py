@@ -21,7 +21,6 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
     create_remote_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
@@ -35,9 +34,6 @@ from skyrl.train.utils.utils import (
     initialize_ray,
 )
 from skyrl.utils.tok import get_tokenizer
-
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -316,95 +312,23 @@ class BasePPOExp:
     def _get_new_inference_client(self):
         """New inference client using HTTP endpoints.
 
-        Config combinations:
-        - Colocated + external URLs → ERROR (validated earlier)
-        - Neither set → Build servers internally
-        - external_server_urls only → Create router over external servers
-        - external_proxy_url only → Use proxy for both data + control plane
-        - Both set → Fully external (proxy for data plane, servers for control plane)
-
         Returns:
             RemoteInferenceClient: The new inference client.
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-            RemoteInferenceClient,
-        )
         from skyrl.backends.skyrl_train.inference_servers.setup import (
-            create_inference_servers,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.utils import (
-            build_router_args,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-            VLLMRouter,
+            build_new_inference_client,
         )
 
-        ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
-        external_proxy_url = ie_cfg.external_proxy_url
-        external_server_urls = ie_cfg.external_server_urls
-
-        has_external_proxy = external_proxy_url is not None
-        has_external_servers = external_server_urls is not None
-
-        if has_external_proxy and has_external_servers:
-            # Case: Both external - fully external setup
-            proxy_url = external_proxy_url
-            server_urls = list(external_server_urls)
-            logger.info(
-                f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
-            )
-
-        elif has_external_proxy and not has_external_servers:
-            # Case: Proxy only - assume proxy handles control plane too
-            proxy_url = external_proxy_url
-            server_urls = [proxy_url]
-            logger.info(
-                f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}"
-            )
-
-        elif has_external_servers and not has_external_proxy:
-            # Case: Servers only - create internal router over them
-            server_urls = list(external_server_urls)
-            router_args = build_router_args(self.cfg.generator.inference_engine, server_urls=server_urls)
-            self._inference_router = VLLMRouter(router_args, log_path=self.cfg.trainer.log_path)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Created router over external "
-                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
-            )
-
-        else:
-            # Case: Neither - build servers and router internally
-            cli_args = build_vllm_cli_args(self.cfg)
-            setup = create_inference_servers(
-                self.cfg.generator.inference_engine,
-                cli_args,
-                log_path=self.cfg.trainer.log_path,
-                placement_group=self.colocate_pg if is_colocated else None,
-            )
-            self._inference_router = setup.router
-            self._server_groups = setup.server_groups
-            self._prefill_server_groups = setup.prefill_server_groups
-            self._decode_server_groups = setup.decode_server_groups
-            proxy_url = setup.proxy_url
-            server_urls = setup.server_urls
-
-        lora_cfg = self.cfg.trainer.policy.model.lora
-        active_lora_name = (
-            _SKYRL_LORA_ADAPTER_NAME
-            if lora_cfg and lora_cfg.rank > 0 and self.cfg.trainer.strategy != "megatron"
-            else None
+        client, server_setup = build_new_inference_client(
+            self.cfg,
+            self.tokenizer,
+            placement_group=self.colocate_pg if is_colocated else None,
         )
-        client = RemoteInferenceClient(
-            proxy_url=proxy_url,
-            server_urls=server_urls,
-            model_name=self.cfg.trainer.policy.model.path,
-            enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-            active_lora_name=active_lora_name,
-            data_parallel_size=ie_cfg.data_parallel_size,
-            tokenizer=self.tokenizer,
-        )
+        self._inference_router = server_setup.router
+        self._server_groups = server_setup.server_groups
+        self._prefill_server_groups = server_setup.prefill_server_groups
+        self._decode_server_groups = server_setup.decode_server_groups
 
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).

@@ -442,7 +442,13 @@ class InferenceEngineState:
         """
         if self.router is not None:
             self.router.shutdown()
-        for group_list in (self.server_groups, self.prefill_server_groups, self.decode_server_groups):
+        # Handle shutdown for prefill and decode server groups separately
+        group_lists = (
+            [self.server_groups]
+            if not self.prefill_server_groups
+            else [self.prefill_server_groups, self.decode_server_groups]
+        )
+        for group_list in group_lists:
             if group_list is not None:
                 for group in group_list:
                     group.shutdown()
