@@ -916,12 +916,6 @@ class PolicyWorkerBase(Worker):
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
 
-    def barrier(self) -> None:
-        """
-        Synchronization barrier across all workers.
-        """
-        torch.distributed.barrier()
-
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_checkpoint(
             model=self.model,
@@ -1116,12 +1110,6 @@ class CriticWorkerBase(Worker):
         """
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
-
-    def barrier(self) -> None:
-        """
-        Synchronization barrier across all workers.
-        """
-        torch.distributed.barrier()
 
     def _forward_micro_batch(
         self,
