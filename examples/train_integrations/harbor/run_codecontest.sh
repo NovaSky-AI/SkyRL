@@ -62,7 +62,7 @@ TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fr
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
 
 # Run SkyRL command
-uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
+_SKYRL_USE_NEW_INFERENCE=0 uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
