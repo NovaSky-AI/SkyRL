@@ -14,7 +14,6 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    ConversationType,
     InferenceEngineInput,
     InferenceEngineInterface,
 )
@@ -104,10 +103,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         self,
         env_class: str,
         env_extras: Dict[str, Any],
-        prompt: ConversationType,
         sampling_params: Optional[Dict[str, Any]],
-        max_tokens: int,
-        max_input_length: int,
         trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
         """Register this rollout in ``active_rollouts`` and inject hook callables.
@@ -123,40 +119,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
         env_extras = dict(env_extras)
 
         parent_rid = env_extras.pop("_rlm_parent_rid", None)
-        rid = uuid.uuid4().hex[:8]
-        if parent_rid is None:
-            tid = trajectory_id.to_string() if trajectory_id is not None else None
-            ctx = _RLMRolloutContext(
-                rid=rid,
-                env_class=env_class,
-                trajectory_id=tid,
-                parent_rid=None,
-                depth=0,
-                child_index=None,
-            )
-        else:
-            parent = self.active_rollouts[parent_rid]
-            child_index = sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid)
-            ctx = _RLMRolloutContext(
-                rid=rid,
-                env_class=parent.env_class,
-                trajectory_id=parent.trajectory_id,
-                parent_rid=parent_rid,
-                depth=parent.depth + 1,
-                child_index=child_index,
-            )
-        self.active_rollouts[rid] = ctx
-        env_extras["rlm_rollout_id"] = rid
+        ctx = self._register_rollout(env_class, trajectory_id, parent_rid)
+        env_extras["rlm_rollout_id"] = ctx.rid
         env_extras["depth"] = ctx.depth
 
         loop = asyncio.get_running_loop()
-        # In-REPL llm_query() always goes through the frozen engine when
-        # configured; otherwise falls back to the policy engine.
         env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
         if getattr(self.generator_cfg, "enable_child_agents", True):
-            env_extras["subcall_fn"] = self._make_subcall_fn(
-                loop, env_extras, sampling_params, max_tokens, max_input_length, rid,
-            )
+            env_extras["subcall_fn"] = self._make_subcall_fn(loop, env_extras, ctx.rid)
 
         return env_extras
 
@@ -281,8 +251,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         loop: asyncio.AbstractEventLoop,
         env_extras: Dict[str, Any],
         sampling_params: Optional[Dict[str, Any]],
-        max_tokens: int,
-        max_input_length: int,
         parent_rid: str,
     ) -> Callable[[str], str]:
         """Build a sync ``subcall_fn`` exposed to the parent's REPL as ``rlm_query``.
@@ -314,8 +282,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 prompt=[{"role": "user", "content": prompt}],
                 env_class=parent_ctx.env_class,
                 env_extras=child_extras,
-                max_tokens=max_tokens,
-                max_input_length=max_input_length,
+                max_tokens=self.generator_cfg.sampling_params.max_generate_length,
+                max_input_length=self.generator_cfg.max_input_length,
                 sampling_params=sampling_params,
             )
 
@@ -330,3 +298,39 @@ class RLMGymGenerator(SkyRLGymGenerator):
             return future.result(timeout=600)
 
         return subcall_fn
+
+    def _register_rollout(
+        self,
+        env_class: str,
+        trajectory_id: Optional[TrajectoryID],
+        parent_rid: Optional[str],
+    ) -> "_RLMRolloutContext":
+        """Create and register an _RLMRolloutContext, returning it.
+
+        Root rollouts (parent_rid is None) get a fresh context with depth 0.
+        Child rollouts inherit env_class/trajectory_id from their parent.
+        """
+        rid = uuid.uuid4().hex[:8]
+        if parent_rid is None:
+            tid = trajectory_id.to_string() if trajectory_id is not None else None
+            ctx = _RLMRolloutContext(
+                rid=rid,
+                env_class=env_class,
+                trajectory_id=tid,
+                parent_rid=None,
+                depth=0,
+                child_index=None,
+            )
+        else:
+            parent = self.active_rollouts[parent_rid]
+            child_index = sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid)
+            ctx = _RLMRolloutContext(
+                rid=rid,
+                env_class=parent.env_class,
+                trajectory_id=parent.trajectory_id,
+                parent_rid=parent_rid,
+                depth=parent.depth + 1,
+                child_index=child_index,
+            )
+        self.active_rollouts[rid] = ctx
+        return ctx

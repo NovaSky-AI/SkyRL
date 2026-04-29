@@ -228,13 +228,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
     def _setup_env_extras(
         self,
-        env_class: str,
+        _env_class: str,
         env_extras: Dict[str, Any],
-        prompt: ConversationType,
-        sampling_params: Optional[Dict[str, Any]],
-        max_tokens: int,
-        max_input_length: int,
-        trajectory_id: Optional[TrajectoryID],
+        _sampling_params: Optional[Dict[str, Any]],
+        _trajectory_id: Optional[TrajectoryID],
     ) -> Dict[str, Any]:
         """Hook: subclasses may inject env-specific callables/extras before env construction."""
         return env_extras
@@ -242,14 +239,14 @@ class SkyRLGymGenerator(GeneratorInterface):
     def _post_process_agent_loop_output(
         self,
         agent_loop_output,
-        env_extras: Dict[str, Any],
-        trajectory_id: Optional[TrajectoryID],
+        _env_extras: Dict[str, Any],
+        _trajectory_id: Optional[TrajectoryID],
     ):
         """Hook: transform agent_loop_output after per-step rewards are stamped.
 
         Called at the end of ``agent_loop``, after reward allocation but before
-        return.  Subclasses can override to e.g. inline child trajectory steps
-        whose rewards were already assigned by their own ``agent_loop`` calls.
+        return.  Subclasses can override to restructure, merge, or augment the
+        output steps (e.g. flattening nested trajectories, injecting metadata).
         """
         return agent_loop_output
 
@@ -295,9 +292,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_extras = self._setup_env_extras(
-            env_class, env_extras, prompt, sampling_params, max_tokens, max_input_length, trajectory_id
-        )
+        env_extras = self._setup_env_extras(env_class, env_extras, sampling_params, trajectory_id)
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
