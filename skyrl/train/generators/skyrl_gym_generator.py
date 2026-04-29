@@ -134,6 +134,43 @@ class TurnOutput:
             return None
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
+    # ----------------------------------------------------------------------------
+    # Gen-only variants (step-wise path). Step-wise emits one training sample per
+    # turn, and each sample's response is just the model's generation — the
+    # observation tokens belong to the *next* turn's prompt. The helpers below
+    # return aligned loss_mask / rollout_logprobs / rollout_expert_indices for
+    # the gen-only response so downstream length invariants stay consistent.
+    # ----------------------------------------------------------------------------
+    def get_turn_gen_only_loss_mask(self) -> List[int]:
+        """Like `get_turn_loss_mask()` but without the trailing observation zeros."""
+        if self.added_eos:
+            # The EOS wasn't actually generated, so mask it out.
+            return [1] * (len(self.output_ids) - 1) + [0]
+        return [1] * len(self.output_ids)
+
+    def get_turn_gen_only_rollout_logprobs(self) -> Optional[List[float]]:
+        """Like `get_turn_rollout_logprobs()` but without the trailing observation zeros.
+
+        `output_logprobs` already covers the manually appended EOS (agent_loop adds a 0.0
+        stub there), so this is exactly the list we want.
+        """
+        if not self.output_logprobs:
+            return None
+        return list(self.output_logprobs)
+
+    def get_turn_gen_only_rollout_expert_indices(self) -> Optional[List[List[List[int]]]]:
+        """Like `get_turn_rollout_expert_indices()` but without the trailing observation pads."""
+        if self.rollout_expert_indices is None:
+            return None
+        if not self.rollout_expert_indices:
+            return self.rollout_expert_indices
+        indices = list(self.rollout_expert_indices)
+        if self.added_eos:
+            layer_num = len(self.rollout_expert_indices[0])
+            topk = len(self.rollout_expert_indices[0][0]) if layer_num > 0 else 0
+            indices.append([[0] * topk for _ in range(layer_num)])
+        return indices
+
 
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
@@ -317,10 +354,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not agent_loop_state.done:
 
-            if len(agent_loop_state.input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
@@ -334,6 +367,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+
+            if len(agent_loop_state.input_ids) > max_input_length:
+                stop_reason = "length"
+                break
 
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
@@ -403,13 +440,16 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.rollout_expert_indices = []
 
             if is_step_wise:
-                # current response + observation ids
-                turn_response_ids = turn_output.output_ids + turn_output.obs_ids
+                # Gen-only response: the obs tokens will appear in the *next* turn's prompt
+                # (or be recovered as `obs_delta` under `merge_stepwise_output`). Keeping obs
+                # out of `response_ids` caps per-step sequence length at
+                # ``max_input_length + max_generate_length`` — previously obs inflated each
+                # training sample by up to several thousand tokens for e.g. Search-R1.
+                turn_response_ids = turn_output.output_ids
                 turn_prompt_ids = agent_loop_state.input_ids
 
-                # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
-                turn_loss_mask = turn_output.get_turn_loss_mask()
-                turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
+                turn_loss_mask = turn_output.get_turn_gen_only_loss_mask()
+                turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_gen_only_rollout_logprobs()
 
                 per_step_output = TrajectoryOutput(
                     response_ids=turn_response_ids,
@@ -419,7 +459,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
                     env_metrics=env.get_metrics() if agent_loop_state.done else {},
-                    rollout_expert_indices=turn_output.get_turn_rollout_expert_indices(),
+                    rollout_expert_indices=turn_output.get_turn_gen_only_rollout_expert_indices(),
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
 
@@ -494,9 +534,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             assert response_ids is not None and loss_mask is not None
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
-                # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
-                # masked with 0, why bother adding it?
-                loss_mask.append(1)
+                # The EOS was not actually generated by the model, so mask it out.
+                loss_mask.append(0)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
                 if rollout_expert_indices_out is not None and rollout_expert_indices_out:
