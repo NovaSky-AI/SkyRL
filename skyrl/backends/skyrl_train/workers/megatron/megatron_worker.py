@@ -47,7 +47,6 @@ from skyrl.backends.skyrl_train.workers.worker import (
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
-    SampleBasedBatchIterator,
     TokenBasedBatchIterator,
     all_reduce_metrics,
     get_microbatch_iterator,
@@ -543,9 +542,7 @@ class MegatronWorker:
             output.metadata = data.metadata
             # The output from Megatron is concatenated across microbatches.
             # We need to extract only the real (non-padded) samples and reorder.
-            output = self._reorder_megatron_forward_output(
-                output, microbatch_iterator, micro_dicts, mbs
-            )
+            output = self._reorder_megatron_forward_output(output, microbatch_iterator, micro_dicts, mbs)
         else:
             output = TrainingOutputBatch({"output": log_probs})
             output.metadata = data.metadata

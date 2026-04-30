@@ -51,9 +51,6 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
-    BatchIterator,
-    SampleBasedBatchIterator,
-    TokenBasedBatchIterator,
     all_reduce_metrics,
     get_microbatch_iterator,
     reduce_metrics,

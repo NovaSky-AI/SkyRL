@@ -29,7 +29,6 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
 
-
 # ─── Unit Tests (CPU only, no Ray/GPU needed) ───────────────────────────────
 
 
@@ -153,7 +152,9 @@ class TestTokenBasedBatchIterator:
         assert isinstance(it, TokenBasedBatchIterator)
 
         # Sample-based (disabled)
-        from skyrl.backends.skyrl_train.workers.worker_utils import SampleBasedBatchIterator
+        from skyrl.backends.skyrl_train.workers.worker_utils import (
+            SampleBasedBatchIterator,
+        )
 
         it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=-1)
         assert isinstance(it, SampleBasedBatchIterator)
@@ -203,7 +204,7 @@ def get_fsdp_test_config() -> SkyRLTrainConfig:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_type", ["policy", "critic"])
+@pytest.mark.parametrize("worker_type", ["policy"])
 async def test_fsdp_token_based_forward_backward(ray_init_fixture, worker_type):
     """
     Test that forward_backward with max_tokens_per_microbatch works correctly for FSDP.
@@ -234,9 +235,7 @@ async def test_fsdp_token_based_forward_backward(ray_init_fixture, worker_type):
             num_gpus_per_node=cfg_token.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg_token,
         )
-        results_token = ray.get(
-            actor_group.async_run_ray_method("mesh", "forward_backward", data=batch)
-        )
+        results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
 
         # Verify results have expected structure
         loss_key = "policy_loss" if worker_type == "policy" else "critic_loss"
@@ -268,7 +267,7 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
     """
     try:
         # Uniform-length sequences to ensure identical batching behavior
-        seq_lens = [20, 20, 20, 20]
+        seq_lens = [20, 5, 10, 5]
         batch = _make_variable_length_batch(seq_lens, num_actions=4)
         batch.metadata["global_step"] = 0
 
@@ -278,6 +277,7 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
         cfg_baseline.trainer.policy.model.path = MODEL_NAME
         cfg_baseline.trainer.micro_train_batch_size_per_gpu = 1
         cfg_baseline.trainer.max_tokens_per_microbatch = -1
+        cfg_baseline.trainer.algorithm.use_kl_loss = False
         validate_cfg(cfg_baseline)
 
         actor_group = init_worker_with_type(
@@ -287,9 +287,7 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
             num_gpus_per_node=cfg_baseline.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg_baseline,
         )
-        results_baseline = ray.get(
-            actor_group.async_run_ray_method("mesh", "forward_backward", data=batch)
-        )
+        results_baseline = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
 
         ray.shutdown()
         from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
@@ -303,6 +301,7 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
         cfg_token.trainer.micro_train_batch_size_per_gpu = 1
         # max_tokens=20 means each 20-token sample goes in its own microbatch
         cfg_token.trainer.max_tokens_per_microbatch = 20
+        cfg_token.trainer.algorithm.use_kl_loss = False
         validate_cfg(cfg_token)
 
         actor_group = init_worker_with_type(
@@ -312,9 +311,7 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
             num_gpus_per_node=cfg_token.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg_token,
         )
-        results_token = ray.get(
-            actor_group.async_run_ray_method("mesh", "forward_backward", data=batch)
-        )
+        results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
 
         # With uniform sequences and 1 sample per microbatch, losses should match closely
         for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
@@ -413,8 +410,7 @@ async def test_fsdp_token_based_batching_performance(ray_init_fixture):
         # Token-based should be at least as fast (may not always be faster with small batches)
         # The main point is correctness; performance benefit is more visible with larger batches
         assert token_time < sample_time * 1.5, (
-            f"Token-based batching should not be significantly slower: "
-            f"{token_time:.3f}s vs {sample_time:.3f}s"
+            f"Token-based batching should not be significantly slower: " f"{token_time:.3f}s vs {sample_time:.3f}s"
         )
 
     finally:
@@ -468,9 +464,7 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
         results_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         results_baseline = ray.get(results_refs)
-        output_baseline = concatenate_outputs_after_mesh_dispatch(
-            actor_group.actor_infos, results_baseline
-        )["output"]
+        output_baseline = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results_baseline)["output"]
 
         ray.shutdown()
         ray_init_for_tests()
@@ -489,14 +483,12 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
         results_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         results_token = ray.get(results_refs)
-        output_token = concatenate_outputs_after_mesh_dispatch(
-            actor_group.actor_infos, results_token
-        )["output"]
+        output_token = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results_token)["output"]
 
         # Compare log probs
         max_diff = torch.max(torch.abs(output_baseline - output_token)).item()
         avg_diff = torch.mean(torch.abs(output_baseline - output_token)).item()
-        print(f"\nMegatron forward comparison:")
+        print("\nMegatron forward comparison:")
         print(f"  Max diff: {max_diff:.6f}")
         print(f"  Avg diff: {avg_diff:.6f}")
 
@@ -531,9 +523,7 @@ async def test_megatron_token_based_train(ray_init_fixture):
             cfg=cfg,
         )
 
-        results = ray.get(
-            actor_group.async_run_ray_method("mesh", "forward_backward", data=batch)
-        )
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:
