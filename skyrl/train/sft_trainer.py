@@ -149,7 +149,19 @@ def _tokenize_chat_last_assistant(
     max_length: Optional[int] = None,
     **tokenizer_kwargs,
 ) -> dict | None:
-    """Original behavior: loss on last assistant message only."""
+    """Tokenize a conversation and compute loss only on the last assistant message.
+
+    Args:
+        messages: Full conversation (must end with an assistant message).
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates both prompt and full
+            conversation to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, and ``num_actions`` (number
+        of last-assistant tokens), or ``None`` if truncation left no response tokens.
+    """
     # Tokenize prompt (everything except last assistant message)
     prompt_ids = tokenizer.apply_chat_template(
         messages[:-1],
@@ -189,21 +201,33 @@ def _tokenize_chat_all_assistants(
     max_length: Optional[int] = None,
     **tokenizer_kwargs,
 ) -> dict | None:
-    """Loss on every assistant message in the conversation.
+    """Tokenize a conversation and compute loss on all assistant messages.
 
-    Builds a per-token loss mask by incrementally calling
-    ``apply_chat_template`` to discover each message's token boundaries.
-    ``num_actions`` spans from the first assistant token to the end, with
+    Builds a per-token loss mask covering every assistant turn. ``num_actions``
+    spans from the first assistant token to the end of the conversation, with
     interior 0s masking out user/system tokens between assistant turns.
+
+    Args:
+        messages: Full conversation. May start with system/user messages;
+            must contain at least one assistant message.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        ``loss_mask`` (per-token 0/1 list within the action window), or
+        ``None`` if no assistant tokens survived after truncation.
     """
 
-    i = 0  # s, u, a
+    # Find the index of the first assistant message.
+    i = 0
     while i < len(messages) and messages[i]["role"] != "assistant":
         i += 1
-    # i = 2
 
-    # Encode these separately - because `get_response_ids_and_loss_mask_from_messages`
-    # is not compatible with system messages
+    # Encode leading non-assistant messages separately because
+    # `get_response_ids_and_loss_mask_from_messages` does not accept system messages.
+
     initial_token_ids = tokenizer.apply_chat_template(
         messages[:i],
         add_generation_prompt=False,

@@ -506,29 +506,23 @@ def encode_messages_subset(
 
 
 def _find_generation_prompt_boundary(cur_token_ids: List[int], generation_prompt_ids: List[int]) -> int:
-    """Return the index in ``cur_token_ids`` where the assistant-generated
-    content starts, i.e. the length of the generation-prompt prefix.
+    """Return the index in ``cur_token_ids`` where assistant-generated content starts.
 
-    Handles two cases:
+    Handles the common case (exact prefix match) and a merge case where the last
+    token of the generation prompt is merged with the assistant content's leading
+    whitespace by the tokenizer (e.g. ``\\n`` + ``\\nHello`` -> ``\\n\\n`` token).
+    In the merge case, returns ``len(generation_prompt_ids) - 1`` so the merged
+    boundary token is attributed to the assistant's content (loss 1).
 
-    1. Exact prefix match (common). ``cur_token_ids[:n] == generation_prompt_ids``
-       where ``n = len(generation_prompt_ids)``. Returns ``n``.
+    Args:
+        cur_token_ids: Token IDs for a single assistant message.
+        generation_prompt_ids: Expected generation-prompt prefix token IDs.
 
-    2. Merge case. The last token of ``generation_prompt_ids`` (typically a
-       whitespace token like ``\\n``) gets merged with the assistant content's
-       leading whitespace into a single token (e.g. ``\\n`` + ``\\n...`` ->
-       ``\\n\\n``). This is common for datasets like TULU3 where some assistant
-       replies begin with a blank line. In this case
-       ``cur_token_ids[: n - 1] == generation_prompt_ids[: n - 1]`` and
-       ``cur_token_ids[n - 1]`` is the merged boundary token. We return
-       ``n - 1`` so the merged token is treated as part of the assistant's
-       generated content (loss 1). This is the safer choice: the content's
-       leading whitespace is inside that token, so we keep loss on it and
-       only lose loss on the trailing ``\\n`` of the header that was absorbed
-       into the same token. The common case (exact prefix match) is
-       unaffected and produces identical output to the original code.
+    Returns:
+        Index into ``cur_token_ids`` at which generated content begins.
 
-    Raises ``AssertionError`` if neither pattern holds.
+    Raises:
+        AssertionError: If neither the exact nor the merge pattern matches.
     """
     n = len(generation_prompt_ids)
     if cur_token_ids[:n] == generation_prompt_ids:
