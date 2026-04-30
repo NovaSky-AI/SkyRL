@@ -1,10 +1,11 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
+# Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data with fp8 rollouts 
+# and full precision trainer.
 # Uses 1 node with 8 GPUs.
 # hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/train/text_to_sql/run_skyrl_sql.sh
+# bash examples/train/text_to_sql/run_skyrl_sql_fp8.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
