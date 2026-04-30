@@ -1093,26 +1093,54 @@ class RemoteInferenceClient:
         After loading, generation requests will automatically use the LoRA adapter
         by setting the model name to the LoRA adapter name.
 
+        Implementation note: we do unload-then-load (with `load_inplace=False`)
+        rather than a single `load_inplace=True` call. This works around an
+        upstream vLLM bug where the `load_inplace=True` flag is persisted onto
+        the cached `LoRARequest` and propagated to every subsequent generate
+        request. The worker (`LRUCacheWorkerLoRAManager.add_adapter`) then
+        unconditionally re-reads the adapter from disk on every model step,
+        crippling generation throughput (~30 tok/s observed vs ~10000 tok/s).
+
+        The unload step is safe because this method is only invoked while the
+        engine is in `wake_up(['weights'])` mode (kv_cache is still asleep), so
+        no generate requests can be in flight to race against the brief window
+        where the adapter is missing from the server's `lora_requests` cache.
+
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
 
         Returns:
-            Dict mapping server_url to response.
+            Dict mapping server_url to response from the load step.
         """
         if self.active_lora_name is None:
             raise ValueError("active_lora_name must be set on RemoteInferenceClient before loading a LoRA adapter.")
 
         lora_name = self.active_lora_name
+        session = await self._get_session()
+
+        # Step 1: unload the existing adapter (if any) on all servers. vLLM
+        # returns 404 when the adapter isn't loaded yet (first sync), which we
+        # treat as success.
+        async def _unload_on_server(server_url: str) -> None:
+            url = f"{server_url}/v1/unload_lora_adapter"
+            async with session.post(url, json={"lora_name": lora_name}) as resp:
+                if resp.status == 404:
+                    return
+                if resp.status >= 400:
+                    body = await resp.json()
+                    raise_for_status(resp, body)
+
+        await asyncio.gather(*[_unload_on_server(url) for url in self.server_urls])
+
+        # Step 2: load the (new) adapter on all servers. Because we just
+        # unloaded, the server's cache miss path runs and the worker actually
+        # reads the freshly-written safetensors from disk. `load_inplace=False`
+        # avoids the upstream bug described in the docstring above.
         payload = {
             "lora_name": lora_name,
             "lora_path": lora_path,
-            "load_inplace": True,
+            "load_inplace": False,
         }
-
-        # Call /v1/load_lora_adapter on all servers directly.
-        # This endpoint returns a plain text response (not JSON), so we use a
-        # custom call instead of _call_all_servers which expects JSON.
-        session = await self._get_session()
 
         async def _load_on_server(server_url: str):
             url = f"{server_url}/v1/load_lora_adapter"
