@@ -1106,11 +1106,13 @@ class RemoteInferenceClient:
         no generate requests can be in flight to race against the brief window
         where the adapter is missing from the server's `lora_requests` cache.
 
+        TODO(aaron): remove this once bug is fixed on vllm. 
+
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
 
         Returns:
-            Dict mapping server_url to response from the load step.
+            Dict mapping server_url to response.
         """
         if self.active_lora_name is None:
             raise ValueError("active_lora_name must be set on RemoteInferenceClient before loading a LoRA adapter.")
