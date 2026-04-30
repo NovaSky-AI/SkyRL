@@ -117,9 +117,7 @@ class FSDPStrategy(DistributedStrategy):
 
         self.device_mesh = create_device_mesh(world_size=self.world_size, fsdp_size=self.fsdp_config.fsdp_size)
 
-    def offload_to_cpu(
-        self, model, optimizer, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True
-    ):
+    def offload_to_cpu(self, model, optimizer, offload_optimizer=True, offload_model=True):
         """
         Offload model weights and optimizer to CPU memory.
 
@@ -127,8 +125,6 @@ class FSDPStrategy(DistributedStrategy):
         """
         if isinstance(model, HFModelWrapper):
             model = model.model
-        else:
-            model = model
 
         if self.manual_offload:
             if offload_model:
@@ -140,12 +136,10 @@ class FSDPStrategy(DistributedStrategy):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-    def backload_to_gpu(self, model, optimizer, non_blocking=True, backload_optimizer=True, backload_model=True):
+    def backload_to_gpu(self, model, optimizer, backload_optimizer=True, backload_model=True):
         """Reload model weights back to GPU."""
         if isinstance(model, HFModelWrapper):
             model = model.model
-        else:
-            model = model
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually backload weights/optimizer to gpu
         if self.manual_offload:

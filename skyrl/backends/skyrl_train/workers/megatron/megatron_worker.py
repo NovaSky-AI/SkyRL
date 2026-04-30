@@ -529,6 +529,10 @@ class MegatronWorker:
             tokenizer=tokenizer,
         )
 
+    def _get_module_for_offload(self):
+        # The underlying offloadable module is `self.actor_module` instead of `self.model`.
+        return self.actor_module
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
@@ -539,17 +543,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._is_lora = self.cfg.policy.model.lora.rank > 0
-
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(
-            self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
-        )
-
-    def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
-        self.strategy.backload_to_gpu(
-            self.actor_module, self.optimizer, non_blocking, backload_optimizer, backload_model
-        )
 
     def init_worker_process_group(self):
         """
@@ -934,13 +927,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
-
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
-
-    def backload_to_gpu(self, non_blocking=True, **kwargs):
-        self.strategy.backload_to_gpu(self.actor_module, None, non_blocking)
 
     def init_worker_process_group(self):
         """

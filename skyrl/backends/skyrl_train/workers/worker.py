@@ -123,7 +123,8 @@ class DistributedTorchRayActor:
 
         # setup device mesh
         # TODO: Support TP / PP for additional backends
-        # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined, it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
+        # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined,
+        # it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
         device_mesh = torch.distributed.device_mesh.init_device_mesh(
@@ -247,24 +248,40 @@ class Worker(DistributedTorchRayActor):
         for key, value in kwargs.items():
             setattr(self.cfg.algorithm, key, value)
 
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def _get_module_for_offload(self):
+        """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
+        return self.model
+
+    def offload_to_cpu(self, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.
 
-        After this function runs, only temporary reserved memory and torch's pre-loaded cuda kernels (~ GB) will remain
+        After this function runs, only temporary reserved memory and torch's pre-loaded cuda kernels (~ GB) will remain.
 
         Args:
-            pin_memory: Whether to use pinned/ paged-locked memory on CPU
-            non_blocking: Whether the operation is non-blocking
+            offload_optimizer: Whether to offload optimizer state (no-op when there is no optimizer, e.g. Ref worker).
+            offload_model: Whether to offload model parameters.
         """
-        raise NotImplementedError()
+        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self.strategy.offload_to_cpu(
+            self._get_module_for_offload(),
+            self.optimizer,
+            offload_optimizer=offload_optimizer,
+            offload_model=offload_model,
+        )
 
-    def backload_to_gpu(self, non_blocking=True):
-        """Backload worker state to GPU
+    def backload_to_gpu(self, backload_optimizer=True, backload_model=True):
+        """Backload worker state to GPU.
 
         Args:
-            non_blocking: Whether the operation is non-blocking
+            backload_optimizer: Whether to backload optimizer state (no-op when there is no optimizer).
+            backload_model: Whether to backload model parameters.
         """
-        raise NotImplementedError()
+        self.strategy.backload_to_gpu(
+            self._get_module_for_offload(),
+            self.optimizer,
+            backload_optimizer=backload_optimizer,
+            backload_model=backload_model,
+        )
 
     def get_cuda_memory(self) -> Dict[str, Any]:
         """Get CUDA memory usage on worker's CUDA device."""
@@ -1116,6 +1133,9 @@ class RefWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
+        # Ref does not train. Expose ``None`` defaults so inherited methods (e.g. offload_to_cpu) work.
+        self.optimizer = None
+        self.scheduler = None
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()

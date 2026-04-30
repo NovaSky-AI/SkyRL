@@ -177,9 +177,7 @@ class MegatronStrategy(DistributedStrategy):
         self.set_seed(self.seed)
         self.world_size = dist.get_world_size()
 
-    def offload_to_cpu(
-        self, model, optimizer, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True
-    ):
+    def offload_to_cpu(self, model, optimizer, offload_optimizer=True, offload_model=True):
         """
         Offload model weights and optimizer to CPU memory.
         """
@@ -191,7 +189,7 @@ class MegatronStrategy(DistributedStrategy):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-    def backload_to_gpu(self, model, optimizer, non_blocking=True, backload_optimizer=True, backload_model=True):
+    def backload_to_gpu(self, model, optimizer, backload_optimizer=True, backload_model=True):
         """Reload model weights back to GPU."""
         if backload_model:
             load_megatron_model_to_gpu(model)
