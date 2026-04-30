@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.api_server import (
     init_app_state,
 )
 from vllm.inputs import TokensPrompt
-from vllm.sampling_params import RequestOutputKind, SamplingParams as VLLMSamplingParams
+from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
 from vllm.utils.system_utils import set_ulimit
@@ -374,7 +375,11 @@ class VLLMServerActor(ServerActorProtocol):
             sampling_params_dict = body.get("sampling_params", {})
 
             if sampling_params_dict.pop("output_kind", None):
-                raise ValueError("`output_kind` is not supported with SkyRL's cusotm generation entrypoint")
+                raise HTTPException(status_code=400, detail="SkyRL's generation endpoint doesn't support `output_kind`")
+
+            # disable detokenization by default
+            if "detokenize" not in sampling_params_dict:
+                sampling_params_dict["detokenize"] = False
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict, output_kind=RequestOutputKind.FINAL_ONLY)
             prompt = TokensPrompt(prompt_token_ids=token_ids)
