@@ -5,7 +5,6 @@ import socket
 from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
 
 import ray
@@ -374,10 +373,7 @@ class Worker(DistributedTorchRayActor):
 
         torch.distributed.barrier()
 
-    def forward(
-        self,
-        data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
+    def forward(self, data: TrainingInputBatch) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.micro_forward_batch_size_per_gpu`.
@@ -396,6 +392,51 @@ class Worker(DistributedTorchRayActor):
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
+
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+        self.strategy.save_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            ckpt_dir=ckpt_dir,
+            node_local_rank=self.get_node_local_rank(),
+            tokenizer=tokenizer,
+        )
+
+    def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
+        _, states = self.strategy.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer if load_optimizer_states else None,
+            scheduler=self.scheduler if load_lr_scheduler_states else None,
+            ckpt_dir=ckpt_dir,
+            load_optimizer_states=load_optimizer_states,
+            load_lr_scheduler_states=load_lr_scheduler_states,
+        )
+        return states
+
+    def save_hf_model(self, export_dir: str, tokenizer):
+        # Save model in HuggingFace safetensors format
+        self.strategy.save_hf_model(
+            self.model,
+            export_dir,
+            tokenizer=tokenizer,
+        )
+
+    def get_lr(self) -> float:
+        """
+        Get current learning rate from optimizer.
+        """
+        return self.optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
 
 # adapted from OpenReasonerZero: https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero/blob/main/orz/ppo/actors.py
@@ -900,53 +941,6 @@ class PolicyWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def get_lr(self) -> float:
-        """
-        Get current learning rate from optimizer.
-        """
-        return self.optimizer.param_groups[0]["lr"]
-
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
-
-        This directly updates the optimizer's param_groups, bypassing the scheduler.
-        Useful for external learning rate schedules (e.g., from Tinker).
-        """
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = learning_rate
-
-    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
-        self.strategy.save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            ckpt_dir=ckpt_dir,
-            node_local_rank=self.get_node_local_rank(),
-            tokenizer=tokenizer,
-        )
-
-    def load_checkpoint(
-        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
-    ):
-        _, states = self.strategy.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
-            ckpt_dir=ckpt_dir,
-            load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
-        )
-        return states
-
-    def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model in HuggingFace safetensors format
-        self.strategy.save_hf_model(
-            self.model,
-            export_dir,
-            tokenizer=tokenizer,
-        )
-
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
         micro_batch.to(device)
@@ -1092,22 +1086,6 @@ class CriticWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def get_lr(self) -> float:
-        """
-        Get current learning rate from optimizer.
-        """
-        return self.optimizer.param_groups[0]["lr"]
-
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
-
-        This directly updates the optimizer's param_groups, bypassing the scheduler.
-        Useful for external learning rate schedules (e.g., from Tinker).
-        """
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = learning_rate
-
     def _forward_micro_batch(
         self,
         micro_batch: TrainingInputBatch,
@@ -1132,35 +1110,6 @@ class CriticWorkerBase(Worker):
         )
         output.metadata = micro_batch.metadata
         return output
-
-    def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model in HuggingFace safetensors format
-        self.strategy.save_hf_model(
-            self.model,
-            export_dir,
-            tokenizer=tokenizer,
-        )
-
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
-        self.strategy.save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            ckpt_dir=ckpt_dir,
-            node_local_rank=self.get_node_local_rank(),
-            tokenizer=tokenizer,
-        )
-
-    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
-        _, states = self.strategy.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
-            ckpt_dir=ckpt_dir,
-            load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
-        )
-        return states
 
 
 class RefWorkerBase(Worker):
