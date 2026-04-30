@@ -11,6 +11,7 @@ import os
 import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
 import yaml
@@ -658,11 +659,11 @@ def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
         raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
 
 
-def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
-    """Extract the concrete dataclass type from a type annotation.
+def _resolve_class_type(type_annotation: Any) -> Optional[Type]:
+    """Extract the concrete non-plain class type from a type annotation.
 
     Handles plain types, Optional[T], Union[T, None], and Annotated[T, ...].
-    Returns None if no dataclass type can be resolved.
+    Returns None if no dataclass or Enum type can be resolved.
     """
     origin = typing.get_origin(type_annotation)
 
@@ -671,16 +672,18 @@ def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
         for arg in typing.get_args(type_annotation):
             if arg is type(None):
                 continue
-            resolved = _resolve_dataclass_type(arg)
+            resolved = _resolve_class_type(arg)
             if resolved is not None:
                 return resolved
         return None
 
     if origin is Annotated:
-        return _resolve_dataclass_type(typing.get_args(type_annotation)[0])
+        return _resolve_class_type(typing.get_args(type_annotation)[0])
 
     # Plain class check
-    if isinstance(type_annotation, type) and dataclasses.is_dataclass(type_annotation):
+    if isinstance(type_annotation, type) and (
+        dataclasses.is_dataclass(type_annotation) or issubclass(type_annotation, Enum)
+    ):
         return type_annotation
 
     return None
@@ -709,9 +712,12 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
         if f.name not in d:
             continue
         value = d[f.name]
-        nested_cls = _resolve_dataclass_type(f.type)
-        if nested_cls is not None and isinstance(value, dict):
-            kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+        nested_cls = _resolve_class_type(f.type)
+        if nested_cls is not None:
+            if isinstance(value, dict) and dataclasses.is_dataclass(nested_cls):
+                kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+            elif issubclass(nested_cls, Enum):
+                kwargs[f.name] = nested_cls(value)
         else:
             # Primitives, None, lists, raw dicts, already-constructed objects
             kwargs[f.name] = value

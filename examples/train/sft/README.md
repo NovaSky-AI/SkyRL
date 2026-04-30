@@ -82,6 +82,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `megatron_config.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |
 | `logger` | `console` | `console` or `wandb` |
 | `project_name` | `skyrl_sft` | W&B project name (when `logger=wandb`) |
+| `train_on_what` | `last_assistant_message` | Which tokens to train on. See `TrainOnWhat` enum: `last_assistant_message` (default, loss on final assistant reply only) or `all_assistant_messages` (loss on every assistant message). Other values defined for future use. |
 | `dummy_run_full_ctx` | `false` | Enable dummy/benchmarking mode |
 | `dummy_run_max_steps` | `5` | Steps to run in dummy mode |
 
@@ -99,6 +100,6 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 ## Limitations
 
 - **No evaluation support.** : Currently we do not support using an evaluation dataset.
-- **Last assistant message only**: The current SFT trainer only supports training on the last assistant message.
+- **Limited `train_on_what` options**: Only `last_assistant_message` and `all_assistant_messages` are currently implemented. Other `TrainOnWhat` values are defined for API stability but raise `NotImplementedError` if used.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.

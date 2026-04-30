@@ -10,6 +10,8 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from skyrl.train.config.sft_config import TrainOnWhat
+from skyrl.train.generators.utils import get_generation_prompt_ids
 from skyrl.train.sft_trainer import (
     collate_sft_batch,
     tokenize_chat_example,
@@ -393,3 +395,270 @@ def test_loss_norm_all_nonpad(tokenizer):
 
     # Sum should be batch_size / micro_batch_size = 2
     assert abs(batch["loss_mask"].sum().item() - 2.0) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Explicit loss_mask in collation (ALL_ASSISTANT_MESSAGES support)
+# ---------------------------------------------------------------------------
+
+
+def test_collate_explicit_loss_mask(tokenizer):
+    """Collation uses explicit per-token loss_mask when present."""
+    examples = [
+        {
+            "input_ids": [1, 2, 3, 4, 5],
+            "attention_mask": [1, 1, 1, 1, 1],
+            "num_actions": 4,
+            "loss_mask": [1, 0, 0, 1],  # assistant, user, user, assistant
+        },
+        _make_example([10, 20, 30], 2),  # no explicit loss_mask -> all 1s
+    ]
+    batch = collate_sft_batch(examples, tokenizer)
+
+    # max_num_actions = 4
+    assert batch["loss_mask"].shape == (2, 4)
+    # Example 0: explicit mask, no action padding needed
+    assert batch["loss_mask"][0].tolist() == [1, 0, 0, 1]
+    # Example 1: 2 actions, padded to 4 -> [0, 0, 1, 1]
+    assert batch["loss_mask"][1].tolist() == [0, 0, 1, 1]
+
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat: LAST_ASSISTANT_MESSAGE tests
+# ---------------------------------------------------------------------------
+
+
+def test_train_on_what_single_turn_last_assistant(tokenizer):
+    """Single-turn with LAST_ASSISTANT_MESSAGE: behavior unchanged."""
+    example = {
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+    result = tokenize_chat_example(
+        example,
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    )
+    assert result is not None
+    assert result["num_actions"] > 0
+    # LAST_ASSISTANT_MESSAGE does not produce a loss_mask key
+    assert "loss_mask" not in result
+
+
+def test_train_on_what_multi_turn_last_assistant_only(tokenizer):
+    """Multi-turn with LAST_ASSISTANT_MESSAGE: only last assistant counted."""
+    messages = [
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "4"},
+        {"role": "user", "content": "And 3+3?"},
+        {"role": "assistant", "content": "6"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        enable_thinking=False,
+    )
+    assert result is not None
+
+    # Only the last assistant's tokens should be counted
+    expected_last = "6<|im_end|>\n"
+    assert result["num_actions"] == len(tokenizer.encode(expected_last))
+    assert "loss_mask" not in result
+
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat: ALL_ASSISTANT_MESSAGES tests
+# ---------------------------------------------------------------------------
+
+
+def test_train_on_what_multi_turn_all_assistants(tokenizer):
+    """Multi-turn with ALL_ASSISTANT_MESSAGES: both assistant msgs get loss=1, user tokens masked."""
+    messages = [
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "4"},
+        {"role": "user", "content": "And 3+3?"},
+        {"role": "assistant", "content": "6"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    assert result is not None
+    assert "loss_mask" in result
+    assert len(result["loss_mask"]) == result["num_actions"]
+
+    loss_mask = result["loss_mask"]
+    # There must be some 1s (assistant tokens)
+    assert sum(loss_mask) > 0
+    # There must be some 0s (user tokens between the two assistant turns)
+    assert 0 in loss_mask
+    # The mask should have a non-contiguous pattern: 1s, then 0s, then 1s
+    # Find the transition points
+    first_zero_after_one = None
+    second_one_after_zero = None
+    for i in range(1, len(loss_mask)):
+        if loss_mask[i] == 0 and loss_mask[i - 1] == 1 and first_zero_after_one is None:
+            first_zero_after_one = i
+        if (
+            loss_mask[i] == 1
+            and loss_mask[i - 1] == 0
+            and first_zero_after_one is not None
+            and second_one_after_zero is None
+        ):
+            second_one_after_zero = i
+    assert first_zero_after_one is not None, "Expected 0s between assistant turns"
+    assert second_one_after_zero is not None, "Expected 1s for second assistant turn"
+
+
+def test_train_on_what_non_contiguous_assistants(tokenizer):
+    """assistant->user->assistant with ALL_ASSISTANT_MESSAGES: interior user masked out."""
+    messages = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there"},
+        {"role": "user", "content": "Tell me a joke"},
+        {"role": "assistant", "content": "Why did the chicken cross the road?"},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    assert result is not None
+    loss_mask = result["loss_mask"]
+
+    # The num_actions window starts at the first assistant token
+    # and extends to the end. Within it, user/system tokens are 0.
+    total_ones = sum(loss_mask)
+    total_zeros = len(loss_mask) - total_ones
+    assert total_ones > 0, "Must have assistant tokens"
+    assert total_zeros > 0, "Must have masked user tokens between assistant turns"
+
+    # First few elements are generation prompts - loss mask first assistant token must be 1
+    num_generation_tokens = len(get_generation_prompt_ids(tokenizer))
+    assert loss_mask[:num_generation_tokens] == [0] * num_generation_tokens
+    assert loss_mask[num_generation_tokens] == 1
+    print(tokenizer.decode(result["input_ids"]))
+
+
+def test_train_on_what_all_assistants_truncation(tokenizer):
+    """Truncation cutting into assistant turns with ALL_ASSISTANT_MESSAGES."""
+    messages = [
+        {"role": "user", "content": "Short question"},
+        {"role": "assistant", "content": "First answer " + "word " * 50},
+        {"role": "user", "content": "Another question"},
+        {"role": "assistant", "content": "Second answer " + "word " * 50},
+    ]
+    # Use a small max_length to force truncation
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=64,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        enable_thinking=False,
+    )
+    if result is not None:
+        assert len(result["input_ids"]) <= 64
+        assert result["num_actions"] > 0
+        assert len(result["loss_mask"]) == result["num_actions"]
+        # All loss_mask values should be 0 or 1
+        assert all(v in (0, 1) for v in result["loss_mask"])
+
+
+# ---------------------------------------------------------------------------
+# Regression: TULU3-style assistant content starting with whitespace
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def qwen25_tokenizer():
+    """Qwen2.5 tokenizer. Unlike Qwen3 default template, it does NOT inject a
+    ``<think>`` block, so an assistant content that starts with ``\\n`` ends up
+    merging with the header's trailing newline during tokenization — the exact
+    pattern that trips the strict prefix assertion and crashes on TULU3."""
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    return tok
+
+
+def test_tulu3_leading_newline_assistant_no_crash(qwen25_tokenizer):
+    """Assistant content starting with ``\\n`` must not raise (TULU3 repro).
+
+    Before the fix: ``get_response_ids_and_loss_mask_from_messages`` asserted
+    that the first ``len(generation_prompt_ids)`` tokens of each assistant
+    message exactly equal the generation prompt. With Qwen2.5 and content
+    ``"\\nHello"``, the header's trailing ``\\n`` (id 198) merges with the
+    content's leading ``\\n`` into a single ``\\n\\n`` token (id 271), and the
+    assertion fired. After the fix we detect this merge and still produce a
+    valid (input_ids, loss_mask) pair.
+    """
+    from skyrl.train.generators.utils import (
+        get_response_ids_and_loss_mask_from_messages,
+    )
+
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "\nHello world"},
+    ]
+
+    # Should not raise
+    response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen25_tokenizer)
+
+    assert len(response_ids) == len(loss_mask)
+    assert qwen25_tokenizer.eos_token_id in response_ids
+
+    # The merged '\n\n' boundary token belongs to the assistant's generation
+    # window (loss 1). It starts right after the '<|im_start|>assistant'
+    # prefix which has length len(generation_prompt_ids) - 1 in the merge case.
+    gen_prompt = get_generation_prompt_ids(qwen25_tokenizer)
+
+    # Find indices of '<|im_start|>' (id 151644) — should be 2 (user, assistant).
+    im_start_id = 151644
+    im_start_indices = [i for i, t in enumerate(response_ids) if t == im_start_id]
+    assert len(im_start_indices) == 2, f"Expected two <|im_start|> tokens, got {len(im_start_indices)}"
+    assistant_turn_start = im_start_indices[1]
+
+    # First token of assistant turn is <|im_start|> (gen_prompt[0]), loss 0
+    assert loss_mask[assistant_turn_start] == 0
+    # Second token is 'assistant' (gen_prompt[1]), loss 0
+    assert loss_mask[assistant_turn_start + 1] == 0
+    # Third token is the merged '\n\n' (id 271) — loss 1 under our fix
+    assert response_ids[assistant_turn_start + 2] == 271, (
+        f"Expected merged '\\n\\n' token (271), got "
+        f"{response_ids[assistant_turn_start + 2]}. gen_prompt={gen_prompt}"
+    )
+    assert loss_mask[assistant_turn_start + 2] == 1
+
+    # At least some tokens must have loss=1 (the actual reply content)
+    assert sum(loss_mask) > 0
+
+
+def test_tulu3_leading_newline_via_chat_example(qwen25_tokenizer):
+    """End-to-end path via tokenize_chat_example: ALL_ASSISTANT_MESSAGES must
+    handle a TULU3-style leading-``\\n`` assistant message without crashing."""
+    example = {
+        "messages": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Give me a poem."},
+            # Leading newline — the TULU3 pattern that used to crash
+            {"role": "assistant", "content": "\nRoses are red,\nViolets are blue."},
+        ]
+    }
+
+    result = tokenize_chat_example(
+        example,
+        qwen25_tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    )
+
+    assert result is not None
+    assert "loss_mask" in result
+    assert len(result["loss_mask"]) == result["num_actions"]
+    assert sum(result["loss_mask"]) > 0  # some tokens get loss=1
+    assert all(v in (0, 1) for v in result["loss_mask"])
