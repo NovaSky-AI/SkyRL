@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -85,10 +86,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
             )
         # Per-rollout registry keyed by rid. Populated in _setup_env_extras /
         # _run_child; the whole subtree is popped in the root's
-        # _finalize_episode. CPython dict ops on distinct keys are atomic so no
-        # lock is needed for set/get/pop; do not iterate concurrently with
-        # mutation.
+        # _finalize_episode. _rollout_lock serialises child registration so
+        # the count-then-insert in _register_rollout is atomic.
         self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
+        self._rollout_lock = threading.Lock()
         self.frozen_inference_engine: Optional[InferenceEngineInterface] = self._build_frozen_inference_engine()
 
     def _build_frozen_inference_engine(self) -> Optional[InferenceEngineInterface]:
@@ -332,16 +333,18 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 depth=0,
                 child_index=None,
             )
+            self.active_rollouts[rid] = ctx
         else:
-            parent = self.active_rollouts[parent_rid]
-            child_index = sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid)
-            ctx = _RLMRolloutContext(
-                rid=rid,
-                env_class=parent.env_class,
-                trajectory_id=parent.trajectory_id,
-                parent_rid=parent_rid,
-                depth=parent.depth + 1,
-                child_index=child_index,
-            )
-        self.active_rollouts[rid] = ctx
+            with self._rollout_lock:
+                parent = self.active_rollouts[parent_rid]
+                child_index = sum(1 for c in self.active_rollouts.values() if c.parent_rid == parent_rid)
+                ctx = _RLMRolloutContext(
+                    rid=rid,
+                    env_class=parent.env_class,
+                    trajectory_id=parent.trajectory_id,
+                    parent_rid=parent_rid,
+                    depth=parent.depth + 1,
+                    child_index=child_index,
+                )
+                self.active_rollouts[rid] = ctx
         return ctx
