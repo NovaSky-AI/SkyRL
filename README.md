@@ -35,6 +35,7 @@ For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your
 
 For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
 
+For a list of supported models, see our [Supported Models](https://docs.skyrl.ai/docs/getting-started/supported_models) docs.
 
 # News
 - **[2026/02/17]** 🎉 SkyRL is officially integrated with Harbor! Train your terminal-use agent! [[Blog](https://novasky-ai.notion.site/skyrl-harbor)]

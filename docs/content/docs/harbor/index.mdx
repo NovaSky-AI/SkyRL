@@ -212,7 +212,7 @@ agent:
   override_timeout_sec: 1200          # Time (seconds) given for a single Trial to run
   kwargs:
     max_turns: 32                     # Max agent iterations per trial
-    store_all_messages: true          # Required for SkyRL to extract training data
+    collect_rollout_details: true     # Required for SkyRL to extract training data
     temperature: 1.0                  # Sampling temperature (higher = more exploration)
     enable_summarize: false           # Context summarization when nearing token limits
     model_info:
@@ -221,7 +221,7 @@ agent:
 ```
 
 <Callout type="info">
-`store_all_messages: true` is **required** for training. Without it, SkyRL cannot extract the chat history needed to compute loss masks and train the model.
+`collect_rollout_details: true` is **required** for training, where fields like `prompt_token_ids`, `completion_token_ids`, and `logprobs` are crucial for model training.
 </Callout>
 
 ### Key Knobs for RL Training

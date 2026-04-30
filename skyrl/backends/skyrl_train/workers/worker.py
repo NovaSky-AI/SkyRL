@@ -244,6 +244,10 @@ class Worker(DistributedTorchRayActor):
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
 
+    def set_algorithm_config(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self.cfg.algorithm, key, value)
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
 
@@ -598,30 +602,6 @@ class PPORayActorGroup:
             return refs
         return ray.get(refs)
 
-    def run_method(self, dispatch_type: str, method_name: str, *args, **kwargs) -> Optional[TrainingOutputBatch]:
-        """Run a method on all actors using specified dispatch type synchronously.
-
-        The method should either return `None` or a `TrainingOutputBatch` object.
-
-        Args:
-            dispatch_type: Type of dispatch to use ("mesh" or "pass_through")
-            method_name: Name of the method to call on actors
-            *args: Positional arguments to pass to the method
-            **kwargs: Keyword arguments to pass to the method
-
-        Returns:
-            Collect results from all the actors.
-        """
-        dispatch_class: Dispatch = DispatchRegistry.get(dispatch_type)
-        # validate the dispatch args to be sent to `.dispatch`
-        args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
-
-        # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
-        # Collect results from all the actors
-        ret = dispatch_class.sync_collect(self.actor_infos, object_refs)
-        return ret
-
     def async_run_ray_method(self, dispatch_type: str, method_name: str, *args, **kwargs) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.
 
@@ -641,28 +621,6 @@ class PPORayActorGroup:
         # Dispatch the method call
         object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
         return object_refs
-
-    async def async_run_method(
-        self, dispatch_type: str, method_name: str, *args, **kwargs
-    ) -> Optional[TrainingOutputBatch]:
-        """Run a method on all actors using specified dispatch type in an asyncio-compatible way.
-
-        Args:
-            dispatch_type: Type of dispatch to use ("mesh" or "pass_through")
-            method_name: Name of the method to call on actors
-            *args: Positional arguments to pass to the method
-            **kwargs: Keyword arguments to pass to the method
-
-        Returns:
-            TrainingOutputBatch: concatenated results from all actors
-        """
-        dispatch_class: Dispatch = DispatchRegistry.get(dispatch_type)
-        # validate the dispatch args to be sent to `.dispatch`
-        args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
-
-        # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
-        return await dispatch_class.async_collect(self.actor_infos, object_refs)
 
 
 class PolicyWorkerBase(Worker):
@@ -745,8 +703,10 @@ class PolicyWorkerBase(Worker):
         Args:
             experience: Experience object for one micro batch
             microbatch_weight: Weight of the micro batch in the overall batch
-            loss_fn: Optional loss function name to use instead of config default
-            loss_fn_config: Optional config overrides for the loss function
+            loss_fn: Optional train loss function name to use instead of config default.
+                Public Tinker aliases such as ``ppo`` should be normalized by the backend
+                before reaching the worker.
+            loss_fn_config: Optional config overrides for the resolved train loss function
 
         Returns:
             Metrics dict for the worker's local micro batch
@@ -956,12 +916,6 @@ class PolicyWorkerBase(Worker):
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
 
-    def barrier(self) -> None:
-        """
-        Synchronization barrier across all workers.
-        """
-        torch.distributed.barrier()
-
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_checkpoint(
             model=self.model,
@@ -1019,9 +973,6 @@ class PolicyWorkerBase(Worker):
         )
         output.metadata = micro_batch.metadata
         return output
-
-    def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):
-        return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
 
 
 class CriticWorkerBase(Worker):
@@ -1156,12 +1107,6 @@ class CriticWorkerBase(Worker):
         """
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
-
-    def barrier(self) -> None:
-        """
-        Synchronization barrier across all workers.
-        """
-        torch.distributed.barrier()
 
     def _forward_micro_batch(
         self,

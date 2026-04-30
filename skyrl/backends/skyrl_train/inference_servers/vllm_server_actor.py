@@ -123,6 +123,10 @@ class VLLMServerActor(ServerActorProtocol):
                 per-server placement group. Only used when
                 ``distributed_executor_backend="mp"`` and TP*PP > 1.
         """
+        from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
+
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
         self._port, self._port_reservation = find_and_reserve_port(start_port)

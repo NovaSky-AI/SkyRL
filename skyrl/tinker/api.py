@@ -250,6 +250,7 @@ class CreateModelRequest(BaseModel):
     session_id: str
     base_model: str
     lora_config: LoRAConfig
+    model_role: str = "policy"
 
 
 class CreateModelResponse(BaseModel):
@@ -399,6 +400,8 @@ class Datum(BaseModel):
                 weights=weights,
                 advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
+                values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
+                returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
             ),
             model_input=self.model_input.to_types(),
         )
@@ -408,12 +411,13 @@ class ForwardBackwardInput(BaseModel):
     _ALLOWED_KEYS_BY_LOSS_FN: ClassVar[dict[str, set[str]]] = {
         "cross_entropy": set(),
         "importance_sampling": set(),
-        "ppo": {"clip_low_threshold", "clip_high_threshold"},
+        "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
+        "ppo_critic": {"value_clip"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
@@ -675,6 +679,16 @@ class WeightsInfoResponse(BaseModel):
     lora_rank: int | None = None
 
 
+class ClientConfigResponse(BaseModel):
+    pjwt_auth_enabled: bool = False
+
+
+@app.post("/api/v1/client/config", response_model=ClientConfigResponse)
+async def client_config():
+    """Stub for tinker SDK client_config handshake."""
+    return ClientConfigResponse()
+
+
 @app.get("/api/v1/healthz", response_model=HealthResponse)
 async def healthz():
     """Checks if the API server is ready."""
@@ -749,7 +763,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=types.CreateModelInput(lora_config=lora_config),
+        request_data=types.CreateModelInput(lora_config=lora_config, model_role=request.model_role),
     )
 
     model_db = ModelDB(

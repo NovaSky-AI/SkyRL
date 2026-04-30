@@ -8,7 +8,6 @@ import shutil
 import pytest
 import ray
 
-from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -211,7 +210,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
 
         dummy_batch = make_dummy_tensorbatch()
         # Run forward pass
-        results: TrainingOutputBatch = actor_group.run_method("pass_through", "forward", dummy_batch)
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward", dummy_batch))
 
         after_forward = get_rank_0_memory(actor_group, "After forward")
 
@@ -238,7 +237,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
         get_rank_0_memory(actor_group, "After backload")
 
         # Run forward again and ensure output consistency
-        results_backload: TrainingOutputBatch = actor_group.run_method("pass_through", "forward", dummy_batch)
+        results_backload = ray.get(actor_group.async_run_ray_method("pass_through", "forward", dummy_batch))
 
         assert (
             results == results_backload

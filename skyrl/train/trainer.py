@@ -11,7 +11,6 @@ import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
-from ray import ObjectRef
 from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -254,13 +253,15 @@ class RayPPOTrainer:
                         generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
-                    vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    log_example(
-                        logger,
-                        prompt=generator_input["prompts"][0],
-                        response=vis,
-                        reward=generator_output["rewards"][0],
-                    )
+                    log_interval = self.cfg.trainer.log_example_interval
+                    if log_interval > 0 and self.global_step % log_interval == 0:
+                        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+                        log_example(
+                            logger,
+                            prompt=generator_input["prompts"][0],
+                            response=vis,
+                            reward=generator_output["rewards"][0],
+                        )
 
                     # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
@@ -591,21 +592,6 @@ class RayPPOTrainer:
         self.dispatch.init_weight_sync_state(self.inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
-    def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
-        """Broadcast policy weights to inference engines.
-
-        Note: For new code, prefer using dispatch.save_weights_for_sampler() which
-        handles the full weight sync protocol including offload/backload.
-        This method is kept for backward compatibility with subclasses.
-        TODO(tgriggs): Remove this method when migration is complete.
-        """
-        return self.policy_model.async_run_ray_method(
-            "pass_through",
-            "broadcast_to_inference_engines",
-            self.inference_engine_client,
-            self.cfg.generator.inference_engine,
-        )
-
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training
 
@@ -743,6 +729,7 @@ class RayPPOTrainer:
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
+        generator_output.pop("rollout_metrics", None)
 
         validate_generator_output(
             len(input_batch["prompts"]),

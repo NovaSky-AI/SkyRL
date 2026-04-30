@@ -28,7 +28,7 @@ MEGATRON_CP=1
 NUM_INFERENCE_ENGINES=8
 INFERENCE_TP=1
 
-uv run --isolated --extra megatron --extra mamba -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

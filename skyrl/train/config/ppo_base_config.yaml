@@ -250,6 +250,7 @@ trainer:
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
+  log_example_interval: 1  # Log example prompt/response every N steps, -1 to disable.
   dump_data_batch: false
   dump_eval_results: true
 

@@ -27,6 +27,24 @@ def test_forward_backward_input_accepts_ppo_threshold_keys():
     assert req.loss_fn_config == {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}
 
 
+def test_forward_backward_input_accepts_ppo_value_clip():
+    req = api.ForwardBackwardInput(
+        data=[_make_datum()],
+        loss_fn="ppo",
+        loss_fn_config={"value_clip": 0.2},
+    )
+    assert req.loss_fn_config == {"value_clip": 0.2}
+
+
+def test_forward_backward_input_accepts_ppo_critic_value_clip():
+    req = api.ForwardBackwardInput(
+        data=[_make_datum()],
+        loss_fn="ppo_critic",
+        loss_fn_config={"value_clip": 0.2},
+    )
+    assert req.loss_fn_config == {"value_clip": 0.2}
+
+
 def test_forward_backward_input_rejects_invalid_ppo_loss_fn_config_keys():
     with pytest.raises(ValidationError, match="Invalid loss_fn_config keys"):
         api.ForwardBackwardInput(
@@ -43,6 +61,27 @@ def test_forward_backward_input_rejects_loss_fn_config_for_cross_entropy():
             loss_fn="cross_entropy",
             loss_fn_config={"clip_low_threshold": 0.9},
         )
+
+
+def test_datum_to_types_defaults_values_and_returns_to_empty():
+    datum = _make_datum().to_types()
+    assert datum.loss_fn_inputs.values.data == []
+    assert datum.loss_fn_inputs.returns.data == []
+
+
+def test_datum_to_types_preserves_values_and_returns():
+    datum = api.Datum(
+        model_input=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2, 3])]),
+        loss_fn_inputs={
+            "target_tokens": api.TensorData(data=[2, 3, 4]),
+            "weights": api.TensorData(data=[1.0, 1.0, 1.0]),
+            "values": api.TensorData(data=[0.1, 0.2, 0.3]),
+            "returns": api.TensorData(data=[0.4, 0.5, 0.6]),
+        },
+    ).to_types()
+
+    assert datum.loss_fn_inputs.values.data == [0.1, 0.2, 0.3]
+    assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
 
 
 # --- ModelInputChunk discriminator tests (api) ---

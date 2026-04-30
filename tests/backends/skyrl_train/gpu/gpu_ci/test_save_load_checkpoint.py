@@ -136,7 +136,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+            from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
                 get_test_training_batch,
             )
 
@@ -271,7 +271,7 @@ def test_save_load_checkpoint_cloud(ray_init_fixture):
 
         dp_size = actor_group.actor_infos[0].rank.dp_size
 
-        from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+        from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
             get_test_training_batch,
         )
 
