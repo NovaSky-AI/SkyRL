@@ -1106,7 +1106,7 @@ class RemoteInferenceClient:
         no generate requests can be in flight to race against the brief window
         where the adapter is missing from the server's `lora_requests` cache.
 
-        TODO(aaron): remove this once bug is fixed on vllm. 
+        TODO(aaron): remove this once bug is fixed on vllm.
 
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
