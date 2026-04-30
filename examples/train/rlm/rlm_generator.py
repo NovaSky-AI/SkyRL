@@ -134,7 +134,8 @@ class RLMGymGenerator(SkyRLGymGenerator):
         loop = asyncio.get_running_loop()
         env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
         if getattr(self.generator_cfg, "enable_child_agents", True):
-            env_extras["subcall_fn"] = self._make_subcall_fn(loop, env_extras, ctx.rid)
+            env_extras["subcall_fn"] = self._make_subcall_fn(loop, env_extras, sampling_params, ctx.rid)
+
 
         return env_extras
 
