@@ -30,7 +30,7 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.max_turns=6 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/evidence-rlm-sft-2b" \
+  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-4b" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \

@@ -240,7 +240,7 @@ class EvidenceRLMEnv(BaseRLMEnv):
     """
 
     SYSTEM_PROMPT = MULTIPAPER_CHILD_SYSTEM_PROMPT
-    JUDGE_MODEL = "gpt-4.1-nano"
+    JUDGE_MODEL = "gpt-5.4-mini-2026-03-17"
     JUDGE_BASE_URL = "https://api.openai.com/v1"
 
     def _get_reward(self, final_answer: str) -> float:
