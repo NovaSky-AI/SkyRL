@@ -310,10 +310,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         torch.cuda.empty_cache()
         torch.distributed.barrier()
 
-    def get_weight_statistics(self):
-        """Compute lightweight statistics for model weights"""
-        raise NotImplementedError()
-
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
         self.model.model.config.pad_token_id = pad_token_id

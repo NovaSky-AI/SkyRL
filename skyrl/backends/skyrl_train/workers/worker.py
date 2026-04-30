@@ -974,9 +974,6 @@ class PolicyWorkerBase(Worker):
         output.metadata = micro_batch.metadata
         return output
 
-    def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):
-        return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
-
 
 class CriticWorkerBase(Worker):
     def __init__(self, **kwargs):
