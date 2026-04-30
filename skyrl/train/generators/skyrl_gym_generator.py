@@ -306,14 +306,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, init_info = await self._run_in_executor_if_available(env.init, chat_history)
-        # next_user_message is the ephemeral per-turn user prompt: appended before inference but
-        # never stored in chat_history so it doesn't pollute the training context.
-        next_user_message = init_info.get("next_user_message") if init_info else None
+        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
-        _init_chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
         initial_input_ids = self.tokenizer.apply_chat_template(
-            _init_chat_for_inference,
+            chat_history,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
@@ -359,10 +355,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
-                # Append next_user_message ephemerally — it is used for inference but not stored in chat_history.
-                _chat_for_inference = chat_history + ([next_user_message] if next_user_message else [])
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
-                    _chat_for_inference,
+                    chat_history,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     add_generation_prompt=True,
                     tokenize=True,
@@ -412,7 +406,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            next_user_message = env_step_output.get("next_user_message")
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
 

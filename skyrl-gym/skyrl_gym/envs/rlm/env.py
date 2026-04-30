@@ -196,39 +196,46 @@ class BaseRLMEnv(BaseTextEnv):
       • ``lm_callback`` / ``subcall_fn`` — LM query callbacks injected by the generator
       • ``depth`` — rollout depth in a parent/child tree (default 0)
 
-    Step output shape: always returns ``next_user_message`` as a separate
-    field (the step-wise shape). The agent loop is free to inject it
-    after model generation or concatenate it inline; this env doesn't care.
+    Ephemeral user-prompt mechanism
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Each turn the model should see a per-turn instruction prompt (e.g.
+    "Think step-by-step …") as the last user message, but previous turns'
+    prompts must NOT accumulate in the chat history.
 
-    init() returns:
-        [system_msg, context_metadata_msg, turn_0_user_prompt_msg]
+    This is achieved by mutating the generator's ``chat_history`` list
+    through a stashed reference (``self._chat_history_ref``):
 
-    step() returns observations:
-        [repl_output_msg, turn_N_user_prompt_msg]
+      • ``init()`` appends ``turn0_prompt`` to the returned list and stores
+        the reference.
+      • ``step()`` pops the stale prompt off the tail (it is still there
+        because ``step`` runs *before* the generator appends new messages),
+        then includes the next prompt as the last element of observations
+        so the generator appends it at the tail for the next turn.
 
-    The model always sees the per-turn user prompt as the last message before
-    it generates, keeping root_prompt visible every turn.
+    NOTE: this relies on the generator never copying/rebinding
+    ``chat_history`` after ``init()`` — it must remain the same list
+    object.  The upstream ``SkyRLGymGenerator`` satisfies this.
     """
 
     def __init__(self, env_config: Any = None, extras: Dict[str, Any] = None):
-        # env_config is accepted for skyrl_gym.make() kwarg compatibility but ignored:
-        # all knobs come through extras.
         super().__init__()
         extras = extras or {}
         self.extras = extras
 
         self.max_turns = extras.get("max_turns", 10)
 
-        # LM query callbacks — passed via extras to stay serialization-friendly
         self.lm_callback = extras.get("lm_callback", None)
         self.subcall_fn = extras.get("subcall_fn", None)
 
         self.repl: Optional[PersistentREPL] = None
         self._context: Any = None
-        self._tools: Dict[str, Any] = {}  # populated in init() from _get_repl_tools()
+        self._tools: Dict[str, Any] = {}
         self._final_answer: Optional[str] = None
-        self._reward: float = 0.0  # set once when done=True; read by get_metrics
+        self._reward: float = 0.0
         self._turn_index = 0
+
+        # Shared reference to the generator's chat_history list (set in init).
+        self._chat_history_ref: Optional[ConversationType] = None
 
     # ------------------------------------------------------------------
     # Override hooks — subclasses customize task-specific behavior here
@@ -265,8 +272,6 @@ class BaseRLMEnv(BaseTextEnv):
     # ------------------------------------------------------------------
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
-        # root_prompt: the user question shown every turn
-        # context_text: data payload loaded into the REPL `context` variable
         root_prompt = "\n".join(msg["content"] for msg in prompt if msg.get("content"))
         context_payload = self.extras.get("extra_info", {}).get("context_text") or root_prompt
         if isinstance(context_payload, str):
@@ -279,7 +284,6 @@ class BaseRLMEnv(BaseTextEnv):
         self._root_prompt = root_prompt
         self._context = context_payload
 
-        # Subclass-supplied REPL tools (closures may capture self._context)
         self._tools = self._get_repl_tools() or {}
 
         self.repl = PersistentREPL(
@@ -290,20 +294,22 @@ class BaseRLMEnv(BaseTextEnv):
         )
         self.repl.add_context(context_payload, context_index=0)
 
-        # Compute context metadata for the first user message
         metadata_text = _format_context_metadata(context_payload)
-
         system_content = self._build_system_prompt()
 
-        # Turn-0 user prompt injection
         self._turn_index = 0
         turn0_prompt = _build_user_prompt(root_prompt, iteration=0)
 
         init_messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": metadata_text},
+            turn0_prompt,
         ]
-        return init_messages, {"next_user_message": turn0_prompt}
+        # Stash reference — the generator will use this same list object as
+        # chat_history throughout the episode, so we can pop the ephemeral
+        # prompt off it in step().
+        self._chat_history_ref = init_messages
+        return init_messages, {}
 
     def _build_system_prompt(self) -> str:
         template = self._get_system_prompt()
@@ -328,6 +334,11 @@ class BaseRLMEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
         self._turn_index += 1
+
+        # Pop the previous turn's ephemeral user prompt from chat_history.
+        # step() runs before the generator appends the new assistant+obs
+        # messages, so the stale prompt is still the last element.
+        self._chat_history_ref.pop()
 
         done = self.turns >= self.max_turns
         code = _find_code_block(action)
@@ -360,21 +371,20 @@ class BaseRLMEnv(BaseTextEnv):
         return self._make_step_output([{"role": "user", "content": obs_text}], done=False)
 
     def _make_step_output(self, observations: List[Dict[str, str]], done: bool) -> BaseTextEnvStepOutput:
-        """Build a step output. Always returns next_user_message as a separate
-        field; the agent loop decides whether to inject it post-generation
-        (step-wise) or concatenate it inline."""
-        if done:
-            return BaseTextEnvStepOutput(
-                observations=observations,
-                next_user_message=None,
-                reward=self._reward,
-                done=True,
-            )
+        """Build a step output.
+
+        When not done, appends the next turn's ephemeral user prompt to
+        observations so the generator places it at the tail of chat_history.
+        It will be popped at the start of the next step().
+        """
+        if not done:
+            next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
+            observations = observations + [next_prompt]
+
         return BaseTextEnvStepOutput(
             observations=observations,
-            next_user_message=_build_user_prompt(self._root_prompt, self._turn_index),
-            reward=0.0,
-            done=False,
+            reward=self._reward if done else 0.0,
+            done=done,
         )
 
     def get_metrics(self) -> Dict[str, Any]:

@@ -9,7 +9,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -44,7 +44,7 @@ class _RLMRolloutContext:
     parent_rid: Optional[str]                 # None for root
     depth: int                                # 0 for root, +1 per level
     child_index: Optional[int]                # None for root; assigned at registration
-    output: Optional[Union["StepWiseOutput", "TrajectoryOutput"]] = None
+    output: Optional["StepWiseOutput"] = None
 
 
 class RLMGymGenerator(SkyRLGymGenerator):
@@ -76,6 +76,13 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if not self.generator_cfg.step_wise_trajectories:
+            raise ValueError(
+                "RLMGymGenerator requires step_wise_trajectories=True. "
+                "Multiple code paths assume step-wise mode (ephemeral "
+                "user-prompt injection, output type assertions, child "
+                "trajectory inlining). Non-step-wise mode is not supported."
+            )
         # Per-rollout registry keyed by rid. Populated in _setup_env_extras /
         # _run_child; the whole subtree is popped in the root's
         # _finalize_episode. CPython dict ops on distinct keys are atomic so no
@@ -150,14 +157,17 @@ class RLMGymGenerator(SkyRLGymGenerator):
         if ctx is None:
             return agent_loop_output
 
-        if isinstance(agent_loop_output, StepWiseOutput):
-            for step_index, step in enumerate(agent_loop_output.step_outputs):
-                step.env_metrics["rlm_metadata"] = {
-                    "trajectory_id": ctx.trajectory_id,
-                    "depth": ctx.depth,
-                    "child_index": ctx.child_index,
-                    "step_index": step_index,
-                }
+        assert isinstance(agent_loop_output, StepWiseOutput), (
+            f"RLMGymGenerator requires step_wise_trajectories=True, got {type(agent_loop_output).__name__}"
+        )
+
+        for step_index, step in enumerate(agent_loop_output.step_outputs):
+            step.env_metrics["rlm_metadata"] = {
+                "trajectory_id": ctx.trajectory_id,
+                "depth": ctx.depth,
+                "child_index": ctx.child_index,
+                "step_index": step_index,
+            }
 
         ctx.output = agent_loop_output
 
@@ -170,13 +180,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # ---- Root: coalesce children and tear down ----
         descendants = self._dfs_descendants(rid)
 
-        if (isinstance(agent_loop_output, StepWiseOutput)
-                and getattr(self.generator_cfg, "train_child_trajectories", False)
-                and descendants):
+        if getattr(self.generator_cfg, "train_child_trajectories", False) and descendants:
             children_flat: List[TrajectoryOutput] = []
             for d in descendants:
-                if d.output is None or not isinstance(d.output, StepWiseOutput):
+                if d.output is None:
                     continue
+                assert isinstance(d.output, StepWiseOutput), (
+                    f"Child rollout output must be StepWiseOutput, got {type(d.output).__name__}"
+                )
                 children_flat.extend(d.output.step_outputs)
             if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
@@ -287,10 +298,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=sampling_params,
             )
 
-            if isinstance(result, StepWiseOutput):
-                child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
-            else:
-                child_env_metrics = result.env_metrics or {}
+            assert isinstance(result, StepWiseOutput), (
+                f"Child agent_loop must return StepWiseOutput, got {type(result).__name__}"
+            )
+            child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
             return child_env_metrics.get("final_answer") or ""
 
         def subcall_fn(prompt: str, context=None) -> str:
