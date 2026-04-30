@@ -268,6 +268,9 @@ harbor = { git = "https://github.com/laude-institute/harbor", rev = "a85628c803d
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8382dc343b07b068a827ca20bae860633df3baa0", marker = "sys_platform == 'linux'"}
 # megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 4/1/26
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "4ef64ebc468cd3da41a22d46a2db37163694e8e2", marker = "sys_platform == 'linux'"}
+# NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
+# TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
+vllm-router = { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 
 [tool.black]
 line-length = 120
