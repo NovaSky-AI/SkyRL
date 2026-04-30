@@ -34,7 +34,7 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
-TRAIN_BATCH_SIZE=512
+TRAIN_BATCH_SIZE=128
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
@@ -77,11 +77,12 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=8 \
   trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.max_tokens_per_microbatch=20000 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=$LR \
-  trainer.policy.optimizer_config.num_warmup_steps=160 \
+  trainer.policy.optimizer_config.num_warmup_steps=40 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   generator.inference_engine.backend=vllm \
@@ -94,11 +95,11 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_1.7b_base" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base" \
+  trainer.project_name="max_tokens_per_microbatch_dapo" \
+  trainer.run_name="dapo_qwen3_1.7b_base_max_tokens_per_microbatch_20k" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base_max_tokens_per_microbatch_dapo" \
   trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_1.7b_base" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_1.7b_base_max_tokens_per_microbatch_dapo" \
   $@
