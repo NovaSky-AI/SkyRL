@@ -1,0 +1,213 @@
+---
+title: "Multi-Turn Multi-Image VLM RL on VisGym"
+---
+
+<Callout type="info">
+Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and local vLLM source override).
+</Callout>
+
+In this example we train a vision-language model to solve VisGym tasks — gymnasium-style environments (e.g. `maze_2d/easy`) where every environment step returns a **new image observation**. The model sees an image, reasons, emits an action, and receives the next rendered image as part of the next user turn. This is the multi-image multi-turn VLM pattern described in the tutorial.
+
+Source code: `examples/train/visgym/`.
+
+## VisGym Setup
+
+<Callout type="warn">
+**Local VisGym install required.** VisGym ships under the `gymnasium` package namespace rather than as a separate PyPI package — its envs register under `gymnasium.make("maze_2d/easy")` etc., so installing it editable takes over the `gymnasium` import in your env. Clone it locally and point uv at it with two local-only `pyproject.toml` edits (do not commit these).
+</Callout>
+
+1. Clone VisGym anywhere (the repo root is conventional):
+
+   ```bash
+   git clone https://github.com/anyscale/VisGym.git
+   ```
+
+2. Add a `[tool.uv.sources]` entry to the root `pyproject.toml` pointing at your clone. Use the absolute or repo-relative path:
+
+   ```toml
+   [tool.uv.sources]
+   # ...existing entries (skyrl-gym, torch, vllm override from the VLM tutorial, etc.)...
+   gymnasium = { path = "./VisGym", editable = true }
+   ```
+
+3. Add `gymnasium` as a direct dep so the source override actually binds — append it to the `skyrl-train` optional-dependencies list in the root `pyproject.toml`:
+
+   ```toml
+   [project.optional-dependencies]
+   skyrl-train = [
+       # ...existing entries...
+       "gymnasium",
+   ]
+   ```
+
+The next `uv run --isolated --extra fsdp …` invocation (used by `run_visgym_from_*.sh`) will pick up the local VisGym checkout automatically. Remove these edits before committing any changes.
+
+<Callout type="info">
+**Robotics envs** (e.g. `fetch_pick_and_place`) additionally require the `Gymnasium-Robotics/` subpackage inside the VisGym clone to be installed editable — see the [VisGym README](https://github.com/anyscale/VisGym) for that extra step. The default `maze_2d/easy` task in this recipe does not need it.
+</Callout>
+
+## Task Overview
+
+VisGym environments are `gymnasium.Env` instances that return rendered images as observations. The example defaults to `maze_2d/easy`, a 2D navigation maze where:
+
+- The env renders the maze (walls, agent position, goal) as an RGB image.
+- The model chooses a direction to move.
+- The env steps, re-renders, and sends back the new state.
+- The episode ends when the agent reaches the goal, hits a termination condition, or runs out of turns.
+
+Reward is sparse — delivered at the terminal step based on whether the task was solved.
+
+## Two Recipes
+
+VisGym ships with two training recipes that differ in how the model is asked to output actions. The reason there are two: the vanilla instruct model (`Qwen/Qwen3-VL-8B-Instruct`) struggles to reliably produce the structured tuple action format (`('move', 0)`) — it emits code fences, mis-matched quotes, or degenerates into prose. Instead, the instruct recipe uses a simpler `<action>keyword</action>` XML tag that the base model is able to consistently produce. Starting from an SFT checkpoint bypasses this issue, and produces a higher terminal success rate.
+
+### `run_visgym_from_sft.sh` — tuple-action, SFT warm-start
+
+Starts from a pre-SFT'd Qwen3-VL checkpoint that already emits structured output:
+
+```
+<observation>I see a maze with the agent at (1,1) and the goal at (3,3)...</observation>
+<justification>The goal is east-southeast, so I should move east first.</justification>
+<action>('move', 0)</action>
+```
+
+Reward combines task success with a **format reward** (0.8 task + 0.2 format) so the model emits `<observation>...</observation>` and `<justification>...</justification>` reasoning. The base SFT model is trained to only produce `('move', 0)`. KL regularization is off.
+
+See `examples/train/visgym/env_sft.py` for the action-parsing logic.
+
+<Callout type="info">
+**SFT checkpoint.** The SFT'd Qwen3-VL checkpoints are published by the original VisGym authors at [huggingface.co/VisGym/visgym_model](https://huggingface.co/VisGym/visgym_model). This recipe uses the `mixed_qwen3vl` variant — point `MODEL_PATH` at that checkpoint when launching `run_visgym_from_sft.sh`.
+</Callout>
+
+### `run_visgym_from_instruct.sh` — keyword-action, from vanilla instruct
+
+Starts from `Qwen/Qwen3-VL-8B-Instruct` without an SFT warm-start. The action format is a simple keyword tag:
+
+```
+<action>left</action>
+```
+
+where the keyword is one of `left`, `right`, `up`, `down`, `stop`. Reward is **task-only** (no format shaping). We found that due to the low starting reward, a format reward caused the model to over-index on formatting.
+
+See `examples/train/visgym/env_instruct.py` — the action extractor is a simple regex match for `<action>keyword</action>` tags. The env sets `relaxed=True` on the underlying VisGym env so the gymnasium env accepts keyword inputs.
+
+## Env Contract
+
+Both recipes share the multi-image-per-turn contract. On each `step()`:
+
+```python
+obs, reward, terminated, truncated, info = self.visgym_env.step(extracted)
+if not done:
+    image = self.visgym_env.render()               # new RGB frame
+    obs_msg = make_image_message(feedback, image)   # {role, content=[text, image_url]}
+    observations = [obs_msg]
+```
+
+The observation is an OpenAI-format message with both a text feedback string and a base64-encoded image in an `image_url` content part. These accumulate in the conversation, so by turn N the model has seen N+1 images.
+
+`examples/train/visgym/utils.py` provides `make_image_message()`, which handles the RGB-array → data-URI conversion consistently across both recipes.
+
+## Data Preparation
+
+Because VisGym generates its prompts (and images) dynamically from the env's state, the dataset is just a list of "tickets" that tell SkyRL which env to run. It's auto-generated on first run:
+
+```bash
+uv run examples/train/visgym/dataset.py \
+  --env_id maze_2d/easy \
+  --num_rows 256 \
+  --output_dir ~/data/visgym_maze_2d_easy
+```
+
+Each row carries `env_class=visgym`, `visgym_env_id`, and optionally a deterministic `seed` for evaluation.
+
+## Training Configuration
+
+Key overrides from both scripts:
+
+```bash title="examples/train/visgym/run_visgym_from_sft.sh (excerpt)"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+  python examples/train/visgym/entrypoint.py \
+  --env_variant sft \
+  trainer.policy.model.path="$MODEL_PATH" \         # SFT checkpoint
+  trainer.strategy=fsdp2 \
+  # VLM flags
+  generator.vision_language_generator=true \
+  generator.batched=false \
+  trainer.use_sample_packing=false \
+  # Multi-turn rollouts
+  generator.max_turns=15 \
+  generator.inference_engine.async_engine=true \
+  generator.sampling_params.temperature=0.7 \
+  # Algorithm — task+format reward, no KL
+  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.use_kl_loss=false \
+  environment.env_class=visgym \
+```
+
+```bash title="examples/train/visgym/run_visgym_from_instruct.sh (excerpt)"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+  python examples/train/visgym/entrypoint.py \
+  --env_variant instruct \
+  trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
+  trainer.strategy=fsdp2 \
+  # Same VLM flags as above
+  generator.vision_language_generator=true \
+  generator.batched=false \
+  trainer.use_sample_packing=false \
+  # More turns, higher temperature, KL regularization on
+  generator.max_turns=18 \
+  generator.sampling_params.temperature=1 \
+  trainer.algorithm.use_kl_loss=true \
+  trainer.algorithm.kl_loss_coef=0.005 \
+  environment.env_class=visgym \
+```
+
+Some key recipe differences:
+
+- The Instruct recipe runs more turns (18 vs 15) which helps produce a higher initial success rate.
+- The SFT recipe needs a slightly lower temperature compared to the Instruct recipe (0.7 vs. 1). We found the SFT model unable to solve any environment with temperature 1.
+- The Instruct recipe uses a KL loss to prevent reasoning collapse.
+
+## Launching
+
+```bash
+# Instruct recipe — no SFT checkpoint required
+bash examples/train/visgym/run_visgym_from_instruct.sh
+
+# SFT recipe — point MODEL_PATH at your checkpoint
+MODEL_PATH=/path/to/your/sft_ckpt bash examples/train/visgym/run_visgym_from_sft.sh
+```
+
+## Example Rollout
+
+![VisGym rollout — Non-SFT Qwen3-VL-8B-Instruct on maze_2d/easy](/images/examples/visgym_rollout.gif)
+
+Single trajectory from the from-instruct recipe (no SFT warm-start) on `maze_2d/easy` with `kl_loss_coef=0.005`. Each turn renders a fresh maze frame; the model accumulates them across the conversation.
+
+## Results
+
+![VisGym maze_2d/easy reward curve](/images/examples/visgym_maze2d_reward.png)
+
+Reward curve on `maze_2d/easy`.
+
+## What's Next
+
+- **[Geometry-3K example](geometry3k)** — single-image multi-turn VLM RL with tool calling.
+- **[Vision-Language RL tutorial](../tutorials/vision_language_rl)** — shared setup background.
+- **[Creating a New Environment](../tutorials/new_env)** — build your own env.
+
+## Citation
+
+VisGym is a suite of 17 multi-step visual environments (symbolic puzzles, real-image understanding, navigation, manipulation) introduced by Wang et al. (2026). Project page: [visgym.github.io](https://visgym.github.io/). If you use this example in your work, please cite:
+
+```bibtex
+@misc{wang2026visgymdiversecustomizablescalable,
+      title={VisGym: Diverse, Customizable, Scalable Environments for Multimodal Agents},
+      author={Zirui Wang and Junyi Zhang and Jiaxin Ge and Long Lian and Letian Fu and Lisa Dunlap and Ken Goldberg and XuDong Wang and Ion Stoica and David M. Chan and Sewon Min and Joseph E. Gonzalez},
+      year={2026},
+      eprint={2601.16973},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2601.16973},
+}
+```

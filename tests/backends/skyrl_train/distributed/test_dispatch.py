@@ -2,9 +2,8 @@
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/distributed/test_dispatch.py
 """
 
-from typing import List, Optional, Union
+from typing import List
 
-import pytest
 import ray
 import torch
 from ray import ObjectRef
@@ -16,8 +15,10 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     MeshRank,
     PassThroughDispatch,
+    concatenate_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.dataset.preprocess import compute_prompt_mini_batch_boundaries
 
 
 @ray.remote
@@ -52,14 +53,12 @@ class RayActorGroup:
 
     def mesh_dispatch_and_collect(self, data: TrainingInputBatch):
         object_refs = MeshDispatch.dispatch(self.actor_infos, "do_work", data)
-        ret = MeshDispatch.sync_collect(self.actor_infos, object_refs)
-        return ret
+        return concatenate_outputs_after_mesh_dispatch(self.actor_infos, ray.get(object_refs))
 
     def pass_through_dispatch(self, a, b):
         # just pass values as is
         object_refs = PassThroughDispatch.dispatch(self.actor_infos, "dummy", a, b)
-        ret = PassThroughDispatch.sync_collect(self.actor_infos, object_refs)
-        return ret
+        return ray.get(object_refs)
 
 
 def test_mesh_dispatch():
@@ -80,9 +79,16 @@ def test_stage_chunks_and_dispatch_from_staged():
 
     # Full batch has 16 elements, mini_batch_size=8 → 2 mini-batches
     full_data = TrainingInputBatch({"a": torch.arange(16)})
+    uids = [f"p{i}" for i in range(16)]
+    train_batch_size = 16
     mini_batch_size = 8
+    n_samples_per_prompt = 1
+    is_stepwise = False
+    boundaries = compute_prompt_mini_batch_boundaries(
+        uids, mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+    )
 
-    all_chunk_refs = MeshDispatch.stage_chunks(dp_size, full_data, mini_batch_size)
+    all_chunk_refs = MeshDispatch.stage_chunks(dp_size, full_data, boundaries)
     assert len(all_chunk_refs) == 2
     assert len(all_chunk_refs[0]) == dp_size
 
@@ -96,7 +102,7 @@ def test_stage_chunks_and_dispatch_from_staged():
     )
 
     # Collect results (only sp=0 workers contribute, which are ranks 0,1,2,3)
-    results = MeshDispatch.sync_collect(actor_group.actor_infos, object_refs)
+    results = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, ray.get(object_refs))
 
     # Expected: each dp_rank gets 2 elements, adds its rank
     # dp_rank 0 (rank 0): [8,9] + 0 = [8,9]
@@ -112,20 +118,7 @@ def test_pass_through_dispatch():
     num_actors = 8
     actor_group = RayActorGroup(num_actors)
     ret = actor_group.pass_through_dispatch(1, 2)
-    assert ret is None
-
-
-def test_mesh_dispatch_with_mixed():
-    num_actors = 8
-    actor_group = RayActorGroup(num_actors)
-    object_refs = MeshDispatch.dispatch(
-        actor_group.actor_infos,
-        "do_work",
-        TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])}),
-    )
-    object_refs[0] = ray.put(None)
-    with pytest.raises(AssertionError):
-        MeshDispatch.sync_collect(actor_group.actor_infos, object_refs)
+    assert ret == [None] * num_actors
 
 
 def test_dispatch_registry():
@@ -135,18 +128,6 @@ def test_dispatch_registry():
         class CustomDispatch(Dispatch):
             @classmethod
             def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
-                pass
-
-            @classmethod
-            def sync_collect(
-                cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef], nonblocking: bool = False
-            ) -> Union[List[ObjectRef], TrainingInputBatch]:
-                pass
-
-            @classmethod
-            def async_collect(
-                cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]
-            ) -> Optional[TrainingInputBatch]:
                 pass
 
         DispatchRegistry.register("custom", CustomDispatch)

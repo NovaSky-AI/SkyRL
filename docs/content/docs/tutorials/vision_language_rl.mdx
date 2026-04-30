@@ -1,0 +1,98 @@
+---
+title: "Vision-Language RL in SkyRL"
+---
+
+
+SkyRL supports multi-turn RL training on vision-language models (VLMs) — the policy reads image observations, reasons, and emits actions or tool calls, with images flowing through the conversation across turns. This guide covers the setup common to all VLM training runs in SkyRL: enabling the VLM code path, the required flags, the dataset record shape, and the current support matrix. For concrete runnable recipes, see the [Geometry-3K](../examples/geometry3k) and [VisGym](../examples/visgym) example pages.
+
+## Requirements
+
+<Callout type="warn">
+**Local vLLM source override required (temporary).** VLM training needs a newer vLLM than the `vllm==0.19.0` pinned in the root `pyproject.toml`. Until the next vLLM release ships with the multimodal rendering support used by SkyRL's new inference stack, clone vLLM locally and point uv at it by adding one line under `[tool.uv.sources]` in the repo root `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+# ...existing entries (skyrl-gym, torch, etc.)...
+vllm = { path = "/abs/path/to/vllm" }
+```
+
+Use an absolute path. After editing, the standard `uv run --isolated --extra fsdp ...` invocation used by the VLM example scripts will pick up your local vLLM checkout. Remove this override once the next upstream vLLM release is available. Please also unpin the vLLM version:
+```toml
+fsdp = [
+# previously: "vllm==0.19.0; sys_platform == 'linux'",
+"vllm",
+...
+]
+```
+
+vLLM commit required: [80b18230e](https://github.com/vllm-project/vllm/commit/80b18230e0ffe94f8198862675a0dc5e86c10997)
+</Callout>
+
+**Hardware.** Since VLM runs are memory-heavy, we recommend calibrating `gpu_memory_utilization`, `max_model_len`, and `train_batch_size` to fit your setup.
+
+## Turning on VLM mode
+
+Two flags are what actually switch a training run into VLM mode:
+
+```bash
+generator.vision_language_generator=true \
+trainer.use_sample_packing=false \
+```
+
+- **`generator.vision_language_generator=true`** — Switches from the default gym generator to a VLM generator, ensuring that visual content is correctly routed to the inference server.
+- **`trainer.use_sample_packing=false`** — sample packing is currently unsupported for VLM training (see callout below).
+
+<Callout type="info">
+**Sample packing is unsupported for VL models.** Each VLM family (Qwen-VL, InternVL, etc.) processes images and positional embeddings differently, and packing across heterogeneous image counts per sample would need per-model handling. Support is expected in a future release; until then, set `trainer.use_sample_packing=false` for any VLM run.
+</Callout>
+
+## Dataset record shape
+
+VLM training datasets embed images directly in the prompt as `image_url` content parts, using base64 data URIs:
+
+```python
+{
+    "prompt": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<...>"}},
+                {"type": "text", "text": "What is shown in this image?"},
+            ],
+        },
+    ],
+    "env_class": "geometry3k",
+    "reward_spec": {"method": "rule", "ground_truth": "..."},
+}
+```
+
+A prompt can have multiple `image_url` parts. See `examples/train/geometry3k/geometry_3k_dataset.py` for a full dataset preparation script that converts PIL images to data URIs.
+
+For environments that generate images dynamically at each turn (like VisGym), the dataset contains only stub prompts — the env builds the actual multimodal message in `init()` and `step()`. See `examples/train/visgym/dataset.py`. The validation set is held constant by seeding each dataset row while the training set is randomly sampled.
+
+## Interaction patterns
+
+SkyRL handles two distinct VLM interaction patterns:
+
+**Text-only observations.** The initial prompt includes image(s), but subsequent environment observations are text (e.g. tool-call feedback). The [Geometry-3K example](../examples/geometry3k) uses this pattern — the model sees a geometry diagram once, then iterates with text feedback from a `calc_score` tool.
+
+**Image-returning observations.** The environment returns a new image observation at every step. The [VisGym example](../examples/visgym) uses this pattern — after each model action, `env.step()` renders a new image of the updated world state, which is passed back as the next user turn's content.
+
+The generator handles both patterns transparently once `generator.vision_language_generator=true` is set. The environment contract determines which pattern you're in: return observations with `image_url` content parts for image-returning envs, or plain text strings for text-only feedback.
+
+## Limitations and future work
+
+Multimodal support in SkyRL is still early. The current VLM path runs on the FSDP backend and supports multi-image, multi-turn rollouts, but several features are not yet ready:
+
+- **Sample packing** — each VLM family handles images and positional embeddings differently, so packing needs per-model support or a different abstraction.
+- **Megatron backend** — the VLM path has not been wired through Megatron yet.
+- **Context parallelism (CP)** — many VLM tasks are long context, long horizon tasks which get worse as more images are included.
+- **Step-wise training** — step-wise training is currently undergoing rapid development in SkyRL, and will eventually support multimodal models.
+
+Contributions are welcome! This is a good time to get involved in multimodal training in SkyRL.
+
+## What's next
+
+- **[Geometry-3K example](../examples/geometry3k)** — single-image multi-turn with tool calling.
+- **[VisGym example](../examples/visgym)** — multi-image multi-turn, with a new image per step.
+- **[Creating a New Environment](new_env)** — build your own env on top of the VLM flags in this guide.

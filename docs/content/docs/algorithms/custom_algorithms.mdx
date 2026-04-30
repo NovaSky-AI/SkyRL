@@ -98,7 +98,9 @@ We show the outline of creating a custom trainer below, and you can find a full 
 ```python
 class CustomTrainer(RayPPOTrainer):
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str]]:
         # apply custom reward penalties
         ...
         # use base class impl for metrics and per-token reward conversion

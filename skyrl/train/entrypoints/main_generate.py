@@ -9,6 +9,7 @@ from typing import Any
 import ray
 from loguru import logger
 
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
@@ -23,10 +24,9 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, inference_engine_client: InferenceEngineInterface) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
-        inference_engine_client = self.get_inference_client()
         await inference_engine_client.wake_up()
         generator = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
@@ -47,7 +47,10 @@ class EvalOnlyEntrypoint(BasePPOExp):
 @ray.remote(num_cpus=1)
 def eval_entrypoint(cfg: SkyRLTrainConfig) -> dict:
     exp = EvalOnlyEntrypoint(cfg)
-    return asyncio.run(exp.run())
+    # Build the inference client from a sync context so _get_new_inference_client
+    # can run its own asyncio.run() for the colocated-mode sleep step.
+    inference_engine_client = exp.get_inference_client()
+    return asyncio.run(exp.run(inference_engine_client))
 
 
 def main() -> None:

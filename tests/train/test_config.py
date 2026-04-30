@@ -16,6 +16,16 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
+from tests.train.util import example_dummy_config
+
+
+def _make_validated_test_config():
+    """Return a small config that passes validate_batch_sizes()."""
+    cfg = example_dummy_config()
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
+    return cfg
 
 
 # Helper dataclasses for testing
@@ -195,20 +205,35 @@ def test_cross_field_defaults():
 
 
 class TestMaxSeqLenValidation:
-    """Tests for the max_seq_len auto-calculation and explicit-override logic in __post_init__."""
+    """Tests for max_seq_len defaults and validation behavior."""
 
-    def test_max_seq_len_auto_calculated_when_none(self):
-        """When max_seq_len is None (default), __post_init__ should compute it as
-        max_input_length + max_generate_length."""
-        # implicitly set max_seq_len to None
+    def test_max_seq_len_defaults_to_none_when_not_set(self):
         cfg = SkyRLTrainConfig.from_cli_overrides([])
-
-        expected = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        assert cfg.trainer.algorithm.max_seq_len == expected
+        assert cfg.trainer.algorithm.max_seq_len is None
 
     def test_max_seq_len_preserved_when_explicitly_set(self):
-        """When max_seq_len is explicitly set by the user, __post_init__ should NOT overwrite it."""
-        # explicitly set max_seq_len to 32768
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
-
         assert cfg.trainer.algorithm.max_seq_len == 32768
+
+    def test_validate_cfg_requires_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+        cfg.trainer.algorithm.max_seq_len = None
+
+        with pytest.raises(ValueError, match=r"trainer\.algorithm\.max_seq_len"):
+            validate_cfg(cfg)
+
+    @pytest.mark.parametrize("loss_reduction", ["token_mean", "sequence_mean"])
+    def test_validate_cfg_allows_missing_max_seq_len_for_other_reductions(self, loss_reduction):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = loss_reduction
+        cfg.trainer.algorithm.max_seq_len = None
+
+        validate_cfg(cfg)
+
+    def test_validate_cfg_allows_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+        cfg.trainer.algorithm.max_seq_len = 4096
+
+        validate_cfg(cfg)

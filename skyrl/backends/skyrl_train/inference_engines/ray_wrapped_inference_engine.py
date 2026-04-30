@@ -108,6 +108,7 @@ def create_ray_wrapped_inference_engines(
     max_lora_rank=64,
     max_loras=1,
     fully_sharded_loras=False,
+    language_model_only=False,
     engine_init_kwargs: Dict[str, Any] = {},
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
@@ -283,6 +284,7 @@ def create_ray_wrapped_inference_engines(
                 ).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
+                    language_model_only=language_model_only,
                     worker_extension_cls="skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
                     tensor_parallel_size=tensor_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,

@@ -1,9 +1,8 @@
 """Defines dispatch and collect logic for distributed training"""
 
-import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Tuple, Type
 
 import ray
 from ray import ObjectRef
@@ -12,6 +11,7 @@ from ray.actor import ActorHandle
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
+    pad_training_input_batch,
 )
 
 
@@ -63,7 +63,6 @@ class Dispatch(ABC):
 
     Dispatch types are responsible for:
     - dispatching method calls to actors handling data sharding if necessary
-    - collecting results from actors and concatenating results if necessary
     - validating arguments for dispatch
     """
 
@@ -71,20 +70,6 @@ class Dispatch(ABC):
     @abstractmethod
     def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
         """Dispatches method calls to the actors with data sharding if necessary."""
-        pass
-
-    @classmethod
-    @abstractmethod
-    async def async_collect(
-        cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]
-    ) -> Optional[TrainingOutputBatch]:
-        """Collects results from the actors asynchronously in an asyncio-compatible way."""
-        pass
-
-    @classmethod
-    @abstractmethod
-    def sync_collect(cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]) -> Optional[TrainingOutputBatch]:
-        """Collects results from the actors synchronously and returns a `TrainingOutputBatch`."""
         pass
 
     @classmethod
@@ -109,19 +94,10 @@ class MeshDispatch(Dispatch):
     * The input data is chunked into `dp_size` equal chunks, where `dp_size` is the size of data parallelism.
     * Each actor with the same DP rank processes the same data chunk in parallel.
 
-    For data collection:
-
-    * Data is collected only from the primary rank of each model/sequence parallel group.
-    * The primary rank is defined as the rank with (SP=0, TP=0, PP=0).
-    * The collected chunks are concatenated in order of DP rank to reconstruct the full data.
-
     Example: For a world size of 8, with DP size=2, SP size=2, TP size=2, PP size=1:
 
     * Data dispatch: The data is chunked into 2 chunks. All actors with DP rank 0 process the first chunk,
       and all actors with DP rank 1 process the second chunk.
-    * Data collection: Only two actors contribute to the final output - the primary rank from each DP group:
-      (DP=0, SP=0, TP=0, PP=0) and (DP=1, SP=0, TP=0, PP=0). Their chunks are concatenated in order.
-
     """
 
     @classmethod
@@ -146,61 +122,42 @@ class MeshDispatch(Dispatch):
         return object_refs
 
     @classmethod
-    async def async_collect(
-        cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]
-    ) -> Optional[TrainingOutputBatch]:
-        assert len(actor_infos) == len(object_refs), "`actor_infos` and `object_refs` must have the same length"
-        all_objects = await asyncio.gather(*object_refs)
-        if len(all_objects) and all_objects[0] is not None:
-            return concatenate_outputs_after_mesh_dispatch(actor_infos, all_objects)
-        return
-
-    @classmethod
-    def sync_collect(cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]) -> Optional[TrainingOutputBatch]:
-        assert len(actor_infos) == len(object_refs), "`actor_infos` and `object_refs` must have the same length"
-        all_objects = ray.get(object_refs)
-        if len(all_objects) and all_objects[0] is not None:
-            return concatenate_outputs_after_mesh_dispatch(actor_infos, all_objects)
-        # all should be none
-        assert all(obj is None for obj in all_objects), "Got a mix of `None` and non-`None` objects"
-        return
-
-    @classmethod
     def stage_chunks(
         cls,
         dp_size: int,
         data: TrainingInputBatch,
-        mini_batch_size: int,
+        mini_batch_boundaries: List[Tuple[int, int]],
     ) -> List[List[ObjectRef]]:
-        """
-        Pre-stage all mini-batch chunks into the object store.
+        """Pre-stage mini-batch chunks into the object store.
 
-        Slices the full batch into mini-batches, chunks each by DP rank, and
-        ``ray.put``s each chunk.
+        Each mini-batch is defined by a ``(start, end)`` index pair from mini_batch_boundaries.
+        Mini-batches are individually padded so that their size is divisible by dp_size, using dummy
+        entries with ``loss_mask=0`` that do not affect the loss.
 
         Args:
-            dp_size: Number of data-parallel ranks
-            data: Full TrainingInputBatch to slice from
-            mini_batch_size: Size of each mini-batch (before DP chunking)
+            dp_size: Number of data-parallel ranks.
+            data: Full TrainingInputBatch to slice from.
+            mini_batch_boundaries: List of ``(start, end)`` index pairs.  The i-th mini-batch is
+                data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
         Returns:
-            List of per-mini-batch chunk ref lists.  ``result[i][dp_rank]`` is
-            the ObjectRef for mini-batch *i*, DP rank *dp_rank*.
+            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
-        assert (
-            len(data) % mini_batch_size == 0
-        ), f"data batch size must be divisible by mini_batch_size, got {len(data)} and {mini_batch_size}"
-        assert (
-            mini_batch_size % dp_size == 0
-        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
-        num_mini_batches = len(data) // mini_batch_size
-        chunk_size = mini_batch_size // dp_size
-
         all_chunk_refs: List[List[ObjectRef]] = []
-        for step in range(num_mini_batches):
-            start = step * mini_batch_size
-            end = start + mini_batch_size
+        for start, end in mini_batch_boundaries:
             mini_batch = data[start:end]
+            mb_size = end - start
+
+            # Pad to make divisible by dp_size. Will only be non-zero for step-wise training.
+            pad_size = (-mb_size) % dp_size
+            if pad_size > 0:
+                mini_batch = pad_training_input_batch(mini_batch, pad_size)
+
+            mini_batch_size = len(mini_batch)
+            assert (
+                mini_batch_size % dp_size == 0
+            ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
+            chunk_size = mini_batch_size // dp_size
             chunks = mini_batch.chunk(chunk_size)
             all_chunk_refs.append([ray.put(chunk) for chunk in chunks])
         return all_chunk_refs
@@ -263,27 +220,6 @@ class PassThroughDispatch(Dispatch):
     @classmethod
     def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
         return [getattr(actor_info.handle, method).remote(*args, **kwargs) for actor_info in actor_infos]
-
-    @classmethod
-    async def async_collect(
-        cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]
-    ) -> Optional[TrainingOutputBatch]:
-        all_objects = await asyncio.gather(*object_refs)
-        if len(all_objects) and all_objects[0] is not None:
-            return concatenate_outputs_after_mesh_dispatch(actor_infos, all_objects)
-        return
-
-    @classmethod
-    def sync_collect(cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]) -> Optional[TrainingOutputBatch]:
-        data_batches = ray.get(object_refs)
-        if len(data_batches) > 0 and data_batches[0] is not None:
-            assert isinstance(
-                data_batches[0], TrainingOutputBatch
-            ), "data_batches must be a list of `TrainingOutputBatch` objects"
-            return concatenate_outputs_after_mesh_dispatch(actor_infos, data_batches)
-        # all should be none
-        assert all(obj is None for obj in data_batches), "Got a mix of `None` and non-`None` objects"
-        return
 
     @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:

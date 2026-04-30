@@ -42,7 +42,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_router_args,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import ResolvedPlacementGroup, initialize_ray
@@ -91,13 +94,18 @@ def start_servers(cfg: SkyRLTrainConfig) -> Tuple[RemoteInferenceClient, VLLMRou
     server_urls = [info.url for info in server_infos]
 
     # Router
-    router = VLLMRouter(server_urls=server_urls)
+    router_args = build_router_args(ie_cfg, server_urls=server_urls)
+    router = VLLMRouter(router_args)
     proxy_url = router.start()
 
     # Client
     tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
     client = RemoteInferenceClient(
-        proxy_url=proxy_url, server_urls=server_urls, model_name=SERVED_MODEL_NAME, tokenizer=tokenizer
+        proxy_url=proxy_url,
+        server_urls=server_urls,
+        model_name=SERVED_MODEL_NAME,
+        data_parallel_size=cfg.generator.inference_engine.data_parallel_size,
+        tokenizer=tokenizer,
     )
 
     return client, router, server_group

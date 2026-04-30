@@ -5,6 +5,7 @@
     "one_step_off_async",
     "fully_async",
     "tools_guide",
+    "vision_language_rl",
     "skyrl_gym_generator",
     "agent-integration",
     "step-wise-training"

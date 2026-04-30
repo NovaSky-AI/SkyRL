@@ -9,6 +9,8 @@
     "training_backends",
     "multi_turn_text2sql",
     "search",
+    "geometry3k",
+    "visgym",
     "flash_rl",
     "mini_swe_agent",
     "openenv"

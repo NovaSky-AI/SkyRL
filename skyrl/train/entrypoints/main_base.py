@@ -6,7 +6,6 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +21,6 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
     create_remote_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
@@ -36,9 +34,6 @@ from skyrl.train.utils.utils import (
     initialize_ray,
 )
 from skyrl.utils.tok import get_tokenizer
-
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -80,6 +75,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "max_num_seqs": ie_cfg.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": ie_cfg.backend,
+        "language_model_only": ie_cfg.language_model_only,
         "engine_init_kwargs": ie_cfg.engine_init_kwargs,
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
@@ -150,7 +146,9 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
 
         # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
-        self._server_group = None
+        self._server_groups = None
+        self._prefill_server_groups = None
+        self._decode_server_groups = None
         self._inference_router = None
 
     @staticmethod
@@ -223,9 +221,16 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        if cfg.generator.vision_language_generator:
+            from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
 
-        return SkyRLGymGenerator(
+            generator_cls = SkyRLVLMGymGenerator
+        else:
+            from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+            generator_cls = SkyRLGymGenerator
+
+        return generator_cls(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
@@ -307,111 +312,27 @@ class BasePPOExp:
     def _get_new_inference_client(self):
         """New inference client using HTTP endpoints.
 
-        Config combinations:
-        - Colocated + external URLs → ERROR (validated earlier)
-        - Neither set → Build servers internally
-        - external_server_urls only → Create router over external servers
-        - external_proxy_url only → Use proxy for both data + control plane
-        - Both set → Fully external (proxy for data plane, servers for control plane)
-
         Returns:
             RemoteInferenceClient: The new inference client.
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-            RemoteInferenceClient,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.server_group import (
-            ServerGroup,
-        )
-        from skyrl.backends.skyrl_train.inference_servers.vllm_router import (
-            VLLMRouter,
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            build_new_inference_client,
         )
 
-        ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
-        external_proxy_url = ie_cfg.external_proxy_url
-        external_server_urls = ie_cfg.external_server_urls
-
-        has_external_proxy = external_proxy_url is not None
-        has_external_servers = external_server_urls is not None
-
-        if has_external_proxy and has_external_servers:
-            # Case: Both external - fully external setup
-            proxy_url = external_proxy_url
-            server_urls = list(external_server_urls)
-            logger.info(
-                f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
-            )
-
-        elif has_external_proxy and not has_external_servers:
-            # Case: Proxy only - assume proxy handles control plane too
-            proxy_url = external_proxy_url
-            server_urls = [proxy_url]
-            logger.info(
-                f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}"
-            )
-
-        elif has_external_servers and not has_external_proxy:
-            # Case: Servers only - create internal router over them
-            server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Created router over external "
-                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
-            )
-
-        else:
-            # Case: Neither - build servers and router internally
-            cli_args = build_vllm_cli_args(self.cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
-                placement_group=self.colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
-            )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-            )
-
-        lora_cfg = self.cfg.trainer.policy.model.lora
-        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        client = RemoteInferenceClient(
-            proxy_url=proxy_url,
-            server_urls=server_urls,
-            model_name=self.cfg.trainer.policy.model.path,
-            active_lora_name=active_lora_name,
-            tokenizer=self.tokenizer,
+        client, server_setup = build_new_inference_client(
+            self.cfg,
+            self.tokenizer,
+            placement_group=self.colocate_pg if is_colocated else None,
         )
+        self._inference_router = server_setup.router
+        self._server_groups = server_setup.server_groups
+        self._prefill_server_groups = server_setup.prefill_server_groups
+        self._decode_server_groups = server_setup.decode_server_groups
 
         if is_colocated:
-            # This method is called from both sync (BasePPOExp.run) and async
-            # (EvalOnlyEntrypoint.run) contexts. Using a thread with its own
-            # event loop avoids the "cannot call asyncio.run() from a running
-            # event loop" error that occurs in the async case.
-            exc_holder = [None]
-
-            def _sleep_engines():
-                try:
-                    asyncio.run(client.sleep())
-                except Exception as e:
-                    exc_holder[0] = e
-
-            thread = threading.Thread(target=_sleep_engines)
-            thread.start()
-            thread.join()
-
-            if exc_holder[0] is not None:
-                raise RuntimeError("Failed to sleep colocated inference engines") from exc_holder[0]
-
+            # Callers must invoke get_inference_client() from a sync context (no running event loop).
+            asyncio.run(client.sleep())
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client

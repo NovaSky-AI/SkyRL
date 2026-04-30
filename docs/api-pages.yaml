@@ -184,6 +184,25 @@
             - skyrl.train.config.config.SkyRLGymConfig
             - skyrl.train.config.config.GSM8kLLMJudgeEnvConfig
 
+    - slug: sft
+      title: SFT
+      description: Supervised Fine-Tuning configuration and trainer.
+      sections:
+        - heading: Configuration
+          description: ""
+          objects:
+            - skyrl.train.config.sft_config.SFTPlacementConfig
+            - skyrl.train.config.sft_config.SFTConfig
+        - heading: Trainer
+          description: ""
+          objects:
+            - skyrl.train.sft_trainer.SFTTrainer
+        - heading: Config Bridge
+          description: ""
+          objects:
+            - skyrl.train.config.sft_config.validate_sft_cfg
+            - skyrl.train.config.sft_config.build_skyrl_config_for_sft
+
     - slug: env-vars
       title: Environment Variables
       description: Configuration via environment variables.

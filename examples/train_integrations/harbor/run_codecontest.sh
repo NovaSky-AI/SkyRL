@@ -22,36 +22,47 @@ EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 # Directory setup
 #-----------------------
 RUN_NAME="codecontest"
-TRIALS_DIR="$HOME/$RUN_NAME/trials_run"
-CKPTS_DIR="$HOME/$RUN_NAME/ckpts"
-EXPORTS_DIR="$HOME/$RUN_NAME/exports"
-LOG_DIR="/tmp/skyrl-logs/$RUN_NAME"
+STORAGE_ROOT="/mnt/local_storage/$RUN_NAME"
+TRIALS_DIR="$STORAGE_ROOT/trials_run"
+CKPTS_DIR="$STORAGE_ROOT/ckpts"
+EXPORTS_DIR="$STORAGE_ROOT/exports"
+LOG_DIR="$STORAGE_ROOT/logs"
 
 #-----------------------
 # Training setup
 #-----------------------
+N_SAMPLES_PER_PROMPT=8
 MINI_BATCH_SIZE=32
 MAX_MODEL_LEN=32768
-APPLY_OVERLONG_FILTERING=true
 
-# Dr. GRPO parameters
-LOSS_REDUCTION="seq_mean_token_sum_norm"
+# Algorithmic parameters
+LOSS_REDUCTION="token_mean"  # with step-wise training, we have to use token_mean to be prefix-merge-invariant
 GRPO_NORM_BY_STD=false
 USE_KL_LOSS=false
+APPLY_OVERLONG_FILTERING=true
 
-# Essentially achieves interleaved thinking and hence on-policy training without step-wise training.
+# Essentially achieves interleaved thinking (does not strip thinking tokens). Allows our step-wise
+# training to be able to merge more step-wise outputs and hence speed up training.
+# If you change the model you train, please change it accordingly, and decide if you need to make
+# modifications.
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
+
+# TIS corrections
+TIS_TYPE=token
+TIS_IMP_RATIO_CAP=2.0
 
 #----------------
 # Infrastructure setup
 #----------------
-NUM_GPUS=4
+NUM_POLICY_GPUS=8
+NUM_INFERENCE_ENGINES=4
+TP_SIZE=2
 ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
 TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
 
 # Run SkyRL command
-uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
+_SKYRL_USE_NEW_INFERENCE=0 uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
@@ -64,32 +75,37 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
-  generator.inference_engine.tensor_parallel_size=1 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_POLICY_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_POLICY_GPUS \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   generator.inference_engine.engine_init_kwargs.chat_template=$CHAT_TEMPLATE_PATH \
   generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
   generator.inference_engine.engine_init_kwargs.enable_log_requests=false \
   trainer.epochs=3 \
   trainer.eval_batch_size=128 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=20 \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=100 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$MINI_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=5 \
+  trainer.max_ckpts_to_keep=5 \
   trainer.hf_save_interval=5 \
   trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  generator.n_samples_per_prompt=8 \
-  generator.eval_n_samples_per_prompt=4 \
+  generator.step_wise_trajectories=true \
+  generator.merge_stepwise_output=true \
+  generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  generator.eval_n_samples_per_prompt=2 \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger=wandb \

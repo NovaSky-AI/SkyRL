@@ -45,12 +45,10 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
-    init_remote_inference_servers,
-)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
+    init_remote_inference_servers,
     init_worker_with_type,
 )
 
@@ -77,7 +75,6 @@ def _get_test_sampling_params(cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str,
     sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
         sampling_params["top_logprobs"] = 1
-    sampling_params["return_tokens_as_token_ids"] = True
     return sampling_params
 
 
@@ -170,8 +167,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
             choice = response_data["choices"][i]
             assert "logprobs" in choice
             assert choice["logprobs"]["content"] is not None
-            # tokens are token_id:<int> because we request `return_tokens_as_token_ids` from vllm
-            assert choice["logprobs"]["content"][0]["token"].split(":")[1].isdigit()
+            assert isinstance(choice["logprobs"]["content"][0]["token"], str)
 
 
 def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm"):

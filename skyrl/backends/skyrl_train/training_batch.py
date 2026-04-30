@@ -1,5 +1,6 @@
 """Defines interfaces for training data."""
 
+import copy
 import io
 import pickle
 from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
@@ -469,8 +470,8 @@ class TrainingInput(TypedDict, total=False):
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]
-    pixel_values: Optional[TensorList]  # list of [num_patches_i, dim]
-    image_grid_thw: Optional[TensorList]  # list of [num_images_i, 3]
+    pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
+    image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):
@@ -483,3 +484,60 @@ class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
     """Training output data"""
 
     pass
+
+
+def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
+    """Pad `pad_size` entries to `unpadded_batch`, return a newly allocated TrainingInputBatch. If pad_size is 0, return the original batch."""
+    # TODO(Charlie): This incurs 2x CPU memory usage when pad_size > 0. Optimize when needed.
+    # Padding allocates and concatenates; it should not happen on GPU hot path.
+    assert unpadded_batch.device is None or unpadded_batch.device == torch.device(
+        "cpu"
+    ), f"pad_batch expects batch on CPU, got device={unpadded_batch.device}"
+    assert pad_size >= 0, f"pad_size must be >= 0, got {pad_size}"
+
+    # Handle the special case of no padding.
+    if pad_size == 0:
+        if unpadded_batch.metadata is None:
+            unpadded_batch.metadata = {}
+        unpadded_batch.metadata["pad_size"] = 0
+        return unpadded_batch
+
+    # Pad each tensor depending on its type.
+    new_tensors = {}
+    for key, tensor in unpadded_batch.items():
+        if tensor is None:
+            new_tensors[key] = None
+            continue
+
+        if isinstance(tensor, TensorList):
+            assert len(tensor) > 0, f"Cannot pad empty TensorList field {key!r}"
+            padding = TensorList([tensor[0].clone() for _ in range(pad_size)])
+            new_tensors[key] = TensorList.cat([tensor, padding])
+        elif key == "loss_mask":
+            # Ensures that padding tensors don't count towards the loss
+            additional_dims = tensor.shape[1:]
+            padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        else:
+            # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.
+            assert tensor.shape[0] > 0, f"Cannot pad empty tensor field {key!r}"
+            pad_indices = [0] * pad_size
+            padding_tensor = tensor[pad_indices].clone()
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+
+    # Update metadata as well.
+    new_metadata = {}
+    old_metadata = unpadded_batch.metadata or {}
+    for key, value in old_metadata.items():
+        if key == "uids":
+            new_metadata["uids"] = value + [f"pad{i}" for i in range(pad_size)]
+        elif key == "is_last_step":
+            new_metadata["is_last_step"] = value + [True for _ in range(pad_size)]
+        else:
+            new_metadata[key] = copy.deepcopy(value)
+    new_metadata["pad_size"] = pad_size
+
+    new_batch = TrainingInputBatch(new_tensors)
+    new_batch.metadata = new_metadata
+
+    return new_batch

@@ -26,9 +26,9 @@ This page will also guide you how to implement step-wise training for your custo
 
 When step-wise is enabled, a batch of T trajectories with an average of M turns per trajectory produces T×M training samples (sequences). This means:
 
-- **Each mini-batch contains the same number of sequences** (`policy_mini_batch_size * n_samples`), but those sequences are now step-samples rather than full trajectories. The effective number of trajectories per mini-batch is reduced. The number of mini-batches (and hence optimizer steps) per training batch increases by the average number of turns — so if you have `train_batch_size=mini_batch_size=32` with an average of 3 turns, you get 3 optimizer steps instead of 1 for each training step. It is also possible that a mini-batch boundary falls mid-trajectory.
+- **Each mini-batch contains the sequences for exactly `policy_mini_batch_size` prompts**, regardless of how many turns those prompts produced. This means the number of mini-batches (and hence optimizer steps) per training batch is always `train_batch_size / policy_mini_batch_size`, independent of the number of turns. This also means that the actual mini batch size (number of sequences) trained in each mini batch can vary. Each mini batch always leads to a single optimizer step.
 - **Advantages are computed on last steps only**, then broadcast to all steps of the same trajectory. This is mathematically equivalent to non-step-wise advantage computation for GRPO.
-- **Training time grows as O(T²) vs O(T)**, since each trajectory of T turns becomes T sequences to forward (each with a growing prompt prefix), as opposed to 1 sequence. SkyRL will support prefix-aware merging of per-step sequences when the prefix matches (WIP), which brings the cost back to O(T) in the common case.
+- **Training time grows as O(T²) vs O(T)**, since each trajectory of T turns becomes T sequences to forward (each with a growing prompt prefix), as opposed to 1 sequence. SkyRL supports prefix-aware merging of per-step sequences when the prefix matches with config flag `generator.merge_stepwise_output`, which can reduce the O(T²) cost if chat history is linearly appending across turns and there is no token mismatch. See https://github.com/NovaSky-AI/SkyRL/pull/1532
 - **Metrics** like `generate/avg_num_tokens` and `generate/avg_response_length` are per-turn rather than per-trajectory, since each training sample is a single turn.
 
 Some algorithms have their behavior altered by step-wise decomposition, since each turn is now treated as its own sequence:
@@ -182,6 +182,8 @@ for i, step_output in enumerate(trajectory_steps):
         # Intermediate step: all zeros
         rewards = [0.0] * len(step_output.response_ids)
 ```
+
+Note that SkyRL currently only supports trajectory-level reward for step-wise training. Therefore, the reward should be placed at the last step's last token, and all non-last-step rewards are ignored. We then use the last step's reward to estimate the advantage and broadcast it to previous turns. Because of this, you should only use outcome-based advantage estimators (`cfg.trainer.algorithm.advantage_estimator` in `grpo`, `rloo`, or `maxrl`); `reinforce++` and `gae` are rejected at config validation time.
 
 ### 4. Ensure Contiguous Ordering
 

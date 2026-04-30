@@ -1,0 +1,136 @@
+---
+title: "Multi-Turn VLM RL on Geometry-3K"
+---
+
+<Callout type="info">
+Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and local vLLM source override).
+</Callout>
+
+In this example we train a vision-language model to solve geometry problems from the [Geometry-3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). The model sees a geometry diagram plus a text question, reasons, and iteratively checks its answer with a `calc_score` tool before committing to a final boxed answer.
+
+Source code: `examples/train/geometry3k/`.
+
+## Task Overview
+
+The dataset contains ~3,000 geometry problems, each with:
+
+- **image(s)** — geometry diagrams (PIL images).
+- **problem** — problem text that may reference the image.
+- **answer** — ground-truth answer.
+
+The model interacts over up to 3 turns per episode:
+
+1. Read the diagram and question.
+2. Reason, then call `calc_score` to check an answer:
+   ```
+   <tool_call>{"name": "calc_score", "arguments": {"answer": "<your_answer>"}}</tool_call>
+   ```
+3. Environment responds with `calc_score result: 0.0|1.0` plus feedback; model can retry with a different approach.
+4. Final answer as `\boxed{answer}`.
+
+Reward is binary (1.0 correct / 0.0 otherwise), extracted from `\boxed{}` or the last `calc_score` tool call.
+
+## Data Preparation
+
+The training script auto-generates the dataset on first run. To prepare it explicitly:
+
+```bash
+uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir ~/data/geometry_3k
+```
+
+This downloads `hiyouga/geometry3k`, base64-encodes each PIL diagram as a JPEG data URI, and writes `train.parquet` / `val.parquet`. Each row's `prompt` is a chat-format message with an `image_url` content part followed by the question text. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl#dataset-record-shape) for the record format.
+
+## Tool-Calling Protocol
+
+The environment at `examples/train/geometry3k/env.py` parses `<tool_call>` blocks from the model output:
+
+```python
+TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+SUPPORTED_TOOL_NAMES = {"calc_score"}
+```
+
+If the tool call scores 1.0, the env returns "you can now provide the final answer." If 0.0 and not on the final turn, the env nudges the model to reason differently. If no tool call is found, the env falls back to extracting a boxed answer directly from the text and terminates the episode.
+
+Observations returned by `step()` are plain-text feedback strings (no images) — the model sees the diagram once in the initial prompt and reasons about it across turns without new image inputs. This is the **text-only observation** pattern described in the VLM tutorial.
+
+## Training Configuration
+
+Key VLM-specific overrides from `examples/train/geometry3k/run_geometry3k.sh`:
+
+```bash title="examples/train/geometry3k/run_geometry3k.sh"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+  python examples/train/geometry3k/geometry3k_entrypoint.py \
+  trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
+  trainer.strategy=fsdp2 \
+  # VLM flags — see the tutorial for background
+  generator.vision_language_generator=true \
+  generator.batched=false \
+  trainer.use_sample_packing=false \
+  # Multi-turn rollouts
+  generator.max_turns=3 \
+  generator.inference_engine.async_engine=true \
+  # Algorithm
+  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.use_kl_loss=false \
+  generator.n_samples_per_prompt=4 \
+  # ... full config in the script
+```
+
+Defaults: Qwen3-VL-8B-Instruct, GRPO, 4 samples per prompt, 3 turns max, max prompt length 1024 / max generate 2048 per turn.
+
+## LoRA Support
+
+Using the `fsdp` backend, LoRA is supported for VLM models. Enabling LoRA requires a few additional configuration flags to `run_geometry3k.sh` — add the `trainer.policy.model.lora.*` overrides and bump the policy learning rate since LoRA usually tolerates a larger learning rate:
+
+```bash title="delta vs. run_geometry3k.sh"
+  trainer.policy.model.lora.rank=32 \
+  trainer.policy.model.lora.alpha=32 \
+  trainer.policy.optimizer_config.lr=3.0e-5 \
+```
+
+The complete, runnable script is at `examples/train/geometry3k/run_geometry3k_lora.sh`:
+
+```bash
+bash examples/train/geometry3k/run_geometry3k_lora.sh
+```
+
+For the full parameter reference (`rank`, `alpha`, `dropout`, `target_modules`, `exclude_modules`, `lora_sync_path`, `init_method`) and general guidance on choosing LoRA hyperparameters, see the [LoRA example](../examples/lora).
+
+## Launching
+
+```bash
+bash examples/train/geometry3k/run_geometry3k.sh
+```
+
+Override with env vars:
+
+```bash
+# W&B logging
+LOGGER=wandb bash examples/train/geometry3k/run_geometry3k.sh
+
+# Custom data dir
+DATA_DIR=/path/to/data bash examples/train/geometry3k/run_geometry3k.sh
+```
+
+## Results
+
+![Geometry-3K reward curve](/images/examples/geometry3k_reward.png)
+
+## What's Next
+
+- **[VisGym example](visgym)** — multi-image multi-turn VLM RL where the env returns a new image per step.
+- **[Vision-Language RL tutorial](../tutorials/vision_language_rl)** — shared setup background for both VLM examples.
+- **[Creating a New Environment](../tutorials/new_env)** — build your own multi-turn env.
+
+## Citation
+
+Geometry-3K was introduced by Lu et al. (2021) as part of Inter-GPS. The parquet build used in this example is derived from the [`hiyouga/geometry3k`](https://huggingface.co/datasets/hiyouga/geometry3k) repackaging on Hugging Face. If you use this example in your work, please cite the original paper:
+
+```bibtex
+@inproceedings{lu2021inter,
+  title = {Inter-GPS: Interpretable Geometry Problem Solving with Formal Language and Symbolic Reasoning},
+  author = {Lu, Pan and Gong, Ran and Jiang, Shibiao and Qiu, Liang and Huang, Siyuan and Liang, Xiaodan and Zhu, Song-Chun},
+  booktitle = {The Joint Conference of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (ACL-IJCNLP 2021)},
+  year = {2021}
+}
+```
