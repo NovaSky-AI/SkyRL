@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.setup import create_inference_servers
 from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
     build_vllm_cli_args,
 )
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
@@ -620,6 +621,7 @@ class InferenceEngineState:
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 active_lora_name=active_lora_name,
+                uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
                 data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )

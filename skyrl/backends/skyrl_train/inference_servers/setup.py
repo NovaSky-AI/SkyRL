@@ -16,7 +16,12 @@ from skyrl.train.utils.utils import (
 
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
-from .utils import build_router_args, build_vllm_cli_args, get_pd_cli_args
+from .utils import (
+    _uses_lora_weight_sync,
+    build_router_args,
+    build_vllm_cli_args,
+    get_pd_cli_args,
+)
 from .vllm_router import VLLMRouter
 
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
@@ -284,6 +289,7 @@ def build_new_inference_client(
         model_name=cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         active_lora_name=active_lora_name,
+        uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
     )
