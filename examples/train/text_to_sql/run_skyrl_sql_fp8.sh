@@ -33,7 +33,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
-  trainer.epochs=125 \
+  trainer.epochs=30 \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.policy.fsdp_config.cpu_offload=false \
@@ -53,9 +53,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy_mini_batch_size=256 \
   trainer.algorithm.use_kl_loss=false \
-  trainer.ckpt_interval=-1 \
-  trainer.hf_save_interval=-1 \
-  trainer.dump_data_batch=false \
+  trainer.ckpt_interval=60 \
+  trainer.hf_save_interval=30 \
+  trainer.dump_data_batch=true \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
