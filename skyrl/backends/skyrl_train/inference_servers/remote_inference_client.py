@@ -1115,7 +1115,7 @@ class RemoteInferenceClient:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
 
         Returns:
-            Dict mapping server_url to load response.
+            Dict mapping server_url to response.
         """
         if self.active_lora_name is None:
             raise ValueError("active_lora_name must be set on RemoteInferenceClient before loading a LoRA adapter.")
