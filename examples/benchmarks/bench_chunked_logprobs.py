@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 VOCAB_SIZE = 32000
 SEQ_LENS = [32768, 65536, 131072]
-CHUNK_SIZES = [None, 1024, 4096, 8192]
+CHUNK_SIZES = [None, 32, 1024, 4096, 8192]
 WARMUP_REPS = 2
 BENCH_REPS = 5
 
