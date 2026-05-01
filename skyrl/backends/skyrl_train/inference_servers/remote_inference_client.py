@@ -1100,16 +1100,16 @@ class RemoteInferenceClient:
         lora_path: str,
     ) -> Dict[str, Any]:
         """
-        Update LoRA adapter weights by loading from disk on all backend servers.
+        Update LoRA adapter weights by loading from disk on all backend servers via /v1/load_lora_adapter.
 
-        Implementation: unload then load (with load_inplace=False), rather than a single
-        load with load_inplace=True. Reason: vLLM's /v1/load_lora_adapter caches the
-        LoRARequest object server-side keyed by lora_name (see OpenAIServingModels.lora_requests).
-        If load_inplace=True is set on that cached request, every subsequent generate request
-        causes LRUCacheWorkerLoRAManager.add_adapter to re-read the adapter from disk on every
-        model step (line 299-307 of vllm/lora/worker_manager.py checks `load_inplace` per-step).
-        The cleanest fix is upstream (clear load_inplace before caching); until that lands,
-        unloading first lets us reuse the same lora_name without ever needing load_inplace=True.
+        Always loads under self.active_lora_name so the same slot is reused across
+        weight syncs.
+
+        After loading, generation requests will automatically use the LoRA adapter
+        by setting the model name to the LoRA adapter name.
+
+        TODO(aaron): remove _unload_on_server and add back "load_inplace": True to payload after
+        vllm lora disk load bug is fixed.
 
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
