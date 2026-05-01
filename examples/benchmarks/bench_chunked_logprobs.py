@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 VOCAB_SIZE = 32000
 SEQ_LENS = [32768, 65536, 131072]
-CHUNK_SIZE = 1024
+CHUNK_SIZES = [None, 1024, 4096, 8192]
 WARMUP_REPS = 2
 BENCH_REPS = 5
 
@@ -73,17 +73,16 @@ def main():
 
     device = torch.device("cuda", 0)
     print(f"Device : {torch.cuda.get_device_name(device)}")
-    print(f"Vocab  : {VOCAB_SIZE:,}  |  chunk_size={CHUNK_SIZE}  |  warmup={WARMUP_REPS}  bench={BENCH_REPS}\n")
+    print(f"Vocab  : {VOCAB_SIZE:,}  |  chunk_sizes={CHUNK_SIZES}  |  warmup={WARMUP_REPS}  bench={BENCH_REPS}\n")
 
     col_w = 14
     header = (
         f"{'seq_len':>10}  "
-        f"{'no-chunk ms':>{col_w}}  "
-        f"{'chunk ms':>{col_w}}  "
-        f"{'speedup':>{col_w}}  "
-        f"{'no-chunk MB':>{col_w}}  "
-        f"{'chunk MB':>{col_w}}  "
-        f"{'mem saved':>{col_w}}"
+        f"{'chunk_size':>10}  "
+        f"{'time ms':>{col_w}}  "
+        f"{'peak MB':>{col_w}}  "
+        f"{'vs no-chunk':>{col_w}}  "
+        f"{'mem saved MB':>{col_w}}"
     )
     sep = "-" * len(header)
     print(header)
@@ -95,35 +94,43 @@ def main():
         labels = torch.randint(0, VOCAB_SIZE, (seq_len,), device=device)
 
         # ----- warmup -----
-        for _ in range(WARMUP_REPS):
-            _ = measure(logits, labels, chunk_size=None, reps=1)
-            _ = measure(logits, labels, chunk_size=CHUNK_SIZE, reps=1)
+        for cs in CHUNK_SIZES:
+            for _ in range(WARMUP_REPS):
+                _ = measure(logits, labels, chunk_size=cs, reps=1)
 
-        # ----- benchmark -----
-        t_none, mem_none = measure(logits, labels, chunk_size=None, reps=BENCH_REPS)
-        t_chunk, mem_chunk = measure(logits, labels, chunk_size=CHUNK_SIZE, reps=BENCH_REPS)
+        # ----- benchmark: collect baseline (no-chunk) first -----
+        t_baseline, mem_baseline = measure(logits, labels, chunk_size=None, reps=BENCH_REPS)
 
-        speedup = t_none / t_chunk if t_chunk > 0 else float("inf")
-        mem_none_mb = mem_none / (1024**2)
-        mem_chunk_mb = mem_chunk / (1024**2)
-        mem_saved_mb = mem_none_mb - mem_chunk_mb
+        # ----- print one row per chunk_size -----
+        for cs in CHUNK_SIZES:
+            if cs is None:
+                t_cs, mem_cs = t_baseline, mem_baseline
+            else:
+                t_cs, mem_cs = measure(logits, labels, chunk_size=cs, reps=BENCH_REPS)
 
-        print(
-            f"{seq_len:>10,}  "
-            f"{t_none:>{col_w}.1f}  "
-            f"{t_chunk:>{col_w}.1f}  "
-            f"{speedup:>{col_w}.2f}x  "
-            f"{mem_none_mb:>{col_w}.0f}  "
-            f"{mem_chunk_mb:>{col_w}.0f}  "
-            f"{mem_saved_mb:>{col_w}.0f}"
-        )
+            speedup = t_baseline / t_cs if t_cs > 0 else float("inf")
+            mem_cs_mb = mem_cs / (1024**2)
+            mem_baseline_mb = mem_baseline / (1024**2)
+            mem_saved_mb = mem_baseline_mb - mem_cs_mb
+            cs_label = "None" if cs is None else str(cs)
 
-        # Free memory before next iteration
+            print(
+                f"{seq_len:>10,}  "
+                f"{cs_label:>10}  "
+                f"{t_cs:>{col_w}.1f}  "
+                f"{mem_cs_mb:>{col_w}.0f}  "
+                f"{speedup:>{col_w}.2f}x  "
+                f"{mem_saved_mb:>{col_w}.0f}"
+            )
+
+        print(sep)
+
+        # Free memory before next seq_len
         del logits, labels
         torch.cuda.empty_cache()
 
-    print(sep)
     print("All times are mean wall-clock (ms) over forward+backward passes.")
+    print("vs no-chunk: speedup relative to chunk_size=None (>1 = faster).")
 
 
 if __name__ == "__main__":
