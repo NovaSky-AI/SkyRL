@@ -23,6 +23,7 @@ Or as a CLI entrypoint::
 import os
 import random
 from dataclasses import asdict
+from math import ceil
 from typing import Optional
 
 import ray
@@ -393,6 +394,8 @@ class SFTTrainer:
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
         )
+        # num_steps may be None when num_epochs is used; the worker will use its
+        # default (large value) for the LR scheduler in that case.
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,
@@ -732,7 +735,17 @@ class SFTTrainer:
         self._log_dataset_stats(tokenized)
 
         batch_size = self.sft_cfg.batch_size
-        num_steps = self.sft_cfg.num_steps
+
+        # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
+        if self.sft_cfg.num_steps is not None:
+            num_steps = self.sft_cfg.num_steps
+        else:
+            steps_per_epoch = ceil(len(tokenized) / batch_size)
+            num_steps = self.sft_cfg.num_epochs * steps_per_epoch
+            logger.info(
+                f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
+                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = {num_steps} steps"
+            )
 
         # Early validation: dataset must have at least batch_size examples
         if len(tokenized) < batch_size:
