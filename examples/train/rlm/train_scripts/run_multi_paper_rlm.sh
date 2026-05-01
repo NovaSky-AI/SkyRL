@@ -13,9 +13,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/rlm-synthetic-multi}"
-: "${NUM_ENGINES:=2}"
+: "${NUM_ENGINES:=1}"
 : "${TP_SIZE:=4}"
-: "${TRAIN_GPUS:=8}"
+: "${TRAIN_GPUS:=4}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
