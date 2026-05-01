@@ -384,26 +384,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have enough groups buffered.
+                    # 1. Non-blocking streaming training: process mini-batch when buffer has enough data.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
                     with Timer("wait_for_generation_buffer", self.all_timings):
-                        buffer_pbar = tqdm(
-                            total=self.mini_batch_size,
-                            initial=0,
-                            desc="Generation Buffer Progress",
-                            position=1,
-                        )
-                        # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
-                        # self.mini_batch_size, and assume that all trajectories succeed (just like sync training),
-                        # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
-                        # should handle the case where the dataloader is exhausted and the buffer is empty, or
-                        # else this loop will never exit.
-                        while len(cur_generation_group_mini_batch) < self.mini_batch_size:
+                        while generation_output_group_buffer.qsize() < self.mini_batch_size:
+                            # Sleep briefly to avoid busy waiting while generation workers keep running.
+                            await asyncio.sleep(0.01)
+                        logger.info(f"Buffer size: {generation_output_group_buffer.qsize()}")
+                        for _ in range(self.mini_batch_size):
                             # We do finish-time FIFO here (not schedule-time FIFO)
-                            cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
-                            buffer_pbar.update(1)
-                            buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                        buffer_pbar.close()
+                            try:
+                                cur_generation_group_mini_batch.append(generation_output_group_buffer.get_nowait())
+                            except asyncio.QueueEmpty as e:
+                                raise AssertionError(
+                                    "Generation buffer unexpectedly drained while collecting a mini-batch."
+                                ) from e
 
                     # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
                     with Timer("convert_to_training_input", self.all_timings):
@@ -593,11 +588,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.on_rollout_accepted()
         except asyncio.CancelledError:
             # If a slot was acquired but we exit early, release running count
-            try:
-                if "slot_acquired" in locals() and slot_acquired:
-                    raise RuntimeError("Generation workers should only be cancelled when they finish running.")
-            finally:
-                return
+            if "slot_acquired" in locals() and slot_acquired:
+                raise RuntimeError("Generation workers should only be cancelled when they finish running.")
+            return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
             logger.error(f"Traceback: \n{traceback.format_exc()}")
