@@ -4,7 +4,7 @@ set -x
 # SFT training with Megatron backend for Qwen2.5-0.5B-Instruct on Tulu3
 #
 # This script runs supervised fine-tuning using the Megatron backend with
-# pure data parallelism (DP=4) on 4 GPUs with the Alpaca dataset.
+# pure data parallelism (DP=4) on 4 GPUs with the Tulu3 dataset.
 # For larger models that exceed single-GPU memory, increase TP/PP below
 # (e.g. tensor_model_parallel_size=2, pipeline_model_parallel_size=2).
 #

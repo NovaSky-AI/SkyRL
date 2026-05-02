@@ -15,6 +15,7 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.sft_trainer import tokenize_chat_example
+from skyrl.utils.tok import get_tokenizer
 
 # Path to the custom Qwen3 chat template that doesn't add empty thinking blocks
 QWEN3_ACC_THINKING_TEMPLATE_PATH = os.path.join(
@@ -936,16 +937,14 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
 
 # ============================================================================
-# Regression: TULU3-style assistant content starting with whitespace
+# Regression: TULU3-style assistant content starting with newline
 # ============================================================================
 
 
 @pytest.fixture(scope="module")
 def qwen25_tokenizer():
     """Qwen2.5 tokenizer used to repro the TULU3 leading-newline merge case."""
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+    tok = get_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
     return tok
 
 
