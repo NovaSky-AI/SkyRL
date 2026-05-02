@@ -32,7 +32,7 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
 
-# NOTE (sumanthrh): We use a chunk size of 1024 for calaulating logprobs
+# NOTE (sumanthrh): We use a chunk size of 1024 for calculating logprobs
 # from logits to avoid OOMs for large sequence lengths.
 # For more details, see https://github.com/NovaSky-AI/SkyRL/pull/1610
 CHUNK_SIZE_LOGPROBS = 1024
