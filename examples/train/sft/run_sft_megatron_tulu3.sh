@@ -12,7 +12,7 @@ set -x
 #   bash examples/train/sft/run_sft_megatron_tulu3.sh [extra overrides...]
 #
 # Example:
-#   bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
+#   bash examples/train/sft/run_sft_megatron_tulu3.sh num_steps=20 batch_size=8
 
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
