@@ -193,6 +193,7 @@ def _tokenize_chat_last_assistant(
         "input_ids": full_ids,
         "attention_mask": [1] * len(full_ids),
         "num_actions": num_actions,
+        "loss_mask": [1] * num_actions,
     }
 
 
@@ -276,9 +277,8 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     - attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
     - loss_mask: [batch_size, num_actions] - 1 for tokens to compute loss on
 
-    When an example contains a ``loss_mask`` key (e.g. from
-    ``ALL_ASSISTANT_MESSAGES`` tokenization), that per-token mask is used
-    directly instead of generating an all-1s mask.
+    All examples are expected to carry a ``loss_mask`` key (guaranteed by both
+    ``_tokenize_chat_last_assistant`` and ``_tokenize_chat_all_assistants``).
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
@@ -293,12 +293,8 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
         attention_masks.append([0] * pad_len + ex["attention_mask"])
 
-        # Per-example loss_mask: use explicit mask if provided, else all-1s
         action_pad = max_num_actions - ex["num_actions"]
-        if "loss_mask" in ex:
-            loss_masks.append([0] * action_pad + ex["loss_mask"])
-        else:
-            loss_masks.append([0] * action_pad + [1] * ex["num_actions"])
+        loss_masks.append([0] * action_pad + ex["loss_mask"])
 
     batch = TrainingInputBatch(
         {

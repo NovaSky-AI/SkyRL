@@ -168,11 +168,16 @@ def test_alpaca_truncated_response(tokenizer):
 
 
 def _make_example(input_ids, num_actions):
-    """Helper to create a tokenized example dict for collation tests."""
+    """Helper to create a tokenized example dict for collation tests.
+
+    Mirrors ``_tokenize_chat_last_assistant``: loss_mask is num_actions long,
+    all 1s (train on every response token).
+    """
     return {
         "input_ids": input_ids,
         "attention_mask": [1] * len(input_ids),
         "num_actions": num_actions,
+        "loss_mask": [1] * num_actions,
     }
 
 
@@ -398,38 +403,12 @@ def test_loss_norm_all_nonpad(tokenizer):
 
 
 # ---------------------------------------------------------------------------
-# Explicit loss_mask in collation (ALL_ASSISTANT_MESSAGES support)
-# ---------------------------------------------------------------------------
-
-
-def test_collate_explicit_loss_mask(tokenizer):
-    """Collation uses explicit per-token loss_mask when present."""
-    examples = [
-        {
-            "input_ids": [1, 2, 3, 4, 5],
-            "attention_mask": [1, 1, 1, 1, 1],
-            "num_actions": 4,
-            "loss_mask": [1, 0, 0, 1],  # assistant, user, user, assistant
-        },
-        _make_example([10, 20, 30], 2),  # no explicit loss_mask -> all 1s
-    ]
-    batch = collate_sft_batch(examples, tokenizer)
-
-    # max_num_actions = 4
-    assert batch["loss_mask"].shape == (2, 4)
-    # Example 0: explicit mask, no action padding needed
-    assert batch["loss_mask"][0].tolist() == [1, 0, 0, 1]
-    # Example 1: 2 actions, padded to 4 -> [0, 0, 1, 1]
-    assert batch["loss_mask"][1].tolist() == [0, 0, 1, 1]
-
-
-# ---------------------------------------------------------------------------
 # TrainOnWhat: LAST_ASSISTANT_MESSAGE tests
 # ---------------------------------------------------------------------------
 
 
 def test_train_on_what_single_turn_last_assistant(tokenizer):
-    """Single-turn with LAST_ASSISTANT_MESSAGE: behavior unchanged."""
+    """Single-turn with LAST_ASSISTANT_MESSAGE: returns loss_mask covering last assistant turn."""
     example = {
         "messages": [
             {"role": "user", "content": "Hi"},
@@ -443,12 +422,13 @@ def test_train_on_what_single_turn_last_assistant(tokenizer):
     )
     assert result is not None
     assert result["num_actions"] > 0
-    # LAST_ASSISTANT_MESSAGE does not produce a loss_mask key
-    assert "loss_mask" not in result
+    assert "loss_mask" in result
+    assert len(result["loss_mask"]) == result["num_actions"]
+    assert result["loss_mask"] == [1] * result["num_actions"]
 
 
 def test_train_on_what_multi_turn_last_assistant_only(tokenizer):
-    """Multi-turn with LAST_ASSISTANT_MESSAGE: only last assistant counted."""
+    """Multi-turn with LAST_ASSISTANT_MESSAGE: only last assistant counted, loss_mask reflects that."""
     messages = [
         {"role": "user", "content": "What is 2+2?"},
         {"role": "assistant", "content": "4"},
@@ -466,7 +446,9 @@ def test_train_on_what_multi_turn_last_assistant_only(tokenizer):
     # Only the last assistant's tokens should be counted
     expected_last = "6<|im_end|>\n"
     assert result["num_actions"] == len(tokenizer.encode(expected_last))
-    assert "loss_mask" not in result
+    assert "loss_mask" in result
+    assert len(result["loss_mask"]) == result["num_actions"]
+    assert result["loss_mask"] == [1] * result["num_actions"]
 
 
 # ---------------------------------------------------------------------------
