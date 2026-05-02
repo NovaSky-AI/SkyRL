@@ -82,7 +82,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `megatron_config.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |
 | `logger` | `console` | `console` or `wandb` |
 | `project_name` | `skyrl_sft` | W&B project name (when `logger=wandb`) |
-| `train_on_what` | `last_assistant_message` | Which tokens to train on. See `TrainOnWhat` enum: `last_assistant_message` (default, loss on final assistant reply only) or `all_assistant_messages` (loss on every assistant message). Other values defined for future use. |
+| `train_on_what` | `last_assistant_message` | Which tokens to train on. See `TrainOnWhat` enum: `last_assistant_message` (default, loss on final assistant reply only) or `all_assistant_messages` (loss on every assistant message).
 | `dummy_run_full_ctx` | `false` | Enable dummy/benchmarking mode |
 | `dummy_run_max_steps` | `5` | Steps to run in dummy mode |
 
