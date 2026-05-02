@@ -718,6 +718,8 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
                 kwargs[f.name] = build_nested_dataclass(nested_cls, value)
             elif issubclass(nested_cls, Enum):
                 kwargs[f.name] = nested_cls(value)
+            else:
+                kwargs[f.name] = value
         else:
             # Primitives, None, lists, raw dicts, already-constructed objects
             kwargs[f.name] = value
