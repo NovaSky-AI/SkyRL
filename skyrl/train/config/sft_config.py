@@ -149,7 +149,7 @@ class SFTConfig(BaseConfig):
     # ---- HF export ----
     hf_save_interval: int = 0
     """Save HuggingFace-format weights every N steps. 0 = disabled."""
-    hf_export_path: str = ""
+    export_path: str = ""
     """Directory for HF-format exports. Defaults to ckpt_path/hf_exports if empty."""
 
     seed: int = 42
@@ -274,8 +274,8 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     # HF export
     if sft_cfg.hf_save_interval > 0:
         cfg.trainer.hf_save_interval = sft_cfg.hf_save_interval
-        if sft_cfg.hf_export_path:
-            cfg.trainer.export_path = sft_cfg.hf_export_path
+        if sft_cfg.export_path:
+            cfg.trainer.export_path = sft_cfg.export_path
         elif sft_cfg.ckpt_path:
             cfg.trainer.export_path = os.path.join(sft_cfg.ckpt_path, "hf_exports")
         # else: leave cfg.trainer.export_path at its default (~/exports/)

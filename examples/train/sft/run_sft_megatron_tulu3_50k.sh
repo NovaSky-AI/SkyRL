@@ -13,7 +13,7 @@ set -x
 #   bash examples/train/sft/run_sft_megatron_tulu3_50k.sh [extra overrides...]
 
 : "${CKPT_PATH:="$HOME/ckpts/skyrl_tulu3_50k"}"
-: "${HF_EXPORT_PATH:="/tmp/skyrl_tulu3_50k_hf_ckpts"}"
+: "${export_path:="/tmp/skyrl_tulu3_50k_hf_ckpts"}"
 
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
@@ -46,5 +46,5 @@ uv run --isolated --extra megatron \
     resume_from="" \
     train_on_what="all_assistant_messages" \
     hf_save_interval=2083 \
-    hf_export_path="$HF_EXPORT_PATH" \
+    export_path="$export_path" \
     "$@"
