@@ -1,9 +1,19 @@
 #!/bin/bash
 set -x
 
+
+# SFT training with Megatron backend for Qwen2.5-0.5B-Instruct on Tulu3
+#
+# This script runs supervised fine-tuning using the Megatron backend with
+# pure data parallelism (DP=4) on 4 GPUs with the Tulu3 dataset.
+# For larger models that exceed single-GPU memory, increase TP/PP below
+# (e.g. tensor_model_parallel_size=2, pipeline_model_parallel_size=2).
+
 # Usage:
 #   bash examples/train/sft/run_sft_megatron_tulu3_50k.sh [extra overrides...]
 
+: "${CKPT_PATH:="$HOME/ckpts/skyrl_tulu3_50k"}"
+: "${HF_EXPORT_PATH:="/tmp/skyrl_tulu3_50k_hf_ckpts"}"
 
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
@@ -31,10 +41,10 @@ uv run --isolated --extra megatron \
     logger=wandb \
     project_name=skyrl_sft \
     run_name=skyrl_sft_megatron_tulu3_50k \
-    ckpt_path="" \
+    ckpt_path="$CKPT_PATH" \
     ckpt_interval=0 \
     resume_from="" \
     train_on_what="all_assistant_messages" \
     hf_save_interval=2083 \
-    hf_export_path=/tmp/skyrl_tulu3_50k_hf_ckpts \
+    hf_export_path="$HF_EXPORT_PATH" \
     "$@"
