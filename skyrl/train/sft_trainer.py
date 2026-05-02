@@ -100,7 +100,7 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512, **toke
 def tokenize_chat_example(
     example: dict,
     tokenizer,
-    max_length: int = 512,
+    max_length: Optional[int] = None,
     messages_key: str = "messages",
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     **tokenizer_kwargs,
@@ -240,7 +240,9 @@ def _tokenize_chat_all_assistants(
     if i >= len(messages):
         return None
 
-    later_token_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages[i:], tokenizer)
+    later_token_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        messages[i:], tokenizer, chat_template=tokenizer_kwargs.get("chat_template")
+    )
     input_ids = initial_token_ids + later_token_ids
 
     # truncate
@@ -473,8 +475,7 @@ class SFTTrainer:
         """Log tokenized sequence length statistics over the training set.
 
         Reports count, mean, median (q50), q25, q75, min, max of the tokenized
-        ``input_ids`` lengths. Logs once via ``logger.info`` and, if a tracker
-        is configured (e.g. wandb), also emits ``dataset/*`` scalars at step 0.
+        ``input_ids`` lengths. Logs once via ``logger.info``.
         """
         if not tokenized:
             logger.warning("No tokenized examples to compute stats over")
@@ -709,7 +710,7 @@ class SFTTrainer:
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
                 "train/actual_num_tokens": actual_num_tokens,
-                "train/total_num_tokens": self._total_tokens_processed,
+                "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
 

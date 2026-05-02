@@ -543,7 +543,6 @@ def test_train_on_what_non_contiguous_assistants(tokenizer):
     num_generation_tokens = len(get_generation_prompt_ids(tokenizer))
     assert loss_mask[:num_generation_tokens] == [0] * num_generation_tokens
     assert loss_mask[num_generation_tokens] == 1
-    print(tokenizer.decode(result["input_ids"]))
 
 
 def test_train_on_what_all_assistants_truncation(tokenizer):

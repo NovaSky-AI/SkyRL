@@ -9,7 +9,7 @@ set -x
 # (e.g. tensor_model_parallel_size=2, pipeline_model_parallel_size=2).
 #
 # Usage:
-#   bash examples/train/sft/run_sft_megatron.sh [extra overrides...]
+#   bash examples/train/sft/run_sft_megatron_tulu3.sh [extra overrides...]
 #
 # Example:
 #   bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
