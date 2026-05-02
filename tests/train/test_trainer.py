@@ -163,9 +163,29 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     assert "avg_final_rewards" in metrics
     assert "avg_response_length" in metrics
     assert "avg_advantages_abs" in metrics
+    assert mock_compute_adv_and_ret.call_args.kwargs["grpo_norm_by_std"] is False
     assert metrics["avg_advantages"] == approx(
         torch.masked_select(mock_advantages, data["response_mask"].bool()).mean().item(), rel=1e-5
     )
+
+@patch("skyrl.backends.skyrl_train.utils.ppo_utils.compute_advantages_and_returns", new_callable=MagicMock)
+def test_calc_advantages_and_returns_respects_explicit_grpo_norm_by_std_true(mock_compute_adv_and_ret, dummy_config):
+    dummy_config.trainer.algorithm.grpo_norm_by_std = True
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    data = _get_test_data(trainer)
+    mock_compute_adv_and_ret.return_value = (torch.ones((2, 5)), torch.ones((2, 5)))
+
+    trainer.compute_advantages_and_returns(data)
+
+    assert mock_compute_adv_and_ret.call_args.kwargs["grpo_norm_by_std"] is True
 
 
 def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
@@ -194,7 +214,7 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     # different positions; this is what exposes the broadcast bug.
     #
     #   row  traj  step        resp_len  response_mask
-    #   ───  ────  ──────────  ────────  ──────────────────
+    #   ---  ----  ----------  --------  ------------------
     #    0    A    intermed.       4     [0, 0, 1, 1, 1, 1]
     #    1    A    last            1     [0, 0, 0, 0, 0, 1]
     #    2    B    intermed.       3     [0, 0, 0, 1, 1, 1]
