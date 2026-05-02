@@ -798,6 +798,7 @@ class SFTTrainer:
             # Compute throughput using actual (non-padding) tokens
             batch_padded_seq_len = batch["sequences"].shape[1]
             actual_num_tokens = batch["attention_mask"].sum().item()
+            self._total_tokens_processed += actual_num_tokens
             tokens_per_second = actual_num_tokens / all_timings["step"]
 
             # Build log dict
