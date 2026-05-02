@@ -12,6 +12,7 @@ Usage (single GPU, torchrun required for distributed init):
 
 import os
 import time
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -34,8 +35,8 @@ def measure(
     target: torch.Tensor,
     vocab_start_index: int,
     vocab_end_index: int,
-    chunk_size,
-    tp_group,
+    chunk_size: Optional[int],
+    tp_group: torch.distributed.ProcessGroup,
     reps: int,
 ):
     """Run forward+backward through the real SkyRL logprob kernel.
@@ -218,10 +219,13 @@ def main():
                             )
                         continue
 
-                speedup = t_baseline / t_cs if (t_baseline is not None and t_cs > 0) else float("inf")
                 mem_cs_mb = mem_cs / (1024**2)
-                mem_baseline_mb = mem_baseline / (1024**2) if mem_baseline is not None else 0
-                mem_saved_mb = mem_baseline_mb - mem_cs_mb
+                if t_baseline is not None and t_cs > 0:
+                    speedup_str = f"{t_baseline / t_cs:>{col_w}.2f}x"
+                    mem_saved_str = f"{mem_baseline / (1024**2) - mem_cs_mb:>{col_w}.0f}"
+                else:
+                    speedup_str = f"{'N/A':>{col_w}}"
+                    mem_saved_str = f"{'N/A':>{col_w}}"
 
                 if dist.get_rank() == 0:
                     print(
@@ -230,8 +234,8 @@ def main():
                         f"{cs_label:>10}  "
                         f"{t_cs:>{col_w}.1f}  "
                         f"{mem_cs_mb:>{col_w}.0f}  "
-                        f"{speedup:>{col_w}.2f}x  "
-                        f"{mem_saved_mb:>{col_w}.0f}"
+                        f"{speedup_str}  "
+                        f"{mem_saved_str}"
                     )
 
             if dist.get_rank() == 0:

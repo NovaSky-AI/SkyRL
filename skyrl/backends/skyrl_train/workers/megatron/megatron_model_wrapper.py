@@ -32,6 +32,11 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
 
+# NOTE (sumanthrh): We use a chunk size of 1024 for calaulating logprobs
+# from logits to avoid OOMs for large sequence lengths.
+# For more details, see https://github.com/NovaSky-AI/SkyRL/pull/1610
+CHUNK_SIZE_LOGPROBS = 1024
+
 
 class MegatronModelWrapper:
     def __init__(
@@ -104,7 +109,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=True,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=1024,
+                chunk_size=CHUNK_SIZE_LOGPROBS,  # chunk seq dim to bound peak memory; see examples/benchmarks/bench_chunked_logprobs.py
             )
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
@@ -264,7 +269,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=False,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=1024,
+                chunk_size=CHUNK_SIZE_LOGPROBS,  # chunk seq dim to bound peak memory; see examples/benchmarks/bench_chunked_logprobs.py
             )
 
             action_log_probs = token_logprobs[:, -num_actions:]
