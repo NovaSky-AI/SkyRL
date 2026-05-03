@@ -1,6 +1,7 @@
-from typing import List, Dict, Any, TypedDict, Optional, Union, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 
 TrainingPhase = Literal["train", "eval"]
@@ -39,6 +40,7 @@ class GeneratorOutput(TypedDict):
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     trajectory_ids: Optional[List[TrajectoryID]]
+    rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
 

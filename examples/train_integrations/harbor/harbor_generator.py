@@ -305,6 +305,7 @@ class HarborGenerator(GeneratorInterface):
         prompt_ids = self.tokenizer.apply_chat_template(
             prompt,
             add_generation_prompt=False,  # the message below will add it themselves
+            return_dict=False,
             tokenize=True,
             chat_template=self.custom_chat_template_content,
         )

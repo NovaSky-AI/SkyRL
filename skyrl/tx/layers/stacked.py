@@ -3,9 +3,9 @@
 import functools
 from typing import Callable
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 
 from skyrl.tx.utils.generator import KVCache
@@ -145,6 +145,16 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
+    def preextract_decode(self) -> tuple[nnx.GraphDef, list[nnx.GraphState]]:
+        """Pre-extract per-layer states for efficient decode.
+
+        Call this ONCE outside the while_loop, then pass the result via
+        decode_layers kwarg to __call__ to avoid re-slicing every step.
+        """
+        graphdef, state = nnx.split(self._stacked)
+        layers_state = [jax.tree_util.tree_map(lambda x: x[i], state) for i in range(self.num_layers)]
+        return graphdef, layers_state
+
     def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
         """Transform _stacked paths to per-layer paths with ArrayRef.
 
@@ -185,6 +195,7 @@ class StackedDecoderLayers(nnx.Module):
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        decode_layers=None,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         """Forward pass through all layers.
 
@@ -200,6 +211,8 @@ class StackedDecoderLayers(nnx.Module):
             output_hidden_states: Whether to return intermediate hidden states.
             gradient_checkpointing: Whether to use gradient checkpointing.
             is_training: Whether in training mode. Skips KV cache to save memory.
+            decode_layers: Pre-extracted per-layer parameters from preextract_decode().
+                Pass this to avoid re-slicing stacked weights inside a while_loop.
 
         Returns:
             Tuple of (final_hidden_states, all_hidden_states, kv_cache).
@@ -209,7 +222,6 @@ class StackedDecoderLayers(nnx.Module):
         if self.num_layers == 0:
             return hidden_states, [], kv_cache
 
-        graphdef, state = nnx.split(self._stacked)
         is_decode = kv_cache is not None
 
         if is_decode:
@@ -219,19 +231,17 @@ class StackedDecoderLayers(nnx.Module):
             # cache array on each layer (16MB per layer). XLA can't prove the buffer can be
             # donated since it doesn't know the slices are non-overlapping. With a Python
             # loop and list format, each layer's KV array is independent and can be donated.
-            flat_state, treedef = jax.tree_util.tree_flatten(state)
+            graphdef, layers_state = decode_layers or self.preextract_decode()
+
             all_hidden_states: list[jax.Array] = []
             updated_keys: list[jax.Array] = []
             updated_values: list[jax.Array] = []
 
-            for layer_idx in range(self.num_layers):
+            for layer_idx, layer_state in enumerate(layers_state):
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
 
-                # Extract this layer's parameters
-                layer_params_flat = [p[layer_idx] for p in flat_state]
-                layer_params = jax.tree_util.tree_unflatten(treedef, layer_params_flat)
-                layer = nnx.merge(graphdef, layer_params)
+                layer = nnx.merge(graphdef, layer_state)
 
                 # Get this layer's KV cache
                 layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
@@ -250,6 +260,8 @@ class StackedDecoderLayers(nnx.Module):
             return hidden_states, all_hidden_states, new_kv_cache
 
         # Prefill/training mode: use scan for efficiency
+        graphdef, state = nnx.split(self._stacked)
+
         def body_fn(carry, layer_params):
             hs = carry
 
@@ -328,6 +340,10 @@ class MultiStackedDecoderLayers(nnx.Module):
 
         return result
 
+    def preextract_decode(self) -> list[tuple[nnx.GraphDef, list[nnx.GraphState]]]:
+        """Pre-extract per-layer states for all groups."""
+        return [group.preextract_decode() for group in self.layer_groups]
+
     @staticmethod
     def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache, ...]:
         boundaries = [0, *split_points, len(kv_cache.keys)]
@@ -358,6 +374,7 @@ class MultiStackedDecoderLayers(nnx.Module):
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        decode_layers=None,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         all_hidden_states: list[jax.Array] = []
 
@@ -371,8 +388,10 @@ class MultiStackedDecoderLayers(nnx.Module):
         else:
             kv_caches = (None,) * len(self.layer_groups)
 
+        group_decode_layers = decode_layers or [None] * len(self.layer_groups)
+
         kv_results: list[KVCache] = []
-        for group, group_kv_cache in zip(self.layer_groups, kv_caches):
+        for group, group_kv_cache, group_dl in zip(self.layer_groups, kv_caches, group_decode_layers):
             hidden_states, layer_hidden_states, layer_kv_cache = group(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -382,6 +401,7 @@ class MultiStackedDecoderLayers(nnx.Module):
                 output_hidden_states=output_hidden_states,
                 gradient_checkpointing=gradient_checkpointing,
                 is_training=is_training,
+                decode_layers=group_dl,
             )
             all_hidden_states.extend(layer_hidden_states)
             if not is_training:

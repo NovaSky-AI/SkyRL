@@ -1,16 +1,21 @@
-from typing import cast
 from unittest.mock import MagicMock
 
-from flax import nnx
 import jax.numpy as jnp
-from skyrl.tx.models.configs import ModelConfig
-from skyrl.tx.models.types import CausalLMOutput
+from flax import nnx
+
 from skyrl.tinker.types import SamplingParams
-from skyrl.tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
-from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
+from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM
+from skyrl.tx.utils.generator import (
+    GenerateOutput,
+    GeneratorMixin,
+    KVCache,
+    apply_top_k_batch,
+    apply_top_p_batch,
+)
+from skyrl.tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 
-class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
+class DummyModel(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
     """Dummy model for testing generator behavior.
 
     In this dummy model, hidden_states directly equal logits (identity transformation).
@@ -35,10 +40,6 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    def get_model_config(self) -> ModelConfig:
-        """Return the model configuration required by LogitsProcessorMixin."""
-        return cast(ModelConfig, self.config)
-
     def __call__(
         self,
         input_ids,
@@ -46,6 +47,7 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         positions=None,
         kv_cache=None,
         adapter_indices=None,
+        decode_layers=None,
     ):
         batch_size, seq_len = input_ids.shape
         base = jnp.arange(self.vocab_size, dtype=jnp.float32)

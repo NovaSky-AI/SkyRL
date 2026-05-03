@@ -29,7 +29,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-from skyrl.train.utils.utils import initialize_ray, validate_cfg
+from skyrl.train.utils.utils import initialize_ray, validate_cfg, ResolvedPlacementGroup
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 
 
@@ -140,8 +140,9 @@ def main():
 
     logger.info("Initializing policy worker...")
     num_gpus = cfg.trainer.placement.policy_num_gpus_per_node
-    pg = placement_group([{"GPU": num_gpus, "CPU": num_gpus}], strategy="PACK")
-    get_ray_pg_ready_with_timeout(pg, timeout=30)
+    raw_pg = placement_group([{"GPU": num_gpus, "CPU": num_gpus}], strategy="PACK")
+    get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+    pg = ResolvedPlacementGroup(raw_pg)
 
     actor_group = PPORayActorGroup(
         cfg.trainer,

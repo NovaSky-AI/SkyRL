@@ -2,8 +2,9 @@
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/gpu/gpu_ci/test_train_batch.py
 """
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 import torch
+
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 def test_data_to_device():

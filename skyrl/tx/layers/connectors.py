@@ -1,8 +1,8 @@
 from collections.abc import Callable
 from typing import Any
 
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 
 from skyrl.tx.layers.util import Param

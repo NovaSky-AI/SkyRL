@@ -162,8 +162,8 @@ def main(command: str = "nvidia-smi"):
         command (str, optional): Command to run. Defaults to "nvidia-smi".
 
     Examples:
-        modal run main.py --command "uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
-        MODAL_GPU=A100:4 MODAL_APP_NAME=benji_skyrl_app modal run main.py --command "bash examples/gsm8k/run_gsm8k_modal.sh"
+        modal run main.py --command "uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
+        MODAL_GPU=A100:4 MODAL_APP_NAME=benji_skyrl_app modal run main.py --command "bash examples/train/gsm8k/run_gsm8k_modal.sh"
     """
     print(f"{'=' * 5} Submitting command to Modal: {command} {'=' * 5}")
     run_script.remote(command)

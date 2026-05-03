@@ -1,16 +1,16 @@
 import pytest
 
-from skyrl.train.config import InferenceEngineConfig
 from skyrl.backends.skyrl_train.weight_sync import (
-    get_transfer_strategy_cls,
-    BroadcastTransferStrategy,
-    CudaIpcTransferStrategy,
     BroadcastInitInfo,
-    CudaIpcInitInfo,
+    BroadcastTransferStrategy,
     BroadcastWeightUpdateRequest,
+    CudaIpcInitInfo,
+    CudaIpcTransferStrategy,
     CudaIpcWeightUpdateRequest,
     LoraLoadRequest,
+    get_transfer_strategy_cls,
 )
+from skyrl.train.config import InferenceEngineConfig
 
 
 class TestGetTransferStrategyCls:
@@ -176,7 +176,9 @@ class TestCudaIpcWeightUpdateRequest:
 
     def test_deserialize_invalid_data(self):
         """Invalid base64/pickle data raises ValueError."""
-        from skyrl.backends.skyrl_train.weight_sync.cuda_ipc_strategy import _IPC_REQUEST_END_MARKER
+        from skyrl.backends.skyrl_train.weight_sync.cuda_ipc_strategy import (
+            _IPC_REQUEST_END_MARKER,
+        )
 
         invalid_data = b"not_valid_base64!!!" + _IPC_REQUEST_END_MARKER
 

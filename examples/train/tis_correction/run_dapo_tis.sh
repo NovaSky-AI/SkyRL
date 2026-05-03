@@ -2,9 +2,9 @@ set -x
 
 # Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/algorithms/dapo/run_dapo_gsm8k.sh
+# bash examples/train/algorithms/dapo/run_dapo_gsm8k.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
@@ -53,6 +53,7 @@ uv run --isolated --extra fsdp -m examples.train.tis_correction.main_tis_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.sampling_params.logprobs=$LOGPROBS \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \

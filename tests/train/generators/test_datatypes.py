@@ -31,6 +31,7 @@ def test_turn_output(output_ids, observation_ids, output_logprobs, added_eos, ex
         output_logprobs=output_logprobs,
         new_obs=[],
         obs_ids=observation_ids,
+        rollout_expert_indices=None,
         added_eos=added_eos,
         reward=1.0,
     )

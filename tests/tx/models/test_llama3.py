@@ -1,16 +1,16 @@
 import os
 import tempfile
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax import nnx
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from skyrl.tx.models.llama3 import Llama3ForCausalLM
 from skyrl.tx.models.configs import Llama3Config
+from skyrl.tx.models.llama3 import Llama3ForCausalLM
 from skyrl.tx.utils.models import load_safetensors
 
 

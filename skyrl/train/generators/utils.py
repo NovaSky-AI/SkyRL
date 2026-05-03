@@ -1,20 +1,22 @@
 import copy
 import os
-import torch
-from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
-from skyrl.train.generators.base import (
-    GeneratorOutput,
-    GeneratorInput,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
-    MetricsOutput,
-)
+import torch
+from loguru import logger
+
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
-from loguru import logger
+from skyrl.train.generators.base import (
+    BatchMetadata,
+    GeneratorInput,
+    GeneratorOutput,
+    MetricsOutput,
+    TrainingPhase,
+    TrajectoryID,
+)
 from skyrl_gym.metrics import aggregate_for_environment
 
 
@@ -157,10 +159,14 @@ def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) ->
         List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
     empty_user = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], tokenize=True, chat_template=chat_template
+        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, chat_template=chat_template
     )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=chat_template
+        [{"role": "user", "content": ""}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=False,
+        chat_template=chat_template,
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -274,20 +280,26 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
 
 def apply_overlong_filtering(
     loss_masks: List[List[int]],
-    response_ids: List[List[int]],
-    eos_token_id: int,
+    stop_reasons: List[str],
 ) -> List[List[int]]:
     """
     Implements DAPO Overlong Filtering: zero-out every token's mask whenever
-    the response does not end with the eos token id (i.e. truncated).
+    the response was truncated (i.e. did not end with a stop token).
+
+    Uses stop_reasons from the inference engine rather than checking for a
+    specific eos token id, making this model/tokenizer agnostic.
+
+    Args:
+        loss_masks: Per-trajectory token loss masks.
+        stop_reasons: Per-trajectory stop reasons from the inference engine
+            (e.g. "stop" for normal completion, "length" for truncation).
 
     Returns:
-        - The loss masks with tokens zeroed out for truncated responses
+        The loss masks with tokens zeroed out for truncated responses.
     """
-    assert len(loss_masks) == len(response_ids), "loss_masks and response_ids must have the same length"
+    assert len(loss_masks) == len(stop_reasons), "loss_masks and stop_reasons must have the same length"
     return [
-        [0] * len(mask) if not response or response[-1] != eos_token_id else mask
-        for mask, response in zip(loss_masks, response_ids)
+        [0] * len(mask) if stop_reason != "stop" else mask[:] for mask, stop_reason in zip(loss_masks, stop_reasons)
     ]
 
 
@@ -449,6 +461,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         add_generation_prompt=False,
         tokenize=True,
         chat_template=chat_template,
+        return_dict=False,
     )
 
     full_conversation = base_conversation + messages
@@ -457,6 +470,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         add_generation_prompt=False,
         tokenize=True,
         chat_template=chat_template,
+        return_dict=False,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids

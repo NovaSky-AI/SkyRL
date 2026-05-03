@@ -23,13 +23,17 @@ __all__ = [
     "old_flex_attention_with_sink",
 ]
 
-import torch
 import functools
+
+import torch
 from torch.nn.attention.flex_attention import (
     create_block_mask as _create_block_mask,
 )
+
 from .flex_attn_utils import (
     _flex_attention as uncompiled_flex_attention,
+)
+from .flex_attn_utils import (
     flex_attention,
 )
 

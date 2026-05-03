@@ -1,27 +1,31 @@
 """
-GPU CI tests for ServerGroup + InferenceRouter.
+GPU CI tests for ServerGroup + VLLMRouter.
 
 Tests:
     - 2 vLLM servers with TP=2 (4 GPUs total)
     - Router with load balancing (data plane only)
     - RemoteInferenceClient for control plane operations (fan-out)
-    - Health, completions, get_server_info, session affinity, pause/resume
+    - Health, completions, get_world_size, session affinity, pause/resume
 
 Run:
     uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_inference_server_group.py -v -s
 """
 
+import argparse
 import asyncio
 import time
 
 import httpx
 import pytest
-import argparse
+from vllm_router.router_args import RouterArgs
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
+from skyrl.utils.tok import get_tokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -68,7 +72,7 @@ def wait_for_url(url: str, timeout: float = 180.0) -> bool:
 
 
 @pytest.fixture(scope="class")
-def server_group_and_router(ray_init_fixture):
+def server_group_and_router(class_scoped_ray_init_fixture):
     """Create 2 vLLM servers (TP=2 each) + router."""
     cli_args = make_vllm_cli_args(MODEL, tp_size=2)
     start_port = get_open_port()
@@ -87,8 +91,13 @@ def server_group_and_router(ray_init_fixture):
         assert wait_for_url(url), f"Server {url} failed to start"
 
     # Create router
-    router_port = get_open_port()
-    router = InferenceRouter(server_urls, host="0.0.0.0", port=router_port)
+    router_args = RouterArgs(
+        worker_urls=server_urls,
+        host="0.0.0.0",
+        port=get_open_port(),
+        policy="consistent_hash",
+    )
+    router = VLLMRouter(router_args)
     router_url = router.start()
     assert wait_for_url(router_url), "Router failed to start"
 
@@ -97,6 +106,7 @@ def server_group_and_router(ray_init_fixture):
         proxy_url=router_url,
         server_urls=server_urls,
         model_name=MODEL,
+        tokenizer=get_tokenizer(MODEL),
     )
 
     yield {
@@ -114,7 +124,7 @@ def server_group_and_router(ray_init_fixture):
 
 @pytest.mark.asyncio(loop_scope="class")
 class TestServerGroupAndRouter:
-    """Tests for ServerGroup + InferenceRouter with 2 TP=2 servers."""
+    """Tests for ServerGroup + VLLMRouter with 2 TP=2 servers."""
 
     def test_health_check(self, server_group_and_router):
         """Health endpoint works through router."""
@@ -122,21 +132,15 @@ class TestServerGroupAndRouter:
         resp = httpx.get(f"{router_url}/health", timeout=10.0)
         assert resp.status_code == 200
 
-    def test_list_servers(self, server_group_and_router):
-        """/servers returns all backends."""
-        router_url = server_group_and_router["router_url"]
-        resp = httpx.get(f"{router_url}/servers", timeout=10.0)
-        assert resp.status_code == 200
-        assert len(resp.json()["servers"]) == 2
-
     async def test_get_world_size(self, server_group_and_router):
-        """get_world_size returns total world size across all servers."""
+        """get_world_size returns total world size and per-server sizes."""
         client = server_group_and_router["client"]
 
         # Each server has TP=2, we have 2 servers = total world_size of 4
-        world_size = await client.get_world_size()
-        print(f"Total world_size: {world_size}")
-        assert world_size == 4
+        total_world_size, world_size_per_server = await client.get_world_size()
+        print(f"Total world_size: {total_world_size}, per_server: {world_size_per_server}")
+        assert total_world_size == 4
+        assert world_size_per_server == 2
 
     def test_completion_request(self, server_group_and_router):
         """Completion requests work through router."""

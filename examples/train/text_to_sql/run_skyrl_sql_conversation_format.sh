@@ -11,7 +11,7 @@ set -x
 # Uses 1 node with 8 GPUs.
 # hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_skyrl_sql_conversation_format.sh
+# bash examples/train/text_to_sql/run_skyrl_sql_conversation_format.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
@@ -68,6 +68,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.append_eos_token_after_stop_str_in_multi_turn=true \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \

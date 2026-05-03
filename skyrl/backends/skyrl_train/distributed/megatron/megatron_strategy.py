@@ -1,46 +1,124 @@
+import hashlib
 import os
 import random
+import re
+import shutil
+import tempfile
 from datetime import timedelta
-from typing import List, Union, Optional
-from jaxtyping import Float
+from typing import List, Optional, Union
 
+import megatron.core.parallel_state as mpu
 import numpy as np
 import torch
 import torch.nn as nn
-from torch import optim
-from torch import distributed as dist
-
-from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
-import megatron.core.parallel_state as mpu
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    offload_megatron_model_to_cpu,
-    load_megatron_model_to_gpu,
-    offload_megatron_optimizer,
-    load_megatron_optimizer,
-    offload_megatron_grads_to_cpu,
-    load_megatron_grads_to_gpu,
-)
-
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+from jaxtyping import Float
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
-from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from torch import distributed as dist
+from torch import optim
+from transformers import PreTrainedTokenizer
+
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    load_megatron_grads_to_gpu,
+    load_megatron_model_to_gpu,
+    load_megatron_optimizer,
+    offload_megatron_grads_to_cpu,
+    offload_megatron_model_to_cpu,
+    offload_megatron_optimizer,
+)
+from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronModelWrapper,
+)
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100
+
+
+def _patched_update_fp32_params_by_new_state(self):
+    """Monkeypatch for megatron-core HybridDeviceOptimizer._update_fp32_params_by_new_state.
+
+    Upstream bug: params that are already fp32 are not present in
+    ``self.param_to_fp32_param`` but the original code does an unconditional
+    dict lookup, causing a ``KeyError`` during checkpoint loading with CPU
+    offloading enabled.
+    """
+    if not self.param_update_in_fp32:
+        return
+    for param, v in self.state.items():
+        if param not in self.param_to_fp32_param:
+            continue
+        fp32_param = self.param_to_fp32_param[param]
+        fp32_param.data.copy_(v["master_param"])
+
+
+_orig_load_parameter_state_from_dp_reshardable = DistributedOptimizer.load_parameter_state_from_dp_reshardable
+
+
+def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
+    """Wrapper around the original method that preserves the Adam step counter.
+
+    Upstream bug: each bucket element carries a ``step`` tensor wrapped as a
+    ``LocalNonpersistentObject``.  During the load-time round-trip this object
+    picks up the *current* (stale) step count instead of the checkpoint value.
+    The correct step is already set from ``param_groups`` by
+    ``load_state_dict`` before this method runs, but the original
+    ``_set_main_param_and_optimizer_states`` overwrites it with the stale one.
+    ``load_parameter_state_from_fs_model_space`` already filters ``step``;
+    here we save/restore it around the original method instead.
+    """
+    correct_step = None
+    for v in self.optimizer.state.values():
+        if "step" in v and isinstance(v["step"], torch.Tensor):
+            correct_step = v["step"].clone()
+            break
+
+    _orig_load_parameter_state_from_dp_reshardable(self, state_dict)
+
+    if correct_step is not None:
+        for v in self.optimizer.state.values():
+            if "step" in v and isinstance(v["step"], torch.Tensor):
+                v["step"].copy_(correct_step)
+
+    if isinstance(self.optimizer, HybridDeviceOptimizer):
+        self.optimizer._sync_hdo_state_to_sub_optimizers()
+
+
+# HybridDeviceOptimizer stores optimizer class references (cpu_optimizer_cls,
+# gpu_optimizer_cls) in its ``defaults`` dict, which bleed into param_groups
+# and get pickled into the "common" checkpoint file.  PyTorch 2.6+ defaults
+# torch.load to weights_only=True, which rejects these class globals.
+_safe_globals = [torch.optim.Adam, torch.optim.AdamW]
+try:
+    from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import (
+        HybridDeviceOptimizer,
+    )
+
+    HybridDeviceOptimizer._update_fp32_params_by_new_state = _patched_update_fp32_params_by_new_state
+    DistributedOptimizer.load_parameter_state_from_dp_reshardable = _patched_load_parameter_state_from_dp_reshardable
+
+    try:
+        from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
+
+        _safe_globals.append(FusedAdam)
+    except ImportError:
+        pass
+except ImportError:
+    pass
+torch.serialization.add_safe_globals(_safe_globals)
 
 
 class MegatronStrategy(DistributedStrategy):
@@ -54,6 +132,7 @@ class MegatronStrategy(DistributedStrategy):
         optimizer_config=None,
         seed: int = 42,
         is_lora: bool = False,
+        node_local_rank: int = 0,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
@@ -61,6 +140,7 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         self.is_lora = is_lora
+        self.node_local_rank = node_local_rank
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
@@ -299,15 +379,18 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            # Load the checkpoint in parallel.
-            load_strategy = get_default_load_sharded_strategy(read_dir)
+        if io.is_cloud_path(ckpt_dir):
+            state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
+        else:
+            # Load from local filesystem with full parallel strategy.
+            load_strategy = get_default_load_sharded_strategy(ckpt_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
             state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
+                sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
             )
+
         if not self.is_lora:
             # Load the model, optimizer, and scheduler state dicts.
             assert (
@@ -337,6 +420,80 @@ class MegatronStrategy(DistributedStrategy):
             self.load_rng_state(state_dict["rng"])
 
         return ckpt_dir, {}
+
+    _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
+
+    def _load_dist_checkpoint_from_cloud(self, ckpt_dir: str, sharded_state_dict: dict) -> dict:
+        """Download checkpoint shards from cloud storage with per-rank parallelism.
+
+        All ranks on the same node share a single local directory. Each rank
+        downloads only its own shard file(s) into the shared dir, so the total
+        download per node equals one full copy of the checkpoint (instead of one
+        copy per rank).
+
+        Local rank 0 creates the directory and downloads common metadata files.
+        After a barrier, all shard files are present and every rank can load.
+
+        Does not currently support flexible trainer resharding.
+        """
+        global_rank = dist.get_rank()
+        node_local_rank = self.node_local_rank
+
+        dir_hash = hashlib.md5(ckpt_dir.encode()).hexdigest()[:12]
+        local_dir = os.path.join(tempfile.gettempdir(), f"skyrl_ckpt_load_{dir_hash}")
+
+        try:
+            all_entries = io.list_dir(ckpt_dir)
+
+            # Local rank 0: create dir and download common/metadata files.
+            if node_local_rank == 0:
+                if os.path.exists(local_dir):
+                    shutil.rmtree(local_dir)
+                os.makedirs(local_dir)
+
+                for entry in all_entries:
+                    name = entry.rstrip("/").split("/")[-1]
+                    if not name:
+                        continue
+                    if self._SHARD_FILE_PATTERN.search(name):
+                        continue
+                    cloud_entry = ckpt_dir.rstrip("/") + "/" + name
+                    if io.isdir(cloud_entry):
+                        continue
+                    io.download_file(cloud_entry, os.path.join(local_dir, name))
+
+            # Wait for the directory and common files to be ready.
+            dist.barrier()
+
+            # Each rank downloads its own shard file(s) into the shared dir.
+            for entry in all_entries:
+                name = entry.rstrip("/").split("/")[-1]
+                if not name:
+                    continue
+                match = self._SHARD_FILE_PATTERN.search(name)
+                if match and int(match.group(1)) == global_rank:
+                    cloud_path = ckpt_dir.rstrip("/") + "/" + name
+                    local_path = os.path.join(local_dir, name)
+                    io.download_file(cloud_path, local_path)
+
+            # Wait for all ranks to finish downloading their shards.
+            dist.barrier()
+
+            self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir}")
+
+            load_strategy = get_default_load_sharded_strategy(local_dir)
+            load_strategy = FullyParallelLoadStrategyWrapper(
+                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+            )
+            return dist_checkpointing.load(
+                sharded_state_dict=sharded_state_dict,
+                checkpoint_dir=local_dir,
+                sharded_strategy=load_strategy,
+            )
+        finally:
+            dist.barrier()
+            if node_local_rank == 0:
+                shutil.rmtree(local_dir, ignore_errors=True)
 
     def _load_lora_adapters(self, model, ckpt_dir):
         """Load LoRA adapters from checkpoint."""

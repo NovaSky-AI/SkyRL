@@ -8,40 +8,51 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
 """
 
-import json
-import pytest
 import asyncio
-from http import HTTPStatus
-from typing import Any, Dict, List, Union, Tuple
-from pathlib import Path
-from unittest.mock import patch
-import ray
+import json
+import logging
 import threading
-import requests
+from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+from unittest.mock import patch
+
 import aiohttp
-from pydantic import BaseModel
 import litellm
-from litellm import completion as litellm_completion
+import pytest
+import ray
+import requests
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
-import logging
+from litellm import completion as litellm_completion
+from pydantic import BaseModel
+from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
+import skyrl.train.utils
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
-    wait_for_server_ready,
     shutdown_server,
+    wait_for_server_ready,
 )
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from concurrent.futures import ThreadPoolExecutor
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-import skyrl.train.utils
-from transformers import AutoTokenizer
+from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
+    init_remote_inference_servers,
+)
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
+)
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
@@ -137,7 +148,9 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import (
+                    ChatCompletionResponse,
+                )
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
@@ -189,7 +202,9 @@ def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import (
+                    CompletionResponse,
+                )
 
                 CompletionResponse.model_validate(response_data)
             else:
@@ -225,6 +240,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
@@ -276,12 +292,15 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm. Therefore, we instead use LiteLLM.
-def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
 
@@ -292,164 +311,181 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     test_types = ["request_posting", "aiohttp_client_session", "litellm"]
     endpoints = ["chat_completions", "completions"]
-    server_port = None
-    server_thread = None
-    try:
-        # 1. Set up engine
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
-        engines = InferenceEngineState.create(
-            cfg=cfg,
-            use_local=True,
-            backend="vllm",
-            model=MODEL_QWEN2_5,
-            sleep_level=2,  # since we explicitly sync weights
-        )
+    # 1. Set up engine
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        backend="vllm",
+        model=MODEL_QWEN2_5,
+        sleep_level=2,  # since we explicitly sync weights
+    ) as engines:
         client, pg = engines.client, engines.pg
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
-        server_thread, server_port = set_up_http_server(client)
-        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+        # Sleep inference engine before initializing policy worker to avoid OOM on colocated GPU
+        await client.sleep()
 
-        # Weight sync
-        policy = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
-            cfg=cfg,
-        )
-        ray.get(
-            policy.async_run_ray_method(
-                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+        server_thread, server_port = None, None
+        try:
+            server_thread, server_port = set_up_http_server(client)
+            base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+
+            # Weight sync
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+                cfg=cfg,
             )
-        )
-        asyncio.run(client.reset_prefix_cache())
-        ray.get(
-            policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                )
             )
-        )
+            # Colocated weight sync: offload optimizer, partially wake engine, broadcast, then fully wake
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "offload_to_cpu", offload_optimizer=True, offload_model=False
+                )
+            )
+            await client.wake_up(tags=["weights"])
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+                )
+            )
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "offload_to_cpu", offload_optimizer=False, offload_model=True
+                )
+            )
+            await client.wake_up(tags=["kv_cache"])
+            await client.reset_prefix_cache()
 
-        # 2. Do tests
-        num_samples = 20
-        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
-        # For /completions, we test both string and token IDs input
-        test_prompts_half_str_half_tokens_list: List[Union[str, List[int]]] = [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
-            for conv in test_prompts_conv_list[: num_samples // 2]
-        ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
-            for conv in test_prompts_conv_list[num_samples // 2 :]
-        ]
+            # 2. Do tests
+            num_samples = 20
+            test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
+            # For /completions, we test both string and token IDs input
+            test_prompts_half_str_half_tokens_list: List[Union[str, List[int]]] = [
+                tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
+                for conv in test_prompts_conv_list[: num_samples // 2]
+            ] + [
+                tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
+                for conv in test_prompts_conv_list[num_samples // 2 :]
+            ]
 
-        def _generate_outputs(test_type, endpoint):
-            def payload_builder(session_id, prompt):
+            async def _generate_outputs(test_type, endpoint):
+                def payload_builder(session_id, prompt):
+                    if endpoint == "chat_completions":
+                        return {
+                            "model": MODEL_QWEN2_5,
+                            "messages": prompt,
+                            "session_id": session_id,
+                            **sampling_params,
+                        }
+                    else:
+                        return {
+                            "model": MODEL_QWEN2_5,
+                            "prompt": prompt,
+                            "session_id": session_id,
+                            **sampling_params,
+                        }
+
                 if endpoint == "chat_completions":
-                    return {
-                        "model": MODEL_QWEN2_5,
-                        "messages": prompt,
-                        "session_id": session_id,
-                        **sampling_params,
-                    }
+                    path = "chat/completions"
+                    prompt_iterable = test_prompts_conv_list
+                    sampling_params = _get_test_sampling_params(cfg, "chat_completions")
+
                 else:
-                    return {
-                        "model": MODEL_QWEN2_5,
-                        "prompt": prompt,
-                        "session_id": session_id,
-                        **sampling_params,
-                    }
+                    path = "completions"
+                    prompt_iterable = test_prompts_half_str_half_tokens_list
+                    sampling_params = _get_test_sampling_params(cfg, "completions")
 
-            if endpoint == "chat_completions":
-                path = "chat/completions"
-                prompt_iterable = test_prompts_conv_list
-                sampling_params = _get_test_sampling_params(cfg, "chat_completions")
+                if test_type == "request_posting":
 
-            else:
-                path = "completions"
-                prompt_iterable = test_prompts_half_str_half_tokens_list
-                sampling_params = _get_test_sampling_params(cfg, "completions")
+                    def generate_output(session_id, prompt):
+                        return requests.post(
+                            f"{base_url}/{path}",
+                            json=payload_builder(session_id, prompt),
+                        ).json()
 
-            if test_type == "request_posting":
+                    with ThreadPoolExecutor() as executor:
+                        output_tasks = [
+                            executor.submit(generate_output, session_id, prompt)
+                            for session_id, prompt in enumerate(prompt_iterable)
+                        ]
+                        outputs = [task.result() for task in output_tasks]
 
-                def generate_output(session_id, prompt):
-                    return requests.post(
-                        f"{base_url}/{path}",
-                        json=payload_builder(session_id, prompt),
-                    ).json()
+                elif test_type == "aiohttp_client_session":
 
-                with ThreadPoolExecutor() as executor:
-                    output_tasks = [
-                        executor.submit(generate_output, session_id, prompt)
-                        for session_id, prompt in enumerate(prompt_iterable)
-                    ]
-                    outputs = [task.result() for task in output_tasks]
+                    async def generate_outputs_async():
+                        conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)
+                        async with aiohttp.ClientSession(
+                            connector=conn, timeout=aiohttp.ClientTimeout(total=None)
+                        ) as session:
+                            headers = {"Content-Type": "application/json"}
+                            output_tasks = []
+                            for session_id, prompt in enumerate(prompt_iterable):
+                                payload = payload_builder(session_id, prompt)
+                                output_tasks.append(session.post(f"{base_url}/{path}", json=payload, headers=headers))
+                            responses = await asyncio.gather(*output_tasks)
+                            return [await response.json() for response in responses]
 
-            elif test_type == "aiohttp_client_session":
+                    outputs = await generate_outputs_async()
 
-                async def generate_outputs_async():
-                    conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)
-                    async with aiohttp.ClientSession(
-                        connector=conn, timeout=aiohttp.ClientTimeout(total=None)
-                    ) as session:
-                        headers = {"Content-Type": "application/json"}
-                        output_tasks = []
-                        for session_id, prompt in enumerate(prompt_iterable):
-                            payload = payload_builder(session_id, prompt)
-                            output_tasks.append(session.post(f"{base_url}/{path}", json=payload, headers=headers))
-                        responses = await asyncio.gather(*output_tasks)
-                        return [await response.json() for response in responses]
+                elif test_type == "litellm":
 
-                outputs = asyncio.run(generate_outputs_async())
+                    async def generate_outputs_async():
+                        async def generate_output(session_id, prompt):
+                            if endpoint == "chat_completions":
+                                return await litellm_async_completion(
+                                    model=f"openai/{MODEL_QWEN2_5}",
+                                    messages=prompt,
+                                    api_base=base_url,
+                                    api_key="DUMMY_KEY",
+                                    session_id=session_id,
+                                    **sampling_params,
+                                )
+                            else:
+                                return await litellm_async_text_completion(
+                                    model=f"openai/{MODEL_QWEN2_5}",
+                                    prompt=[prompt],
+                                    api_base=base_url,
+                                    api_key="DUMMY_KEY",
+                                    session_id=[session_id],
+                                    **sampling_params,
+                                )
 
-            elif test_type == "litellm":
+                        tasks = [
+                            generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)
+                        ]
+                        return await asyncio.gather(*tasks)
 
-                async def generate_outputs_async():
-                    async def generate_output(session_id, prompt):
-                        if endpoint == "chat_completions":
-                            return await litellm_async_completion(
-                                model=f"openai/{MODEL_QWEN2_5}",
-                                messages=prompt,
-                                api_base=base_url,
-                                api_key="DUMMY_KEY",
-                                session_id=session_id,
-                                **sampling_params,
-                            )
-                        else:
-                            return await litellm_async_text_completion(
-                                model=f"openai/{MODEL_QWEN2_5}",
-                                prompt=[prompt],
-                                api_base=base_url,
-                                api_key="DUMMY_KEY",
-                                session_id=[session_id],
-                                **sampling_params,
-                            )
+                    outputs = await generate_outputs_async()
 
-                    tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
-                    return await asyncio.gather(*tasks)
-
-                outputs = asyncio.run(generate_outputs_async())
-
-            else:
-                raise ValueError(f"Invalid test type: {test_type}")
-
-            return outputs
-
-        for test_type in test_types:
-            for endpoint in endpoints:
-                outputs = _generate_outputs(test_type, endpoint)
-                if endpoint == "chat_completions":
-                    _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
                 else:
-                    _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
+                    raise ValueError(f"Invalid test type: {test_type}")
 
-    finally:
-        if server_port is not None:
-            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread is not None and server_thread.is_alive():
-            server_thread.join(timeout=5)
+                return outputs
+
+            for test_type in test_types:
+                for endpoint in endpoints:
+                    outputs = await _generate_outputs(test_type, endpoint)
+                    if endpoint == "chat_completions":
+                        _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
+                    else:
+                        _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
+
+        finally:
+            if server_port is not None:
+                shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+            if server_thread is not None and server_thread.is_alive():
+                server_thread.join(timeout=5)
 
 
 @pytest.mark.parametrize(
@@ -459,7 +495,8 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     ],
     ids=["tp2"],
 )
-def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
+@pytest.mark.asyncio
+async def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -483,11 +520,11 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
-        def _generate_outputs(endpoint):
+        async def _generate_outputs(endpoint):
             if endpoint == "chat_completions":
                 sampling_params = _get_test_sampling_params(cfg, "chat_completions")
                 prompt_iterable = test_prompts_conv_list
@@ -496,34 +533,31 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
                 prompt_iterable = test_prompts_half_str_half_tokens_list
 
             # Default concurrency limit is 100 due to HTTP client pool capacity.
-            async def generate_outputs_async():
-                async def generate_output(session_id, prompt):
-                    if endpoint == "chat_completions":
-                        return await litellm_async_completion(
-                            model=f"openai/{MODEL_QWEN2_5}",
-                            messages=prompt,
-                            api_base=base_url,
-                            api_key="DUMMY_KEY",
-                            session_id=session_id,
-                            **sampling_params,
-                        )
-                    else:
-                        return await litellm_async_text_completion(
-                            model=f"openai/{MODEL_QWEN2_5}",
-                            prompt=[prompt],
-                            api_base=base_url,
-                            api_key="DUMMY_KEY",
-                            session_id=[session_id],
-                            **sampling_params,
-                        )
+            async def generate_output(session_id, prompt):
+                if endpoint == "chat_completions":
+                    return await litellm_async_completion(
+                        model=f"openai/{MODEL_QWEN2_5}",
+                        messages=prompt,
+                        api_base=base_url,
+                        api_key="DUMMY_KEY",
+                        session_id=session_id,
+                        **sampling_params,
+                    )
+                else:
+                    return await litellm_async_text_completion(
+                        model=f"openai/{MODEL_QWEN2_5}",
+                        prompt=[prompt],
+                        api_base=base_url,
+                        api_key="DUMMY_KEY",
+                        session_id=[session_id],
+                        **sampling_params,
+                    )
 
-                tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
-                return await asyncio.gather(*tasks)
-
-            return asyncio.run(generate_outputs_async())
+            tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
+            return await asyncio.gather(*tasks)
 
         for endpoint in endpoints:
-            outputs = _generate_outputs(endpoint)
+            outputs = await _generate_outputs(endpoint)
             if endpoint == "chat_completions":
                 _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
             else:
@@ -547,6 +581,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
 def test_structured_generation(ray_init_fixture):
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
@@ -600,6 +635,8 @@ def test_structured_generation(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
@@ -611,6 +648,7 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
@@ -766,6 +804,8 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 @pytest.mark.parametrize("use_custom_template", [False, True])
@@ -776,6 +816,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
     """
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
@@ -853,6 +894,8 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
 def test_http_endpoint_served_model_name(ray_init_fixture):
@@ -872,6 +915,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
 
     server_port = None
     server_thread = None
+    engines = None
     try:
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
@@ -945,9 +989,12 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+        if engines is not None:
+            engines.close()
 
 
-def test_context_length_error_returns_400(ray_init_fixture):
+@pytest.mark.asyncio
+async def test_context_length_error_returns_400(ray_init_fixture):
     """
     Test that context length errors return HTTP 400 (Bad Request), not 500.
 
@@ -962,102 +1009,98 @@ def test_context_length_error_returns_400(ray_init_fixture):
     # Use a small max_model_len to make testing faster
     TEST_MAX_MODEL_LEN = 1024
 
-    server_port = None
-    server_thread = None
-    try:
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
 
-        engines = InferenceEngineState.create(
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            backend="vllm",
-            model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
-            sleep_level=1,
-            engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
-        )
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend="vllm",
+        model=MODEL_QWEN2_5,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
+        sleep_level=1,
+        engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
+    ) as engines:
         client = engines.client
 
-        server_thread, server_port = set_up_http_server(client)
-        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+        server_thread, server_port = None, None
+        try:
+            server_thread, server_port = set_up_http_server(client)
+            base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
-        # Test 1: Prompt alone exceeds max_model_len (1024) -> HTTP 400
-        # vllm serve returns: "This model's maximum context length is 1024 tokens. However, your
-        # request has {n} input tokens. Please reduce the length of the input messages."
-        messages_oversized = [{"role": "user", "content": "hello " * 1500}]
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            json={"model": MODEL_QWEN2_5, "messages": messages_oversized},
-        )
-        assert (
-            response.status_code == HTTPStatus.BAD_REQUEST
-        ), f"Expected HTTP 400 for oversized prompt, got {response.status_code}: {response.json()}"
-        error_data = response.json()
-        assert "error" in error_data
-        error_message = error_data["error"]["message"]
-        assert (
-            "context length" in error_message.lower()
-        ), f"Error message should mention 'context length': {error_message}"
-
-        # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
-        # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
-        # This model's maximum context length is {max_model_len} tokens and your request has {n}
-        # input tokens ({max_tokens} > {max_model_len} - {n})."
-        messages_medium = [{"role": "user", "content": "hello " * 500}]
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 1000},
-        )
-        assert (
-            response.status_code == HTTPStatus.BAD_REQUEST
-        ), f"Expected HTTP 400 for prompt+max_tokens overflow, got {response.status_code}: {response.json()}"
-        error_data = response.json()
-        assert "error" in error_data
-        error_message = error_data["error"]["message"]
-        assert (
-            "context length" in error_message.lower()
-        ), f"Error message should mention 'context length': {error_message}"
-
-        # Test 3: Valid request still works (regression test)
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 10},
-        )
-        assert (
-            response.status_code == HTTPStatus.OK
-        ), f"Expected HTTP 200 for valid request, got {response.status_code}: {response.json()}"
-
-        # Test 4: LiteLLM wraps prompt+max_tokens error as BadRequestError (not InternalServerError).
-        # This is critical for Harbor's ContextLengthExceededError detection.
-        # Uses the same prompt+max_tokens case as Test 2.
-        async def make_litellm_call():
-            return await litellm_async_completion(
-                model=f"hosted_vllm/{MODEL_QWEN2_5}",
-                messages=messages_medium,
-                api_base=base_url,
-                api_key="DUMMY_KEY",
-                max_tokens=1000,
-                num_retries=0,
+            # Test 1: Prompt alone exceeds max_model_len (1024) -> HTTP 400
+            # vllm serve returns: "This model's maximum context length is 1024 tokens. However, your
+            # request has {n} input tokens. Please reduce the length of the input messages."
+            messages_oversized = [{"role": "user", "content": "hello " * 1500}]
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                json={"model": MODEL_QWEN2_5, "messages": messages_oversized},
             )
+            assert (
+                response.status_code == HTTPStatus.BAD_REQUEST
+            ), f"Expected HTTP 400 for oversized prompt, got {response.status_code}: {response.json()}"
+            error_data = response.json()
+            assert "error" in error_data
+            error_message = error_data["error"]["message"]
+            assert (
+                "context length" in error_message.lower()
+            ), f"Error message should mention 'context length': {error_message}"
 
-        with pytest.raises(LiteLLMBadRequestError) as excinfo:
-            asyncio.run(make_litellm_call())
-        exception_raised = excinfo.value
+            # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
+            # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
+            # This model's maximum context length is {max_model_len} tokens and your request has {n}
+            # input tokens ({max_tokens} > {max_model_len} - {n})."
+            messages_medium = [{"role": "user", "content": "hello " * 500}]
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 1000},
+            )
+            assert (
+                response.status_code == HTTPStatus.BAD_REQUEST
+            ), f"Expected HTTP 400 for prompt+max_tokens overflow, got {response.status_code}: {response.json()}"
+            error_data = response.json()
+            assert "error" in error_data
+            error_message = error_data["error"]["message"]
+            assert (
+                "context length" in error_message.lower()
+            ), f"Error message should mention 'context length': {error_message}"
 
-        assert exception_raised is not None
-        error_str = str(exception_raised).lower()
-        assert (
-            "context length" in error_str
-        ), f"Error message should mention 'context length': {str(exception_raised)[:200]}"
+            # Test 3: Valid request still works (regression test)
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 10},
+            )
+            assert (
+                response.status_code == HTTPStatus.OK
+            ), f"Expected HTTP 200 for valid request, got {response.status_code}: {response.json()}"
 
-    finally:
-        if server_port is not None:
-            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread is not None and server_thread.is_alive():
-            server_thread.join(timeout=5)
+            # Test 4: LiteLLM wraps prompt+max_tokens error as BadRequestError (not InternalServerError).
+            # This is critical for Harbor's ContextLengthExceededError detection.
+            # Uses the same prompt+max_tokens case as Test 2.
+            with pytest.raises(LiteLLMBadRequestError) as excinfo:
+                await litellm_async_completion(
+                    model=f"hosted_vllm/{MODEL_QWEN2_5}",
+                    messages=messages_medium,
+                    api_base=base_url,
+                    api_key="DUMMY_KEY",
+                    max_tokens=1000,
+                    num_retries=0,
+                )
+            exception_raised = excinfo.value
+
+            assert exception_raised is not None
+            error_str = str(exception_raised).lower()
+            assert (
+                "context length" in error_str
+            ), f"Error message should mention 'context length': {str(exception_raised)[:200]}"
+
+        finally:
+            if server_port is not None:
+                shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+            if server_thread is not None and server_thread.is_alive():
+                server_thread.join(timeout=5)

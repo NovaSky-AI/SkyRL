@@ -5,7 +5,8 @@ uv run --isolated --extra dev pytest tests/train/test_eval.py
 from unittest.mock import MagicMock
 
 import pytest
-from skyrl.train.config import SamplingParams, EnvironmentConfig
+
+from skyrl.train.config import EnvironmentConfig, SamplingParams
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput
 from tests.train.util import example_dummy_config

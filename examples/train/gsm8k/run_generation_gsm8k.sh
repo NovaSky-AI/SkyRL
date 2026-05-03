@@ -2,9 +2,9 @@ set -x
 
 # Generation only for for Qwen2.5-0.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_generation_gsm8k.sh
+# bash examples/train/gsm8k/run_generation_gsm8k.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=1

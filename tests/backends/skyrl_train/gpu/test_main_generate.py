@@ -3,12 +3,15 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 """
 
 import json
-import asyncio
+
+import pytest
 import ray
 
 from skyrl.train.entrypoints.main_generate import EvalOnlyEntrypoint
-from skyrl.train.utils.utils import initialize_ray
-from tests.backends.skyrl_train.gpu.utils import get_test_actor_config, get_test_generator_input
+from tests.backends.skyrl_train.gpu.utils import (
+    get_test_actor_config,
+    get_test_generator_input,
+)
 
 
 def create_dataset(tmp_path, model_name: str):
@@ -25,7 +28,8 @@ def create_dataset(tmp_path, model_name: str):
     return str(path)
 
 
-def test_main_generate(tmp_path):
+@pytest.mark.asyncio
+async def test_main_generate(ray_init_fixture, tmp_path):
     cfg = get_test_actor_config()
 
     # Minimize resources and side effects
@@ -44,7 +48,6 @@ def test_main_generate(tmp_path):
 
     cfg.environment.skyrl_gym.max_env_workers = 1
 
-    initialize_ray(cfg)
     try:
         data_path = create_dataset(tmp_path, cfg.trainer.policy.model.path)
         cfg.data.val_data = [data_path]
@@ -53,7 +56,8 @@ def test_main_generate(tmp_path):
         cfg.trainer.eval_interval = 1
 
         exp = EvalOnlyEntrypoint(cfg)
-        metrics = asyncio.run(exp.run())
+        inference_engine_client = exp.get_inference_client()
+        metrics = await exp.run(inference_engine_client)
         assert isinstance(metrics, dict) and len(metrics) > 0, f"Eval results not correctly computed: {metrics}"
     finally:
         ray.shutdown()

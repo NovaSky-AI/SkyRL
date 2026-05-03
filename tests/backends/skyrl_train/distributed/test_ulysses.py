@@ -1,6 +1,10 @@
-import torch
 from unittest.mock import patch
-from skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch import _ulysses_flash_attention_forward
+
+import torch
+
+from skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch import (
+    _ulysses_flash_attention_forward,
+)
 
 
 def test_basic_forward_no_parallel():

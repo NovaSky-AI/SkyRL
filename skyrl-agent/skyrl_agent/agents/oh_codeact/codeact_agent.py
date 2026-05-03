@@ -106,12 +106,17 @@ class OHCodeActAgent(CodeActAgent):
                 messages,
                 add_generation_prompt=True,
                 tokenize=True,
+                return_dict=False,
                 enable_thinking=self.qwen3_enable_thinking,
                 chat_template=chat_template.read_text(),
             )
         else:
             input_ids = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True, enable_thinking=self.qwen3_enable_thinking
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=False,
+                enable_thinking=self.qwen3_enable_thinking,
             )
         return input_ids
 

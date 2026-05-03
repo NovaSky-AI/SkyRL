@@ -3,9 +3,9 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlmodel import SQLModel, Field, JSON
 from sqlalchemy import DateTime, event
 from sqlalchemy.engine import url as sqlalchemy_url
+from sqlmodel import JSON, Field, SQLModel
 
 from skyrl.tinker import types
 

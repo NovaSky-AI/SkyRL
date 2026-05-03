@@ -18,11 +18,13 @@
 # limitations under the License.
 from typing import Union
 
-from omegaconf import DictConfig
 import torch
 from megatron.core.optimizer import OptimizerConfig
-from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
+from megatron.core.optimizer import (
+    get_megatron_optimizer as get_megatron_optimizer_native,
+)
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from omegaconf import DictConfig
 
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 

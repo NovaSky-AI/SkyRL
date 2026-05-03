@@ -1,7 +1,8 @@
 """Tests for Qwen3Config."""
 
-from skyrl.tx.models.configs import Qwen3Config
 from transformers import PretrainedConfig
+
+from skyrl.tx.models.configs import Qwen3Config
 
 
 def test_config_wraps_pretrained_config():

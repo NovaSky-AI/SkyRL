@@ -1,10 +1,32 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
-# follow the instructions in examples/search/README.md for setting up the dataset
-# and for starting the local search server
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/train/search/run_search.sh
+# Colocated GRPO training+generation for Qwen2.5-3B-Instruct on SearchR1 data.
+# Follow the instructions in docs/content/docs/recipes/searchr1.mdx for setup.
+#
+# Usage:
+#   export WANDB_API_KEY=<your_key_here>
+#   bash examples/train/search/run_search.sh
+#
+# Configurable knobs (override via env vars or command-line args):
+#   USE_CONVERSATION_MULTI_TURN - set to "true" to use conversation multi-turn format (default: false)
+#     When true, also enables append_eos_token_after_stop_str_in_multi_turn=true so that
+#     each turn's response ends with the model's EOS token (required for correct behavior
+#     when stop strings like </search> or </answer> terminate generation instead of EOS).
+#   STEP_WISE - set to "true" to enable step-wise training (default: false)
+#     Requires USE_CONVERSATION_MULTI_TURN=true.
+#
+# Examples:
+#   # Default (non-conversation, non-step-wise):
+#   bash examples/train/search/run_search.sh
+#
+#   # Conversation multi-turn format:
+#   USE_CONVERSATION_MULTI_TURN=true bash examples/train/search/run_search.sh
+#
+#   # Step-wise with conversation multi-turn:
+#   USE_CONVERSATION_MULTI_TURN=true STEP_WISE=true bash examples/train/search/run_search.sh
+#
+#   # Override any config via positional args (passed to Hydra):
+#   bash examples/train/search/run_search.sh trainer.epochs=2 trainer.eval_interval=10
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
@@ -13,6 +35,28 @@ RUN_NAME="skyrl-search_4turns_maxgeneratelen_500-multiturn-sync-TIS_2.0"
 
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
+
+# Configurable knobs with defaults
+: "${USE_CONVERSATION_MULTI_TURN:=false}"
+: "${STEP_WISE:=false}"
+
+# Build conditional args
+MULTI_TURN_ARGS=""
+if [ "$USE_CONVERSATION_MULTI_TURN" = "true" ]; then
+  MULTI_TURN_ARGS="generator.use_conversation_multi_turn=true generator.append_eos_token_after_stop_str_in_multi_turn=true"
+else
+  MULTI_TURN_ARGS="generator.use_conversation_multi_turn=false"
+fi
+
+STEP_WISE_ARGS=""
+if [ "$STEP_WISE" = "true" ]; then
+  STEP_WISE_ARGS="generator.step_wise_trajectories=true"
+  # Step-wise requires conversation multi-turn
+  if [ "$USE_CONVERSATION_MULTI_TURN" != "true" ]; then
+    echo "WARNING: STEP_WISE=true requires USE_CONVERSATION_MULTI_TURN=true. Enabling it automatically."
+    MULTI_TURN_ARGS="generator.use_conversation_multi_turn=true generator.append_eos_token_after_stop_str_in_multi_turn=true"
+  fi
+fi
 
 uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
@@ -49,7 +93,8 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=500 \
   generator.inference_engine.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=false \
+  $MULTI_TURN_ARGS \
+  $STEP_WISE_ARGS \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \
   generator.sampling_params.temperature=1.0 \
@@ -72,6 +117,7 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
+  generator.eval_sampling_params.max_generate_length=500 \
   trainer.export_path="$HOME/${RUN_NAME}/exports" \
   trainer.eval_interval=50 \
   $@

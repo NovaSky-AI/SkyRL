@@ -38,10 +38,19 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        # `text_config` can come through as a raw dict from HF configs.
         super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 
-        # Add LoRA-specific parameters
+        # In transformers v5, rope_parameters may not contain rope_theta
+        # even when it exists as a top-level config attribute (e.g. DeepSeek v3).
+        # Inject it so model code can always use config.rope_parameters["rope_theta"].
+        rope_params = getattr(self, "rope_parameters", None) or {}
+        if "rope_theta" not in rope_params:
+            rope_theta = getattr(self, "rope_theta", None)
+            if rope_theta is not None:
+                rope_params["rope_theta"] = rope_theta
+        if rope_params:
+            self.rope_parameters = rope_params
+
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
@@ -53,10 +62,13 @@ class ModelConfig(PretrainedConfig):
         """Return `text_config` when present, otherwise return this config."""
         return self.get_text_config() if hasattr(self, "text_config") else self
 
-    def get_text_config(self) -> "ModelConfig":
+    def get_text_config(self, decoder=None, encoder=None) -> "ModelConfig":
         """Return a wrapped config built from `self.text_config`."""
+        text_cfg = super().get_text_config(decoder=decoder, encoder=encoder)
+        if text_cfg is self or isinstance(text_cfg, ModelConfig):
+            return text_cfg
         return type(self)(
-            self.text_config,
+            text_cfg,
             max_lora_adapters=self.max_lora_adapters,
             max_lora_rank=self.max_lora_rank,
             shard_attention_heads=self.shard_attention_heads,

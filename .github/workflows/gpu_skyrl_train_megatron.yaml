@@ -15,6 +15,8 @@ on:
       - '!docs/**'
       - '!examples/**'
       - '.github/workflows/**'
+  pull_request_target:
+    types: [labeled]
   workflow_dispatch:
 
 
@@ -25,6 +27,19 @@ permissions:
 jobs:
   
   skyrl_train_tests_megatron:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci') &&
+        (
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR'
+        )
+      )
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -33,6 +48,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

@@ -2,20 +2,21 @@
 uv run --extra dev --isolated pytest tests/backends/skyrl_train/gpu/gpu_ci/test_worker_offload.py
 """
 
-import ray
-import pytest
 import os
 import shutil
 
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    make_dummy_training_batch,
-    make_dummy_tensorbatch,
-    get_rank_0_memory,
-)
+import pytest
+import ray
+
+from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
-from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
+from tests.backends.skyrl_train.gpu.utils import (
+    get_rank_0_memory,
+    init_worker_with_type,
+    make_dummy_tensorbatch,
+    make_dummy_training_batch,
+)
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 

@@ -1,11 +1,10 @@
-from logging.config import fileConfig
 import os
 import sys
+from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import pool
-
 from alembic import context
+from sqlalchemy import pool
 
 # Add parent directory to path so we can import skyrl modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))

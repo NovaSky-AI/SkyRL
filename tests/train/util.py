@@ -1,12 +1,12 @@
 # utility functions used for CPU tests
 
 from skyrl.train.config import (
-    SkyRLTrainConfig,
     AlgorithmConfig,
-    SamplingParams,
-    TrainerConfig,
     GeneratorConfig,
     InferenceEngineConfig,
+    SamplingParams,
+    SkyRLTrainConfig,
+    TrainerConfig,
 )
 
 

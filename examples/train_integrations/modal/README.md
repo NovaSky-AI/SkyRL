@@ -35,12 +35,12 @@ modal run main.py --command "nvidia-smi"
 
 #### 2. Generate GSM8K dataset
 ```bash
-modal run main.py --command "uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
+modal run main.py --command "uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
 ```
 
 #### 3. Run training script
 ```bash
-modal run main.py --command "bash examples/gsm8k/run_gsm8k_modal.sh"
+modal run main.py --command "bash examples/train/gsm8k/run_gsm8k_modal.sh"
 ```
 
 #### 4. Other scripts
@@ -68,7 +68,7 @@ Configure the integration using environment variables:
 ```bash
 MODAL_APP_NAME=benji_skyrl_app \
 MODAL_GPU=A100:4 \
-modal run main.py --command "bash examples/gsm8k/run_gsm8k_modal.sh"
+modal run main.py --command "bash examples/train/gsm8k/run_gsm8k_modal.sh"
 ```
 
 ## How It Works

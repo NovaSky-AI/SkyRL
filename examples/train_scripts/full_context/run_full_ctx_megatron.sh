@@ -1,7 +1,7 @@
 set -x
 
 # Script to simulate full context training for DAPO with Qwen3-4B on 8 GPUs with Megatron.
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # bash scripts/full_context/run_full_ctx_megatron.sh
 
 # NOTE: Make sure to tune the configurations for the setup you wish to test.

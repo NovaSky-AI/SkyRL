@@ -2,8 +2,8 @@ set -x
 
 # Running on policy distillation for Math on the DAPO math dataset, with eval on AIME 2024.
 # Uses Qwen-3-1.7B-Base as the student model and an RL trained Qwen-3-4B as the teacher model
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/on_policy_distillation/run_on_policy_distill_math_qwen3_1.7b.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_1.7b.sh
 
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"

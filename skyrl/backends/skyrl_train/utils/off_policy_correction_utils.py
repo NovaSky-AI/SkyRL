@@ -1,7 +1,9 @@
+from typing import Optional, Tuple
+
 import torch
 from omegaconf import DictConfig
-from typing import Tuple, Optional
-from skyrl.backends.skyrl_train.utils.torch_utils import safe_exp_delta, masked_mean
+
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
 
 
 def compute_tis_ratio(

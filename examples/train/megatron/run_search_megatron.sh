@@ -1,10 +1,10 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen3-30B-A3B on SearchR1 data.
-# follow the instructions in examples/search/README.md for setting up the dataset
+# follow the instructions in examples/train/search/README.md for setting up the dataset
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/megatron/run_search_megatron.sh
+# bash examples/train/megatron/run_search_megatron.sh
 # Runs on 4 nodes of 8xH100s
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
@@ -92,6 +92,7 @@ uv run --isolated --frozen --extra megatron -m skyrl.train.entrypoints.main_base
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
+  generator.eval_sampling_params.max_generate_length=500 \
   trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_qwen30b/exports" \
   trainer.eval_interval=50 \
   $@

@@ -18,20 +18,28 @@ Run with:
 """
 
 import asyncio
+
+import pytest
 import ray
 import torch
 import torch.distributed as dist
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.weight_sync import (
-    WeightChunk,
-    CudaIpcTransferStrategy,
     BroadcastTransferStrategy,
+    CudaIpcTransferStrategy,
+    WeightChunk,
     WeightSyncInitInfo,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import get_free_port, str_to_torch_dtype
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from ray.util.placement_group import placement_group
+
+pytestmark = pytest.mark.skipif(
+    _SKYRL_USE_NEW_INFERENCE,
+    reason="Transfer strategy e2e tests use legacy receiver which is incompatible with new inference path",
+)
 
 
 def make_cfg(
@@ -288,8 +296,8 @@ def _run_weight_sync_e2e(
             receiver_options = {"num_gpus": 1}
 
         # Use for_engine() to get per-engine init_info
-        # Test assumes tp_size=pp_size=1 (single worker per engine)
-        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1)
+        # Test assumes tp_size=pp_size=1,dp_size=1 (single worker per engine)
+        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1, dp_size=1)
 
         receiver = ReceiverActor.options(**receiver_options).remote(strategy_cls, receiver_init_info)
         receivers.append(receiver)

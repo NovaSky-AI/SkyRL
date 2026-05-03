@@ -6,11 +6,13 @@ import os
 from pathlib import Path
 
 from cloudpathlib import AnyPath
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
+
+    model_config = ConfigDict(extra="forbid")
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
     backend: str = Field(default="jax", description="Backend to use for training and inference")

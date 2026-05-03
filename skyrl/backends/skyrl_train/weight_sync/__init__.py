@@ -2,29 +2,29 @@
 
 from typing import Type
 
-from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
-from .weight_extractor import WeightExtractor
-from .weight_loader import WeightLoader
-from .transfer_strategy import (
-    WeightTransferStrategy,
-    WeightTransferSender,
-    WeightTransferReceiver,
-    WeightSyncInitInfo,
-)
+from .base import LoraLoadRequest, WeightChunk, WeightUpdateRequest
 from .broadcast_strategy import (
     BroadcastInitInfo,
     BroadcastTransferStrategy,
-    BroadcastWeightTransferSender,
     BroadcastWeightTransferReceiver,
+    BroadcastWeightTransferSender,
     BroadcastWeightUpdateRequest,
 )
 from .cuda_ipc_strategy import (
     CudaIpcInitInfo,
     CudaIpcTransferStrategy,
-    CudaIpcWeightTransferSender,
     CudaIpcWeightTransferReceiver,
+    CudaIpcWeightTransferSender,
     CudaIpcWeightUpdateRequest,
 )
+from .transfer_strategy import (
+    WeightSyncInitInfo,
+    WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
+)
+from .weight_extractor import WeightExtractor
+from .weight_loader import WeightLoader
 
 
 def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> Type[WeightTransferStrategy]:
@@ -43,9 +43,17 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    if weight_sync_backend == "nccl" and colocate_all:
+    strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
+    if strategy == "ipc":
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
+
+
+def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
+    """Get the appropriate transfer strategy string based on config."""
+    if weight_sync_backend == "nccl" and colocate_all:
+        return "ipc"
+    return "nccl"
 
 
 __all__ = [

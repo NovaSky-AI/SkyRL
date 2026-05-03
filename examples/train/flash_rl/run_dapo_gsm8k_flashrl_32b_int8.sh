@@ -3,9 +3,9 @@ set -x
 # Colocated DAPO training+generation for Qwen3-32B on GSM8K with FP8 rollouts.
 # The configuration is tested on 2 8xH100 GPUs.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/flash_rl/run_dapo_gsm8k_flashrl_32b_int8.sh
+# bash examples/train/flash_rl/run_dapo_gsm8k_flashrl_32b_int8.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=16
@@ -53,6 +53,7 @@ uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.int8 -
   generator.sampling_params.top_p=$TOP_P \
   generator.sampling_params.logprobs=0 \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \

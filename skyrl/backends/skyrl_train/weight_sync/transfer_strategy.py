@@ -7,7 +7,7 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Iterator, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
 
@@ -15,9 +15,12 @@ from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
-    from skyrl.train.config import SkyRLTrainConfig
-    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+        InferenceEngineClient,
+    )
     from skyrl.backends.skyrl_train.weight_sync.base import WeightUpdateRequest
+    from skyrl.train.config import SkyRLTrainConfig
 
 
 @dataclass
@@ -33,7 +36,7 @@ class WeightSyncInitInfo(ABC):
         """Return the strategy class for this init info type."""
         ...
 
-    def for_engine(self, engine_index: int, tp_size: int, pp_size: int) -> "WeightSyncInitInfo":
+    def for_engine(self, engine_index: int, tp_size: int, pp_size: int, dp_size: int) -> "WeightSyncInitInfo":
         """Return init_info adjusted for a specific engine.
 
         Override in subclasses that need per-engine adjustments (e.g., rank offset).
@@ -43,6 +46,7 @@ class WeightSyncInitInfo(ABC):
             engine_index: Index of the engine (0-based).
             tp_size: Tensor parallel size of the engine.
             pp_size: Pipeline parallel size of the engine.
+            dp_size: Data parallel size of the engine.
 
         Returns:
             Adjusted init_info for the specific engine.
@@ -58,7 +62,11 @@ class WeightTransferSender(ABC):
     """
 
     @abstractmethod
-    async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
+    async def send_chunks(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
         """Send chunks using this transfer strategy.
 
         This method must be called on all training ranks. Implementations may have
@@ -66,6 +74,9 @@ class WeightTransferSender(ABC):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
+            weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
+                When provided, allows the sender to avoid materializing all chunks
+                to collect metadata upfront.
         """
         ...
 
@@ -116,7 +127,7 @@ class WeightTransferStrategy(ABC):
         sender = Strategy.create_sender(init_info, inference_client)
 
     Usage on receiver side (for each engine):
-        engine_init_info = init_info.for_engine(engine_index, tp_size, pp_size)
+        engine_init_info = init_info.for_engine(engine_index, tp_size, pp_size, dp_size)
         receiver = engine_init_info.strategy_type().create_receiver(engine_init_info)
     """
 

@@ -1,7 +1,10 @@
 import pytest
 import torch
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+
 from skyrl.backends.skyrl_train.weight_sync import WeightChunk
+from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
+    yield_module_grouped_chunks,
+)
 
 
 class TestModuleGrouping:

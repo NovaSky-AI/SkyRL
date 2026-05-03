@@ -2,15 +2,20 @@
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/gpu/gpu_ci/test_model_wrapper.py
 """
 
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
-import torch
-import pytest
 from unittest.mock import MagicMock, patch
-from transformers import AutoTokenizer
+
+import pytest
 import ray
+import torch
 import torch.distributed as dist
 from torch.distributed.distributed_c10d import _get_default_group
-from skyrl.backends.skyrl_train.workers.worker import set_ulysses_sequence_parallel_group, apply_monkey_patch
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
+from skyrl.backends.skyrl_train.workers.worker import (
+    apply_monkey_patch,
+    set_ulysses_sequence_parallel_group,
+)
 
 MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 TOKENIZER_NAME = "unsloth/Meta-Llama-3.1-8B"

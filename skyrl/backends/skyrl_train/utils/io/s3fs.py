@@ -1,4 +1,5 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+
 import fsspec
 
 # Optional AWS deps (present when s3fs is installed)

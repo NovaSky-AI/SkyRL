@@ -1,8 +1,8 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on DAPO training data and validate on AIME 2024.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen2.5_math_7b_aime.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/algorithms/dapo/run_dapo_qwen2.5_math_7b_aime.sh
 
 # download the model from huggingface and modify the max_position_embeddings in config.json to 32768
 # hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/qwen2.5-math
@@ -62,6 +62,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \

@@ -14,22 +14,23 @@ import asyncio
 import json
 import logging
 import time
-import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import fastapi
+import requests
 import uvicorn
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+        InferenceEngineClient,
+    )
 
 logger = logging.getLogger(__name__)
 

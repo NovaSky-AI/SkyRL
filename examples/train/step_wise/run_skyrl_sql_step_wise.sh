@@ -4,7 +4,7 @@ set -x
 # Uses 1 node with 8 GPUs.
 # hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/step_wise/run_skyrl_sql_step_wise.sh
+# bash examples/train/step_wise/run_skyrl_sql_step_wise.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
@@ -61,6 +61,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="stepwise_multiturn" \

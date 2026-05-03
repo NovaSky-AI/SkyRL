@@ -14,12 +14,19 @@ from typing import Any, Dict, List, Optional
 import ray
 from ray import ObjectRef
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    MeshDispatch,
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshDispatch
+from skyrl.train.config import SkyRLTrainConfig
 
 
 @dataclass
@@ -155,20 +162,24 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def stage_data(self, data: TrainingInputBatch) -> ObjectRef:
+    def stage_data(self, model: str, data: TrainingInputBatch, mini_batch_size: int) -> List[List[ObjectRef]]:
         """
-        Put training data in Ray object store for efficient access.
+        Pre-stage all mini-batch chunks in the Ray object store.
 
-        Call this once to avoid repeated serialization when dispatching
-        data to workers
+        Call this once before the training loop so that all serialization is
+        done upfront and GPUs stay saturated during training.
 
         Args:
-            data: Full training batch to stage in the ray object store
+            model: Model name (used to look up DP size)
+            data: Full training batch
+            mini_batch_size: Size of each mini-batch (before DP chunking)
 
         Returns:
-            ObjectRef to the staged data
+            ``result[i][dp_rank]`` is the ObjectRef for mini-batch *i*,
+            DP rank *dp_rank*.
         """
-        return ray.put(data)
+        dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
+        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_size)
 
     def forward_backward(
         self,
@@ -220,23 +231,19 @@ class WorkerDispatch:
     def forward_backward_from_staged(
         self,
         model: str,
-        data_ref: ObjectRef,
-        start_idx: int,
-        end_idx: int,
+        chunk_refs: List[ObjectRef],
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
-        Run forward/backward pass using pre-staged data from object store.
+        Run forward/backward pass using pre-staged per-DP chunks.
 
-        Workers fetch the full batch from object store and slice locally,
-        avoiding repeated serialization for each mini-batch.
+        Each worker receives only its own DP chunk from the object store,
+        avoiding unncecessary deserialization overhead.
 
         Args:
             model: Model name ("policy" or "critic")
-            data_ref: ObjectRef to staged TrainingInputBatch (from stage_data)
-            start_idx: Start index for mini-batch slice
-            end_idx: End index for mini-batch slice
+            chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_data``)
 
         Returns:
             Aggregated metrics dict from training
@@ -250,13 +257,10 @@ class WorkerDispatch:
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
 
-        # Use specialized dispatch that passes ObjectRef + indices instead of data
         refs = MeshDispatch.dispatch_from_staged(
             self._actor_groups[model].actor_infos,
-            "forward_backward_from_staged",
-            data_ref=data_ref,
-            start_idx=start_idx,
-            end_idx=end_idx,
+            "forward_backward",
+            chunk_refs=chunk_refs,
             **kwargs,
         )
         statuses = ray.get(refs)

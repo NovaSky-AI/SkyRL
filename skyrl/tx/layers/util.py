@@ -1,8 +1,8 @@
-from flax import nnx
 import jax
+from flax import nnx
 from jax import lax
 from jax import numpy as jnp
-from jax.sharding import get_abstract_mesh, PartitionSpec
+from jax.sharding import PartitionSpec, get_abstract_mesh
 
 
 def ragged_dot(

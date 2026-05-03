@@ -4,15 +4,18 @@ Server Group - manages server actors with placement groups.
 
 import logging
 from argparse import Namespace
-from typing import Any, List, Optional, Type
+from typing import Any, List, Optional, Type, Union
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    ServerInfo,
+)
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +45,13 @@ class ServerGroup:
         cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
-        placement_group: Optional[PlacementGroup] = None,
+        placement_group: Optional[ResolvedPlacementGroup] = None,
         placement_group_bundle_offset: int = 0,
         enable_dp: bool = False,
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
+        **server_actor_kwargs: Any,
     ):
         """
         Initialize the server group.
@@ -57,7 +61,7 @@ class ServerGroup:
             num_servers: Number of server instances to create.
             start_port: Base port for server ports.
             placement_group: External placement group for colocation mode.
-                If None, creates internal placement group.
+                If None, creates an internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
                 external placement group (e.g., if training uses first N
                 bundles).
@@ -68,20 +72,34 @@ class ServerGroup:
                 server_idx.
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
+            **server_actor_kwargs: Additional keyword arguments to pass to the server actor class.
         """
-        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
+        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+            VLLMServerActor,
+        )
 
         self._server_actor_cls = server_actor_cls or VLLMServerActor
         self._cli_args = cli_args
         self._num_servers = num_servers
         self._start_port = start_port
-        self._external_pg = placement_group
         self._bundle_offset = placement_group_bundle_offset
         self._enable_dp = enable_dp
         self._enable_pd = enable_pd
         self._nixl_side_channel_base = nixl_side_channel_base
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
+        self._server_actor_kwargs = server_actor_kwargs
+        self._external_pg = placement_group
+
+        # Extract the raw PG, reordered indices, and GPU IDs from ResolvedPlacementGroup.
+        if placement_group is not None:
+            self._external_pg = placement_group.pg
+            self._reordered_bundle_indices = placement_group.reordered_bundle_indices
+            self._bundle_gpu_ids = placement_group.bundle_gpu_ids
+        else:
+            self._external_pg = None
+            self._reordered_bundle_indices = None
+            self._bundle_gpu_ids = None
 
         # Query the actor class for GPU requirements
         self._num_gpus_per_server = self._server_actor_cls.compute_num_gpus_per_server(cli_args)
@@ -91,15 +109,18 @@ class ServerGroup:
             f"num_servers={num_servers}, "
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "
-            f"external_pg={'yes' if placement_group else 'no'}"
+            f"external_pg={'yes' if self._external_pg else 'no'}"
         )
 
     def _create_placement_group(self) -> PlacementGroup:
-        """Create internal placement group with bundles for all servers."""
+        """Create an internal placement group with per-GPU bundles."""
         total_bundles = self._num_servers * self._num_gpus_per_server
         logger.info(f"Creating placement group with {total_bundles} bundles...")
         pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(total_bundles)])
         ray.get(pg.ready())
+        skyrl_pg = ResolvedPlacementGroup(pg)
+        self._reordered_bundle_indices = skyrl_pg.reordered_bundle_indices
+        self._bundle_gpu_ids = skyrl_pg.bundle_gpu_ids
         logger.info("Placement group ready")
         return pg
 
@@ -123,6 +144,22 @@ class ServerGroup:
             ),
         )
 
+    def _get_bundle_indices_for_server(self, server_idx: int) -> List[int]:
+        """Get the bundle indices for a server, using reordered indices if available."""
+        gpus = self._num_gpus_per_server
+        logical_base = self._bundle_offset + server_idx * gpus
+        if self._reordered_bundle_indices is not None:
+            return [self._reordered_bundle_indices[logical_base + k] for k in range(gpus)]
+        return list(range(logical_base, logical_base + gpus))
+
+    def _get_gpu_ids_for_server(self, server_idx: int) -> Optional[List[int]]:
+        """Get the physical GPU IDs for a server, using cached gpu_ids if available."""
+        if self._bundle_gpu_ids is None:
+            return None
+        gpus = self._num_gpus_per_server
+        logical_base = self._bundle_offset + server_idx * gpus
+        return [self._bundle_gpu_ids[logical_base + k] for k in range(gpus)]
+
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
         pg = self._get_placement_group()
@@ -131,22 +168,32 @@ class ServerGroup:
         dp_address, dp_rpc_port = None, None
 
         for server_idx in range(self._num_servers):
-            # Calculate bundle index accounting for offset (colocation mode)
-            start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
+            bundle_indices = self._get_bundle_indices_for_server(server_idx)
+            start_bundle_idx = bundle_indices[0]
 
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
+
+            gpu_ids = self._get_gpu_ids_for_server(server_idx)
+            server_kwargs = self._server_actor_cls.prepare_server_kwargs(
+                pg,
+                start_bundle_idx,
+                self._num_gpus_per_server,
+                _gpu_ids=gpu_ids,
+                **self._server_actor_kwargs,
+            )
 
             actor = ServerActorClass.remote(
                 self._cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
-                start_bundle_idx=start_bundle_idx,
+                bundle_indices=bundle_indices,
                 dp_size=self._num_servers if self._enable_dp else -1,
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
                 colocated_training=self._external_pg is not None,
+                **server_kwargs,
             )
 
             # Get DP info from server 0 which is where DP0 will be
@@ -158,29 +205,41 @@ class ServerGroup:
 
         return actors
 
-    def start(self) -> List[ServerInfo]:
-        """Create actors, start the pool, and return endpoints."""
+    def start(self, blocking: bool = True) -> Union[List[ServerInfo], List[ray.ObjectRef]]:
+        """Create actors, start the pool, and return endpoints.
+
+        Args:
+            blocking: If True (default), waits for all servers to be ready
+                and returns ``List[ServerInfo]``.  If False, creates actors
+                and fires off start RPCs but returns the
+                ``List[ObjectRef]`` without waiting.
+        """
         logger.info(f"Starting {self._num_servers} server(s)...")
         actors = self._create_actors()
         self._pool = ServerActorPool(actors)
-        server_infos = self._pool.start()
 
-        for i, info in enumerate(server_infos):
-            logger.info(f"Server {i}: {info.url}")
+        if blocking:
+            server_infos = self._pool.start(blocking=True)
+            for i, info in enumerate(server_infos):
+                logger.info(f"Server {i}: {info.url}")
+            return server_infos
 
-        return server_infos
+        return self._pool.start(blocking=False)
+
+    @property
+    def server_infos(self) -> List[ServerInfo]:
+        """Lazily resolved server infos (delegates to pool)."""
+        if self._pool is None:
+            return []
+        return self._pool.server_infos
 
     def get_pool(self) -> Optional[ServerActorPool]:
         """Get the underlying actor pool."""
         return self._pool
 
-    def get_server_infos(self) -> List[ServerInfo]:
-        """Get the list of server endpoints."""
-        return self._pool.get_server_infos() if self._pool else []
-
     def get_server_urls(self) -> List[str]:
         """Get the list of server URLs."""
-        return self._pool.get_server_urls() if self._pool else []
+        return [info.url for info in self.server_infos]
 
     def get_actors(self) -> List[Any]:
         """Get the list of actor handles."""

@@ -2,9 +2,9 @@ set -x
 
 # Colocated REINFORCE++ training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/algorithms/reinforce++/run_reinforce++.sh
+# bash examples/train/algorithms/reinforce++/run_reinforce++.sh
 
 
 DATA_DIR="$HOME/data/gsm8k"

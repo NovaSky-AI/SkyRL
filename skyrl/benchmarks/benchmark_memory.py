@@ -81,7 +81,6 @@ import tinker
 from tinker import types
 from transformers import AutoTokenizer
 
-
 # Default configuration
 DEFAULT_BASE_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 

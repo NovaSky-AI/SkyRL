@@ -1,29 +1,36 @@
-from typing import Optional, Callable, List, Dict, Any
+from dataclasses import asdict
 from functools import partial
+from typing import Any, Callable, Dict, List, Optional
+
+import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
-from dataclasses import asdict
-
-from megatron.core.pipeline_parallel import get_forward_backward_func
-import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.pipeline_parallel import get_forward_backward_func
+from omegaconf import OmegaConf
 
-from skyrl.train.config import TrainerConfig
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    get_model_config,
+    make_batch_generator,
+    postprocess_packed_seqs,
+    preprocess_packed_seqs,
+    recover_left_padding,
+    remove_left_padding,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl.backends.skyrl_train.utils.ppo_utils import compute_approx_kl, PolicyLossRegistry
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    make_batch_generator,
-    preprocess_packed_seqs,
-    postprocess_packed_seqs,
-    remove_left_padding,
-    recover_left_padding,
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    compute_approx_kl,
 )
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    setup_per_microbatch_replay_backward,
+    setup_per_microbatch_replay_forward,
+)
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.train.config import TrainerConfig
 
 
 class MegatronModelWrapper:
@@ -103,6 +110,16 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
+                )
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
@@ -229,7 +246,9 @@ class MegatronModelWrapper:
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
             action_mask = data.get("action_mask")
+            num_microbatches = data.get("num_microbatches")
 
+            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
@@ -283,13 +302,17 @@ class MegatronModelWrapper:
 
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                            "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                            "logprobs": (
+                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
+                            "elementwise_loss": (
+                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                            ),
                         }
                     )
 
                 metrics = {
-                    "loss": loss.detach().item(),
+                    "loss": loss.item(),
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
@@ -319,7 +342,23 @@ class MegatronModelWrapper:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            # Policy losses are pre-scaled to achieve the correct loss_reduction
+            # when summing across the entire minibatch (see `apply_loss_reduction_to_advantages_minibatch`).
+            # Megatron divides loss by num_microbatches
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
+            # and the data parallel all-reduce averages gradients across dp_size (including CP ranks)
+            # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
+            # so we multiply by both factors to recover the correct sum reduction.
+            grad_sum_correction_factor = num_microbatches * dp_size
+
+            # NOTE: The KL and entropy loss terms are not pre-scaled,
+            # so we just average them across microbatches and DP workers.
+            # Megatron's DDP averages gradients across the full DP+CP group,
+            # but KL/entropy should only be averaged across DP (not CP).
+            # Multiply by cp_size to counteract the unwanted CP averaging.
+            cp_size = mpu.get_context_parallel_world_size()
+            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * cp_size
+            unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
@@ -337,12 +376,12 @@ class MegatronModelWrapper:
             for i, valid_len in enumerate(valid_lens):
                 loss_fn_outputs.append(
                     {
-                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
                     }
                 )
 
             metrics = {
-                "final_loss": loss.detach().item(),
+                "final_loss": unscaled_loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),
@@ -353,7 +392,20 @@ class MegatronModelWrapper:
             return loss, metrics
 
         def forward_step(batch_iter, model):
+            # NOTE(Charlie): despite the name, methods like `remove_left_padding()` are padding-agnostic
+            # (can be left, or right) as it uses attention_mask to locate real tokens. Same thing
+            # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
+            # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
+
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices,
+                    batch["attention_mask"],
+                    model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
+                )
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -400,6 +452,9 @@ class MegatronModelWrapper:
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
+
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_backward()
 
             return outputs, partial(loss_func, data=batch)
 

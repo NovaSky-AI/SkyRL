@@ -5,15 +5,15 @@ These mirror the YAML configuration structure 1:1. The top-level SkyRLTrainConfi
 can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config().
 """
 
-import os
-from abc import ABC
-import dataclasses
-from dataclasses import dataclass, field, asdict
-import typing
-from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
-import yaml
 import copy
+import dataclasses
+import os
+import typing
+from abc import ABC
+from dataclasses import asdict, dataclass, field
+from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
+import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_gym.envs.search.env import SearchEnvConfig
@@ -142,6 +142,7 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
     "recompute_modules": ["core_attn"],
     "recompute_method": "uniform",
     "recompute_num_layers": 1,
+    "gradient_accumulation_fusion": False,
 }
 
 
@@ -158,6 +159,7 @@ class MegatronConfig(BaseConfig):
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
+    moe_enable_routing_replay: bool = False
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
@@ -444,6 +446,7 @@ class InferenceEngineConfig(BaseConfig):
     """Sets ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` for reproducibility."""
     enable_prefix_caching: bool = True
     enable_chunked_prefill: bool = True
+    enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
     enforce_eager: bool = True
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
@@ -464,6 +467,10 @@ class InferenceEngineConfig(BaseConfig):
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
+    distributed_executor_backend: str = "ray"
+    """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
+    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
+    placement groups are created when ``"mp"`` is used."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
@@ -472,6 +479,15 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
+    enable_pd: bool = False
+    """Enable prefill-decode disaggregation. Requires ``num_prefill > 0`` and ``num_engines >= 2``."""
+    num_prefill: int = 0
+    """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
+
+    NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
+    Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +736,24 @@ class SkyRLTrainConfig(BaseConfig):
             self.trainer.algorithm.max_seq_len = (
                 self.generator.max_input_length + self.generator.sampling_params.max_generate_length
             )
+
+        # TODO(devpatel): Bandaid solution, replace this once we have a better
+        # solution for LoRA performance degradation on the vLLM side
+        ie_cfg = self.generator.inference_engine
+        if (
+            self.trainer.policy.model.lora.rank > 0
+            and self.trainer.strategy != "megatron"
+            and ie_cfg.enforce_eager
+            and ie_cfg.backend == "vllm"
+        ):
+            import warnings
+
+            warnings.warn(
+                "LoRA is enabled but inference_engine.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            ie_cfg.enforce_eager = False
 
     @classmethod
     def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":

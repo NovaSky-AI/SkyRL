@@ -1,6 +1,12 @@
 # utility functions used for CPU tests
 
-from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig, SamplingParams, TrainerConfig, GeneratorConfig
+from skyrl.train.config import (
+    AlgorithmConfig,
+    GeneratorConfig,
+    SamplingParams,
+    SkyRLTrainConfig,
+    TrainerConfig,
+)
 
 
 def example_dummy_config():

@@ -10,7 +10,7 @@ set -x
 # uv run envs/openenv/install_environment.py
 
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/openenv/run_dummy_openenv.sh
+# bash examples/train_integrations/openenv/run_openenv.sh
 
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train_integrations/openenv/run_dummy_openenv.sh`.
 
@@ -51,6 +51,7 @@ uv run --isolated --extra fsdp --with "openenv-core@git+https://github.com/meta-
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</action>"]' \
   generator.eval_sampling_params.stop='["</action>"]' \
+  generator.eval_sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.max_turns=$MAX_TURNS \
