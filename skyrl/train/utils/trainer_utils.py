@@ -265,15 +265,24 @@ def dump_per_dataset_eval_results(
         data_source_indices[data_source].append(i)
 
     # Dump per-dataset files
+    is_last = concat_generator_outputs.get("is_last_step")
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
         filename = dump_dir_path / f"{sanitized_data_source}.jsonl"
 
         with open(filename, "w") as f:
             for i in indices:
-                is_last = concat_generator_outputs.get("is_last_step")
+                em_i = env_metrics_list[i] if env_metrics_list is not None and i < len(env_metrics_list) else None
+                # Skip mid-trajectory steps. Two signals identify a row worth
+                # dumping: the base generator's `is_last_step` (true only at
+                # the absolute last index of each agent_loop call), and the
+                # per-trajectory `is_trajectory_boundary` flag stamped by
+                # generators that inline child trajectories (e.g. RLM). The
+                # latter recovers child rollouts that lose `is_last_step` when
+                # their step_outputs get prepended into the root's.
                 if is_last is not None and not is_last[i]:
-                    continue
+                    if not (em_i and em_i.get("is_trajectory_boundary")):
+                        continue
                 env_extras_clean = {k: v for k, v in concat_env_extras[i].items() if k != "extra_info"}
                 entry = {
                     "input_prompt": input_prompts[i],
@@ -284,8 +293,8 @@ def dump_per_dataset_eval_results(
                     "env_extras": env_extras_clean,
                     "data_source": data_source,
                 }
-                if env_metrics_list is not None and i < len(env_metrics_list):
-                    entry["env_metrics"] = env_metrics_list[i]
+                if em_i is not None:
+                    entry["env_metrics"] = em_i
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")

@@ -169,6 +169,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 "child_index": ctx.child_index,
                 "step_index": step_index,
             }
+            
+        # Mark this rollout's final step as a trajectory boundary for observability. 
+        # Note that this is different from is_last_step, which is used for training. 
+        if agent_loop_output.step_outputs:
+            agent_loop_output.step_outputs[-1].env_metrics["is_trajectory_boundary"] = True
 
         ctx.output = agent_loop_output
 
