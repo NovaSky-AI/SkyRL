@@ -6,6 +6,7 @@ RLM-specific generator: extends SkyRLGymGenerator via two hooks plus a thin
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import threading
 import uuid
@@ -131,7 +132,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         env_extras["depth"] = ctx.depth
 
         loop = asyncio.get_running_loop()
-        env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+        env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, ctx.rid)
         if getattr(self.generator_cfg, "enable_child_agents", True):
             env_extras["subcall_fn"] = self._make_subcall_fn(loop, env_extras, sampling_params, ctx.rid)
 
@@ -231,6 +232,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         self,
         loop: asyncio.AbstractEventLoop,
         sampling_params: Optional[Dict[str, Any]],
+        rid: Optional[str],
     ) -> Callable[[List[str]], List[str]]:
         """Sync callback that dispatches batched text prompts to an inference engine.
 
@@ -241,6 +243,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
         target_engine = self.frozen_inference_engine or self.inference_engine_client
 
         async def _generate(prompts: List[str]) -> List[str]:
+            if rid is not None and rid not in self.active_rollouts:
+                # Owner rollout was torn down — bail before hitting the engine.
+                # Firing now risks landing on a partially-woken vLLM during
+                # sync_weights and crashing the EngineCore.
+                raise asyncio.CancelledError(f"rollout {rid} torn down before lm_query")
             token_ids = [
                 self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": p}],
@@ -259,7 +266,14 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         def callback(prompts: List[str]) -> List[str]:
             future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)
-            return future.result(timeout=300)
+            try:
+                return future.result(timeout=300)
+            except concurrent.futures.TimeoutError:
+                # Cancel the underlying asyncio task so it doesn't keep firing HTTP
+                # requests after we've given up — orphans queued on a sleeping engine
+                # crash vLLM on partial wake.
+                future.cancel()
+                raise
 
         return callback
 
@@ -312,7 +326,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
 
         def subcall_fn(prompt: str, context=None) -> str:
             future = asyncio.run_coroutine_threadsafe(_run_child(prompt, context=context), loop)
-            return future.result(timeout=600)
+            try:
+                return future.result(timeout=600)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise
 
         return subcall_fn
 
