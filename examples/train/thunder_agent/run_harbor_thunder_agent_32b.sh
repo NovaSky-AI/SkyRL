@@ -66,11 +66,34 @@ TRAINING_WORLD_SIZE=$((TRAIN_NUM_NODES * TRAIN_GPUS_PER_NODE))
 # ---------------------------------------------------------------------------
 ROLLOUT_ENGINES="${ROLLOUT_ENGINES:-4}"
 ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-2}"
+# ROLLOUT_SERVER_URLS can be set directly as a Python list literal, e.g.
+#   '["http://1.2.3.4:18000","http://1.2.3.4:18001"]'
+# OR constructed automatically from ROLLOUT_HOST_IP + ROLLOUT_SERVER_PORTS_CSV
+# (same convention as run_harbor_benchmark.sh / run_harbor_fully_async.sh).
 ROLLOUT_SERVER_URLS="${ROLLOUT_SERVER_URLS:-}"
-# Optional: when the benchmark wrapper has already started a TA proxy in front
-# of the rollout servers, set EXTERNAL_PROXY_URL so SkyRL reuses it instead of
-# launching its own embedded ThunderAgentRouter.
-EXTERNAL_PROXY_URL="${EXTERNAL_PROXY_URL:-}"
+ROLLOUT_HOST_IP="${ROLLOUT_HOST_IP:-}"
+ROLLOUT_SERVER_PORTS_CSV="${ROLLOUT_SERVER_PORTS_CSV:-18000,18001,18002,18003}"
+
+# Auto-build ROLLOUT_SERVER_URLS from host+ports if not already set.
+if [ -z "$ROLLOUT_SERVER_URLS" ] && [ -n "$ROLLOUT_HOST_IP" ]; then
+  _urls=()
+  IFS=',' read -r -a _ports <<<"$ROLLOUT_SERVER_PORTS_CSV"
+  for _p in "${_ports[@]}"; do
+    _urls+=('"'"http://${ROLLOUT_HOST_IP}:${_p}"'"')
+  done
+  ROLLOUT_SERVER_URLS="[$(IFS=,; echo "${_urls[*]}")]"
+  unset _urls _ports _p
+fi
+
+# EXTERNAL_PROXY_URL: when run_harbor_benchmark.sh already started a TA proxy
+# on the merged/head node, pass its URL so SkyRL reuses it instead of starting
+# an embedded ThunderAgentRouter. Also accepts THUNDERAGENT_URL (same variable
+# name used by run_harbor_fully_async.sh).
+EXTERNAL_PROXY_URL="${EXTERNAL_PROXY_URL:-${THUNDERAGENT_URL:-}}"
+# If neither is set but RAY_HEAD_IP is known, derive the proxy URL from it.
+if [ -z "$EXTERNAL_PROXY_URL" ] && [ -n "${RAY_HEAD_IP:-}" ]; then
+  EXTERNAL_PROXY_URL="http://${RAY_HEAD_IP}:${SKYRL_INFERENCE_ROUTER_PORT:-${THUNDER_AGENT_ROUTER_PORT:-8080}}"
+fi
 
 # ---------------------------------------------------------------------------
 # ThunderAgent
