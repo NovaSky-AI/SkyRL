@@ -253,7 +253,6 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
-    env_metrics_list = concat_generator_outputs.get("env_metrics", None)
 
     # Group indices by data source
     data_source_indices = {}
@@ -271,21 +270,15 @@ def dump_per_dataset_eval_results(
 
         with open(filename, "w") as f:
             for i in indices:
-                is_last = concat_generator_outputs.get("is_last_step")
-                if is_last is not None and not is_last[i]:
-                    continue
-                env_extras_clean = {k: v for k, v in concat_env_extras[i].items() if k != "extra_info"}
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    # "score": concat_generator_outputs["rewards"][i],
+                    "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": env_extras_clean,
+                    "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
-                if env_metrics_list is not None and i < len(env_metrics_list):
-                    entry["env_metrics"] = env_metrics_list[i]
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")

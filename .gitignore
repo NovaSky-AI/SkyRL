@@ -123,16 +123,3 @@ tx/tinker/alembic/__pycache__/
 *.db-journal
 *.db-wal
 *.db-shm
-
-# Data / Rollouts / Checkpoints
-/tmp/
-
-# Other
-exports/
-trajectories/
-.neer/
-examples/train/rlm/datasets/
-examples/train/rlm/envs/
-examples/train/rlm/eval_scripts/
-examples/train/rlm/train_scripts/
-examples/train/sft/
