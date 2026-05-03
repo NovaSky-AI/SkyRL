@@ -6,8 +6,10 @@ then wires through GeneratorConfig via make_config().
 """
 
 from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 from skyrl.train.config import GeneratorConfig, InferenceEngineConfig, make_config
+from skyrl.train.utils.rate_limiter import RateLimiterConfig
 
 
 @dataclass
@@ -38,3 +40,23 @@ class ThunderAgentGeneratorConfig(GeneratorConfig):
 
 
 ThunderAgentConfig = make_config(generator_cls=ThunderAgentGeneratorConfig)
+
+
+@dataclass
+class ThunderAgentHarborGeneratorConfig(ThunderAgentGeneratorConfig):
+    """GeneratorConfig with Harbor rate limiting."""
+
+    rate_limit: RateLimiterConfig = field(default_factory=RateLimiterConfig)
+
+
+@dataclass
+class ThunderAgentHarborConfig(ThunderAgentConfig):
+    """Config for Harbor + ThunderAgent fully-async training."""
+
+    harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
+    generator: ThunderAgentHarborGeneratorConfig = field(
+        default_factory=ThunderAgentHarborGeneratorConfig
+    )
+    max_train_tasks: Optional[int] = None
+    max_eval_tasks: Optional[int] = None
+
