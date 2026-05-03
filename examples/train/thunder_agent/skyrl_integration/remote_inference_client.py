@@ -30,10 +30,14 @@ class ThunderAgentRemoteInferenceClient(RemoteInferenceClient):
             # Best-effort cleanup if the backend-side resume path fails.
             pass
 
-    async def pause(self, mode: PauseMode | str = PauseMode.ABORT) -> Dict[str, Any]:
+    async def pause(
+        self,
+        mode: PauseMode | str = PauseMode.KEEP,
+        clear_cache: bool = False,
+    ) -> Dict[str, Any]:
         await self._call_proxy("/weight_sync/begin", {})
         try:
-            return await super().pause(mode=mode)
+            return await super().pause(mode=mode, clear_cache=clear_cache)
         except Exception:
             await self._end_weight_sync_safely()
             raise
