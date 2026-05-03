@@ -16,10 +16,9 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInput,
-    InferenceEngineInterface,
 )
 
-from skyrl.backends.skyrl_train.inference_engines.openrouter_engine import OpenRouterInferenceEngine
+from examples.train.rlm.openrouter_client import OpenRouterInferenceClient
 from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     SkyRLGymGenerator,
@@ -90,10 +89,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
         # the count-then-insert in _register_rollout is atomic.
         self.active_rollouts: Dict[str, _RLMRolloutContext] = {}
         self._rollout_lock = threading.Lock()
-        self.frozen_inference_engine: Optional[InferenceEngineInterface] = self._build_frozen_inference_engine()
+        self.frozen_inference_engine: Optional[OpenRouterInferenceClient] = self._build_frozen_inference_engine()
 
-    def _build_frozen_inference_engine(self) -> Optional[InferenceEngineInterface]:
-        """Build a frozen OpenRouter engine for in-REPL ``llm_query`` calls.
+    def _build_frozen_inference_engine(self) -> Optional[OpenRouterInferenceClient]:
+        """Build a frozen OpenRouter client for in-REPL ``llm_query`` calls.
 
         Returns ``None`` when ``frozen_openrouter_model`` is not set, in which
         case ``_make_lm_callback`` falls back to the policy engine.
@@ -101,7 +100,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
         model = getattr(self.generator_cfg, "frozen_openrouter_model", None)
         if model is None:
             return None
-        return OpenRouterInferenceEngine(model=model, tokenizer=self.tokenizer)
+        return OpenRouterInferenceClient.from_model(model=model, tokenizer=self.tokenizer)
 
     # ------------------------------------------------------------------
     # Hook 1: env-extras setup (runs inside agent_loop, before env construction)
@@ -170,6 +169,11 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 "child_index": ctx.child_index,
                 "step_index": step_index,
             }
+            
+        # Mark this rollout's final step as a trajectory boundary for observability. 
+        # Note that this is different from is_last_step, which is used for training. 
+        if agent_loop_output.step_outputs:
+            agent_loop_output.step_outputs[-1].env_metrics["is_trajectory_boundary"] = True
 
         ctx.output = agent_loop_output
 
