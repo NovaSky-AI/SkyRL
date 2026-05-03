@@ -20,6 +20,14 @@ class ThunderAgentHarborDataset:
         self.data_files = data_files
         self.task_paths = self._load_data_files()
 
+        if not self.task_paths:
+            raise ValueError(
+                f"ThunderAgentHarborDataset resolved zero task directories from "
+                f"data_files={data_files!r}. Each entry must be a directory of "
+                f"task subdirectories (each containing instruction.md), a single "
+                f"task directory, or a directory with a curated MANIFEST.json."
+            )
+
         if max_tasks is not None and max_tasks < len(self.task_paths):
             self.task_paths = self.task_paths[:max_tasks]
 

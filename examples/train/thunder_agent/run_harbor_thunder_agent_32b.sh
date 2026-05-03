@@ -67,6 +67,10 @@ TRAINING_WORLD_SIZE=$((TRAIN_NUM_NODES * TRAIN_GPUS_PER_NODE))
 ROLLOUT_ENGINES="${ROLLOUT_ENGINES:-4}"
 ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-2}"
 ROLLOUT_SERVER_URLS="${ROLLOUT_SERVER_URLS:-}"
+# Optional: when the benchmark wrapper has already started a TA proxy in front
+# of the rollout servers, set EXTERNAL_PROXY_URL so SkyRL reuses it instead of
+# launching its own embedded ThunderAgentRouter.
+EXTERNAL_PROXY_URL="${EXTERNAL_PROXY_URL:-}"
 
 # ---------------------------------------------------------------------------
 # ThunderAgent
@@ -199,7 +203,8 @@ esac
 # ---------------------------------------------------------------------------
 export _SKYRL_USE_NEW_INFERENCE=1
 export SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-8080}"
-export THUNDER_AGENT_PORT="${THUNDER_AGENT_PORT:-$SKYRL_INFERENCE_ROUTER_PORT}"
+# main_thunder_agent.py reads THUNDER_AGENT_ROUTER_PORT for the embedded router.
+export THUNDER_AGENT_ROUTER_PORT="${THUNDER_AGENT_ROUTER_PORT:-$SKYRL_INFERENCE_ROUTER_PORT}"
 export RAY_ADDRESS="${RAY_ADDRESS:-}"
 export TENSORBOARD_DIR
 export SKYRL_TRIALS_ROOT="$TRIALS_DIR"
@@ -222,6 +227,11 @@ fi
 # Launch
 # ---------------------------------------------------------------------------
 ENTRYPOINT="examples.train.thunder_agent.main_harbor_thunder_agent"
+
+EXTRA_ARGS=()
+if [ -n "$EXTERNAL_PROXY_URL" ]; then
+  EXTRA_ARGS+=("generator.inference_engine.external_proxy_url=$EXTERNAL_PROXY_URL")
+fi
 
 "$PYTHON_BIN" -m "$ENTRYPOINT" \
   data.train_data="$TRAIN_DATA" \
@@ -302,6 +312,7 @@ ENTRYPOINT="examples.train.thunder_agent.main_harbor_thunder_agent"
   harbor_trial_config.agent.kwargs.enable_summarize=false \
   harbor_trial_config.agent.kwargs.record_terminal_session=false \
   harbor_trial_config.agent.kwargs.store_all_messages=true \
+  harbor_trial_config.agent.kwargs.llm_call_kwargs.timeout="$MINI_SWE_MODEL_TIMEOUT_SEC" \
   harbor_trial_config.agent.kwargs.llm_call_kwargs.extra_body.chat_template_kwargs.enable_thinking=false \
   harbor_trial_config.agent.kwargs.llm_call_kwargs.extra_body.include_reasoning=false \
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
@@ -312,4 +323,5 @@ ENTRYPOINT="examples.train.thunder_agent.main_harbor_thunder_agent"
   trainer.project_name=harbor \
   trainer.run_name="$RUN_NAME" \
   trainer.resume_mode=latest \
+  "${EXTRA_ARGS[@]}" \
   "$@"

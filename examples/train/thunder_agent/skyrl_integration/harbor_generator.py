@@ -38,7 +38,11 @@ litellm.suppress_debug_info = True
 litellm.set_verbose = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
-MAX_NUM_RETRIES_PER_TRIAL = 2
+# Per-trial retry budget. Override via HARBOR_MAX_NUM_RETRIES_PER_TRIAL env.
+try:
+    MAX_NUM_RETRIES_PER_TRIAL = max(1, int(os.getenv("HARBOR_MAX_NUM_RETRIES_PER_TRIAL", "2")))
+except ValueError:
+    MAX_NUM_RETRIES_PER_TRIAL = 2
 
 
 @dataclass
