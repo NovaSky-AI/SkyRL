@@ -80,10 +80,16 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    configure_ray_worker_logging,
+    get_batch_alignment_info,
+)
 
 
 class RayPPOTrainer:
+    requires_prompt_batch_alignment = True
+
     def __init__(
         self,
         cfg: SkyRLTrainConfig,
@@ -103,6 +109,8 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
+        if self.train_dataset is not None and self.requires_prompt_batch_alignment:
+            self._validate_prompt_batch_alignment(self.cfg.trainer.train_batch_size)
         self.train_dataloader = None
         self.total_training_steps = None
         self._build_train_dataloader_and_compute_training_steps()
@@ -363,8 +371,59 @@ class RayPPOTrainer:
         self.tracker.finish()
         logger.info("Training done!")
 
+    def _format_prompt_batch_alignment_error(
+        self,
+        prompt_batch_size: int,
+        kept_prompts: int,
+        lcm_dp_size: Optional[int] = None,
+        prompt_alignment_stride: Optional[int] = None,
+    ) -> str:
+        alignment_info = get_batch_alignment_info(self.cfg)
+        lcm_dp_size = lcm_dp_size if lcm_dp_size is not None else alignment_info.lcm_dp_size
+        prompt_alignment_stride = (
+            prompt_alignment_stride
+            if prompt_alignment_stride is not None
+            else alignment_info.prompt_alignment_stride
+        )
+        next_valid_batch_size = (
+            math.ceil(max(prompt_batch_size, 1) / prompt_alignment_stride) * prompt_alignment_stride
+        )
+        return (
+            f"Prompt batch size {prompt_batch_size} is not divisible by the prompt DP alignment stride "
+            f"{prompt_alignment_stride}. With trainer.train_batch_size={self.cfg.trainer.train_batch_size}, "
+            f"generator.n_samples_per_prompt={self.cfg.generator.n_samples_per_prompt}, lcm_dp_size={lcm_dp_size} "
+            f"(policy_dp_size={alignment_info.policy_dp_size}, critic_dp_size={alignment_info.critic_dp_size}, "
+            f"ref_dp_size={alignment_info.ref_dp_size}), _remove_tail_data would keep {kept_prompts} prompts before "
+            "generation. Use a prompt batch size that is a multiple of "
+            f"{prompt_alignment_stride}, for example {next_valid_batch_size}, or adjust n_samples_per_prompt / "
+            "placement settings so the stride is smaller."
+        )
+
+    def _validate_prompt_batch_alignment(self, prompt_batch_size: int) -> None:
+        alignment_info = get_batch_alignment_info(self.cfg)
+        stride = alignment_info.prompt_alignment_stride
+        if prompt_batch_size <= 0:
+            raise ValueError(
+                self._format_prompt_batch_alignment_error(
+                    prompt_batch_size,
+                    kept_prompts=0,
+                    lcm_dp_size=alignment_info.lcm_dp_size,
+                    prompt_alignment_stride=stride,
+                )
+            )
+        if prompt_batch_size % stride != 0:
+            kept_prompts = (prompt_batch_size // stride) * stride
+            raise ValueError(
+                self._format_prompt_batch_alignment_error(
+                    prompt_batch_size,
+                    kept_prompts=kept_prompts,
+                    lcm_dp_size=alignment_info.lcm_dp_size,
+                    prompt_alignment_stride=stride,
+                )
+            )
+
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
-        """Remove tail data to have even shards in terms of *effective* samples.
+        """Validate prompt batch alignment for data-parallel training.
 
         Each prompt produces `n_samples_per_prompt` samples. For data-parallel
         training we care that the total number of samples is nicely splittable
@@ -374,18 +433,36 @@ class RayPPOTrainer:
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
-        # We want the largest m <= len(entries) such that:
-        #   (m * n_samples_per_prompt) % lcm_dp_size == 0
+        # A prompt count is valid only if:
+        #   (len(entries) * n_samples_per_prompt) % lcm_dp_size == 0
         #
         # Let g = gcd(lcm_dp_size, n_samples_per_prompt). Then this is equivalent
-        # to requiring m to be a multiple of (lcm_dp_size / g).
+        # to requiring len(entries) to be a multiple of (lcm_dp_size / g).
         stride = lcm_dp_size // math.gcd(lcm_dp_size, n_samples_per_prompt)
+        if len(entries) == 0:
+            raise ValueError(
+                self._format_prompt_batch_alignment_error(
+                    len(entries),
+                    kept_prompts=0,
+                    lcm_dp_size=lcm_dp_size,
+                    prompt_alignment_stride=stride,
+                )
+            )
         if stride <= 1:
             # Every prompt count is valid, keep all entries.
             return entries
 
         kept_prompts = (len(entries) // stride) * stride
-        return entries[:kept_prompts]
+        if kept_prompts != len(entries):
+            raise ValueError(
+                self._format_prompt_batch_alignment_error(
+                    len(entries),
+                    kept_prompts=kept_prompts,
+                    lcm_dp_size=lcm_dp_size,
+                    prompt_alignment_stride=stride,
+                )
+            )
+        return entries
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
         """
