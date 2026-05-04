@@ -180,6 +180,28 @@ class FleetTaskEnv(BaseTextEnv):
             else False
         )
 
+        # Taste judge (LLM-as-judge) GATED reward:
+        #   effective_taste = max(taste_floor, taste_score)  (1.0 on judge fail)
+        #   final_reward    = verifier_reward * effective_taste
+        self.taste_floor = float(
+            env_config.get("taste_floor", 0.1)
+            if hasattr(env_config, "get")
+            else 0.1
+        )
+        if not 0.0 <= self.taste_floor <= 1.0:
+            raise ValueError(
+                f"taste_floor must be in [0,1], got {self.taste_floor}"
+            )
+        self.taste_judge_timeout_s = float(
+            env_config.get("taste_judge_timeout_s", 10.0)
+            if hasattr(env_config, "get")
+            else 10.0
+        )
+        self.last_verifier_reward: Optional[float] = None
+        self.last_taste_reward: Optional[float] = None
+        self.last_effective_taste: Optional[float] = None
+        self.last_taste_judge_failed: bool = False
+
         # Hint config
         self.enable_hints = (
             env_config.get("enable_hints", False)
@@ -667,16 +689,25 @@ class FleetTaskEnv(BaseTextEnv):
                     f"Failed to upload trace for {self.task_key}: {e}"
                 )
 
+        # Apply taste reward gating at episode end
+        if episode_done:
+            reward = await self._apply_taste_reward(reward, episode_done)
+
         # Build observation message
         if max_turns_reached:
+            metadata = {
+                "done_reason": "max_turns",
+                "task_key": self.task_key,
+                "taste_reward": self.last_taste_reward,
+                "effective_taste": self.last_effective_taste,
+                "taste_floor": self.taste_floor,
+                "taste_judge_failed": self.last_taste_judge_failed,
+            }
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=reward,
                 done=True,
-                metadata={
-                    "done_reason": "max_turns",
-                    "task_key": self.task_key,
-                },
+                metadata=metadata,
             )
 
         # Build response observation
@@ -703,6 +734,11 @@ class FleetTaskEnv(BaseTextEnv):
                     "step_time": step_time,
                     "mcp_time": mcp_time,
                 }
+                if episode_done:
+                    metadata["taste_reward"] = self.last_taste_reward
+                    metadata["effective_taste"] = self.last_effective_taste
+                    metadata["taste_floor"] = self.taste_floor
+                    metadata["taste_judge_failed"] = self.last_taste_judge_failed
                 return BaseTextEnvStepOutput(
                     observations=[new_obs],
                     reward=reward,
@@ -757,12 +793,85 @@ class FleetTaskEnv(BaseTextEnv):
             if tool_call["name"] == "manage_context":
                 metadata["modified_chat_history"] = self.chat_history.copy()
 
+        if episode_done:
+            metadata["taste_reward"] = self.last_taste_reward
+            metadata["effective_taste"] = self.last_effective_taste
+            metadata["taste_floor"] = self.taste_floor
+            metadata["taste_judge_failed"] = self.last_taste_judge_failed
+
         return BaseTextEnvStepOutput(
             observations=[new_obs],
             reward=reward,
             done=episode_done,
             metadata=metadata,
         )
+
+    async def _apply_taste_reward(
+        self, verifier_reward: float, episode_done: bool
+    ) -> float:
+        """Gate the binary verifier reward by the taste-judge score.
+
+        On non-terminal steps we pass through verifier_reward unchanged.
+        On terminal steps we call the judge with a hard timeout; on
+        timeout/exception/None we set effective_taste=1.0 (pure verifier).
+        """
+        if not episode_done:
+            return verifier_reward
+
+        self.last_verifier_reward = float(verifier_reward)
+        self.last_taste_reward = None
+        self.last_effective_taste = None
+        self.last_taste_judge_failed = False
+
+        try:
+            from skyrl_taste.judge import score_trajectory_async
+        except Exception as e:
+            logger.warning(
+                "skyrl_taste import failed (%s); verifier-only reward", e
+            )
+            self.last_taste_judge_failed = True
+            self.last_effective_taste = 1.0
+            return verifier_reward
+
+        actions = [
+            {"role": m.get("role"), "content": m.get("content")}
+            for m in self.chat_history
+            if m.get("role") == "assistant"
+        ]
+        task_text = self.task_config.get("prompt", "") if self.task_config else ""
+        outcome = bool(self.last_verifier_reward >= 1.0)
+
+        taste_score: Optional[float]
+        try:
+            taste_score = await asyncio.wait_for(
+                score_trajectory_async(task_text, actions, outcome),
+                timeout=self.taste_judge_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            self.last_taste_judge_failed = True
+            logger.warning(
+                "taste judge timed out after %.1fs for task_key=%s",
+                self.taste_judge_timeout_s,
+                getattr(self, "task_key", "?"),
+            )
+            taste_score = None
+        except Exception as e:
+            self.last_taste_judge_failed = True
+            logger.warning(
+                "taste judge raised %s: %s for task_key=%s",
+                type(e).__name__, e, getattr(self, "task_key", "?"),
+            )
+            taste_score = None
+
+        if taste_score is None:
+            self.last_effective_taste = 1.0
+            return verifier_reward
+
+        taste_score = max(0.0, min(1.0, float(taste_score)))
+        self.last_taste_reward = taste_score
+        effective_taste = max(self.taste_floor, taste_score)
+        self.last_effective_taste = effective_taste
+        return verifier_reward * effective_taste
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         """Execute one step in the Fleet environment (sync wrapper)."""
@@ -822,6 +931,13 @@ class FleetTaskEnv(BaseTextEnv):
         }
         if self.last_reward is not None:
             metrics["final_reward"] = self.last_reward
+        # Taste judge metrics
+        if self.last_taste_reward is not None:
+            metrics["taste_reward"] = self.last_taste_reward
+        if self.last_effective_taste is not None:
+            metrics["effective_taste"] = self.last_effective_taste
+        metrics["taste_floor"] = self.taste_floor
+        metrics["taste_judge_failed"] = self.last_taste_judge_failed
         # Include verifier feedback for hint generation
         if self._verifier_stdout is not None:
             metrics["verifier_stdout"] = self._verifier_stdout

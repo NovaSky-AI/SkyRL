@@ -1,0 +1,130 @@
+# Fleet VL/CUA GRPO Training WITH TASTE JUDGE - Qwen3.5-9B (Vision-Language)
+#
+# Reward shape: GATED TASTE
+#   effective_taste = max(taste_floor, taste_score)   (1.0 on judge fail)
+#   reward          = verifier_reward * effective_taste
+# Closes the "pretty failure" hack (verifier=0 -> reward=0 always) while
+# preserving within-success taste variance via the floor (default 0.1).
+#
+# Delta from tasks/openenv-fleet-grpo-vl.yaml:
+#   - environment.skyrl_gym.fleet_task.taste_floor=0.1            (NEW)
+#   - environment.skyrl_gym.fleet_task.taste_judge_timeout_s=10.0 (NEW)
+#   - trainer.algorithm.grpo_norm_by_std=false                    (FLIPPED, was true default)
+#   - ANTHROPIC_API_KEY / OPENAI_API_KEY env vars added           (NEW)
+#
+# Required env vars (pass each via `sky launch --env KEY=VALUE`):
+#   FLEET_API_KEY          - Fleet API access for OpenEnv environments
+#   WANDB_API_KEY          - WandB logging
+#   AWS_ACCESS_KEY_ID      - S3 dataset/checkpoint/trajectory buckets
+#   AWS_SECRET_ACCESS_KEY  - S3 credentials
+#   ANTHROPIC_API_KEY      - NEW. Claude judge (research/judge/judge.py default).
+#   OPENAI_API_KEY         - NEW. Reserved for inter-rater / GPT-4o judge path.
+#
+# Usage:
+#   sky launch configs/openenv-fleet-grpo-vl-taste.yaml \
+#     --env FLEET_API_KEY=... \
+#     --env WANDB_API_KEY=... \
+#     --env AWS_ACCESS_KEY_ID=... \
+#     --env AWS_SECRET_ACCESS_KEY=... \
+#     --env ANTHROPIC_API_KEY=... \
+#     --env OPENAI_API_KEY=...
+
+name: fleet-vl-grpo-qwen3-5-9b-taste
+
+resources:
+  disk_size: 750
+  ports: 6479
+  ordered:
+    - accelerators: H200:8
+      cloud: runpod
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
+      cloud: lambda
+    - accelerators: H200:8
+      cloud: nebius
+    - accelerators: H200-SXM:8
+      cloud: vast
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/skyrl-fleet.git
+  ref: taste-reward-shaping
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  # NEW: judge credentials. Anthropic is the default judge backend; OpenAI
+  # is used for inter-rater agreement / fallback paths.
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v6"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "browser_use"
+  MAX_TURNS: 80
+  MAX_INPUT_LENGTH: 80000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 10
+  RUN_ID: ""
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  # NEW: runtime kill-switch for taste judge. Set to "1" to fall back to
+  # verifier-only reward without touching the patched env or restarting.
+  SKYRL_TASTE_DISABLED: "0"
+  # NEW: floor for the gated taste reward (forwarded into Hydra override).
+  # reward = verifier * max(taste_floor, taste_score)
+  #   floor=1.0 -> pure verifier (clean ablation baseline)
+  #   floor=0.0 -> pure multiplicative (every ugly success -> 0 reward)
+  #   floor=0.1 -> default; offline taste of verifier=1 trajectories sits
+  #               around 0.13 so floor=0.1 acts as multiplicative-with-cushion;
+  #               re-tune after a 50-100 step pilot using effective_taste P25.
+  TASTE_FLOOR: "0.1"
+  # NEW: production judge selection. OpenRouter is used at training time so
+  # we don't hit per-org Anthropic rate limits during burst-end-of-step
+  # judge calls.
+  OPENROUTER_API_KEY: ""
+  SKYRL_TASTE_PROVIDER: "openrouter"
+  SKYRL_TASTE_MODEL: "anthropic/claude-haiku-4.5"
+  # Stream 4 finding: pass blind_outcome=True at training time to suppress
+  # outcome bleed (judge sees outcome=True and inflates ~+1.4 weighted-pts).
+  SKYRL_TASTE_BLIND_OUTCOME: "1"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+  # NEW: install the taste-judge package next to skyrl_gym so the env's
+  # `from skyrl_taste.judge import score_trajectory_async` import resolves.
+  pip install --no-deps anthropic openai
+  pip install -e /workdir/skyrl_taste || echo "skyrl_taste must be vendored into workdir"
+
+run: |
+  # We delegate to the existing fleet-vl-run.sh wrapper, which forwards extra
+  # Hydra overrides via the trailing args. The new flags below are the ONLY
+  # delta from the upstream script.
+  bash scripts/fleet-vl-run.sh \
+    environment.skyrl_gym.fleet_task.taste_floor=${TASTE_FLOOR} \
+    environment.skyrl_gym.fleet_task.taste_judge_timeout_s=10.0 \
+    trainer.algorithm.grpo_norm_by_std=false
+  # ^ grpo_norm_by_std=false (flipped from default true):
+  #   Even under gated taste, within-group reward std is inflated whenever a
+  #   group has a mix of pretty and ugly successes (rewards in {0.1, ..., 1.0})
+  #   on top of the binary verifier signal. Default GRPO normalization would
+  #   divide advantages by that larger denominator and damp the gradient.
+  #   Stream 1's analysis showed std-norm collapses learning under shaped
+  #   reward; that conclusion still applies here. Disabling std normalization
+  #   keeps advantage magnitudes proportional to (reward - mean), which is
+  #   the part the taste signal actually increases. Re-enable and tune
+  #   advantage_batch_normalize=true if cross-prompt magnitudes get unstable.
