@@ -51,8 +51,8 @@ resources:
 num_nodes: 2
 
 workdir:
-  url: https://github.com/fleet-ai/SkyRL-Fleet.git
-  ref: taste-reward-shaping
+  url: https://github.com/fleet-ai/SkyRL-v2.git
+  ref: feat/taste-judge
 
 envs:
   WANDB_API_KEY: ""
