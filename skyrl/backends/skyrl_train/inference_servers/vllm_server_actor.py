@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.api_server import (
     init_app_state,
 )
 from vllm.inputs import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
@@ -359,6 +360,47 @@ class VLLMServerActor(ServerActorProtocol):
             """Reset the prefix cache."""
             await engine.reset_prefix_cache()
             return {"status": "ok"}
+
+        @app.post("/skyrl/v1/load_lora_adapter")
+        async def _skyrl_load_lora_adapter(request: Request):
+            """Load a LoRA adapter from disk, replacing any existing adapter
+            under the same name in place. Used by RemoteInferenceClient.update_lora_from_disk.
+
+            TODO(aaron): remove this endpoint and route update_lora_from_disk back
+            through /v1/load_lora_adapter once the upstream fix in
+            https://github.com/vllm-project/vllm/pull/41482 lands in a vLLM release we depend on.
+            """
+            body = await request.json()
+            lora_name = body.get("lora_name")
+            lora_path = body.get("lora_path")
+            if not lora_name or not lora_path:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Both 'lora_name' and 'lora_path' must be provided.",
+                )
+
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                lora_int_id = (
+                    models.lora_requests[lora_name].lora_int_id
+                    if lora_name in models.lora_requests
+                    else models.lora_id_counter.inc(1)
+                )
+                lora_request = LoRARequest(
+                    lora_name=lora_name,
+                    lora_int_id=lora_int_id,
+                    lora_path=lora_path,
+                    load_inplace=True,
+                )
+                await models.engine_client.add_lora(lora_request)
+                lora_request.load_inplace = False
+                models.lora_requests[lora_name] = lora_request
+
+            return {
+                "status": "ok",
+                "lora_name": lora_name,
+                "lora_int_id": lora_int_id,
+            }
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
         # endpoint /inference/v1/generate does not support returning routed expert IDs.

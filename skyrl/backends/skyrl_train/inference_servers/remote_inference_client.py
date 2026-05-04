@@ -1100,16 +1100,26 @@ class RemoteInferenceClient:
         lora_path: str,
     ) -> Dict[str, Any]:
         """
-        Update LoRA adapter weights by loading from disk on all backend servers via /v1/load_lora_adapter.
+        Update LoRA adapter weights by loading from disk on all backend servers
+        via the SkyRL custom /skyrl/v1/load_lora_adapter endpoint.
 
-        Always loads under self.active_lora_name so the same slot is reused across
-        weight syncs.
+        Always loads under self.active_lora_name so the same lora_int_id slot
+        is reused across weight syncs.
 
-        After loading, generation requests will automatically use the LoRA adapter
-        by setting the model name to the LoRA adapter name.
+        TODO(aaron): switch back to /v1/load_lora_adapter (with "load_inplace": True)
+        once the upstream fix in https://github.com/vllm-project/vllm/pull/41482
+        lands in a vLLM release we depend on.
 
-        TODO(aaron): remove _unload_on_server and add back "load_inplace": True to payload after
-        vllm lora disk load bug is fixed.
+        The custom endpoint (defined in vllm_server_actor.py) wraps add_lora
+        with load_inplace=True (so the engine reloads the freshly-written
+        safetensors) and then resets the cached LoRARequest's load_inplace=False
+        (so subsequent generates don't reload from disk on every step). This
+        avoids two vLLM 0.19.0 bugs that surface under colocate_all + tp=1 +
+        num_engines>=2 — see vllm_server_actor.py:_skyrl_load_lora_adapter for
+        the detailed explanation.
+
+        After loading, generation requests will automatically use the LoRA
+        adapter by setting the model name to the LoRA adapter name.
 
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
@@ -1121,30 +1131,17 @@ class RemoteInferenceClient:
             raise ValueError("active_lora_name must be set on RemoteInferenceClient before loading a LoRA adapter.")
 
         lora_name = self.active_lora_name
-        # Both endpoints return plain text on success or JSON ErrorResponse on failure,
-        # so we use a session.post directly rather than _call_all_servers (which expects JSON).
         session = await self._get_session()
 
-        async def _unload_on_server(server_url: str) -> None:
-            """Remove the cached LoRARequest server-side. 404 on the first sync is expected."""
-            url = f"{server_url}/v1/unload_lora_adapter"
-            async with session.post(url, json={"lora_name": lora_name}) as resp:
-                if resp.status == 404:
-                    return
-                if resp.status >= 400:
-                    body = await resp.json()
-                    raise_for_status(resp, body)
-
         async def _load_on_server(server_url: str):
-            url = f"{server_url}/v1/load_lora_adapter"
+            url = f"{server_url}/skyrl/v1/load_lora_adapter"
             payload = {"lora_name": lora_name, "lora_path": lora_path}
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await resp.json()
                     raise_for_status(resp, body)
-                return server_url, {"status": resp.status, "body": await resp.text()}
+                return server_url, await resp.json()
 
-        await asyncio.gather(*[_unload_on_server(url) for url in self.server_urls])
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
