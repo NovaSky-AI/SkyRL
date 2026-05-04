@@ -254,6 +254,15 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    multi_modal_data_list = concat_generator_outputs.get("multi_modal_data") or []
+
+    # Save screenshots if any trajectories have images
+    images_dir = dump_dir_path / "images"
+    has_any_images = any(
+        mm and mm.get("images") for mm in multi_modal_data_list if isinstance(mm, dict)
+    )
+    if has_any_images:
+        images_dir.mkdir(parents=True, exist_ok=True)
 
     # Group indices by data source
     data_source_indices = {}
@@ -265,12 +274,36 @@ def dump_per_dataset_eval_results(
         data_source_indices[data_source].append(i)
 
     # Dump per-dataset files
+    total_images_saved = 0
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
         filename = dump_dir_path / f"{sanitized_data_source}.jsonl"
 
         with open(filename, "w") as f:
             for i in indices:
+                # Save screenshots for this eval trajectory
+                image_paths = []
+                mm_data = multi_modal_data_list[i] if i < len(multi_modal_data_list) else None
+                if isinstance(mm_data, dict) and mm_data.get("images"):
+                    for j, img in enumerate(mm_data["images"]):
+                        img_filename = f"eval_{i:04d}_img_{j:03d}.jpg"
+                        img_path = images_dir / img_filename
+                        try:
+                            if hasattr(img, "save"):
+                                img.save(str(img_path), "JPEG", quality=85)
+                                image_paths.append(str(img_path))
+                                total_images_saved += 1
+                            elif isinstance(img, str) and img.startswith(("http://", "https://")):
+                                image_paths.append(img)
+                                total_images_saved += 1
+                            elif isinstance(img, bytes):
+                                with open(img_path, "wb") as img_f:
+                                    img_f.write(img)
+                                image_paths.append(str(img_path))
+                                total_images_saved += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to save eval image {j} for trajectory {i}: {e}")
+
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
@@ -280,9 +313,15 @@ def dump_per_dataset_eval_results(
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
+                if image_paths:
+                    entry["image_paths"] = image_paths
+                    entry["num_screenshots"] = len(image_paths)
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
+
+    if total_images_saved:
+        logger.info(f"Saved {total_images_saved} eval screenshots to {images_dir}")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
