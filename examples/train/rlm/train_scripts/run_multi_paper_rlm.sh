@@ -62,10 +62,10 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.7 \
+  generator.inference_engine.gpu_memory_utilization=0.6\
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=false \
   generator.chat_template_kwargs.enable_thinking=false \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
