@@ -6,7 +6,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # source ~/.bashrc
 
 # Install dependencies
-uv sync --extra fsdp
+uv sync --extra fsdp --python 3.12
 
 # Activate virtual environment
 source .venv/bin/activate
