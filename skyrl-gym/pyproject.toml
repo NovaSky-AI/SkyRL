@@ -25,7 +25,7 @@ dependencies = [
 Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 [tool.setuptools.packages.find]
-include = ["skyrl_gym*"]
+include = ["skyrl_gym*", "skyrl_taste*"]
 
 [project.optional-dependencies]
 dev = [
