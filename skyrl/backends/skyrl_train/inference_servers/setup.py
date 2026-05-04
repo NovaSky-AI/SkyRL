@@ -14,6 +14,7 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
 )
 
+from .common import SERVER_PORT_STRIDE
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
@@ -107,7 +108,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + i * servers_per_group,
+                start_port=VLLM_START_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -125,7 +126,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group,
+                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -183,7 +184,7 @@ def create_inference_servers(
                 cli_args=cli_args,
                 num_servers=ie_cfg.data_parallel_size,
                 placement_group=placement_group,
-                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size,
+                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
