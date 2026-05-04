@@ -502,6 +502,9 @@ class InferenceEngineConfig(BaseConfig):
     """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
     Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
 
+    profiler_config: Dict[str, Any] = field(default_factory=dict)
+    """Pass through profiler config to vLLM engine."""
+
 
 # ---------------------------------------------------------------------------
 # Generator
