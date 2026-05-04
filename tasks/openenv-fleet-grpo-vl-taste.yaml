@@ -48,10 +48,10 @@ resources:
     - accelerators: H200-SXM:8
       cloud: vast
 
-num_nodes: 1
+num_nodes: 2
 
 workdir:
-  url: https://github.com/fleet-ai/skyrl-fleet.git
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
   ref: taste-reward-shaping
 
 envs:
