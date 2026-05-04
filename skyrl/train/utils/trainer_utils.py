@@ -308,9 +308,18 @@ def dump_training_trajectories(
     filename = traj_dir / f"global_step_{global_step}.jsonl"
 
     env_metrics_list = generator_output.get("env_metrics") or []
+    multi_modal_data_list = generator_output.get("multi_modal_data") or []
     rewards_list = generator_output["rewards"]
     stop_reasons = generator_output.get("stop_reasons") or []
     ts = time.time()
+
+    # Save screenshots alongside JSONL if any trajectories have images
+    images_dir = traj_dir / f"global_step_{global_step}_images"
+    has_any_images = any(
+        mm and mm.get("images") for mm in multi_modal_data_list if isinstance(mm, dict)
+    )
+    if has_any_images:
+        images_dir.mkdir(parents=True, exist_ok=True)
 
     with open(filename, "w") as f:
         for i in range(len(generator_output["response_ids"])):
@@ -329,6 +338,28 @@ def dump_training_trajectories(
             stop_reason = stop_reasons[i] if i < len(stop_reasons) else "unknown"
             tokens = len(generator_output["response_ids"][i])
 
+            # Save screenshots for this trajectory
+            image_paths = []
+            mm_data = multi_modal_data_list[i] if i < len(multi_modal_data_list) else None
+            if isinstance(mm_data, dict) and mm_data.get("images"):
+                for j, img in enumerate(mm_data["images"]):
+                    img_filename = f"traj_{i:03d}_img_{j:03d}.jpg"
+                    img_path = images_dir / img_filename
+                    try:
+                        if hasattr(img, "save"):
+                            # PIL Image
+                            img.save(str(img_path), "JPEG", quality=85)
+                            image_paths.append(str(img_path))
+                        elif isinstance(img, str) and img.startswith(("http://", "https://")):
+                            # URL — store the URL, don't download during training
+                            image_paths.append(img)
+                        elif isinstance(img, bytes):
+                            with open(img_path, "wb") as img_f:
+                                img_f.write(img)
+                            image_paths.append(str(img_path))
+                    except Exception as e:
+                        logger.warning(f"Failed to save image {j} for trajectory {i}: {e}")
+
             entry = {
                 "step": global_step,
                 "env_key": env_key,
@@ -341,9 +372,21 @@ def dump_training_trajectories(
                 "text": tokenizer.decode(generator_output["response_ids"][i]),
                 "timestamp": ts,
             }
+            if image_paths:
+                entry["image_paths"] = image_paths
+                entry["num_screenshots"] = len(image_paths)
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    logger.info(f"Dumped {len(generator_output['response_ids'])} training trajectories to {filename}")
+    n_images = sum(
+        len(entry.get("images", []))
+        for mm in multi_modal_data_list
+        if isinstance(mm, dict)
+        for entry in [mm]
+    )
+    logger.info(
+        f"Dumped {len(generator_output['response_ids'])} training trajectories to {filename}"
+        + (f" ({n_images} screenshots saved)" if has_any_images else "")
+    )
     return str(filename)
 
 

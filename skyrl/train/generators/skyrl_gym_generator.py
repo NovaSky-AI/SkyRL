@@ -651,6 +651,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_logprobs=rollout_logprobs,
                 env_metrics=env_metrics,
                 rollout_expert_indices=rollout_expert_indices_out,
+                multi_modal_data={"images": agent_loop_state.accumulated_images}
+                if agent_loop_state.accumulated_images
+                else None,
             )
 
         return agent_loop_output
@@ -1297,6 +1300,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             # set loss mask to 0 if the stop reason is not "stop"
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
+        # Collect per-trajectory images (for dump_training_trajectories)
+        multi_modal_data_list = [output.multi_modal_data for output in all_outputs]
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
@@ -1310,6 +1316,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "env_metrics": env_metrics,
             "is_last_step": is_last_step,
             "is_hinted": is_hinted,
+            "multi_modal_data": multi_modal_data_list,
         }
 
         return generator_output
