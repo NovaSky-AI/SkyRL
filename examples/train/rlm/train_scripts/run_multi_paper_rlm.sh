@@ -13,9 +13,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/rlm-synthetic-multi}"
-: "${NUM_ENGINES:=1}"
+: "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
-: "${TRAIN_GPUS:=4}"
+: "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
@@ -30,7 +30,7 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.max_turns=6 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-4b" \
+  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-2b" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
