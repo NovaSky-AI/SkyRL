@@ -1046,6 +1046,9 @@ class FleetTaskEnv(BaseTextEnv):
                         "turns": [],
                         "tool_calls": [],
                         "tool_errors": [],
+                        "taste_reward": [],
+                        "effective_taste": [],
+                        "taste_judge_failed": [],
                     }
                 env_data[env_key]["turns"].append(m.get("turns", 0))
                 env_data[env_key]["tool_calls"].append(
@@ -1054,6 +1057,11 @@ class FleetTaskEnv(BaseTextEnv):
                 env_data[env_key]["tool_errors"].append(
                     m.get("tool_errors", 0)
                 )
+                if m.get("taste_reward") is not None:
+                    env_data[env_key]["taste_reward"].append(float(m["taste_reward"]))
+                if m.get("effective_taste") is not None:
+                    env_data[env_key]["effective_taste"].append(float(m["effective_taste"]))
+                env_data[env_key]["taste_judge_failed"].append(float(bool(m.get("taste_judge_failed", False))))
 
         result: Dict[str, Any] = {}
         total_turns = 0
@@ -1093,10 +1101,30 @@ class FleetTaskEnv(BaseTextEnv):
             result[f"{env_key}/tool_error_rate"] = tool_error_rate
             result[f"{env_key}/num_episodes"] = len(turns_list)
 
+            taste_reward_list = data["taste_reward"]
+            effective_taste_list = data["effective_taste"]
+            taste_judge_failed_list = data["taste_judge_failed"]
+            if taste_reward_list:
+                result[f"{env_key}/avg_taste_reward"] = sum(taste_reward_list) / len(taste_reward_list)
+            if effective_taste_list:
+                result[f"{env_key}/avg_effective_taste"] = sum(effective_taste_list) / len(effective_taste_list)
+            if taste_judge_failed_list:
+                result[f"{env_key}/taste_judge_fail_rate"] = sum(taste_judge_failed_list) / len(taste_judge_failed_list)
+
             total_turns += total_env_turns
             total_tool_calls += total_env_tool_calls
             total_tool_errors += total_env_tool_errors
             total_episodes += len(turns_list)
+
+        all_taste_reward = [v for d in env_data.values() for v in d["taste_reward"]]
+        all_effective_taste = [v for d in env_data.values() for v in d["effective_taste"]]
+        all_taste_judge_failed = [v for d in env_data.values() for v in d["taste_judge_failed"]]
+        if all_taste_reward:
+            result["avg_taste_reward"] = sum(all_taste_reward) / len(all_taste_reward)
+        if all_effective_taste:
+            result["avg_effective_taste"] = sum(all_effective_taste) / len(all_effective_taste)
+        if all_taste_judge_failed:
+            result["taste_judge_fail_rate"] = sum(all_taste_judge_failed) / len(all_taste_judge_failed)
 
         result["avg_turns"] = (
             total_turns / total_episodes if total_episodes > 0 else 0
