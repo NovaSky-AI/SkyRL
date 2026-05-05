@@ -27,6 +27,8 @@ fleet_task:
   use_llm_hints: false
   hint_model: "openrouter/anthropic/claude-sonnet-4"
   hint_llm_timeout: 30.0
+  taste_floor: 1.0
+  taste_judge_timeout_s: 10.0
 
 task_gen:
   max_turns: 10
