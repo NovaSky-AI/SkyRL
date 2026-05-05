@@ -1,0 +1,100 @@
+# Fleet VL/CUA GRPO Training — ADDITIVE TASTE (group Haiku judge) - Qwen3.5-9B
+#
+# Reward shape: ADDITIVE (binary + α·taste, no gating)
+#   r_i = verifier_reward + TASTE_ALPHA * taste_score
+#   Judge scores ALL rollouts including fails — all-fail groups get non-zero
+#   signal from taste variation among fails (expected adv_var boost: +33% at α=0.5).
+#
+# See research/judge/variance_report.md §5 for the theoretical derivation.
+#
+# Judge: relative_haiku (claude-haiku-4-5-20251001, vision)
+#   - Same group judge as the relative-haiku baseline for a clean comparison
+#   - Taste mode: "additive" (env_config.taste_mode)
+#   - Alpha: controlled by TASTE_ALPHA (default 0.5)
+#
+# Delta from tasks/openenv-fleet-grpo-vl-relative-haiku.yaml:
+#   - environment.skyrl_gym.fleet_task.taste_mode=additive  (NEW)
+#   - environment.skyrl_gym.fleet_task.taste_alpha=${TASTE_ALPHA} (NEW)
+#   - name / run_id reflect new config
+#
+# Required env vars (pass each via `sky launch --env KEY=VALUE`):
+#   FLEET_API_KEY          - Fleet API access
+#   WANDB_API_KEY          - WandB logging
+#   AWS_ACCESS_KEY_ID      - S3 buckets
+#   AWS_SECRET_ACCESS_KEY  - S3 credentials
+#   ANTHROPIC_API_KEY      - Haiku group judge (direct Anthropic path)
+
+name: fleet-vl-grpo-qwen3-5-9b-additive-haiku
+
+resources:
+  disk_size: 750
+  ports: 6479
+  ordered:
+    - accelerators: H200:8
+      cloud: runpod
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
+      cloud: lambda
+    - accelerators: H200:8
+      cloud: nebius
+    - accelerators: H200-SXM:8
+      cloud: vast
+
+num_nodes: 2
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-v2.git
+  ref: feat/taste-judge
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+  OPENROUTER_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v6"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "browser_use"
+  MAX_TURNS: 80
+  MAX_INPUT_LENGTH: 80000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 10
+  RUN_ID: ""
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  SKYRL_TASTE_DISABLED: "0"
+  TASTE_FLOOR: "0.1"
+  TASTE_ALPHA: "0.5"
+  # --- Relative judge mode (same provider as relative-haiku baseline) ---
+  SKYRL_TASTE_MODE: "relative"
+  SKYRL_TASTE_GROUP_PROVIDER: "relative_haiku"
+  SKYRL_TASTE_PROVIDER: "anthropic"
+  SKYRL_TASTE_MODEL: "claude-haiku-4-5-20251001"
+  SKYRL_TASTE_BLIND_OUTCOME: "1"
+  SKYRL_TASTE_GROUP_TIMEOUT_S: "90"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+  pip install --no-deps anthropic openai
+
+run: |
+  bash scripts/fleet-vl-run.sh \
+    environment.skyrl_gym.fleet_task.taste_mode=additive \
+    environment.skyrl_gym.fleet_task.taste_alpha=${TASTE_ALPHA} \
+    environment.skyrl_gym.fleet_task.taste_floor=${TASTE_FLOOR} \
+    environment.skyrl_gym.fleet_task.taste_judge_timeout_s=10.0 \
+    trainer.algorithm.grpo_norm_by_std=false

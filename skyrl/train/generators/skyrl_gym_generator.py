@@ -203,6 +203,11 @@ async def _apply_group_taste_rewards(
             )
             taste_scores = [None] * len(deferred_indices)
 
+        # Read reward mode from the first deferred rollout's env_metrics (same for all in group).
+        first_em = all_outputs[deferred_indices[0]].env_metrics
+        taste_mode = first_em.get("taste_mode", "gated")
+        taste_alpha = float(first_em.get("taste_alpha", 0.5))
+
         for rank, i in enumerate(deferred_indices):
             output = all_outputs[i]
             em = output.env_metrics
@@ -213,9 +218,21 @@ async def _apply_group_taste_rewards(
             judge_failed = taste_score is None
             em["taste_judge_failed"] = judge_failed
 
-            if taste_score is not None and verifier_r is not None and verifier_r > 0.0:
-                effective_taste = max(taste_floor, taste_score)
-                new_terminal = verifier_r * effective_taste
+            if taste_score is not None and verifier_r is not None:
+                if taste_mode == "additive":
+                    # r = b + α·t applied to all rollouts including fails.
+                    new_terminal = verifier_r + taste_alpha * taste_score
+                    effective_taste = taste_score
+                else:
+                    # gated: only non-zero verifier rewards get shaped.
+                    if verifier_r <= 0.0:
+                        em["taste_reward"] = taste_score
+                        em["effective_taste"] = None
+                        em.pop("taste_deferred_data", None)
+                        continue
+                    effective_taste = max(taste_floor, taste_score)
+                    new_terminal = verifier_r * effective_taste
+
                 # Patch the single terminal-step reward token in the reward list.
                 if isinstance(output.reward, list):
                     reward_list = list(output.reward)
@@ -223,6 +240,9 @@ async def _apply_group_taste_rewards(
                         if reward_list[j] != 0.0:
                             reward_list[j] = new_terminal
                             break
+                    else:
+                        # additive mode: fails have all-zero reward list; set last token
+                        reward_list[-1] = new_terminal
                     output.reward = reward_list
                 else:
                     output.reward = new_terminal

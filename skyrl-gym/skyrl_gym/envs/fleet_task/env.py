@@ -257,9 +257,23 @@ class FleetTaskEnv(BaseTextEnv):
             else False
         )
 
-        # Taste judge (LLM-as-judge) GATED reward:
-        #   effective_taste = max(taste_floor, taste_score)  (1.0 on judge fail)
-        #   final_reward    = verifier_reward * effective_taste
+        # Taste judge reward modes:
+        #   "gated"    (default): final_reward = verifier * max(taste_floor, taste)
+        #   "additive":           final_reward = verifier + taste_alpha * taste
+        #              Judge scores ALL rollouts (including fails); all-fail groups
+        #              get non-zero signal from taste variation among fails.
+        self.taste_mode: str = (
+            env_config.get("taste_mode", "gated")
+            if hasattr(env_config, "get")
+            else "gated"
+        )
+        if self.taste_mode not in ("gated", "additive"):
+            raise ValueError(f"taste_mode must be 'gated' or 'additive', got {self.taste_mode!r}")
+        self.taste_alpha: float = float(
+            env_config.get("taste_alpha", 0.5)
+            if hasattr(env_config, "get")
+            else 0.5
+        )
         self.taste_floor = float(
             env_config.get("taste_floor", 0.1)
             if hasattr(env_config, "get")
@@ -971,6 +985,11 @@ class FleetTaskEnv(BaseTextEnv):
 
         taste_score = max(0.0, min(1.0, float(taste_score)))
         self.last_taste_reward = taste_score
+
+        if self.taste_mode == "additive":
+            self.last_effective_taste = taste_score
+            return verifier_reward + self.taste_alpha * taste_score
+
         effective_taste = max(self.taste_floor, taste_score)
         self.last_effective_taste = effective_taste
         return verifier_reward * effective_taste
@@ -1039,6 +1058,8 @@ class FleetTaskEnv(BaseTextEnv):
         if self.last_effective_taste is not None:
             metrics["effective_taste"] = self.last_effective_taste
         metrics["taste_floor"] = self.taste_floor
+        metrics["taste_mode"] = self.taste_mode
+        metrics["taste_alpha"] = self.taste_alpha
         metrics["taste_judge_failed"] = self.last_taste_judge_failed
         if self._taste_deferred_data is not None:
             # Group judge mode: generator will call score_group_async and patch rewards.
