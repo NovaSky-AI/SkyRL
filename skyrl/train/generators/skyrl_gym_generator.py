@@ -1354,6 +1354,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
+        # Inject instance_id so aggregate_metrics can compute within-group std.
+        tids = out_trajectory_ids if out_trajectory_ids is not None else trajectory_ids
+        if tids is not None:
+            for em, tid in zip(env_metrics, tids):
+                if isinstance(em, dict):
+                    em["_instance_id"] = tid.instance_id
+
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         # Log hint augmentation metrics

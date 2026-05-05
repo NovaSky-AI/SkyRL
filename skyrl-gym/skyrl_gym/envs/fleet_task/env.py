@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +28,16 @@ from skyrl_gym.envs.base_text_env import (
     ConversationType,
 )
 from skyrl_gym.envs.fleet_task.tool_call_parser import parse_tool_call
+
+
+def _within_group_std(by_instance: "dict[str, list[float]]") -> "float | None":
+    """Mean per-group std across all instance groups that have ≥2 values."""
+    stds = []
+    for vals in by_instance.values():
+        if len(vals) >= 2:
+            mean_v = sum(vals) / len(vals)
+            stds.append((sum((x - mean_v) ** 2 for x in vals) / (len(vals) - 1)) ** 0.5)
+    return sum(stds) / len(stds) if stds else None
 
 # Reduce MCP client log noise
 try:
@@ -1144,6 +1155,8 @@ class FleetTaskEnv(BaseTextEnv):
                         "taste_reward": [],
                         "effective_taste": [],
                         "taste_judge_failed": [],
+                        "taste_reward_by_instance": defaultdict(list),
+                        "effective_taste_by_instance": defaultdict(list),
                     }
                 env_data[env_key]["turns"].append(m.get("turns", 0))
                 env_data[env_key]["tool_calls"].append(
@@ -1152,10 +1165,17 @@ class FleetTaskEnv(BaseTextEnv):
                 env_data[env_key]["tool_errors"].append(
                     m.get("tool_errors", 0)
                 )
+                iid = m.get("_instance_id")
                 if m.get("taste_reward") is not None:
-                    env_data[env_key]["taste_reward"].append(float(m["taste_reward"]))
+                    val = float(m["taste_reward"])
+                    env_data[env_key]["taste_reward"].append(val)
+                    if iid is not None:
+                        env_data[env_key]["taste_reward_by_instance"][iid].append(val)
                 if m.get("effective_taste") is not None:
-                    env_data[env_key]["effective_taste"].append(float(m["effective_taste"]))
+                    val = float(m["effective_taste"])
+                    env_data[env_key]["effective_taste"].append(val)
+                    if iid is not None:
+                        env_data[env_key]["effective_taste_by_instance"][iid].append(val)
                 env_data[env_key]["taste_judge_failed"].append(float(bool(m.get("taste_judge_failed", False))))
 
         result: Dict[str, Any] = {}
@@ -1200,17 +1220,15 @@ class FleetTaskEnv(BaseTextEnv):
             effective_taste_list = data["effective_taste"]
             taste_judge_failed_list = data["taste_judge_failed"]
             if taste_reward_list:
-                n = len(taste_reward_list)
-                mean_tr = sum(taste_reward_list) / n
-                result[f"{env_key}/avg_taste_reward"] = mean_tr
-                if n > 1:
-                    result[f"{env_key}/std_taste_reward"] = (sum((x - mean_tr) ** 2 for x in taste_reward_list) / (n - 1)) ** 0.5
+                result[f"{env_key}/avg_taste_reward"] = sum(taste_reward_list) / len(taste_reward_list)
+                wg_std = _within_group_std(data["taste_reward_by_instance"])
+                if wg_std is not None:
+                    result[f"{env_key}/within_group_std_taste_reward"] = wg_std
             if effective_taste_list:
-                n = len(effective_taste_list)
-                mean_et = sum(effective_taste_list) / n
-                result[f"{env_key}/avg_effective_taste"] = mean_et
-                if n > 1:
-                    result[f"{env_key}/std_effective_taste"] = (sum((x - mean_et) ** 2 for x in effective_taste_list) / (n - 1)) ** 0.5
+                result[f"{env_key}/avg_effective_taste"] = sum(effective_taste_list) / len(effective_taste_list)
+                wg_std = _within_group_std(data["effective_taste_by_instance"])
+                if wg_std is not None:
+                    result[f"{env_key}/within_group_std_effective_taste"] = wg_std
             if taste_judge_failed_list:
                 result[f"{env_key}/taste_judge_fail_rate"] = sum(taste_judge_failed_list) / len(taste_judge_failed_list)
 
@@ -1223,17 +1241,23 @@ class FleetTaskEnv(BaseTextEnv):
         all_effective_taste = [v for d in env_data.values() for v in d["effective_taste"]]
         all_taste_judge_failed = [v for d in env_data.values() for v in d["taste_judge_failed"]]
         if all_taste_reward:
-            n = len(all_taste_reward)
-            mean_tr = sum(all_taste_reward) / n
-            result["avg_taste_reward"] = mean_tr
-            if n > 1:
-                result["std_taste_reward"] = (sum((x - mean_tr) ** 2 for x in all_taste_reward) / (n - 1)) ** 0.5
+            result["avg_taste_reward"] = sum(all_taste_reward) / len(all_taste_reward)
+            merged: Dict[str, list] = defaultdict(list)
+            for d in env_data.values():
+                for iid, vals in d["taste_reward_by_instance"].items():
+                    merged[iid].extend(vals)
+            wg_std = _within_group_std(merged)
+            if wg_std is not None:
+                result["within_group_std_taste_reward"] = wg_std
         if all_effective_taste:
-            n = len(all_effective_taste)
-            mean_et = sum(all_effective_taste) / n
-            result["avg_effective_taste"] = mean_et
-            if n > 1:
-                result["std_effective_taste"] = (sum((x - mean_et) ** 2 for x in all_effective_taste) / (n - 1)) ** 0.5
+            result["avg_effective_taste"] = sum(all_effective_taste) / len(all_effective_taste)
+            merged = defaultdict(list)
+            for d in env_data.values():
+                for iid, vals in d["effective_taste_by_instance"].items():
+                    merged[iid].extend(vals)
+            wg_std = _within_group_std(merged)
+            if wg_std is not None:
+                result["within_group_std_effective_taste"] = wg_std
         if all_taste_judge_failed:
             result["taste_judge_fail_rate"] = sum(all_taste_judge_failed) / len(all_taste_judge_failed)
 
