@@ -209,12 +209,20 @@ class RemoteInferenceClient:
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
+    profile_each_sample: bool = False
+    """If True, hit ``/start_profile`` and ``/stop_profile`` around each ``sample()``
+    call. Requires the server to have been launched with ``profiler_config`` set
+    (via ``engine_init_kwargs.profiler_config``). Concurrent ``sample()`` calls
+    are serialized by a lock so traces don't overlap."""
+
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+    _profile_counter: int = field(default=0, repr=False)
+    _profile_lock: Optional[asyncio.Lock] = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -289,10 +297,14 @@ class RemoteInferenceClient:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
+                        text = ""
+                        try:
+                            text = await resp.text()
+                        except Exception:
+                            pass
                         if 400 <= resp.status < 500:
                             # Non-JSON client error (e.g. plain text 422 from vllm-router).
                             # Raise immediately — client errors won't succeed on retry.
-                            text = await resp.text()
                             raise aiohttp.ClientResponseError(
                                 resp.request_info,
                                 resp.history,
@@ -301,7 +313,10 @@ class RemoteInferenceClient:
                                 headers=resp.headers,
                             )
                         last_exc = e
-                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                        logger.debug(
+                            f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: "
+                            f"status={resp.status} body={text[:200]!r}: {e}"
+                        )
                         await asyncio.sleep(1)
                         continue
                     raise_for_status(resp, body)
@@ -612,11 +627,28 @@ class RemoteInferenceClient:
 
         url = f"{self.proxy_url}/inference/v1/generate"
         gen_sem, _ = self._get_semaphores()
-        if gen_sem is None:
-            response = await self._post(url, json=payload, headers=headers)
-        else:
+
+        async def _do_post() -> Dict[str, Any]:
+            if gen_sem is None:
+                return await self._post(url, json=payload, headers=headers)
             async with gen_sem:
-                response = await self._post(url, json=payload, headers=headers)
+                return await self._post(url, json=payload, headers=headers)
+
+        if self.profile_each_sample:
+            # start/stop_profile is global per-engine, so serialize concurrent
+            # samples to keep traces clean.
+            if self._profile_lock is None:
+                self._profile_lock = asyncio.Lock()
+            async with self._profile_lock:
+                prefix = f"sample_{self._profile_counter}"
+                self._profile_counter += 1
+                await self.start_profile(profile_prefix=prefix)
+                try:
+                    response = await _do_post()
+                finally:
+                    await self.stop_profile()
+        else:
+            response = await _do_post()
 
         # vLLM returns: list[dict[str(token_id) → {"logprob": float, ...}] | None]
         result_prompt_logprobs: Optional[List[Optional[float]]] = None
@@ -879,6 +911,20 @@ class RemoteInferenceClient:
             *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
         )
         return {url: resp for url, resp in results}
+
+    async def start_profile(self, profile_prefix: Optional[str] = None) -> Dict[str, Any]:
+        """Open a profiler span on every backend server.
+
+        Requires the server to have been launched with ``profiler_config`` set
+        (otherwise vLLM raises a 500). vLLM's ``/start_profile`` endpoint accepts
+        ``profile_prefix`` as a query param (used as the trace filename prefix).
+        """
+        params = {"profile_prefix": profile_prefix} if profile_prefix else None
+        return await self._call_all_servers("/start_profile", params=params)
+
+    async def stop_profile(self) -> Dict[str, Any]:
+        """Close the profiler span on every backend and flush traces to ``torch_profiler_dir``."""
+        return await self._call_all_servers("/stop_profile")
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
         """

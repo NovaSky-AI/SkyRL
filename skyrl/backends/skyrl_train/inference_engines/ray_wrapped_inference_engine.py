@@ -70,6 +70,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def reset_prefix_cache(self):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
 
+    async def start_profile(self, profile_prefix: str | None = None):
+        return await self.inference_engine_actor.start_profile.remote(profile_prefix=profile_prefix)
+
+    async def stop_profile(self):
+        return await self.inference_engine_actor.stop_profile.remote()
+
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.chat_completion.remote(request_payload)
 

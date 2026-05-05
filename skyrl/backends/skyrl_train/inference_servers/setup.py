@@ -283,6 +283,16 @@ def build_new_inference_client(
     active_lora_name = (
         _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 and cfg.trainer.strategy != "megatron" else None
     )
+
+    # Auto-enable per-sample profiling when the user configured a vLLM profiler
+    # via engine_init_kwargs.profiler_config. Accept both dict (raw user input)
+    # and ProfilerConfig (post-coercion in build_vllm_cli_args).
+    profiler_cfg = ie_cfg.engine_init_kwargs.get("profiler_config") if ie_cfg.engine_init_kwargs else None
+    if isinstance(profiler_cfg, dict):
+        profile_each_sample = bool(profiler_cfg.get("profiler"))
+    else:
+        profile_each_sample = bool(profiler_cfg and getattr(profiler_cfg, "profiler", None))
+
     client = RemoteInferenceClient(
         proxy_url=server_setup.proxy_url,
         server_urls=server_setup.server_urls,
@@ -292,6 +302,7 @@ def build_new_inference_client(
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
+        profile_each_sample=profile_each_sample,
     )
 
     return client, server_setup
