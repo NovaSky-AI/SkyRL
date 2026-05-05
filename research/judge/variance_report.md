@@ -76,33 +76,40 @@ Taste's role is within passing rollouts, not failing ones. For all-pass groups (
 | reddit | 0.000 | 1.000 |
 | datadog | 0.000 | 1.000 |
 
----
-
-## 4. Binary vs Taste Advantage Variance
-
-In GRPO, the learning signal is **within-group advantage variance**: `var(reward - group_mean)`. A reward that's high-variance across the batch but constant within every group contributes nothing.
-
-![Binary vs taste advantage variance per group](plot_binary_vs_taste_variance.png)
-
-With pass@4 ≈ 0.33 and n=4 rollouts per group:
-
-| Group outcome | P(this outcome) | Binary adv_var | Taste adv_var | Notes |
-|---|---|---|---|---|
-| 0/4 pass | **20%** | **0.000** | **0.000** | **both dead** |
-| 1/4 pass | 40% | 0.188 | >0 | both active |
-| 2/4 pass | 29% | 0.250 | >0 | both active |
-| 3/4 pass | 10% | 0.188 | >0 | both active |
-| 4/4 pass | **1%** | **0.000** | **>0** | **taste only** |
-
-In mixed groups, binary advantage variance (0.19–0.25) exceeds taste advantage variance (0.05–0.18) — expected, since binary is doing the heavy lifting for pass/fail discrimination and taste adds a secondary quality gradient. The combined reward `binary + α × taste` has advantage variance:
-```
-var(binary_adv + α × taste_adv) = var(binary_adv) + α²·var(taste_adv) + 2α·cov(binary_adv, taste_adv)
-```
-Since taste correlates with binary (passing rollouts score higher on average), `cov > 0` — taste amplifies the binary signal when they agree and moderates it when they disagree (e.g., an ugly pass).
 
 ---
 
-## 5. Summary
+## 5. Weighted Combination — Binary + α·Taste (No Gating)
+
+Combined reward: `r_i = b_i + α·t_i`, judge scores **all** rollouts including fails.
+
+The within-group advantage variance works out to:
+
+```
+Var(r_adv) = (k/n)(1−k/n)·(1 + α·Δμ)² + α²·[p·σ_p² + (1−p)·σ_f²]
+```
+
+where `Δμ = μ_{t|pass} − μ_{t|fail}` is the mean taste gap between passing and failing rollouts, and `σ_p`, `σ_f` are taste std within each class. From the ablation: `Δμ ≈ 0.22` (pass mean 0.58, fail mean 0.36), `σ ≈ 0.20` for both.
+
+Two differences from gating `t_i = 0` for fails:
+- The `(1 + α·Δμ)²` term uses the **gap** (0.22) not the pass mean (0.58) — taste helps less per unit α in mixed groups, because fails also score well on taste so it doesn't point as cleanly in the same direction as binary.
+- All-fail groups are no longer dead: they get `α²·σ_f²` from taste variation among fails.
+
+| α | 0/4 pass | 1/4 pass | 2/4 pass | 3/4 pass | 4/4 pass | E[Var]\* |
+|---|---|---|---|---|---|---|
+| 0.0 (binary only) | 0.000 | 0.188 | 0.250 | 0.188 | 0.000 | 0.100 |
+| 0.25 | 0.003 | 0.212 | 0.281 | 0.212 | 0.003 | 0.114 |
+| 0.5 | 0.010 | 0.241 | 0.318 | 0.241 | 0.010 | 0.133 |
+| 1.0 | 0.040 | 0.319 | 0.412 | 0.319 | 0.040 | 0.188 |
+| 2.0 | 0.160 | 0.549 | 0.678 | 0.549 | 0.160 | 0.367 |
+
+\* p ≈ 0.16 per rollout (consistent with pass@4 ≈ 0.33 from live training).
+
+α=0.5 gives **33% more expected variance than binary alone** (0.133 vs 0.100) and wakes up all-fail groups that contribute nothing under binary. The reward is no longer in [0,1] — GRPO normalization handles the scale, but KL coefficient may need retuning.
+
+---
+
+## 6. Summary
 
 | Claim | Evidence |
 |---|---|

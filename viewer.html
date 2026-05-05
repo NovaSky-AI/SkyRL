@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trajectory Viewer — baseline vs exp</title>
+<style>
+/* ===== Reset & Base ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f8f9fa;
+  color: #1e293b;
+  min-height: 100vh;
+}
+
+/* ===== Header ===== */
+.header {
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-wrap: wrap;
+}
+
+.header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  flex: 1;
+  text-align: center;
+}
+
+.run-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.run-badge.baseline { background: #dbeafe; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.run-badge.exp      { background: #ede9fe; color: #7c3aed; border: 1px solid #ddd6fe; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+select, .step-label {
+  font-size: 13px;
+  padding: 5px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e293b;
+  cursor: pointer;
+  outline: none;
+}
+select:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
+
+.step-label {
+  cursor: default;
+  background: #f1f5f9;
+  color: #64748b;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* ===== Main layout ===== */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  max-width: 1800px;
+  margin: 0 auto;
+}
+
+.column {
+  padding: 16px 14px;
+  min-width: 0;
+}
+
+.column-header {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 8px 12px;
+  border-radius: 8px 8px 0 0;
+  border-left: 4px solid;
+  margin-bottom: 0;
+}
+.column-header.baseline { color: #1d4ed8; border-color: #3b82f6; background: #eff6ff; }
+.column-header.exp      { color: #7c3aed; border-color: #8b5cf6; background: #f5f3ff; }
+
+/* Stats bar */
+.stats-bar {
+  font-size: 12px;
+  color: #64748b;
+  padding: 6px 12px 8px;
+  border-left: 4px solid;
+  background: #fff;
+  margin-bottom: 10px;
+  border-radius: 0 0 6px 6px;
+  border-bottom: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+}
+.stats-bar.baseline { border-color: #3b82f6; }
+.stats-bar.exp      { border-color: #8b5cf6; }
+
+/* ===== Card grid ===== */
+.card-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ===== Trajectory Card ===== */
+.card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  border-left: 4px solid;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.1s;
+  position: relative;
+}
+.card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.08); transform: translateY(-1px); }
+.card.baseline { border-left-color: #3b82f6; }
+.card.exp      { border-left-color: #8b5cf6; }
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.badge.pass { background: #dcfce7; color: #15803d; }
+.badge.fail { background: #fee2e2; color: #b91c1c; }
+
+.card-meta {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.7;
+}
+.card-meta strong { color: #334155; }
+
+.card-env {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 4px;
+  flex: 1;
+}
+
+.card-right {
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Judge bar */
+.judge-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.judge-label { color: #64748b; white-space: nowrap; }
+.judge-bar-wrap {
+  flex: 1;
+  background: #e2e8f0;
+  border-radius: 4px;
+  height: 6px;
+  overflow: hidden;
+}
+.judge-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+.judge-score-text { color: #334155; font-weight: 600; white-space: nowrap; }
+
+/* Rationale preview */
+.rationale-preview {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* ===== Modal ===== */
+.modal-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15,23,42,.5);
+  z-index: 200;
+  backdrop-filter: blur(2px);
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+.modal-backdrop.open { display: flex; }
+
+.modal {
+  background: #fff;
+  border-radius: 12px;
+  width: 90vw;
+  max-width: 1100px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.25);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  margin: auto;
+}
+
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  flex: 1;
+}
+
+.modal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta-chip {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 500;
+}
+
+.modal-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.nav-btn {
+  padding: 5px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  color: #475569;
+  transition: background 0.1s;
+}
+.nav-btn:hover { background: #f1f5f9; }
+.nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.modal-close {
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: #f1f5f9;
+  border-radius: 6px;
+  font-size: 18px;
+  cursor: pointer;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s;
+  flex-shrink: 0;
+}
+.modal-close:hover { background: #e2e8f0; color: #0f172a; }
+
+/* Judge detail in modal header */
+.modal-judge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.modal-judge-bar-wrap {
+  width: 80px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  height: 8px;
+  overflow: hidden;
+}
+.modal-judge-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+
+/* Modal body = conversation */
+.modal-body {
+  overflow-y: auto;
+  padding: 20px;
+  flex: 1;
+}
+
+/* Conversation turns */
+.turn {
+  margin-bottom: 16px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+}
+
+.turn-header {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+}
+.turn.assistant .turn-header { background: #f0fdf4; color: #166534; border-bottom: 1px solid #bbf7d0; }
+.turn.user .turn-header { background: #eff6ff; color: #1d4ed8; border-bottom: 1px solid #bfdbfe; }
+
+.turn-content { padding: 12px 14px; }
+
+/* Think block */
+.think-block {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  margin: 6px 0;
+  overflow: hidden;
+}
+.think-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  background: #f8fafc;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.1s;
+}
+.think-toggle:hover { background: #f1f5f9; }
+.think-arrow { transition: transform 0.2s; display: inline-block; }
+.think-toggle.open .think-arrow { transform: rotate(90deg); }
+.think-content {
+  display: none;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #475569;
+  background: #fff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  border-top: 1px solid #e2e8f0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.think-content.open { display: block; }
+
+/* Tool call block */
+.tool-call-block {
+  margin: 6px 0;
+  border: 1px solid #e0e7ff;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tool-call-header {
+  background: #eef2ff;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #4338ca;
+  letter-spacing: 0.04em;
+}
+.tool-call-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  background: #fafafa;
+  white-space: pre;
+  overflow-x: auto;
+  color: #1e293b;
+  border-top: 1px solid #e0e7ff;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+/* Prose text */
+.prose-text {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Images in user turns */
+.turn-image {
+  display: block;
+  max-width: 400px;
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  margin: 6px 0;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.turn-image:hover { opacity: 0.85; }
+
+/* Modal judge rationale */
+.rationale-full {
+  margin: 16px 0 0;
+  padding: 12px 14px;
+  background: #f8f9fa;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #475569;
+  line-height: 1.65;
+}
+.rationale-full strong { display: block; margin-bottom: 4px; color: #334155; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Axis scores */
+.axis-scores {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.axis-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <span class="run-badge baseline" id="baseline-badge">BASELINE …</span>
+
+  <div class="header-title">Trajectory Viewer</div>
+
+  <div class="controls">
+    <label for="env-select" style="font-size:12px;color:#64748b;font-weight:600;">Env:</label>
+    <select id="env-select">
+      <option value="">All environments</option>
+    </select>
+
+    <label for="filter-select" style="font-size:12px;color:#64748b;font-weight:600;">Filter:</label>
+    <select id="filter-select">
+      <option value="all">All</option>
+      <option value="pass">Pass only</option>
+      <option value="fail">Fail only</option>
+    </select>
+
+    <span class="step-label" id="step-label">Step —</span>
+  </div>
+
+  <span class="run-badge exp" id="exp-badge">EXP …</span>
+</div>
+
+<!-- Main two-column layout -->
+<div class="main" id="main-grid">
+  <!-- Baseline column -->
+  <div class="column" id="col-baseline">
+    <div class="column-header baseline" id="col-header-baseline">BASELINE</div>
+    <div class="stats-bar baseline" id="stats-baseline">—</div>
+    <div class="card-grid" id="grid-baseline"></div>
+  </div>
+
+  <!-- Exp column -->
+  <div class="column" id="col-exp">
+    <div class="column-header exp" id="col-header-exp">EXP / JUDGE</div>
+    <div class="stats-bar exp" id="stats-exp">—</div>
+    <div class="card-grid" id="grid-exp"></div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal" id="modal" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <div style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="modal-title" id="modal-title">—</span>
+          <div class="modal-meta" id="modal-meta"></div>
+        </div>
+        <div id="modal-judge-row" style="display:none;">
+          <div class="modal-judge" id="modal-judge"></div>
+        </div>
+        <div id="modal-axis-row" style="display:none;">
+          <div class="axis-scores" id="modal-axis"></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+        <div class="modal-nav">
+          <button class="nav-btn" id="nav-prev" title="Previous (←)">&#8592;</button>
+          <span id="nav-counter" style="font-size:12px;color:#64748b;padding:0 4px;"></span>
+          <button class="nav-btn" id="nav-next" title="Next (→)">&#8594;</button>
+        </div>
+        <button class="modal-close" id="modal-close" aria-label="Close">&#10005;</button>
+      </div>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ===== State =====
+let DATA = null;           // full viewer_data.json
+let filteredBase = [];     // currently shown baseline rollouts
+let filteredExp = [];      // currently shown exp rollouts
+let activeList = [];       // the list the modal is navigating (merged for arrow keys)
+let activeIdx = -1;        // index within activeList
+
+// ===== Utility =====
+
+function judgeColor(score) {
+  // 0 = red, 0.5 = yellow, 1 = green
+  if (score === null || score === undefined) return '#94a3b8';
+  const r = score <= 0.5
+    ? 255
+    : Math.round(255 * (1 - (score - 0.5) * 2));
+  const g = score >= 0.5
+    ? Math.round(200 * ((score - 0.5) * 2))
+    : Math.round(200 * (score * 2));
+  const b = 0;
+  return `rgb(${r},${g+55},${b})`;
+}
+
+function avg(arr) {
+  if (!arr.length) return null;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '—';
+  return n.toLocaleString();
+}
+
+function escHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ===== Stats bar =====
+
+function renderStats(rollouts, el) {
+  const pass = rollouts.filter(r => r.passed);
+  const fail = rollouts.filter(r => !r.passed);
+  const avgTokPass = avg(pass.map(r => r.tokens));
+  const avgTokFail = avg(fail.map(r => r.tokens));
+  const avgTurnPass = avg(pass.map(r => r.turns));
+  const avgTurnFail = avg(fail.map(r => r.turns));
+  const judged = rollouts.filter(r => r.judge_score !== null);
+  const avgJudge = avg(judged.map(r => r.judge_score));
+
+  let html = `<strong>${pass.length} pass / ${rollouts.length} total</strong>`;
+  if (avgTurnPass !== null || avgTurnFail !== null) {
+    const tp = avgTurnPass !== null ? avgTurnPass.toFixed(1) : '—';
+    const tf = avgTurnFail !== null ? avgTurnFail.toFixed(1) : '—';
+    html += ` &nbsp;·&nbsp; avg turns: <span style="color:#16a34a">${tp}</span>/<span style="color:#dc2626">${tf}</span> (pass/fail)`;
+  }
+  if (avgTokPass !== null) html += ` &nbsp;·&nbsp; avg tok (pass): ${fmtNum(Math.round(avgTokPass))}`;
+  if (avgTokFail !== null) html += ` &nbsp;·&nbsp; avg tok (fail): ${fmtNum(Math.round(avgTokFail))}`;
+  if (avgJudge !== null) html += ` &nbsp;·&nbsp; avg judge: ${avgJudge.toFixed(2)}`;
+  el.innerHTML = html;
+}
+
+// ===== Card rendering =====
+
+function renderJudgeBar(score) {
+  if (score === null || score === undefined) return '';
+  const pct = Math.round(score * 100);
+  const color = judgeColor(score);
+  return `
+    <div class="judge-row">
+      <span class="judge-label">judge</span>
+      <div class="judge-bar-wrap">
+        <div class="judge-bar-fill" style="width:${pct}%;background:${color};"></div>
+      </div>
+      <span class="judge-score-text">${score.toFixed(2)}</span>
+    </div>`;
+}
+
+function renderCard(rollout) {
+  const passClass = rollout.passed ? 'pass' : 'fail';
+  const passLabel = rollout.passed ? 'PASS' : 'FAIL';
+  const splitClass = rollout.split;
+  const judgeHtml = renderJudgeBar(rollout.judge_score);
+  const rationale = rollout.judge_rationale
+    ? `<div class="rationale-preview" title="${escHtml(rollout.judge_rationale)}">${escHtml(rollout.judge_rationale)}</div>`
+    : '';
+
+  return `
+    <div class="card ${splitClass}" data-id="${rollout.id}" tabindex="0" role="button" aria-label="Trajectory ${rollout.traj_idx}, ${rollout.env_key}">
+      <div class="card-top">
+        <div>
+          <div class="card-env">${escHtml(rollout.env_key)}</div>
+          <div class="card-meta">
+            <strong>${rollout.turns}</strong> turns &nbsp;·&nbsp; <strong>${fmtNum(rollout.tokens)}</strong> tok
+            &nbsp;·&nbsp; <span style="color:#94a3b8;">${escHtml(rollout.stop_reason)}</span>
+          </div>
+        </div>
+        <div style="flex:1;"></div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <span class="badge ${passClass}">${passLabel} ${rollout.reward.toFixed(1)}</span>
+          <span class="card-right">#${rollout.traj_idx}</span>
+        </div>
+      </div>
+      ${judgeHtml}
+      ${rationale}
+    </div>`;
+}
+
+function sortRollouts(rollouts) {
+  // Pass first (by reward desc), then fail (by reward desc)
+  const pass = rollouts.filter(r => r.passed).sort((a, b) => b.reward - a.reward);
+  const fail = rollouts.filter(r => !r.passed).sort((a, b) => b.reward - a.reward);
+  return [...pass, ...fail];
+}
+
+// ===== Filter & render columns =====
+
+function getFiltered() {
+  const env = document.getElementById('env-select').value;
+  const filter = document.getElementById('filter-select').value;
+
+  function apply(rollouts) {
+    let res = rollouts;
+    if (env) res = res.filter(r => r.env_key === env);
+    if (filter === 'pass') res = res.filter(r => r.passed);
+    if (filter === 'fail') res = res.filter(r => !r.passed);
+    return sortRollouts(res);
+  }
+
+  const baseAll = DATA.rollouts.filter(r => r.split === 'baseline');
+  const expAll  = DATA.rollouts.filter(r => r.split === 'exp');
+  return { base: apply(baseAll), exp: apply(expAll) };
+}
+
+function renderColumns() {
+  const { base, exp } = getFiltered();
+  filteredBase = base;
+  filteredExp = exp;
+
+  // Update column headers with count
+  document.getElementById('col-header-baseline').textContent = `BASELINE (${base.length} shown)`;
+  document.getElementById('col-header-exp').textContent = `EXP / JUDGE (${exp.length} shown)`;
+
+  renderStats(base, document.getElementById('stats-baseline'));
+  renderStats(exp, document.getElementById('stats-exp'));
+
+  const gridBase = document.getElementById('grid-baseline');
+  const gridExp  = document.getElementById('grid-exp');
+
+  if (base.length === 0) {
+    gridBase.innerHTML = '<div class="empty-state">No trajectories match the current filter.</div>';
+  } else {
+    gridBase.innerHTML = base.map(renderCard).join('');
+  }
+
+  if (exp.length === 0) {
+    gridExp.innerHTML = '<div class="empty-state">No trajectories match the current filter.</div>';
+  } else {
+    gridExp.innerHTML = exp.map(renderCard).join('');
+  }
+
+  // Attach click + keyboard handlers
+  document.querySelectorAll('.card').forEach(el => {
+    el.addEventListener('click', () => openModalById(+el.dataset.id));
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') openModalById(+el.dataset.id);
+    });
+  });
+}
+
+// ===== Conversation parsing =====
+
+function parseToolCall(json_str) {
+  try {
+    const obj = JSON.parse(json_str);
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return json_str;
+  }
+}
+
+function renderAssistantContent(text) {
+  // Process think blocks, tool_call blocks, and prose
+  const parts = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    // Find the earliest special block
+    const thinkStart = remaining.indexOf('<think>');
+    const toolStart  = remaining.indexOf('<tool_call>');
+
+    let next = -1;
+    let type = null;
+
+    if (thinkStart !== -1 && (toolStart === -1 || thinkStart <= toolStart)) {
+      next = thinkStart; type = 'think';
+    } else if (toolStart !== -1) {
+      next = toolStart; type = 'tool';
+    }
+
+    if (next === -1) {
+      // No more special blocks
+      if (remaining.trim()) parts.push(`<div class="prose-text">${escHtml(remaining)}</div>`);
+      break;
+    }
+
+    // Prose before this block
+    const pre = remaining.slice(0, next);
+    if (pre.trim()) parts.push(`<div class="prose-text">${escHtml(pre)}</div>`);
+
+    if (type === 'think') {
+      const endTag = '</think>';
+      const endIdx = remaining.indexOf(endTag, next + 7);
+      if (endIdx === -1) {
+        // Unclosed — treat rest as prose
+        const content = remaining.slice(next + 7);
+        parts.push(buildThinkBlock(content));
+        remaining = '';
+      } else {
+        const content = remaining.slice(next + 7, endIdx);
+        parts.push(buildThinkBlock(content));
+        remaining = remaining.slice(endIdx + endTag.length);
+      }
+    } else {
+      const endTag = '</tool_call>';
+      const endIdx = remaining.indexOf(endTag, next + 11);
+      if (endIdx === -1) {
+        const content = remaining.slice(next + 11);
+        parts.push(buildToolCallBlock(content));
+        remaining = '';
+      } else {
+        const content = remaining.slice(next + 11, endIdx);
+        parts.push(buildToolCallBlock(content));
+        remaining = remaining.slice(endIdx + endTag.length);
+      }
+    }
+  }
+
+  return parts.join('');
+}
+
+// We use a counter so each toggle is unique
+let _thinkCounter = 0;
+function buildThinkBlock(content) {
+  const id = 'think-' + (++_thinkCounter);
+  return `
+    <div class="think-block">
+      <button class="think-toggle" onclick="toggleThink('${id}',this)" aria-expanded="false">
+        <span class="think-arrow">&#9654;</span> Reasoning trace (${content.split('\n').length} lines)
+      </button>
+      <div class="think-content" id="${id}">${escHtml(content)}</div>
+    </div>`;
+}
+
+function buildToolCallBlock(content) {
+  const pretty = parseToolCall(content.trim());
+  return `
+    <div class="tool-call-block">
+      <div class="tool-call-header">TOOL CALL</div>
+      <pre class="tool-call-pre">${escHtml(pretty)}</pre>
+    </div>`;
+}
+
+function toggleThink(id, btn) {
+  const el = document.getElementById(id);
+  const isOpen = el.classList.toggle('open');
+  btn.classList.toggle('open', isOpen);
+  btn.setAttribute('aria-expanded', isOpen);
+}
+window.toggleThink = toggleThink;
+
+function renderUserContent(text, images, imgIndexRef) {
+  // Replace each [image] placeholder with the next image
+  const parts = text.split('[image]');
+  let html = '';
+  parts.forEach((part, i) => {
+    if (part.trim()) {
+      html += `<div class="prose-text">${escHtml(part)}</div>`;
+    }
+    if (i < parts.length - 1) {
+      // This was a [image] placeholder
+      const imgIdx = imgIndexRef.count;
+      imgIndexRef.count++;
+      if (imgIdx < images.length) {
+        const src = escHtml(images[imgIdx]);
+        html += `<a href="${src}" target="_blank" rel="noopener">
+          <img class="turn-image" src="${src}" alt="screenshot ${imgIdx}" loading="lazy"
+            onerror="this.style.display='none'">
+        </a>`;
+      }
+    }
+  });
+  return html;
+}
+
+function parseTurns(text) {
+  // Split on <|im_start|> — the text before the first marker is the first assistant turn
+  const marker = '<|im_start|>';
+  const segments = text.split(marker);
+
+  const turns = [];
+
+  // First segment (before any marker) is the first assistant turn content
+  const firstSeg = segments[0];
+  if (firstSeg && firstSeg.trim()) {
+    turns.push({ role: 'assistant', content: firstSeg.replace(/<\|im_end\|>/g, '').trimEnd() });
+  }
+
+  // Remaining segments: "role\ncontent<|im_end|>..."
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i].replace(/<\|im_end\|>/g, '');
+    const nlIdx = seg.indexOf('\n');
+    if (nlIdx === -1) continue;
+    const role = seg.slice(0, nlIdx).trim();
+    const content = seg.slice(nlIdx + 1).trimEnd();
+    if (role === 'user' || role === 'assistant') {
+      turns.push({ role, content });
+    }
+  }
+
+  return turns;
+}
+
+function buildConversationHtml(rollout) {
+  const turns = parseTurns(rollout.text);
+  const images = rollout.images || [];
+  const imgIndexRef = { count: 0 };
+  const parts = [];
+
+  turns.forEach((turn, i) => {
+    let contentHtml;
+    if (turn.role === 'assistant') {
+      contentHtml = renderAssistantContent(turn.content);
+    } else {
+      contentHtml = renderUserContent(turn.content, images, imgIndexRef);
+    }
+    parts.push(`
+      <div class="turn ${turn.role}">
+        <div class="turn-header">${turn.role === 'assistant' ? 'Assistant' : 'User'} — turn ${i + 1}</div>
+        <div class="turn-content">${contentHtml}</div>
+      </div>`);
+  });
+
+  return parts.join('') || '<p style="color:#94a3b8;">No conversation content.</p>';
+}
+
+// ===== Modal =====
+
+function openModalById(id) {
+  const rollout = DATA.rollouts.find(r => r.id === id);
+  if (!rollout) return;
+
+  // Determine navigation list: merge filteredBase and filteredExp interleaved by position
+  // Actually navigate within the same column for arrow keys
+  activeList = rollout.split === 'baseline' ? filteredBase : filteredExp;
+  activeIdx = activeList.findIndex(r => r.id === id);
+
+  renderModal(rollout);
+  document.getElementById('modal-backdrop').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function renderModal(rollout) {
+  _thinkCounter = 0;
+
+  // Title
+  document.getElementById('modal-title').textContent = rollout.env_key;
+
+  // Meta chips
+  const passClass = rollout.passed ? 'pass' : 'fail';
+  const passColor = rollout.passed ? '#15803d' : '#b91c1c';
+  const passLabel = rollout.passed ? 'PASS' : 'FAIL';
+  document.getElementById('modal-meta').innerHTML = `
+    <span class="meta-chip" style="background:${rollout.passed ? '#dcfce7' : '#fee2e2'};color:${passColor};font-weight:700;">
+      ${passLabel} ${rollout.reward.toFixed(1)}
+    </span>
+    <span class="meta-chip">${escHtml(rollout.split)} #${rollout.traj_idx}</span>
+    <span class="meta-chip">${rollout.turns} turns</span>
+    <span class="meta-chip">${fmtNum(rollout.tokens)} tokens</span>
+    <span class="meta-chip">${escHtml(rollout.stop_reason)}</span>
+  `;
+
+  // Judge row
+  const judgeRow = document.getElementById('modal-judge-row');
+  const judgeEl  = document.getElementById('modal-judge');
+  if (rollout.judge_score !== null && rollout.judge_score !== undefined) {
+    const pct = Math.round(rollout.judge_score * 100);
+    const color = judgeColor(rollout.judge_score);
+    judgeEl.innerHTML = `
+      <span style="font-size:12px;color:#64748b;font-weight:600;">Judge score:</span>
+      <div class="modal-judge-bar-wrap">
+        <div class="modal-judge-bar-fill" style="width:${pct}%;background:${color};"></div>
+      </div>
+      <span style="font-size:13px;font-weight:700;color:#0f172a;">${rollout.judge_score.toFixed(3)}</span>
+    `;
+    judgeRow.style.display = '';
+  } else {
+    judgeRow.style.display = 'none';
+  }
+
+  // Axis scores row is not in rollout object — skip
+
+  // Navigation counter
+  document.getElementById('nav-counter').textContent =
+    `${activeIdx + 1} / ${activeList.length}`;
+  document.getElementById('nav-prev').disabled = activeIdx <= 0;
+  document.getElementById('nav-next').disabled = activeIdx >= activeList.length - 1;
+
+  // Build conversation body
+  let bodyHtml = buildConversationHtml(rollout);
+
+  // Append rationale
+  if (rollout.judge_rationale) {
+    bodyHtml += `
+      <div class="rationale-full">
+        <strong>Judge Rationale</strong>
+        ${escHtml(rollout.judge_rationale)}
+      </div>`;
+  }
+
+  const modalBody = document.getElementById('modal-body');
+  modalBody.innerHTML = bodyHtml;
+  modalBody.scrollTop = 0;
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+function navigateModal(delta) {
+  const newIdx = activeIdx + delta;
+  if (newIdx < 0 || newIdx >= activeList.length) return;
+  activeIdx = newIdx;
+  renderModal(activeList[newIdx]);
+}
+
+// ===== Event listeners =====
+
+document.getElementById('modal-close').addEventListener('click', closeModal);
+
+document.getElementById('modal-backdrop').addEventListener('click', e => {
+  if (e.target === document.getElementById('modal-backdrop')) closeModal();
+});
+
+document.getElementById('nav-prev').addEventListener('click', () => navigateModal(-1));
+document.getElementById('nav-next').addEventListener('click', () => navigateModal(+1));
+
+document.addEventListener('keydown', e => {
+  const backdropOpen = document.getElementById('modal-backdrop').classList.contains('open');
+  if (backdropOpen) {
+    if (e.key === 'Escape') closeModal();
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); navigateModal(-1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); navigateModal(+1); }
+  }
+});
+
+document.getElementById('env-select').addEventListener('change', renderColumns);
+document.getElementById('filter-select').addEventListener('change', renderColumns);
+
+// ===== Init =====
+
+function init(data) {
+  DATA = data;
+
+  // Header badges
+  document.getElementById('baseline-badge').textContent = `BASELINE ${data.meta.baseline_run}`;
+  document.getElementById('exp-badge').textContent      = `EXP ${data.meta.exp_run}`;
+  document.getElementById('step-label').textContent     = `Step ${data.meta.step}`;
+
+  // Populate env dropdown
+  const sel = document.getElementById('env-select');
+  data.envs.forEach(env => {
+    const opt = document.createElement('option');
+    opt.value = env;
+    opt.textContent = env;
+    sel.appendChild(opt);
+  });
+
+  renderColumns();
+}
+
+// ===== Load data =====
+fetch('viewer_data.json')
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    return r.json();
+  })
+  .then(data => init(data))
+  .catch(err => {
+    document.getElementById('main-grid').innerHTML = `
+      <div style="grid-column:1/-1;padding:40px;text-align:center;color:#b91c1c;">
+        <strong>Failed to load viewer_data.json</strong><br>
+        <span style="font-size:13px;color:#64748b;">${escHtml(String(err))}</span><br>
+        <span style="font-size:12px;color:#94a3b8;margin-top:8px;display:block;">
+          Make sure you're serving this file with: <code>python3 -m http.server 8765</code>
+        </span>
+      </div>`;
+  });
+</script>
+</body>
+</html>
