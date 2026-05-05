@@ -100,6 +100,14 @@ envs:
   # Stream 4 finding: pass blind_outcome=True at training time to suppress
   # outcome bleed (judge sees outcome=True and inflates ~+1.4 weighted-pts).
   SKYRL_TASTE_BLIND_OUTCOME: "1"
+  # Set to "relative" to use the group/pairwise judge instead of the
+  # per-rollout single judge.  Scoring is deferred to the generator,
+  # which calls score_group_async once per task after all rollouts finish.
+  # Use SKYRL_TASTE_GROUP_PROVIDER to pick "relative_haiku" (default, with
+  # screenshots) or "relative_sonnet" (text-only, higher quality).
+  # SKYRL_TASTE_MODE: "relative"
+  # SKYRL_TASTE_GROUP_PROVIDER: "relative_haiku"
+  SKYRL_TASTE_GROUP_TIMEOUT_S: "60"
 
 setup: |
   bash scripts/fleet-common-setup.sh \

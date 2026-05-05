@@ -83,6 +83,72 @@ def clear_caches():
     _TASK_CACHE = {}
 
 
+_MAX_ACTION_CONTENT_CHARS = 2000
+_MAX_DEFERRED_SCREENSHOTS = 8
+
+
+def _extract_screenshots_from_chat_history(chat_history: list) -> list:
+    """Extract base64 screenshot strings from image_url blocks in user messages.
+
+    Browser observations arrive as {"type": "image_url", "image_url": {"url":
+    "data:image/png;base64,<data>"}} blocks inside user-role messages.  We
+    strip the data-URI prefix and return raw base64 strings so the research
+    judge's _screenshot_to_anthropic_block() can consume them directly.
+
+    Pre-sampled to _MAX_DEFERRED_SCREENSHOTS so we don't balloon deferred-data
+    memory for long trajectories; the group judge subsamples further to
+    max_screenshots_per_rollout (default 2).
+    """
+    all_b64: list = []
+    for msg in chat_history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                continue
+            url = block.get("image_url", {}).get("url", "")
+            if url.startswith("data:"):
+                _, _, b64 = url.partition(",")
+                if b64:
+                    all_b64.append(b64)
+    if len(all_b64) <= _MAX_DEFERRED_SCREENSHOTS:
+        return all_b64
+    step = (len(all_b64) - 1) / (_MAX_DEFERRED_SCREENSHOTS - 1)
+    idx = sorted({round(i * step) for i in range(_MAX_DEFERRED_SCREENSHOTS)})
+    return [all_b64[i] for i in idx]
+
+
+def _truncate_action_content(content) -> str:
+    """Truncate action content for the group judge to prevent context overflow.
+
+    Qwen3-VL <think> blocks can be 10-50K chars; at 8 rollouts × 30 actions
+    that would exceed Haiku's 200K context.  We keep the first 2000 chars,
+    which preserves the key action intent while staying safe.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        # Multimodal content: extract text parts only (drop image blobs).
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                # image_url / image blocks are skipped — screenshots go via
+                # the dedicated screenshots= path, not inside action content.
+            elif isinstance(block, str):
+                parts.append(block)
+        text = "\n".join(parts)
+    else:
+        text = str(content)
+    if len(text) > _MAX_ACTION_CONTENT_CHARS:
+        return text[:_MAX_ACTION_CONTENT_CHARS] + "…"
+    return text
+
+
 class FleetTaskEnv(BaseTextEnv):
     """SkyRL environment for Fleet-hosted tasks.
 
@@ -201,6 +267,14 @@ class FleetTaskEnv(BaseTextEnv):
         self.last_taste_reward: Optional[float] = None
         self.last_effective_taste: Optional[float] = None
         self.last_taste_judge_failed: bool = False
+        # Group/relative judge mode: defer scoring to the generator so all
+        # rollouts for the same task are scored together.  Enabled either by
+        # env_config["taste_use_group_judge"]=True or SKYRL_TASTE_MODE=relative.
+        self.taste_use_group_judge: bool = bool(
+            (env_config.get("taste_use_group_judge", False) if hasattr(env_config, "get") else False)
+            or os.environ.get("SKYRL_TASTE_MODE", "").lower() == "relative"
+        )
+        self._taste_deferred_data: Optional[dict] = None
 
         # Hint config
         self.enable_hints = (
@@ -823,6 +897,23 @@ class FleetTaskEnv(BaseTextEnv):
         self.last_effective_taste = None
         self.last_taste_judge_failed = False
 
+        if self.taste_use_group_judge:
+            # Defer to generator-level group judge. Stash the trajectory data
+            # that score_group_async needs; generator patches the reward later.
+            task_text = self.task_config.get("prompt", "") if self.task_config else ""
+            actions = [
+                {"role": m.get("role"), "content": _truncate_action_content(m.get("content"))}
+                for m in self.chat_history
+                if m.get("role") == "assistant"
+            ]
+            self._taste_deferred_data = {
+                "task": task_text,
+                "actions": actions,
+                "outcome": bool(verifier_reward >= 1.0),
+                "screenshots": _extract_screenshots_from_chat_history(self.chat_history),
+            }
+            return verifier_reward
+
         try:
             from skyrl_gym.taste import score_trajectory_async
         except Exception as e:
@@ -938,6 +1029,10 @@ class FleetTaskEnv(BaseTextEnv):
             metrics["effective_taste"] = self.last_effective_taste
         metrics["taste_floor"] = self.taste_floor
         metrics["taste_judge_failed"] = self.last_taste_judge_failed
+        if self._taste_deferred_data is not None:
+            # Group judge mode: generator will call score_group_async and patch rewards.
+            metrics["taste_deferred_data"] = self._taste_deferred_data
+            metrics["verifier_reward"] = self.last_verifier_reward
         # Include verifier feedback for hint generation
         if self._verifier_stdout is not None:
             metrics["verifier_stdout"] = self._verifier_stdout

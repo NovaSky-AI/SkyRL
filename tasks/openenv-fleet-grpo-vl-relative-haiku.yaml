@@ -1,0 +1,117 @@
+# Fleet VL/CUA GRPO Training — RELATIVE HAIKU JUDGE (screenshots) - Qwen3.5-9B
+#
+# Reward shape: GATED TASTE (relative / group judge)
+#   Scoring is deferred: env stashes {task, actions, outcome, screenshots} in
+#   taste_deferred_data; after all G rollouts finish the generator calls
+#   score_trajectory_group_haiku() once per task, then patches rewards.
+#
+#   effective_taste = max(taste_floor, relative_taste_score)
+#   reward          = verifier_reward * effective_taste
+#
+# Judge: relative_haiku (claude-haiku-4-5-20251001, vision)
+#   - 2 screenshots per rollout, evenly sampled
+#   - Called once per group of G rollouts (not once per rollout)
+#   - At G=8: ~33k tokens/call vs 49k for 8× absolute calls
+#   - AUC-ROC 0.864 on Claude trajectory eval (vs 0.793 for best absolute)
+#   - Context limit: G≈49 before hitting 200k; G=8 uses ~16.5% of budget
+#
+# Delta from tasks/openenv-fleet-grpo-vl-taste.yaml:
+#   - SKYRL_TASTE_MODE=relative          (NEW — activates group judge)
+#   - SKYRL_TASTE_GROUP_PROVIDER=relative_haiku (NEW — selects vision variant)
+#   - SKYRL_TASTE_GROUP_TIMEOUT_S=90     (raised from 60; one group call can
+#                                         take longer than 8 parallel per-rollout calls)
+#   - name / run_id reflect new config
+#
+# Required env vars (pass each via `sky launch --env KEY=VALUE`):
+#   FLEET_API_KEY          - Fleet API access
+#   WANDB_API_KEY          - WandB logging
+#   AWS_ACCESS_KEY_ID      - S3 buckets
+#   AWS_SECRET_ACCESS_KEY  - S3 credentials
+#   ANTHROPIC_API_KEY      - Haiku group judge (direct Anthropic path)
+#
+# Usage:
+#   sky launch tasks/openenv-fleet-grpo-vl-relative-haiku.yaml \
+#     --env FLEET_API_KEY=... \
+#     --env WANDB_API_KEY=... \
+#     --env AWS_ACCESS_KEY_ID=... \
+#     --env AWS_SECRET_ACCESS_KEY=... \
+#     --env ANTHROPIC_API_KEY=...
+
+name: fleet-vl-grpo-qwen3-5-9b-relative-haiku
+
+resources:
+  disk_size: 750
+  ports: 6479
+  ordered:
+    - accelerators: H200:8
+      cloud: runpod
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
+      cloud: lambda
+    - accelerators: H200:8
+      cloud: nebius
+    - accelerators: H200-SXM:8
+      cloud: vast
+
+num_nodes: 2
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-v2.git
+  ref: feat/taste-judge
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  # OpenAI / OpenRouter not needed for relative_haiku (direct Anthropic path).
+  OPENAI_API_KEY: ""
+  OPENROUTER_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v6"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "browser_use"
+  MAX_TURNS: 80
+  MAX_INPUT_LENGTH: 80000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 10
+  RUN_ID: ""
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  SKYRL_TASTE_DISABLED: "0"
+  TASTE_FLOOR: "0.1"
+  # --- Relative judge mode ---
+  # Activates group/pairwise scoring: env defers reward until all G rollouts
+  # finish, then the generator calls the group judge once per task.
+  SKYRL_TASTE_MODE: "relative"
+  SKYRL_TASTE_GROUP_PROVIDER: "relative_haiku"
+  # Per-rollout provider is bypassed in relative mode; kept for diagnostics.
+  SKYRL_TASTE_PROVIDER: "anthropic"
+  SKYRL_TASTE_MODEL: "claude-haiku-4-5-20251001"
+  # Suppress verifier outcome from the judge prompt to prevent outcome bleed.
+  SKYRL_TASTE_BLIND_OUTCOME: "1"
+  # 90s: one group call (~33k tokens at G=8) can take longer than 8 parallel
+  # per-rollout calls; give it breathing room without stalling the batch.
+  SKYRL_TASTE_GROUP_TIMEOUT_S: "90"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+  pip install --no-deps anthropic openai
+
+run: |
+  bash scripts/fleet-vl-run.sh \
+    environment.skyrl_gym.fleet_task.taste_floor=${TASTE_FLOOR} \
+    environment.skyrl_gym.fleet_task.taste_judge_timeout_s=10.0 \
+    trainer.algorithm.grpo_norm_by_std=false

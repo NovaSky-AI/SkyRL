@@ -139,6 +139,103 @@ class TurnOutput:
         return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
+async def _apply_group_taste_rewards(
+    all_outputs: list,
+    trajectory_ids: list,
+) -> None:
+    """Group rollouts by instance_id, call the relative judge once per task, patch rewards.
+
+    Each output whose env_metrics contains "taste_deferred_data" has its reward rescaled
+    from verifier_reward → verifier_reward * effective_taste.  Outputs without deferred
+    data (failed/zero-reward trajectories) are left untouched.
+
+    Modifies all_outputs[i].reward and all_outputs[i].env_metrics in-place.
+    """
+    import os
+    try:
+        from skyrl_gym.taste import score_group_async
+    except Exception as e:
+        logger.warning("group taste judge unavailable: %s; using verifier-only rewards", e)
+        return
+
+    # Group indices by instance_id.
+    groups: Dict[str, List[int]] = defaultdict(list)
+    for i, tid in enumerate(trajectory_ids):
+        groups[tid.instance_id].append(i)
+
+    timeout_s = float(os.environ.get("SKYRL_TASTE_GROUP_TIMEOUT_S", "60.0"))
+
+    for instance_id, indices in groups.items():
+        # Collect rollout dicts for indices that have deferred taste data.
+        deferred_indices = [
+            i for i in indices
+            if isinstance(all_outputs[i].env_metrics, dict)
+            and "taste_deferred_data" in all_outputs[i].env_metrics
+        ]
+        if not deferred_indices:
+            continue
+
+        first_deferred = all_outputs[deferred_indices[0]].env_metrics["taste_deferred_data"]
+        task_text = first_deferred.get("task", "")
+        rollouts = [
+            all_outputs[i].env_metrics["taste_deferred_data"]
+            for i in deferred_indices
+        ]
+
+        try:
+            taste_scores: list = await asyncio.wait_for(
+                score_group_async(task_text, rollouts),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "group taste judge timed out after %.1fs for instance_id=%s; "
+                "falling back to verifier-only rewards",
+                timeout_s,
+                instance_id,
+            )
+            taste_scores = [None] * len(deferred_indices)
+        except Exception as e:
+            logger.warning(
+                "group taste judge raised %s: %s for instance_id=%s; "
+                "falling back to verifier-only rewards",
+                type(e).__name__, e, instance_id,
+            )
+            taste_scores = [None] * len(deferred_indices)
+
+        for rank, i in enumerate(deferred_indices):
+            output = all_outputs[i]
+            em = output.env_metrics
+            taste_score = taste_scores[rank] if rank < len(taste_scores) else None
+            verifier_r = em.get("verifier_reward", None)
+            taste_floor = em.get("taste_floor", 0.1)
+
+            judge_failed = taste_score is None
+            em["taste_judge_failed"] = judge_failed
+
+            if taste_score is not None and verifier_r is not None and verifier_r > 0.0:
+                effective_taste = max(taste_floor, taste_score)
+                new_terminal = verifier_r * effective_taste
+                # Patch the single terminal-step reward token in the reward list.
+                if isinstance(output.reward, list):
+                    reward_list = list(output.reward)
+                    for j in range(len(reward_list) - 1, -1, -1):
+                        if reward_list[j] != 0.0:
+                            reward_list[j] = new_terminal
+                            break
+                    output.reward = reward_list
+                else:
+                    output.reward = new_terminal
+                em["taste_reward"] = taste_score
+                em["effective_taste"] = effective_taste
+            else:
+                em["taste_reward"] = taste_score
+                em["effective_taste"] = None
+
+            # Drop the raw trajectory data; it's consumed and shouldn't be serialised further.
+            em.pop("taste_deferred_data", None)
+
+
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
@@ -1143,6 +1240,24 @@ class SkyRLGymGenerator(GeneratorInterface):
                 all_outputs[idx] = self._make_zero_reward_output(prompts[idx], zero_reward, is_step_wise)
             else:
                 all_outputs[idx] = t.result()
+
+        # --- Group (relative) taste judge ---
+        # When SKYRL_TASTE_MODE=relative (or taste_use_group_judge=True in env config),
+        # the env deferred scoring: each env_metrics has "taste_deferred_data" with the
+        # {task, actions, outcome} needed by score_group_async.  We group by instance_id
+        # (same prompt), call the group judge once per task, then patch rewards in-place
+        # before hint augmentation reads them to determine which tasks need rescue.
+        if (
+            trajectory_ids is not None
+            and not is_step_wise
+            and any(
+                isinstance(o, TrajectoryOutput)
+                and isinstance(o.env_metrics, dict)
+                and "taste_deferred_data" in o.env_metrics
+                for o in all_outputs
+            )
+        ):
+            await _apply_group_taste_rewards(all_outputs, trajectory_ids)
 
         # --- Hint augmentation: rescue GRPO signal on dead prompts ---
         # Only during training; eval should not run hints.
