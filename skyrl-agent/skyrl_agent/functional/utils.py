@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from functools import wraps
+from loguru import logger
 
 # Type aliases for Transition
 Observation = Dict[str, Any]
@@ -122,7 +123,7 @@ class TrainingDatum:
 
     input_tokens: List[int]
     response_tokens: List[int]
-    response_logprobs: List[float]
+    response_logprobs: Optional[List[float]]  # None when logprobs unavailable (e.g. external actions)
     response_mask: List[float]  # 0 for observation tokens, 1 for action tokens
 
 
@@ -157,24 +158,48 @@ def transitions_to_training_data(
         List of TrainingDatum objects
     """
 
-    # Accumulator state for building sequences
-    full_sequence: List[int] = []
-    sampled_logprobs: List[float] = []
-    mask: List[float] = []
+    if not transitions:
+        return []
 
     data: List[TrainingDatum] = []
 
-    def make_datum():
+    full_sequence: List[int] = []
+    sampled_logprobs: List[float] = []
+    mask: List[float] = []
+    has_valid_logprobs: bool = True
+
+    def finalize_datum() -> Optional[TrainingDatum]:
         """Create a TrainingDatum from current accumulated state."""
         if not full_sequence:
             return None
 
         first_nonzero = mask.index(1) if 1 in mask else len(mask)
-        # till the first non-zero mask
+        if first_nonzero == len(mask):
+            logger.warning("Datum has no action tokens (all mask is 0), skipping")
+            return None
+
         input_tokens = full_sequence[:first_nonzero]
         response_tokens = full_sequence[first_nonzero:]
-        response_logprobs = sampled_logprobs[first_nonzero:]
         response_mask = mask[first_nonzero:]
+
+        if has_valid_logprobs:
+            response_logprobs = sampled_logprobs[first_nonzero:]
+
+            if len(response_logprobs) != len(response_tokens):
+                logger.error(
+                    f"response_logprobs length ({len(response_logprobs)}) "
+                    f"!= response_tokens length ({len(response_tokens)})"
+                )
+                return None
+        else:
+            response_logprobs = None
+
+        if len(response_mask) != len(response_tokens):
+            logger.error(
+                f"Length mismatch: response_mask ({len(response_mask)}) "
+                f"!= response_tokens ({len(response_tokens)})"
+            )
+            return None
 
         return TrainingDatum(
             input_tokens=input_tokens,
@@ -183,52 +208,73 @@ def transitions_to_training_data(
             response_mask=response_mask,
         )
 
-    def clear_accumulator():
-        """Clear the accumulator state."""
-        nonlocal full_sequence, sampled_logprobs, mask
+    def reset_accumulator():
+        """Clear accumulator for next datum."""
+        nonlocal full_sequence, sampled_logprobs, mask, has_valid_logprobs
         full_sequence = []
         sampled_logprobs = []
         mask = []
+        has_valid_logprobs = True
 
     # Process each transition
-    for transition in transitions:
-        # Get observation tokens
+    for idx, transition in enumerate(transitions):
+        # Validation
+        if transition.ob is None:
+            logger.warning(f"Transition {idx} has None observation, skipping")
+            continue
+        if transition.ac is None:
+            logger.warning(f"Transition {idx} has None action, skipping")
+            continue
+
         ob_tokens = transition.ob.input_ids
+        if not ob_tokens:
+            logger.warning(f"Transition {idx} has empty observation tokens, skipping")
+            continue
 
-        # Get action tokens and logprobs
         ac_tokens = transition.ac.token_ids
-        ac_logprobs = transition.ac.logprobs or [0.0] * len(ac_tokens)
+        if not ac_tokens:
+            logger.warning(f"Transition {idx} has empty action tokens, skipping")
+            continue
 
-        # Determine delta observation (new tokens not in accumulated sequence)
+        ac_logprobs = transition.ac.logprobs
+        transition_has_valid_logprobs = (
+            ac_logprobs is not None and len(ac_logprobs) == len(ac_tokens)
+        )
+
+        if not transition_has_valid_logprobs:
+            if ac_logprobs is None:
+                logger.debug(f"Transition {idx} has no logprobs")
+            else:
+                logger.warning(
+                    f"Transition {idx} has mismatched logprobs "
+                    f"({len(ac_logprobs)} logprobs vs {len(ac_tokens)} tokens)"
+                )
+
         if len(full_sequence) == 0:
-            # First transition, use all observation tokens
+            # First transition always starts a new datum
             delta_ob_tokens = ob_tokens
         elif _is_prefix(full_sequence, ob_tokens):
-            # Current observation extends previous sequence
-            # Only add the delta (new tokens)
-            delta_ob_tokens = ob_tokens[len(full_sequence) :]
+            delta_ob_tokens = ob_tokens[len(full_sequence):]
         else:
-            # Current observation doesn't extend previous sequence
-            # Save current accumulated datum and start fresh
-            datum = make_datum()
+            datum = finalize_datum()
             if datum:
                 data.append(datum)
-            clear_accumulator()
+            reset_accumulator()
             delta_ob_tokens = ob_tokens
 
-        # Add delta observation tokens to sequence
+        has_valid_logprobs = has_valid_logprobs and transition_has_valid_logprobs
+
+        # Accumulate tokens (pad logprobs with 0.0 when invalid — safe since has_valid_logprobs gates usage)
         full_sequence.extend(delta_ob_tokens)
         sampled_logprobs.extend([0.0] * len(delta_ob_tokens))
         mask.extend([0.0] * len(delta_ob_tokens))
 
-        # Add action tokens to sequence
         full_sequence.extend(ac_tokens)
-        sampled_logprobs.extend(ac_logprobs)
+        sampled_logprobs.extend(ac_logprobs if transition_has_valid_logprobs else [0.0] * len(ac_tokens))
         mask.extend([1.0] * len(ac_tokens))
 
-    # Create final datum from remaining accumulated state
     if full_sequence:
-        datum = make_datum()
+        datum = finalize_datum()
         if datum:
             data.append(datum)
 
