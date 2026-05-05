@@ -15,7 +15,7 @@
 #   bash scripts/fleet-taste-relative-haiku-launch.sh
 set -eo pipefail
 
-YAML="tasks/openenv-fleet-grpo-vl-taste.yaml"
+YAML="tasks/openenv-fleet-grpo-vl-relative-haiku.yaml"
 
 : "${FLEET_API_KEY:?set FLEET_API_KEY}"
 : "${WANDB_API_KEY:?set WANDB_API_KEY}"
@@ -34,10 +34,6 @@ sky launch -c "$CLUSTER" --retry-until-up -y "$YAML" \
   --env AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
   --env AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  --env SKYRL_TASTE_GROUP_PROVIDER=relative_haiku \
-  --env SKYRL_TASTE_MODEL=claude-haiku-4-5-20251001 \
-  --env SKYRL_TASTE_BLIND_OUTCOME=1 \
-  --env TASTE_FLOOR=0.1 \
   --env HF_TOKEN="$HF_TOKEN" &
 
 SKY_PID=$!
