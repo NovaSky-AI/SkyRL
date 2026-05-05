@@ -48,7 +48,7 @@ _USER_PROMPT = (
 )
 _USER_PROMPT_WITH_ROOT = (
     "Think step-by-step on what to do using the REPL environment (which contains the context) "
-    "to answer the original prompt: \"{root_prompt}\".\n\n"
+    'to answer the original prompt: "{root_prompt}".\n\n'
     "Continue using the REPL environment, which has the `context` variable, "
     "by writing to a ```repl``` tag, and determine your answer. Your next action:"
 )
@@ -84,8 +84,7 @@ _FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 
 
 def _find_code_block(text: str) -> Optional[str]:
-    """Return the LAST ```repl ... ``` code block in the response, or None.
-    """
+    """Return the LAST ```repl ... ``` code block in the response, or None."""
     matches = _REPL_BLOCK_RE.findall(text)
     return matches[-1].strip() if matches else None
 
@@ -167,13 +166,16 @@ def _format_tools_for_prompt(custom_tools: Optional[Dict[str, Any]]) -> Optional
         if callable(value):
             lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom function")
         else:
-            lines.append(f"- `{name}`: {description}" if description else f"- `{name}`: A custom {type(value).__name__} value")
+            lines.append(
+                f"- `{name}`: {description}" if description else f"- `{name}`: A custom {type(value).__name__} value"
+            )
     return "\n".join(lines) if lines else None
 
 
 # ---------------------------------------------------------------------------
 # Base environment
 # ---------------------------------------------------------------------------
+
 
 class BaseRLMEnv(BaseTextEnv):
     """Base class for Recursive Language Model (RLM) environments.
@@ -327,7 +329,9 @@ class BaseRLMEnv(BaseTextEnv):
             tools_formatted = _format_tools_for_prompt(self._tools)
             if tools_formatted:
                 section_num = 5 if self.lm_callback is not None else 4
-                custom_tools_section += f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"
+                custom_tools_section += (
+                    f"\n{section_num}. Custom tools and data available in the REPL:\n{tools_formatted}"
+                )
 
         return template.replace("{custom_tools_section}", custom_tools_section)
 

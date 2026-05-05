@@ -273,7 +273,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         result[key] = _flatten_field(generator_outputs, key)
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks"))
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+    )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
     # computes basic stats (response length, reward); generators may add custom keys, which we

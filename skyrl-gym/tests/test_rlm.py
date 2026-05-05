@@ -4,7 +4,6 @@ Tests for RLM lm_query / llm_query_batched / rlm_query / rlm_query_batched.
 All tests use mock callbacks — no real LLM or inference engine required.
 """
 
-import pytest
 import skyrl_gym
 from skyrl_gym.envs.registration import register, registry
 from skyrl_gym.envs.rlm.env import BaseRLMEnv
@@ -16,6 +15,7 @@ from skyrl_gym.envs.rlm.repl import PersistentREPL
 # need the inherited REPL / lm_callback / step-loop plumbing, so subclass with
 # trivial defaults and register under a test-only id.
 # ---------------------------------------------------------------------------
+
 
 class _TestRLMEnv(BaseRLMEnv):
     pass
@@ -30,6 +30,7 @@ if _TEST_ENV_ID not in registry:
 # Shared mock callbacks
 # ---------------------------------------------------------------------------
 
+
 def _mock_lm_callback(prompts):
     """Echo each prompt back with a prefix so tests can verify routing."""
     return [f"response:{p}" for p in prompts]
@@ -43,6 +44,7 @@ def _mock_subcall_fn(prompt, context=None):
 # ---------------------------------------------------------------------------
 # 1. PersistentREPL — llm_query / llm_query_batched
 # ---------------------------------------------------------------------------
+
 
 class TestLLMQuery:
     def test_llm_query_registered_when_callback_provided(self):
@@ -73,11 +75,7 @@ class TestLLMQuery:
 
     def test_llm_query_batched_preserves_order(self):
         repl = PersistentREPL(lm_callback=_mock_lm_callback)
-        result = repl.execute(
-            "results = llm_query_batched(['x', 'y'])\n"
-            "print(results[0])\n"
-            "print(results[1])"
-        )
+        result = repl.execute("results = llm_query_batched(['x', 'y'])\n" "print(results[0])\n" "print(results[1])")
         lines = result.stdout.strip().splitlines()
         assert lines[0] == "response:x"
         assert lines[1] == "response:y"
@@ -110,6 +108,7 @@ class TestLLMQuery:
 # 2. PersistentREPL — rlm_query / rlm_query_batched
 # ---------------------------------------------------------------------------
 
+
 class TestRLMQuery:
     def test_rlm_query_uses_subcall_fn_when_provided(self):
         repl = PersistentREPL(lm_callback=_mock_lm_callback, subcall_fn=_mock_subcall_fn)
@@ -123,21 +122,13 @@ class TestRLMQuery:
 
     def test_rlm_query_batched_uses_subcall_fn(self):
         repl = PersistentREPL(lm_callback=_mock_lm_callback, subcall_fn=_mock_subcall_fn)
-        result = repl.execute(
-            "results = rlm_query_batched(['p1', 'p2'])\n"
-            "print(results[0])\n"
-            "print(results[1])"
-        )
+        result = repl.execute("results = rlm_query_batched(['p1', 'p2'])\n" "print(results[0])\n" "print(results[1])")
         assert "child_result:p1" in result.stdout
         assert "child_result:p2" in result.stdout
 
     def test_rlm_query_batched_falls_back_to_llm_query_batched(self):
         repl = PersistentREPL(lm_callback=_mock_lm_callback)
-        result = repl.execute(
-            "results = rlm_query_batched(['p1', 'p2'])\n"
-            "print(results[0])\n"
-            "print(results[1])"
-        )
+        result = repl.execute("results = rlm_query_batched(['p1', 'p2'])\n" "print(results[0])\n" "print(results[1])")
         assert "response:p1" in result.stdout
         assert "response:p2" in result.stdout
 
@@ -156,9 +147,7 @@ class TestRLMQuery:
 
         repl = PersistentREPL(lm_callback=_mock_lm_callback, subcall_fn=ordered_subcall)
         result = repl.execute(
-            "results = rlm_query_batched(['first', 'second', 'third'])\n"
-            "for r in results:\n"
-            "    print(r)"
+            "results = rlm_query_batched(['first', 'second', 'third'])\n" "for r in results:\n" "    print(r)"
         )
         lines = result.stdout.strip().splitlines()
         assert lines == ["result:first", "result:second", "result:third"]
@@ -181,9 +170,7 @@ class TestRLMQuery:
 
         repl = PersistentREPL(lm_callback=_mock_lm_callback, subcall_fn=flaky_subcall)
         result = repl.execute(
-            "results = rlm_query_batched(['good', 'bad', 'also_good'])\n"
-            "print(results[0])\n"
-            "print(results[2])"
+            "results = rlm_query_batched(['good', 'bad', 'also_good'])\n" "print(results[0])\n" "print(results[2])"
         )
         assert "ok:good" in result.stdout
         assert "ok:also_good" in result.stdout
@@ -200,6 +187,7 @@ class TestRLMQuery:
 # ---------------------------------------------------------------------------
 # 3. RLMEnv integration
 # ---------------------------------------------------------------------------
+
 
 class TestRLMEnvWithLMCallback:
     def _make_env(self, lm_callback=None, subcall_fn=None):
@@ -256,12 +244,7 @@ class TestRLMEnvWithLMCallback:
         prompt = [{"role": "user", "content": "Multi question"}]
         env.init(prompt)
 
-        action = (
-            "```repl\n"
-            "results = llm_query_batched(['q1', 'q2'])\n"
-            "print(results)\n"
-            "```"
-        )
+        action = "```repl\n" "results = llm_query_batched(['q1', 'q2'])\n" "print(results)\n" "```"
         step_out = env.step(action)
         obs_text = " ".join(o["content"] for o in step_out["observations"])
         assert "response:q1" in obs_text
@@ -272,12 +255,7 @@ class TestRLMEnvWithLMCallback:
         prompt = [{"role": "user", "content": "Deep question"}]
         env.init(prompt)
 
-        action = (
-            "```repl\n"
-            "r = rlm_query('solve this subtask')\n"
-            "print(r)\n"
-            "```"
-        )
+        action = "```repl\n" "r = rlm_query('solve this subtask')\n" "print(r)\n" "```"
         step_out = env.step(action)
         obs_text = " ".join(o["content"] for o in step_out["observations"])
         assert "child_result:solve this subtask" in obs_text
@@ -287,12 +265,7 @@ class TestRLMEnvWithLMCallback:
         prompt = [{"role": "user", "content": "question"}]
         env.init(prompt)
 
-        action = (
-            "```repl\n"
-            "r = rlm_query('fallback')\n"
-            "print(r)\n"
-            "```"
-        )
+        action = "```repl\n" "r = rlm_query('fallback')\n" "print(r)\n" "```"
         step_out = env.step(action)
         obs_text = " ".join(o["content"] for o in step_out["observations"])
         assert "response:fallback" in obs_text
@@ -303,11 +276,7 @@ class TestRLMEnvWithLMCallback:
         prompt = [{"role": "user", "content": "question"}]
         env.init(prompt)
 
-        action = (
-            "```repl\n"
-            "r = llm_query('test')\n"
-            "```"
-        )
+        action = "```repl\n" "r = llm_query('test')\n" "```"
         step_out = env.step(action)
         obs_text = " ".join(o["content"] for o in step_out["observations"])
         assert "NameError" in obs_text or "name 'llm_query' is not defined" in obs_text
