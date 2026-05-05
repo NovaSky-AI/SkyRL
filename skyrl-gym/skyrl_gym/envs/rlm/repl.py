@@ -17,48 +17,114 @@ from typing import Any, Callable, Dict, List, Optional
 # ---------------------------------------------------------------------------
 
 _SAFE_BUILTINS = {
-    "print": print, "len": len, "str": str, "int": int, "float": float,
-    "list": list, "dict": dict, "set": set, "tuple": tuple, "bool": bool,
-    "type": type, "isinstance": isinstance, "issubclass": issubclass,
-    "enumerate": enumerate, "zip": zip, "map": map, "filter": filter,
-    "sorted": sorted, "reversed": reversed, "range": range,
-    "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
-    "any": any, "all": all, "pow": pow, "divmod": divmod,
-    "chr": chr, "ord": ord, "hex": hex, "bin": bin, "oct": oct,
-    "repr": repr, "ascii": ascii, "format": format, "hash": hash, "id": id,
-    "iter": iter, "next": next, "slice": slice, "callable": callable,
-    "hasattr": hasattr, "getattr": getattr, "setattr": setattr,
-    "delattr": delattr, "dir": dir, "vars": vars,
-    "bytes": bytes, "bytearray": bytearray, "memoryview": memoryview,
-    "complex": complex, "object": object, "super": super,
-    "property": property, "staticmethod": staticmethod, "classmethod": classmethod,
-    "__import__": __import__, "open": open,
+    "print": print,
+    "len": len,
+    "str": str,
+    "int": int,
+    "float": float,
+    "list": list,
+    "dict": dict,
+    "set": set,
+    "tuple": tuple,
+    "bool": bool,
+    "type": type,
+    "isinstance": isinstance,
+    "issubclass": issubclass,
+    "enumerate": enumerate,
+    "zip": zip,
+    "map": map,
+    "filter": filter,
+    "sorted": sorted,
+    "reversed": reversed,
+    "range": range,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "abs": abs,
+    "round": round,
+    "any": any,
+    "all": all,
+    "pow": pow,
+    "divmod": divmod,
+    "chr": chr,
+    "ord": ord,
+    "hex": hex,
+    "bin": bin,
+    "oct": oct,
+    "repr": repr,
+    "ascii": ascii,
+    "format": format,
+    "hash": hash,
+    "id": id,
+    "iter": iter,
+    "next": next,
+    "slice": slice,
+    "callable": callable,
+    "hasattr": hasattr,
+    "getattr": getattr,
+    "setattr": setattr,
+    "delattr": delattr,
+    "dir": dir,
+    "vars": vars,
+    "bytes": bytes,
+    "bytearray": bytearray,
+    "memoryview": memoryview,
+    "complex": complex,
+    "object": object,
+    "super": super,
+    "property": property,
+    "staticmethod": staticmethod,
+    "classmethod": classmethod,
+    "__import__": __import__,
+    "open": open,
     # Exceptions
-    "Exception": Exception, "BaseException": BaseException,
-    "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
-    "IndexError": IndexError, "AttributeError": AttributeError,
-    "FileNotFoundError": FileNotFoundError, "OSError": OSError, "IOError": IOError,
-    "RuntimeError": RuntimeError, "NameError": NameError, "ImportError": ImportError,
-    "StopIteration": StopIteration, "AssertionError": AssertionError,
-    "NotImplementedError": NotImplementedError, "ArithmeticError": ArithmeticError,
-    "LookupError": LookupError, "Warning": Warning,
+    "Exception": Exception,
+    "BaseException": BaseException,
+    "ValueError": ValueError,
+    "TypeError": TypeError,
+    "KeyError": KeyError,
+    "IndexError": IndexError,
+    "AttributeError": AttributeError,
+    "FileNotFoundError": FileNotFoundError,
+    "OSError": OSError,
+    "IOError": IOError,
+    "RuntimeError": RuntimeError,
+    "NameError": NameError,
+    "ImportError": ImportError,
+    "StopIteration": StopIteration,
+    "AssertionError": AssertionError,
+    "NotImplementedError": NotImplementedError,
+    "ArithmeticError": ArithmeticError,
+    "LookupError": LookupError,
+    "Warning": Warning,
     # Blocked (None = raises NameError on access)
-    "input": None, "eval": None, "exec": None, "compile": None,
-    "globals": None, "locals": None,
+    "input": None,
+    "eval": None,
+    "exec": None,
+    "compile": None,
+    "globals": None,
+    "locals": None,
 }
 
 # Names that are always restored after every execution so model overwrites don't persist.
-RESERVED_TOOL_NAMES: frozenset = frozenset({
-    "FINAL_VAR", "SHOW_VARS", "context",
-    "llm_query", "llm_query_batched", "rlm_query", "rlm_query_batched",
-})
+RESERVED_TOOL_NAMES: frozenset = frozenset(
+    {
+        "FINAL_VAR",
+        "SHOW_VARS",
+        "context",
+        "llm_query",
+        "llm_query_batched",
+        "rlm_query",
+        "rlm_query_batched",
+    }
+)
 
 
 @dataclass
 class REPLResult:
     stdout: str
     stderr: str
-    locals: Dict[str, Any]       # snapshot of self.locals after execution
+    locals: Dict[str, Any]  # snapshot of self.locals after execution
     final_answer: Optional[str]  # set if FINAL_VAR() was called during execution
 
 
@@ -191,11 +257,7 @@ class PersistentREPL:
     def _show_vars(self) -> str:
         """Show all user-created variables in the REPL."""
         lookup = self._exec_combined if self._exec_combined is not None else self.locals
-        available = {
-            k: type(v).__name__
-            for k, v in lookup.items()
-            if not k.startswith("_") and k not in self.globals
-        }
+        available = {k: type(v).__name__ for k, v in lookup.items() if not k.startswith("_") and k not in self.globals}
         if not available:
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
@@ -227,6 +289,7 @@ class PersistentREPL:
         parent can work with it as a native object.
         """
         import ast
+
         try:
             return ast.literal_eval(result)
         except (ValueError, SyntaxError):
@@ -249,7 +312,9 @@ class PersistentREPL:
                 return f"Error: RLM query failed - {e}"
         return self._llm_query(prompt, model)
 
-    def _rlm_query_batched(self, prompts: List[str], model: Optional[str] = None, context_list: Optional[List[Any]] = None) -> List[Any]:
+    def _rlm_query_batched(
+        self, prompts: List[str], model: Optional[str] = None, context_list: Optional[List[Any]] = None
+    ) -> List[Any]:
         """Spawn child RLM agents for multiple prompts in parallel.
 
         Results are returned in the same order as input prompts.
@@ -340,9 +405,7 @@ class PersistentREPL:
             final_answer=final_answer,
         )
 
-    def _execute_with_sigalrm(
-        self, code: str, stdout_buf: io.StringIO, stderr_buf: io.StringIO
-    ) -> Optional[str]:
+    def _execute_with_sigalrm(self, code: str, stdout_buf: io.StringIO, stderr_buf: io.StringIO) -> Optional[str]:
         def _raise_timeout(*_):
             raise TimeoutError("Code execution timed out")
 

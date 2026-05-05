@@ -55,10 +55,15 @@ def convert(row: dict, max_turns: int) -> dict:
     evidence = json.loads(row["evidence"])
     ctx = build_context(papers)
     return {
-        "prompt": [{"role": "user", "content": (
-            f"Extract verbatim text passages from the context that serve as evidence for the query: {row['question']}\n"
-            f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
-        )}],
+        "prompt": [
+            {
+                "role": "user",
+                "content": (
+                    f"Extract verbatim text passages from the context that serve as evidence for the query: {row['question']}\n"
+                    f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
+                ),
+            }
+        ],
         "env_class": "multipaper_evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
@@ -76,13 +81,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/rlm-synthetic-multi")
     parser.add_argument("--hf_dataset", default=_HF_DATASET)
-    parser.add_argument("--n_val",   type=int, default=10,  help="Validation set size (default: 10)")
-    parser.add_argument("--n_test",  type=int, default=128, help="Test set size (default: 128)")
+    parser.add_argument("--n_val", type=int, default=10, help="Validation set size (default: 10)")
+    parser.add_argument("--n_test", type=int, default=128, help="Test set size (default: 128)")
     parser.add_argument("--no_test", action="store_true", help="Skip allocating examples for the test split")
     parser.add_argument("--n_train", type=int, default=None, help="Cap training examples (default: all remaining)")
     parser.add_argument("--max_turns", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--min_ctx_chars", type=int, default=0, help="Skip examples with total context shorter than this")
+    parser.add_argument(
+        "--min_ctx_chars", type=int, default=0, help="Skip examples with total context shorter than this"
+    )
     args = parser.parse_args()
     args.output_dir = os.path.expanduser(args.output_dir)
 
@@ -92,8 +99,10 @@ def main():
 
     if args.min_ctx_chars > 0:
         before = len(rows)
+
         def total_ctx_len(r):
             return sum(len(p.get("text", "")) for p in json.loads(r["papers"]))
+
         rows = [r for r in rows if total_ctx_len(r) >= args.min_ctx_chars]
         print(f"Filtered: {before} -> {len(rows)} rows (min_ctx_chars={args.min_ctx_chars})")
 
@@ -106,17 +115,17 @@ def main():
 
     n_val = args.n_val
     n_test = 0 if args.no_test else args.n_test
-    val_raw   = rows[:n_val]
-    test_raw  = rows[n_val:n_val + n_test]
-    train_raw = rows[n_val + n_test:]
+    val_raw = rows[:n_val]
+    test_raw = rows[n_val : n_val + n_test]
+    train_raw = rows[n_val + n_test :]
 
     if args.n_train is not None:
-        train_raw = train_raw[:args.n_train]
+        train_raw = train_raw[: args.n_train]
 
     print(f"Split: train={len(train_raw)}, val={len(val_raw)}, test={len(test_raw)}")
 
     splits = {
-        "train":      datasets.Dataset.from_list([convert(r, args.max_turns) for r in train_raw]),
+        "train": datasets.Dataset.from_list([convert(r, args.max_turns) for r in train_raw]),
         "validation": datasets.Dataset.from_list([convert(r, args.max_turns) for r in val_raw]),
     }
     if not args.no_test:
@@ -131,7 +140,9 @@ def main():
             ev = ex["reward_spec"]["evidence"]
             total_chars = sum(len(v) for v in ctx.values())
             print(f"  [{i}] {ex['prompt'][0]['content'][:100]}")
-            print(f"       evidence: {len(ev)} paper entries, first paper: {ev[0].get('paperId', '?') if ev else 'none'}")
+            print(
+                f"       evidence: {len(ev)} paper entries, first paper: {ev[0].get('paperId', '?') if ev else 'none'}"
+            )
             print(f"       context: {len(ctx)} papers, {total_chars:,} total chars")
 
     os.makedirs(args.output_dir, exist_ok=True)

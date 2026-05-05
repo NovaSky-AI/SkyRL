@@ -40,21 +40,22 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
     api_key: str = field(default="", repr=False)
     """OpenRouter API key. Falls back to OPENROUTER_API_KEY env var."""
 
-    usage: Dict[str, int] = field(default_factory=lambda: {
-        "prompt_tokens": 0,
-        "cached_tokens": 0,
-        "completion_tokens": 0,
-        "requests": 0,
-    }, repr=False)
+    usage: Dict[str, int] = field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "cached_tokens": 0,
+            "completion_tokens": 0,
+            "requests": 0,
+        },
+        repr=False,
+    )
     """Per-call usage counters for observability."""
 
     def __post_init__(self):
         if not self.api_key:
             self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if not self.api_key:
-            raise ValueError(
-                "OPENROUTER_API_KEY environment variable must be set when using OpenRouterInferenceClient"
-            )
+            raise ValueError("OPENROUTER_API_KEY environment variable must be set when using OpenRouterInferenceClient")
 
     @classmethod
     def from_model(

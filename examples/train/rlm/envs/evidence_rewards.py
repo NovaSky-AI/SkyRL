@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 # Interval metrics
 # ---------------------------------------------------------------------------
 
+
 def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     result = []
     for start, end in sorted(intervals):
@@ -76,9 +77,11 @@ def compute_metrics_multipaper(
 # Reward function factories
 # ---------------------------------------------------------------------------
 
+
 def _parse_answer_substrings(final_answer: str) -> List[str]:
     """Parse a final answer (usually a Python list literal) into text substrings."""
     import ast
+
     try:
         substrings = ast.literal_eval(final_answer)
         if isinstance(substrings, str):
@@ -95,6 +98,7 @@ def _parse_answer_substrings(final_answer: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Per-trajectory child RLM metrics (logged under environment/ on wandb)
 # ---------------------------------------------------------------------------
+
 
 def compute_child_rlm_metrics(
     child_call_records: List[Dict[str, Any]],
@@ -129,7 +133,7 @@ def compute_child_rlm_metrics(
     # --- 2. Paper selection F1 (set-level over paper IDs) ---
     gt_paper_ids: set = set()
     paper_evidence_map: Dict[str, List[str]] = {}
-    for ev in (evidence or []):
+    for ev in evidence or []:
         pid = ev.get("paperId", "")
         texts = [s.get("text", "").strip() for s in ev.get("selections", []) if s.get("text", "").strip()]
         if texts and pid:
@@ -269,7 +273,8 @@ def judge_reward(
     gt_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(gt_strings)) or "(none)"
     pred_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(predicted)) or "(none)"
 
-    user_msg = textwrap.dedent(f"""\
+    user_msg = textwrap.dedent(
+        f"""\
         You are evaluating predicted evidence extractions against ground truth evidence for a question.
         Treat the ground truth evidence as a perfect 10/10 reference for all dimensions.
 
@@ -308,7 +313,8 @@ def judge_reward(
            1 — no relevant content retrieved
 
         Provide a brief reasoning string (2-4 sentences) explaining the scores.
-    """)
+    """
+    )
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -318,7 +324,7 @@ def judge_reward(
     result = None
     for attempt in range(5):
         if attempt > 0:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
         try:
             with httpx.Client(timeout=60) as client:
                 resp = client.post(

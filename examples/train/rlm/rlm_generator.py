@@ -40,11 +40,11 @@ class _RLMRolloutContext:
     """
 
     rid: str
-    env_class: str                            # the env id this rollout is using (used to recurse children with the same env)
-    trajectory_id: Optional[str]              # shared across the whole tree
-    parent_rid: Optional[str]                 # None for root
-    depth: int                                # 0 for root, +1 per level
-    child_index: Optional[int]                # None for root; assigned at registration
+    env_class: str  # the env id this rollout is using (used to recurse children with the same env)
+    trajectory_id: Optional[str]  # shared across the whole tree
+    parent_rid: Optional[str]  # None for root
+    depth: int  # 0 for root, +1 per level
+    child_index: Optional[int]  # None for root; assigned at registration
     output: Optional["StepWiseOutput"] = None
 
 
@@ -136,7 +136,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
         if getattr(self.generator_cfg, "enable_child_agents", True):
             env_extras["subcall_fn"] = self._make_subcall_fn(loop, env_extras, sampling_params, ctx.rid)
 
-
         return env_extras
 
     # ------------------------------------------------------------------
@@ -159,9 +158,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
         if ctx is None:
             return agent_loop_output
 
-        assert isinstance(agent_loop_output, StepWiseOutput), (
-            f"RLMGymGenerator requires step_wise_trajectories=True, got {type(agent_loop_output).__name__}"
-        )
+        assert isinstance(
+            agent_loop_output, StepWiseOutput
+        ), f"RLMGymGenerator requires step_wise_trajectories=True, got {type(agent_loop_output).__name__}"
 
         for step_index, step in enumerate(agent_loop_output.step_outputs):
             step.env_metrics["rlm_metadata"] = {
@@ -170,9 +169,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 "child_index": ctx.child_index,
                 "step_index": step_index,
             }
-            
-        # Mark this rollout's final step as a trajectory boundary for observability. 
-        # Note that this is different from is_last_step, which is used for training. 
+
+        # Mark this rollout's final step as a trajectory boundary for observability.
+        # Note that this is different from is_last_step, which is used for training.
         if agent_loop_output.step_outputs:
             agent_loop_output.step_outputs[-1].env_metrics["is_trajectory_boundary"] = True
 
@@ -192,9 +191,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
             for d in descendants:
                 if d.output is None:
                     continue
-                assert isinstance(d.output, StepWiseOutput), (
-                    f"Child rollout output must be StepWiseOutput, got {type(d.output).__name__}"
-                )
+                assert isinstance(
+                    d.output, StepWiseOutput
+                ), f"Child rollout output must be StepWiseOutput, got {type(d.output).__name__}"
                 children_flat.extend(d.output.step_outputs)
             if children_flat:
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
@@ -292,10 +291,13 @@ class RLMGymGenerator(SkyRLGymGenerator):
         The child's ``_finalize_episode`` parks its output on its context;
         the root's finalize collects it via the tree.
         """
+
         async def _run_child(prompt: str, context=None) -> str:
             parent_ctx = self.active_rollouts.get(parent_rid)
             if parent_ctx is None:
-                logger.warning(f"_run_child: parent rollout {parent_rid!r} was never registered. Returning from subcall early.")
+                logger.warning(
+                    f"_run_child: parent rollout {parent_rid!r} was never registered. Returning from subcall early."
+                )
                 return ""
 
             child_extras = dict(env_extras)
@@ -318,9 +320,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=sampling_params,
             )
 
-            assert isinstance(result, StepWiseOutput), (
-                f"Child agent_loop must return StepWiseOutput, got {type(result).__name__}"
-            )
+            assert isinstance(
+                result, StepWiseOutput
+            ), f"Child agent_loop must return StepWiseOutput, got {type(result).__name__}"
             child_env_metrics = result.step_outputs[-1].env_metrics if result.step_outputs else {}
             return child_env_metrics.get("final_answer") or ""
 

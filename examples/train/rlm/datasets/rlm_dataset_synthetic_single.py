@@ -34,7 +34,12 @@ def convert(row: dict, max_turns: int) -> dict:
     evidence_raw = json.loads(row["evidence"])
     evidence = [item["text"] for item in evidence_raw]
     return {
-        "prompt": [{"role": "user", "content": f"Find snippets of text that can be used to answer the query: {row['question']}"}],
+        "prompt": [
+            {
+                "role": "user",
+                "content": f"Find snippets of text that can be used to answer the query: {row['question']}",
+            }
+        ],
         "env_class": "evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
@@ -51,8 +56,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/rlm-synthetic")
     parser.add_argument("--hf_dataset", default=_HF_DATASET)
-    parser.add_argument("--n_val",   type=int, default=10,  help="Validation set size (default: 10)")
-    parser.add_argument("--n_test",  type=int, default=128, help="Test set size (default: 128)")
+    parser.add_argument("--n_val", type=int, default=10, help="Validation set size (default: 10)")
+    parser.add_argument("--n_test", type=int, default=128, help="Test set size (default: 128)")
     parser.add_argument("--no_test", action="store_true", help="Skip allocating examples for the test split")
     parser.add_argument("--n_train", type=int, default=None, help="Cap training examples (default: all remaining)")
     parser.add_argument("--max_turns", type=int, default=10)
@@ -79,17 +84,17 @@ def main():
 
     n_val = args.n_val
     n_test = 0 if args.no_test else args.n_test
-    val_raw   = rows[:n_val]
-    test_raw  = rows[n_val:n_val + n_test]
-    train_raw = rows[n_val + n_test:]
+    val_raw = rows[:n_val]
+    test_raw = rows[n_val : n_val + n_test]
+    train_raw = rows[n_val + n_test :]
 
     if args.n_train is not None:
-        train_raw = train_raw[:args.n_train]
+        train_raw = train_raw[: args.n_train]
 
     print(f"Split: train={len(train_raw)}, val={len(val_raw)}, test={len(test_raw)}")
 
     splits = {
-        "train":      datasets.Dataset.from_list([convert(r, args.max_turns) for r in train_raw]),
+        "train": datasets.Dataset.from_list([convert(r, args.max_turns) for r in train_raw]),
         "validation": datasets.Dataset.from_list([convert(r, args.max_turns) for r in val_raw]),
     }
     if not args.no_test:

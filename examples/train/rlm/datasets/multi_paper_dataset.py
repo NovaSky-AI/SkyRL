@@ -42,10 +42,15 @@ def convert_datapoint(datapoint: dict, max_turns: int) -> dict:
     ctx = build_context(datapoint["papers"])
     q_text = datapoint["question"]
     return {
-        "prompt": [{"role": "user", "content": (
-            f"Extract verbatim text passages from the context that serve as evidence for the query: {q_text}\n"
-            f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
-        )}],
+        "prompt": [
+            {
+                "role": "user",
+                "content": (
+                    f"Extract verbatim text passages from the context that serve as evidence for the query: {q_text}\n"
+                    f"Return a Python list of exact substrings copied from the context. No paraphrasing, no commentary."
+                ),
+            }
+        ],
         "env_class": "evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
@@ -62,11 +67,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/multi-paper")
     parser.add_argument("--n_train", type=int, default=None)
-    parser.add_argument("--n_val",   type=int, default=None)
-    parser.add_argument("--n_test",  type=int, default=None)
+    parser.add_argument("--n_val", type=int, default=None)
+    parser.add_argument("--n_test", type=int, default=None)
     parser.add_argument("--max_turns", type=int, default=10)
-    parser.add_argument("--load_only_train", action="store_true",
-                        help="Load only the train split and derive val/test from it")
+    parser.add_argument(
+        "--load_only_train", action="store_true", help="Load only the train split and derive val/test from it"
+    )
     args = parser.parse_args()
     args.output_dir = os.path.expanduser(args.output_dir)
 

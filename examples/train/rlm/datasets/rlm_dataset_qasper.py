@@ -29,7 +29,12 @@ HF_DATASET = "alphaXiv/qasper-transformed"
 def convert(row: dict, max_turns: int) -> dict:
     ctx = "\n\n".join(row["paragraphs"])
     return {
-        "prompt": [{"role": "user", "content": f"Find snippets of text that can be used to answer the query: {row['question']}"}],
+        "prompt": [
+            {
+                "role": "user",
+                "content": f"Find snippets of text that can be used to answer the query: {row['question']}",
+            }
+        ],
         "env_class": "evidence_rlm",
         "reward_spec": {
             "ground_truth": None,
@@ -47,8 +52,8 @@ def main():
     parser.add_argument("--output_dir", default="~/data/rlm")
     parser.add_argument("--dataset", default=HF_DATASET, help="HuggingFace dataset name")
     parser.add_argument("--n_train", type=int, default=None, help="Cap training examples (default: all)")
-    parser.add_argument("--n_eval",  type=int, default=200,   help="Cap eval examples (default: 200)")
-    parser.add_argument("--n_test",  type=int, default=None, help="Cap test examples (default: all)")
+    parser.add_argument("--n_eval", type=int, default=200, help="Cap eval examples (default: 200)")
+    parser.add_argument("--n_test", type=int, default=None, help="Cap test examples (default: all)")
     parser.add_argument("--max_turns", type=int, default=10)
     parser.add_argument("--min_ctx_chars", type=int, default=0, help="Skip examples with context shorter than this")
     args = parser.parse_args()
@@ -58,8 +63,8 @@ def main():
 
     split_map = {
         "train_qasper": ("train", args.n_train),
-        "eval_qasper":  ("eval",  args.n_eval),
-        "test_qasper":  ("test",  args.n_test),
+        "eval_qasper": ("eval", args.n_eval),
+        "test_qasper": ("test", args.n_test),
     }
 
     output_splits = {}

@@ -21,14 +21,14 @@ from pathlib import Path
 
 
 ROLE_COLORS = {
-    "system":    "\033[33m",   # yellow
-    "user":      "\033[36m",   # cyan
-    "assistant": "\033[32m",   # green
+    "system": "\033[33m",  # yellow
+    "user": "\033[36m",  # cyan
+    "assistant": "\033[32m",  # green
 }
 RESET = "\033[0m"
-BOLD  = "\033[1m"
-DIM   = "\033[2m"
-RED   = "\033[31m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
 MAGENTA = "\033[35m"
 
 
@@ -105,7 +105,9 @@ def print_turn(turn_idx: int, total_turns: int, turn: dict, example_idx: int, to
     print(DIM + "ENTER/SPACE=next turn  n=next example  p=prev example  q=quit" + RESET)
 
 
-def print_final(example_idx: int, total_examples: int, example: dict, output_response: str, total_turns: int = 0, turn_idx: int = 0):
+def print_final(
+    example_idx: int, total_examples: int, example: dict, output_response: str, total_turns: int = 0, turn_idx: int = 0
+):
     clear_screen()
     turn_label = f"Turn {turn_idx + 1}/{total_turns}  |  " if total_turns else ""
     print(fmt_header(f"Example {example_idx + 1}/{total_examples}  |  {turn_label}LAST TURN"))

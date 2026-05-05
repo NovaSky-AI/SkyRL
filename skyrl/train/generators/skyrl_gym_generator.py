@@ -557,7 +557,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
 
         agent_loop_output = self._post_process_agent_loop_output(
-            agent_loop_output, env_extras, trajectory_id,
+            agent_loop_output,
+            env_extras,
+            trajectory_id,
         )
         return agent_loop_output
 

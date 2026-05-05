@@ -229,6 +229,7 @@ FINAL_VAR([p1, p2])
 # Environment
 # ---------------------------------------------------------------------------
 
+
 class EvidenceRLMEnv(BaseRLMEnv):
     """RLM environment for single-paper evidence extraction.
 
@@ -282,9 +283,11 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
     The generator stamps ``extras["depth"]`` per rollout; this class reads
     it to pick the right prompt.
     """
+
     def _get_reward(self, final_answer: str) -> float:
         depth = self.extras.get("depth", 0)
-        if depth > 0: return 0.0 # short circuit child rewards to 0
+        if depth > 0:
+            return 0.0  # short circuit child rewards to 0
 
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
         reward, precision, recall = judge_reward(

@@ -84,7 +84,7 @@ def make_tools() -> Dict[str, Any]:
         if ei == -1:
             result = snippet[si:]
         else:
-            result = snippet[si: ei + len(end_phrase)]
+            result = snippet[si : ei + len(end_phrase)]
         print(result)
         return result
 

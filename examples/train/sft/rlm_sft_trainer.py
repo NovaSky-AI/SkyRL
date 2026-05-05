@@ -238,7 +238,7 @@ def main():
 
             if global_step % sample_interval == 0:
                 ex = batch_examples[0]
-                response_ids = ex["input_ids"][-ex["num_actions"]:]
+                response_ids = ex["input_ids"][-ex["num_actions"] :]
                 response_text = tokenizer.decode(response_ids, skip_special_tokens=False)
                 with open(EVAL_MD_PATH, "a") as f:
                     f.write(f"---\n\n### Step {global_step} | loss={train_loss:.4f}\n\n")
