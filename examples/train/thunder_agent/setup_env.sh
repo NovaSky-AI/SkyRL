@@ -9,8 +9,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ACTION="${1:-sync}"
 
-RECIPE_VENV="${RECIPE_VENV:-/data/zy/models/$USER/venvs/skyrl-ta-pr-core-thunder-agent-vllm0201-cu129}"
-UV_CACHE_DIR="${UV_CACHE_DIR:-/data/zy/models/$USER/uv-cache/skyrl-ta-pr-core-vllm0201-cu129}"
+if [ -z "${RECIPE_HOME:-}" ]; then
+  if [ -d "/scratch/$USER" ] && [ -w "/scratch/$USER" ]; then
+    RECIPE_HOME="/scratch/$USER/skyrl-thunder-agent"
+  else
+    RECIPE_HOME="$HOME/.cache/skyrl-thunder-agent"
+  fi
+fi
+
+RECIPE_VENV="${RECIPE_VENV:-$RECIPE_HOME/venvs/skyrl-ta-pr-core-vllm0201-cu129}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-$RECIPE_HOME/uv-cache/vllm0201-cu129}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 INSTALL_DEV="${INSTALL_DEV:-0}"
 TORCH_BACKEND="${TORCH_BACKEND:-cu129}"

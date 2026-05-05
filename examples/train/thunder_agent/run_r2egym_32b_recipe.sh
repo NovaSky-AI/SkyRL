@@ -16,7 +16,15 @@ WORKSPACE_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
 ACTION="${1:-status}"
 ACTION_ARG="${2:-}"
 
-DEFAULT_RECIPE_VENV="${RECIPE_VENV:-/data/zy/models/$USER/venvs/skyrl-ta-pr-core-thunder-agent-vllm0201-cu129}"
+if [ -z "${RECIPE_HOME:-}" ]; then
+  if [ -d "/scratch/$USER" ] && [ -w "/scratch/$USER" ]; then
+    RECIPE_HOME="/scratch/$USER/skyrl-thunder-agent"
+  else
+    RECIPE_HOME="$HOME/.cache/skyrl-thunder-agent"
+  fi
+fi
+
+DEFAULT_RECIPE_VENV="${RECIPE_VENV:-$RECIPE_HOME/venvs/skyrl-ta-pr-core-vllm0201-cu129}"
 if [ -x "$DEFAULT_RECIPE_VENV/bin/python" ]; then
   DEFAULT_PYTHON_BIN="$DEFAULT_RECIPE_VENV/bin/python"
 else
@@ -50,9 +58,10 @@ SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-18080}"
 DOCKER_MODE="${DOCKER_MODE:-rootful}"
 HARBOR_DOCKER_SHARED_NETWORK_NAME="${HARBOR_DOCKER_SHARED_NETWORK_NAME:-harbor-r2egym-shared}"
 HARBOR_DOCKER_SHARED_NETWORK_SUBNET="${HARBOR_DOCKER_SHARED_NETWORK_SUBNET:-172.30.0.0/16}"
-HARBOR_SHARED_UV_CACHE_HOST_DIR="${HARBOR_SHARED_UV_CACHE_HOST_DIR:-/scratch/$USER/harbor-uv-cache}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-${SCRATCH:-/scratch/$USER}}"
+HARBOR_SHARED_UV_CACHE_HOST_DIR="${HARBOR_SHARED_UV_CACHE_HOST_DIR:-$RUNTIME_ROOT/harbor-uv-cache}"
 HARBOR_SHARED_UV_CACHE_ENV_DIR="${HARBOR_SHARED_UV_CACHE_ENV_DIR:-/harbor-shared/uv-cache}"
-HARBOR_SHARED_MINI_SWE_TOOL_HOST_HOME="${HARBOR_SHARED_MINI_SWE_TOOL_HOST_HOME:-/scratch/$USER/harbor-mini-swe-home}"
+HARBOR_SHARED_MINI_SWE_TOOL_HOST_HOME="${HARBOR_SHARED_MINI_SWE_TOOL_HOST_HOME:-$RUNTIME_ROOT/harbor-mini-swe-home}"
 HARBOR_SHARED_MINI_SWE_TOOL_ENV_HOME="${HARBOR_SHARED_MINI_SWE_TOOL_ENV_HOME:-/tmp/harbor-mini-swe-home}"
 HARBOR_SHARED_UV_PYTHON_HOST_DIR="${HARBOR_SHARED_UV_PYTHON_HOST_DIR:-/home/$USER/.local/share/uv/python}"
 HARBOR_SHARED_UV_PYTHON_ENV_DIR="${HARBOR_SHARED_UV_PYTHON_ENV_DIR:-$HARBOR_SHARED_UV_PYTHON_HOST_DIR}"
@@ -62,10 +71,10 @@ PREPULL_R2EGYM_IMAGES="${PREPULL_R2EGYM_IMAGES:-true}"
 PREPULL_R2EGYM_IMAGE_RETRIES="${PREPULL_R2EGYM_IMAGE_RETRIES:-3}"
 PREPULL_R2EGYM_IMAGE_RETRY_SLEEP="${PREPULL_R2EGYM_IMAGE_RETRY_SLEEP:-30}"
 
-DATA_ROOT="${DATA_ROOT:-/home/$USER/zthunder_yagent/data/harbor}"
+DATA_ROOT="${DATA_ROOT:-$HOME/data/harbor}"
 TRAIN_DATA="${TRAIN_DATA:-['$DATA_ROOT/r2egym-train256-medium-hard-v1']}"
 EVAL_DATA="${EVAL_DATA:-['$DATA_ROOT/r2egym-eval64-medium-hard-v1']}"
-MODEL_PATH="${MODEL_PATH:-/data/zy/models/$USER/models/Qwen3-32B}"
+MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-32B}"
 MAX_TRAIN_TASKS="${MAX_TRAIN_TASKS:-256}"
 MAX_EVAL_TASKS="${MAX_EVAL_TASKS:-64}"
 HARBOR_AGENT_MAX_TURNS="${HARBOR_AGENT_MAX_TURNS:-25}"
@@ -79,7 +88,7 @@ FULL_EPOCHS="${FULL_EPOCHS:-10}"
 EVAL_INTERVAL_STEPS="${EVAL_INTERVAL_STEPS:-4}"
 USE_KL_LOSS="${USE_KL_LOSS:-false}"
 KL_LOSS_COEF="${KL_LOSS_COEF:-0.0}"
-CKPT_ROOT_OVERRIDE="${CKPT_ROOT_OVERRIDE:-/data/zy/models/$USER/harbor_ckpts}"
+CKPT_ROOT_OVERRIDE="${CKPT_ROOT_OVERRIDE:-$RUNTIME_ROOT/harbor_ckpts}"
 CKPT_INTERVAL="${CKPT_INTERVAL:-4}"
 HF_SAVE_INTERVAL="${HF_SAVE_INTERVAL:--1}"
 EXPORT_ROOT_OVERRIDE="${EXPORT_ROOT_OVERRIDE:-}"
@@ -97,7 +106,7 @@ if [ -z "${RUN_SHORT_ID:-}" ]; then
   RUN_SHORT_ID="r2e-$(printf '%s' "$RUN_NAME" | sha1sum | cut -c1-10)"
 fi
 LOG_DIR="${LOG_DIR_OVERRIDE:-$WORKSPACE_ROOT/tmp_logs/$RUN_NAME}"
-RUN_ARTIFACT_ROOT="${RUN_ARTIFACT_ROOT:-/scratch/$USER/harbor_run_artifacts}"
+RUN_ARTIFACT_ROOT="${RUN_ARTIFACT_ROOT:-$RUNTIME_ROOT/harbor_run_artifacts}"
 RUN_ARTIFACT_DIR="$RUN_ARTIFACT_ROOT/$RUN_NAME"
 STATE_DIR="$LOG_DIR/state"
 LOCAL_TMP_DIR="$LOG_DIR/local-tmp"
@@ -109,9 +118,9 @@ PREPARE_LOG="$LOG_DIR/launcher_prepare.log"
 ROLLOUT_LOG_DIR="$LOG_DIR/rollout"
 HEAD_RAY_TMP_DIR="${HEAD_RAY_TMP_DIR:-/tmp/rh-$RUN_SHORT_ID}"
 TRAINER_RAY_TMP_DIR_ROOT="${TRAINER_RAY_TMP_DIR_ROOT:-/tmp/rw-$RUN_SHORT_ID}"
-MERGED_TMP_DIR="${MERGED_TMP_DIR:-/scratch/$USER/${RUN_SHORT_ID}-tmp}"
-TRAIN_RUNTIME_SCRATCH_ROOT="${TRAIN_RUNTIME_SCRATCH_ROOT:-/scratch/$USER/skyrl_runtime/${RUN_SHORT_ID}-train}"
-ROLLOUT_RUNTIME_SCRATCH_ROOT="${ROLLOUT_RUNTIME_SCRATCH_ROOT:-/scratch/$USER/skyrl_runtime/${RUN_SHORT_ID}-rollout}"
+MERGED_TMP_DIR="${MERGED_TMP_DIR:-$RUNTIME_ROOT/${RUN_SHORT_ID}-tmp}"
+TRAIN_RUNTIME_SCRATCH_ROOT="${TRAIN_RUNTIME_SCRATCH_ROOT:-$RUNTIME_ROOT/skyrl_runtime/${RUN_SHORT_ID}-train}"
+ROLLOUT_RUNTIME_SCRATCH_ROOT="${ROLLOUT_RUNTIME_SCRATCH_ROOT:-$RUNTIME_ROOT/skyrl_runtime/${RUN_SHORT_ID}-rollout}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$TRAIN_RUNTIME_SCRATCH_ROOT/triton-cache}"
 DOCKER_HOST="${WRAPPER_DOCKER_HOST:-unix:///var/run/docker.sock}"
 
@@ -402,7 +411,10 @@ run_ray() {
       mkdir -p '$HEAD_RAY_TMP_DIR'
       mkdir -p '$TRITON_CACHE_DIR'
       export TRITON_CACHE_DIR='$TRITON_CACHE_DIR'
-      DEFAULT_SOCKET_IFNAME=\$(bash '$SCRIPT_DIR/detect_socket_ifname.sh' '$SOCKET_IFNAME_PEER_IP')
+      DEFAULT_SOCKET_IFNAME=\$(ip route get '$SOCKET_IFNAME_PEER_IP' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+      if [ -z \"\$DEFAULT_SOCKET_IFNAME\" ]; then
+        DEFAULT_SOCKET_IFNAME=\$(ip route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+      fi
       if [ \"\${SKYRL_RESPECT_SOCKET_IFNAME:-0}\" != 1 ]; then
         export NCCL_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"
         export GLOO_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"
@@ -423,7 +435,10 @@ run_ray() {
         export TRITON_CACHE_DIR='$TRITON_CACHE_DIR'
         '$RAY_BIN' stop -f >/dev/null 2>&1 || true
         NODE_IP=\$(hostname -I | tr ' ' '\n' | grep '^172\.27\.' | head -n1 || hostname -I | awk '{print \$1}')
-        DEFAULT_SOCKET_IFNAME=\$(bash '$SCRIPT_DIR/detect_socket_ifname.sh' '$MERGED_IP')
+        DEFAULT_SOCKET_IFNAME=\$(ip route get '$MERGED_IP' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+        if [ -z \"\$DEFAULT_SOCKET_IFNAME\" ]; then
+          DEFAULT_SOCKET_IFNAME=\$(ip route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+        fi
         if [ \"\${SKYRL_RESPECT_SOCKET_IFNAME:-0}\" != 1 ]; then
           export NCCL_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"
           export GLOO_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"
@@ -476,7 +491,10 @@ run_driver() {
       export ROLLOUT_HOST_IP='$ROLLOUT_IP'
       mkdir -p '$TRITON_CACHE_DIR'
       export TRITON_CACHE_DIR='$TRITON_CACHE_DIR'
-      DEFAULT_SOCKET_IFNAME=\$(bash '$SCRIPT_DIR/detect_socket_ifname.sh' '$SOCKET_IFNAME_PEER_IP')
+      DEFAULT_SOCKET_IFNAME=\$(ip route get '$SOCKET_IFNAME_PEER_IP' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+      if [ -z \"\$DEFAULT_SOCKET_IFNAME\" ]; then
+        DEFAULT_SOCKET_IFNAME=\$(ip route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i==\"dev\" && i<NF) {print \$(i+1); exit}}')
+      fi
       if [ \"\${SKYRL_RESPECT_SOCKET_IFNAME:-0}\" != 1 ]; then
         export NCCL_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"
         export GLOO_SOCKET_IFNAME=\"\$DEFAULT_SOCKET_IFNAME\"

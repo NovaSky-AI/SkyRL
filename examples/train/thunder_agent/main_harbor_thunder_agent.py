@@ -20,7 +20,6 @@ from .training_config import ThunderAgentHarborConfig
 
 HARBOR_DEFAULT_CONFIG = Path(__file__).parent / "harbor_trial_config" / "default.yaml"
 REPO_ROOT = str(Path(__file__).resolve().parents[3])
-DETECT_SOCKET_IFNAME = Path(__file__).parent / "detect_socket_ifname.sh"
 
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
@@ -34,20 +33,24 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 def _default_socket_ifname() -> str:
-    if DETECT_SOCKET_IFNAME.exists():
-        target_ip = os.environ.get("RAY_HEAD_IP") or os.environ.get("ROLLOUT_HOST_IP") or ""
+    target_ip = os.environ.get("RAY_HEAD_IP") or os.environ.get("ROLLOUT_HOST_IP")
+    if target_ip:
         try:
             result = subprocess.run(
-                ["bash", str(DETECT_SOCKET_IFNAME), target_ip],
+                ["ip", "route", "get", target_ip],
                 check=True,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
-            if ifname := result.stdout.strip():
-                return ifname
         except (OSError, subprocess.CalledProcessError):
-            pass
+            result = None
+        if result:
+            parts = result.stdout.split()
+            if "dev" in parts:
+                idx = parts.index("dev") + 1
+                if idx < len(parts):
+                    return parts[idx]
     return "eth0"
 
 

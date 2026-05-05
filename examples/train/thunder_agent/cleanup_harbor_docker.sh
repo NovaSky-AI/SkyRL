@@ -5,7 +5,7 @@ set -euo pipefail
 # benchmark data tree. This is intentionally stricter than "name=r2egym-"
 # alone because rootful Docker is shared on the head node.
 
-DATA_ROOT="${DATA_ROOT:-/home/$USER/zthunder_yagent/data/harbor}"
+DATA_ROOT="${DATA_ROOT:-$HOME/data/harbor}"
 DRY_RUN="${DRY_RUN:-0}"
 
 docker info >/dev/null

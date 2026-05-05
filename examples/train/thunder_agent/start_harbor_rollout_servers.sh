@@ -146,7 +146,7 @@ wait_for_health() {
   return 1
 }
 
-STORAGE_ROOT="${STORAGE_ROOT:-/data/zy/models/$USER}"
+STORAGE_ROOT="${STORAGE_ROOT:-$HOME}"
 MODEL_ROOT="${MODEL_ROOT:-$STORAGE_ROOT/models}"
 MODEL_PATH="${MODEL_PATH:-$MODEL_ROOT/Qwen3-32B}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen3-32B}"
@@ -190,7 +190,7 @@ export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
-export HF_HOME="${HF_HOME:-/data/zy/models}"
+export HF_HOME="${HF_HOME:-$STORAGE_ROOT}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HUGGINGFACE_HUB_CACHE}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HUGGINGFACE_HUB_CACHE}"
@@ -209,8 +209,24 @@ if [ ! -f "$MODEL_PATH/config.json" ]; then
   exit 1
 fi
 
+detect_socket_ifname() {
+  local target_ip="${1:-}"
+  local ifname=""
+  if [ -n "$target_ip" ] && command -v ip >/dev/null 2>&1; then
+    ifname="$(ip route get "$target_ip" 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev" && i<NF) {print $(i+1); exit}}')"
+  fi
+  if [ -z "$ifname" ] && command -v ip >/dev/null 2>&1; then
+    ifname="$(ip route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev" && i<NF) {print $(i+1); exit}}')"
+  fi
+  if [ -n "$ifname" ]; then
+    printf '%s\n' "$ifname"
+    return
+  fi
+  ls /sys/class/net | grep -Ev '^(lo|docker|br-|veth)' | head -n1
+}
+
 SOCKET_IFNAME_TARGET_IP="${SOCKET_IFNAME_TARGET_IP:-${RAY_HEAD_IP:-}}"
-DEFAULT_SOCKET_IFNAME="$(bash "$SCRIPT_DIR/detect_socket_ifname.sh" "$SOCKET_IFNAME_TARGET_IP")"
+DEFAULT_SOCKET_IFNAME="$(detect_socket_ifname "$SOCKET_IFNAME_TARGET_IP")"
 if [ "${SKYRL_RESPECT_SOCKET_IFNAME:-0}" != "1" ]; then
   export NCCL_SOCKET_IFNAME="$DEFAULT_SOCKET_IFNAME"
   export GLOO_SOCKET_IFNAME="$DEFAULT_SOCKET_IFNAME"

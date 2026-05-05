@@ -41,14 +41,14 @@ PYTHON_BIN="$(resolve_python_bin)"
 # ---------------------------------------------------------------------------
 # Data paths (adjust to your cluster)
 # ---------------------------------------------------------------------------
-DATA_ROOT="${DATA_ROOT:-/home/$USER/zthunder_yagent/data/harbor}"
+DATA_ROOT="${DATA_ROOT:-$HOME/data/harbor}"
 TRAIN_DATA="${TRAIN_DATA:-['$DATA_ROOT/r2egym-train256-medium-hard-v1']}"
 EVAL_DATA="${EVAL_DATA:-['$DATA_ROOT/r2egym-eval64-medium-hard-v1']}"
 
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
-MODEL_PATH="${MODEL_PATH:-/data/zy/models/$USER/models/Qwen3-32B}"
+MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-32B}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-32B}"
 MODEL_REPO_ID="${MODEL_REPO_ID:-Qwen/Qwen3-32B}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
