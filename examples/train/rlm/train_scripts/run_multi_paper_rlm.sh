@@ -75,4 +75,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
+  trainer.policy.language_model_only=true \
+  trainer.ref.language_model_only=true \
+  generator.inference_engine.language_model_only=true \
   "$@"
