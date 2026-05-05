@@ -116,7 +116,7 @@ def _judge_returning(value: float):
 
 
 async def _judge_returns_none_if_disabled(task: str, actions, outcome: bool) -> Optional[float]:
-    # Mimics the SKYRL_TASTE_DISABLED=1 short-circuit in skyrl_taste.judge.
+    # Mimics the SKYRL_TASTE_DISABLED=1 short-circuit in skyrl_gym.taste.
     if os.environ.get("SKYRL_TASTE_DISABLED") == "1":
         return None
     return 1.0

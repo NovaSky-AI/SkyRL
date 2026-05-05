@@ -824,10 +824,10 @@ class FleetTaskEnv(BaseTextEnv):
         self.last_taste_judge_failed = False
 
         try:
-            from skyrl_taste.judge import score_trajectory_async
+            from skyrl_gym.taste import score_trajectory_async
         except Exception as e:
             logger.warning(
-                "skyrl_taste import failed (%s); verifier-only reward", e
+                "skyrl_gym.taste import failed (%s); verifier-only reward", e
             )
             self.last_taste_judge_failed = True
             self.last_effective_taste = 1.0

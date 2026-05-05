@@ -1,11 +1,8 @@
-"""skyrl_taste.judge
-====================
+"""skyrl_gym.taste — async wrapper around the taste-judge for SkyRL GRPO.
 
-Async wrapper around the synchronous taste judge defined in
-`research/judge/judge.py`. Re-exposes the judge with the contract the
-SkyRL Fleet env expects:
-
-    async def score_trajectory_async(task, actions, outcome) -> Optional[float]
+Public API:
+    score_trajectory_async(task, actions, outcome) -> Optional[float]
+    get_judge_provider_info() -> {"taste_judge_provider", "taste_judge_model"}
 
 Provider routing (env vars, read at call-time so swaps don't require a
 restart of the process -- only a fresh rollout):
@@ -50,7 +47,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-logger = logging.getLogger("skyrl_taste")
+logger = logging.getLogger("skyrl_gym.taste")
 
 # Make the research-side judge importable. In a packaged install this would
 # be a sibling import; for the launch-ready integration we add the research

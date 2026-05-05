@@ -40,8 +40,7 @@ cd /tmp/skyrl-fleet
 #    and updates the three terminal returns + get_metrics).
 git apply /Users/alliegu/Desktop/fleet/integration/env.py.diff
 
-# 2. Vendor the taste-judge package into the workdir Python path.
-cp -r /Users/alliegu/Desktop/fleet/integration/skyrl_taste skyrl-gym/skyrl_taste
+# 2. Vendor the research judge into the workdir Python path.
 cp -r /Users/alliegu/Desktop/fleet/research/judge research/judge
 
 # 3. Drop the new YAML config into tasks/.
@@ -75,7 +74,7 @@ sky launch tasks/openenv-fleet-grpo-vl-taste.yaml \
 to suppress outcome bleed (Stream 4 finding — when the judge sees the
 verifier outcome, taste scores correlate ~0.7 with verifier and the
 shaping signal collapses to a noisy duplicate of the binary reward). The
-async wrapper in `skyrl_taste/judge.py` handles this; double-check the
+async wrapper in `skyrl_gym/taste.py` handles this; double-check the
 flag is forwarded if you swap the wrapper.
 
 ## WandB metrics to watch
@@ -111,7 +110,7 @@ This makes `score_trajectory_async` return `None`, the env's
 ```bash
 cd /tmp/skyrl-fleet
 git apply -R /Users/alliegu/Desktop/fleet/integration/env.py.diff
-rm -rf skyrl-gym/skyrl_taste research/judge
+rm -rf research/judge
 ```
 
 ## Two-knob ablation (floor x grpo_norm_by_std)

@@ -105,10 +105,8 @@ setup: |
   bash scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
     --extra-setup scripts/fleet-qwen35-extra-setup.sh
-  # NEW: install the taste-judge package next to skyrl_gym so the env's
-  # `from skyrl_taste.judge import score_trajectory_async` import resolves.
+  # taste judge is part of skyrl_gym (skyrl_gym.taste); just install the SDK deps.
   pip install --no-deps anthropic openai
-  pip install -e ~/sky_workdir/skyrl-gym/skyrl_taste || echo "skyrl_taste install failed"
 
 run: |
   # We delegate to the existing fleet-vl-run.sh wrapper, which forwards extra
