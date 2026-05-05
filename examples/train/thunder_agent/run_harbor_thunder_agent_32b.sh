@@ -14,7 +14,7 @@ set -euo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 STAGE="${1:-full}"
 if [ "$#" -gt 0 ]; then
   shift
@@ -90,9 +90,18 @@ fi
 # an embedded ThunderAgentRouter. Also accepts THUNDERAGENT_URL (same variable
 # name used by run_harbor_fully_async.sh).
 EXTERNAL_PROXY_URL="${EXTERNAL_PROXY_URL:-${THUNDERAGENT_URL:-}}"
-# If neither is set but RAY_HEAD_IP is known, derive the proxy URL from it.
-if [ -z "$EXTERNAL_PROXY_URL" ] && [ -n "${RAY_HEAD_IP:-}" ]; then
+# Only derive a proxy URL when this recipe is explicitly told that an external
+# ThunderAgent router was started. Otherwise the trainer creates its embedded
+# router over the external rollout servers.
+if [ "${USE_EXTERNAL_THUNDERAGENT_PROXY:-0}" = "1" ] && [ -z "$EXTERNAL_PROXY_URL" ] && [ -n "${RAY_HEAD_IP:-}" ]; then
   EXTERNAL_PROXY_URL="http://${RAY_HEAD_IP}:${SKYRL_INFERENCE_ROUTER_PORT:-${THUNDER_AGENT_ROUTER_PORT:-8080}}"
+fi
+
+if [ "$STAGE" = "url_test" ]; then
+  echo "ROLLOUT_SERVER_URLS=$ROLLOUT_SERVER_URLS"
+  echo "EXTERNAL_PROXY_URL=$EXTERNAL_PROXY_URL"
+  echo "THUNDERAGENT_URL=${THUNDERAGENT_URL:-}"
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -117,7 +126,7 @@ RUN_NAME="${RUN_NAME_OVERRIDE:-r2egym-ta-mediumhard256-10epoch-$(date +%Y%m%d_%H
 LOG_ROOT="${LOG_ROOT:-$(cd "$REPO_ROOT/.." && pwd)/tmp_logs}"
 LOG_DIR="${LOG_DIR_OVERRIDE:-$LOG_ROOT/$RUN_NAME}"
 TENSORBOARD_DIR="$LOG_DIR/tensorboard"
-RUN_ARTIFACT_ROOT="${RUN_ARTIFACT_ROOT:-/scratch/triton_cache/$USER/harbor_run_artifacts}"
+RUN_ARTIFACT_ROOT="${RUN_ARTIFACT_ROOT:-/scratch/$USER/harbor_run_artifacts}"
 RUN_ARTIFACT_DIR="$RUN_ARTIFACT_ROOT/$RUN_NAME"
 TRIALS_DIR="$RUN_ARTIFACT_DIR/trials_run"
 CKPT_ROOT_OVERRIDE="${CKPT_ROOT_OVERRIDE:-}"
@@ -181,7 +190,7 @@ case "$STAGE" in
     TRAJ_PER_SEC=1
     MAX_CONCURRENCY=2
     NUM_PARALLEL_GENERATION_WORKERS=8
-    ROLLOUT_ENFORCE_EAGER=true
+    ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
     ;;
   pilot)
     MAX_TRAIN_TASKS=64
@@ -197,7 +206,7 @@ case "$STAGE" in
     TRAJ_PER_SEC=1
     MAX_CONCURRENCY=4
     NUM_PARALLEL_GENERATION_WORKERS="$TRAINING_WORLD_SIZE"
-    ROLLOUT_ENFORCE_EAGER=true
+    ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
     ;;
   full)
     MAX_TRAIN_TASKS=256
@@ -213,7 +222,7 @@ case "$STAGE" in
     TRAJ_PER_SEC="$FULL_TRAJ_PER_SEC"
     MAX_CONCURRENCY="$FULL_MAX_CONCURRENCY"
     NUM_PARALLEL_GENERATION_WORKERS="$FULL_NUM_PARALLEL_GENERATION_WORKERS"
-    ROLLOUT_ENFORCE_EAGER=false
+    ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
     ;;
   *)
     echo "Usage: $0 {smoke|pilot|full}"
@@ -254,6 +263,9 @@ ENTRYPOINT="examples.train.thunder_agent.main_harbor_thunder_agent"
 EXTRA_ARGS=()
 if [ -n "$EXTERNAL_PROXY_URL" ]; then
   EXTRA_ARGS+=("generator.inference_engine.external_proxy_url=$EXTERNAL_PROXY_URL")
+fi
+if [ -n "${TRAINER_RESUME_PATH:-}" ]; then
+  EXTRA_ARGS+=("trainer.resume_path=$TRAINER_RESUME_PATH")
 fi
 
 "$PYTHON_BIN" -m "$ENTRYPOINT" \
@@ -304,12 +316,13 @@ fi
   generator.eval_n_samples_per_prompt="$EVAL_N_SAMPLES" \
   generator.apply_overlong_filtering="$APPLY_OVERLONG_FILTERING" \
   generator.sampling_params.temperature=0.3 \
-  generator.sampling_params.logprobs=1 \
+  generator.sampling_params.logprobs=null \
   generator.eval_sampling_params.temperature=0.0 \
-  generator.eval_sampling_params.logprobs=1 \
+  generator.eval_sampling_params.logprobs=null \
   generator.inference_engine.num_engines="$ROLLOUT_ENGINES" \
   generator.inference_engine.tensor_parallel_size="$ROLLOUT_TP_SIZE" \
   generator.inference_engine.run_engines_locally=false \
+  generator.inference_engine.remote_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.external_server_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.async_engine=true \
@@ -341,10 +354,8 @@ fi
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
   harbor_trial_config.agent.kwargs.model_info.max_output_tokens="$MAX_MODEL_LEN" \
   trainer.logger="['tensorboard','console']" \
-  trainer.collect_memory_metrics=true \
-  trainer.collect_memory_metrics_interval=1 \
   trainer.project_name=harbor \
   trainer.run_name="$RUN_NAME" \
-  trainer.resume_mode=latest \
+  trainer.resume_mode="${TRAINER_RESUME_MODE:-latest}" \
   "${EXTRA_ARGS[@]}" \
   "$@"

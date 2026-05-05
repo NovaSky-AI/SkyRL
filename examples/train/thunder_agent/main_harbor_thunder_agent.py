@@ -3,20 +3,24 @@ Main entrypoint for fully async Harbor training with ThunderAgent routing.
 """
 
 import sys
+import os
+import subprocess
 from pathlib import Path
-from typing import Dict
 
 import ray
 import yaml
 
 from skyrl.train.utils import validate_cfg
-from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.utils.utils import prepare_runtime_environment
+from skyrl.backends.skyrl_train.utils.ppo_utils import sync_registries
 
 from .main_thunder_agent import FullyAsyncThunderAgentExp
 from .training_config import ThunderAgentHarborConfig
 
 
 HARBOR_DEFAULT_CONFIG = Path(__file__).parent / "harbor_trial_config" / "default.yaml"
+REPO_ROOT = str(Path(__file__).resolve().parents[3])
+DETECT_SOCKET_IFNAME = Path(__file__).parent / "detect_socket_ifname.sh"
 
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
@@ -27,6 +31,24 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
         else:
             base[key] = value
     return base
+
+
+def _default_socket_ifname() -> str:
+    if DETECT_SOCKET_IFNAME.exists():
+        target_ip = os.environ.get("RAY_HEAD_IP") or os.environ.get("ROLLOUT_HOST_IP") or ""
+        try:
+            result = subprocess.run(
+                ["bash", str(DETECT_SOCKET_IFNAME), target_ip],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            if ifname := result.stdout.strip():
+                return ifname
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return "eth0"
 
 
 class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
@@ -68,8 +90,44 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
+    from .harbor_runtime_setup import patch_mini_swe_agent_environment
+
+    patch_mini_swe_agent_environment()
     exp = HarborThunderAgentFullyAsyncExp(cfg)
     exp.run()
+
+
+def _recipe_runtime_env(cfg) -> dict[str, str]:
+    env_vars = prepare_runtime_environment(cfg)
+    socket_ifname = os.environ.get("NCCL_SOCKET_IFNAME") or _default_socket_ifname()
+    env_vars.setdefault("NCCL_SOCKET_IFNAME", socket_ifname)
+    env_vars.setdefault("GLOO_SOCKET_IFNAME", os.environ.get("GLOO_SOCKET_IFNAME", socket_ifname))
+
+    for name in (
+        "SKYRL_WORKER_NCCL_TIMEOUT_IN_S",
+        "RAY_HEAD_IP",
+        "ROLLOUT_HOST_IP",
+        "NCCL_SOCKET_IFNAME",
+        "GLOO_SOCKET_IFNAME",
+        "TRITON_CACHE_DIR",
+        "SKYRL_INFERENCE_ROUTER_PORT",
+        "THUNDER_AGENT_ROUTER_PORT",
+        "HARBOR_SHARED_UV_CACHE_ENV_DIR",
+        "HARBOR_SHARED_MINI_SWE_TOOL_ENV_HOME",
+        "HARBOR_MINI_SWE_AGENT_PACKAGE",
+    ):
+        if name in os.environ:
+            env_vars[name] = os.environ[name]
+
+    pythonpath = env_vars.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
+    env_vars["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
+    return env_vars
+
+
+def _initialize_ray_for_recipe(cfg) -> None:
+    os.environ.setdefault("RAY_BACKEND_LOG_LEVEL", "fatal")
+    ray.init(runtime_env={"env_vars": _recipe_runtime_env(cfg)}, log_to_driver=True)
+    sync_registries()
 
 
 def main() -> None:
@@ -82,7 +140,7 @@ def main() -> None:
         cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
 
     validate_cfg(cfg)
-    initialize_ray(cfg)
+    _initialize_ray_for_recipe(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 
 

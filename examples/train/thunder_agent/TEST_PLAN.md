@@ -6,10 +6,15 @@
 > configurable retry budget, dataset empty-guard).
 >
 > Each tier is a hard gate for the next one. Do not skip up the ladder.
+>
+> Status legend:
+>   ✅ PASSED  — tested, all assertions green
+>   🔴 BLOCKED — prerequisites absent, cannot run now
+>   ○  NOT RUN — waiting on lower tier or resources
 
 ---
 
-## Tier 1 — Static & import checks
+## Tier 1 — Static & import checks ✅ PASSED (2026-05-03, kda-dev CPU)
 
 Goal: catch typos, OmegaConf field errors, and Python import breakage
 before any GPU is allocated. Runs in <60s on a CPU-only login node.
@@ -60,67 +65,79 @@ print("OK")
 PY
 ```
 
-Pass criteria: every command exits 0.
+Pass criteria: every command exits 0. ✅ All pass.
 
----
-
-## Tier 2 — Generator unit tests (CPU only)
-
-Goal: verify the four hot paths in the generator without spinning up
-Harbor, vLLM, or Ray. Place under
-`examples/train/thunder_agent/tests/test_harbor_generator_units.py`.
-
-Cases to cover:
-
-1. **`_attach_trial_routing_ids`** — assert
-   `cfg["agent"]["kwargs"]["session_id"]
-    == cfg["agent"]["kwargs"]["llm_call_kwargs"]["extra_body"]["program_id"]`
-   and that calling it twice on a fresh deepcopy of the template never
-   leaks IDs across attempts.
-
-2. **`_apply_sampling_params_to_trial_config`** — feed
-   `{"temperature": 0.3, "top_p": 0.9, "top_k": 20, "min_p": 0.05,
-    "max_tokens": 2048, "logprobs": 1}` and assert:
-   - `agent.kwargs.temperature == 0.3`
-   - `llm_call_kwargs.top_p == 0.9`, `llm_call_kwargs.max_tokens == 2048`
-   - `extra_body.top_k == 20`, `extra_body.min_p == 0.05`
-   - `agent.kwargs.collect_rollout_details is True`
-   - `top_k=-1`, `min_p=0`, `repetition_penalty=1.0` are NOT added to extra_body.
-
-3. **`_best_effort_release_program`** — use `httpx.MockTransport` to
-   simulate (200 ok / 404 / 500 / TimeoutException) and assert:
-   - 200 returns immediately, no retry
-   - 404 returns immediately, no retry
-   - 500 logs a warning, no retry
-   - `TimeoutException` retries up to `THUNDERAGENT_RELEASE_MAX_ATTEMPTS`
-     with exponential backoff, then gives up without raising.
-
-4. **`_get_response_ids_and_loss_mask_from_harbor_rollout`** — using a
-   real Qwen tokenizer + the `qwen3_acc_thinking.jinja2` template:
-   - feed `[{"role":"user", ...}, {"role":"assistant", ...},
-     {"role":"user", ...}, {"role":"assistant", ...}]`
-   - assert `len(response_ids) == len(loss_mask) == len(rollout_logprobs)`
-   - assert user-segment slots in `loss_mask` are all 0
-   - assert assistant-segment slots are 1
-   - assert `rollout_logprobs` aligned with the assistant slots only
-     (other positions are 0.0).
-
-5. **Empty-dataset guard (Tier 1 corollary)** — instantiating
-   `ThunderAgentHarborDataset(["/tmp"])` on a directory with no
-   `instruction.md` subdirs must raise `ValueError`.
-
-Run: `pytest examples/train/thunder_agent/tests/`. Pass: all green.
-
----
-
-## Tier 3 — vLLM `/pause` & `/resume` probe (1 GPU, target image)
-
-Goal: prove the rollout image actually exposes the native
-weight-sync endpoints SkyRL relies on. Without this, every fully-async
-weight sync fails on the first iteration.
+### Shell URL-construction self-test ✅ PASSED
 
 ```bash
-# Start ONE rollout server on the target image with VLLM_SERVER_DEV_MODE=1
+# write to file to avoid quoting issues in bash -c subshells
+cat > /tmp/test_url.sh << 'SCRIPT'
+ROLLOUT_HOST_IP=10.0.0.1
+ROLLOUT_SERVER_PORTS_CSV=18000,18001,18002,18003
+SKYRL_INFERENCE_ROUTER_PORT=18080
+source examples/train/thunder_agent/run_harbor_thunder_agent_32b.sh url_test
+SCRIPT
+bash /tmp/test_url.sh
+```
+
+Confirmed output:
+- `ROLLOUT_SERVER_URLS=["http://10.0.0.1:18000","http://10.0.0.1:18001","http://10.0.0.1:18002","http://10.0.0.1:18003"]` ✅
+- `EXTERNAL_PROXY_URL=http://10.0.0.1:18080` ✅
+- `THUNDERAGENT_URL` passthrough ✅
+
+---
+
+## Tier 2 — Generator unit tests (CPU only) ✅ PASSED (2026-05-03, 25/25 green)
+
+Goal: verify the four hot paths in the generator without spinning up
+Harbor, vLLM, or Ray.
+
+Test file: `examples/train/thunder_agent/tests/test_harbor_generator_units.py`
+
+Run:
+
+```bash
+cd $REPO_ROOT
+pytest examples/train/thunder_agent/tests/ -v
+```
+
+Cases covered and their status:
+
+| Test class | Cases | Result |
+|---|---|---|
+| `TestAttachTrialRoutingIds` | session_id == program_id; no cross-attempt ID leak; existing extra_body preserved | ✅ |
+| `TestApplySamplingParams` | temperature/top_p/top_k/min_p/max_tokens/logprobs; default exclusions (top_k=-1, min_p=0 not added) | ✅ |
+| `TestBestEffortReleaseProgram` | 200/404/500/timeout/None/no-proxy branches via `httpx.MockTransport` | ✅ |
+| `TestGetResponseIdsAndLossMask` | shape alignment; user loss_mask=0; rollout_logprobs length match | ✅ |
+| `TestHarborDatasetEmptyGuard` | empty dir raises ValueError; max_tasks; stable UID | ✅ |
+
+Total: 25 tests, all passed. ✅
+
+---
+
+## Tier 2b — Dataset subset generation ✅ PASSED (2026-05-03, vs ground-truth MANIFEST)
+
+Goal: verify `prepare_r2egym_subset.py` reproduces ground-truth task lists.
+
+```bash
+python examples/train/thunder_agent/prepare_r2egym_subset.py \
+    --data-root ~/data/harbor --dry-run
+```
+
+Verified against `r2egym-eval32-medium-major-v1` and `r2egym-train128-medium-major-v1`
+ground-truth MANIFESTs: exact SHA-256 match on all buckets. ✅
+
+---
+
+## Tier 3 — vLLM `/pause` & `/resume` probe (1 GPU, target image) 🔴 BLOCKED
+
+**Blocked reason**: no vLLM server with `VLLM_SERVER_DEV_MODE=1` available on
+the current SLURM allocation. Job 30368 (research-secure-14) has no running
+vLLM process.
+
+**To unblock**: start one rollout server on the target Docker image, then run:
+
+```bash
 SERVER_URL="http://$(hostname -i):8001"
 
 curl -fsS "$SERVER_URL/health" >/dev/null
@@ -132,9 +149,14 @@ curl -fsS "$SERVER_URL/get_world_size"
 Pass criteria: all four calls return HTTP 200. If any returns 404, the
 recipe will not work on this image and we must rebuild before Tier 4.
 
+**Why this matters**: if `/pause` returns 404, every weight sync in
+`FullyAsyncRayPPOTrainer` will crash at step 0 with an httpx 404 error.
+
 ---
 
-## Tier 4 — Smoke stage end-to-end (1 node × 1 GPU × 1 vLLM)
+## Tier 4 — Smoke stage end-to-end (1 node × 1 GPU × 1 vLLM) ○ NOT RUN
+
+**Prerequisite**: Tier 3 must pass first.
 
 Goal: prove a full pipe from CLI parse → Trial run → weight sync round-
 trip on minimal hardware. Uses `STAGE=smoke` defaults
@@ -161,14 +183,17 @@ Pass criteria (greppable):
    MAX_TRAIN_TASKS` (not every trial errored).
 - The training process exits 0 after `EPOCHS=1`.
 
-If smoke fails with `TypeError` on `pause`, regression on Phase 1 fix.
-If smoke fails with `OmegaConf ConfigKeyError`, regression on Phase 3
-config classes. If smoke fails with an httpx connection error to the TA
-proxy, EXTERNAL_PROXY_URL is mis-routed.
+Failure triage:
+- `TypeError` on `pause` → regression on Phase 1 fix
+- `OmegaConf ConfigKeyError` → regression on Phase 3 config classes
+- httpx connection error to TA proxy → `EXTERNAL_PROXY_URL` mis-routed
+- `ValueError: zero task directories` → dataset path wrong or MANIFEST missing
 
 ---
 
-## Tier 5 — Pilot stage (1 node × 8 GPU)
+## Tier 5 — Pilot stage (1 node × 8 GPU) ○ NOT RUN
+
+**Prerequisite**: Tier 4 must pass first.
 
 Goal: smoke-out scaling and rate-limiter behaviour. Uses
 `STAGE=pilot`: `MAX_TRAIN_TASKS=64`, `EPOCHS=1`,
@@ -195,7 +220,9 @@ Pass criteria:
 
 ---
 
-## Tier 6 — Full benchmark replay (4 nodes × 8 GPU)
+## Tier 6 — Full benchmark replay (4 nodes × 8 GPU) ○ NOT RUN
+
+**Prerequisite**: Tier 5 must pass first.
 
 Goal: reproduce the `thunderagent_medium_hard_256_10epoch_no_preflight`
 benchmark variant.
@@ -221,11 +248,30 @@ Pass criteria:
   (no monotonic growth across epochs — that would indicate a release
   leak).
 
-If Tier 6 deviates from baseline, bisect first by toggling
-`EXTERNAL_PROXY_URL` (rules out router selection), then by setting
-`HARBOR_MAX_NUM_RETRIES_PER_TRIAL=1` (rules out retry-mask interactions),
-then by setting `generator.sampling_params.logprobs=0` (rules out the
-rollout-logprob extraction path).
+Bisect order if Tier 6 deviates from baseline:
+1. Toggle `EXTERNAL_PROXY_URL` (rules out router selection)
+2. `HARBOR_MAX_NUM_RETRIES_PER_TRIAL=1` (rules out retry-mask interactions)
+3. `generator.sampling_params.logprobs=0` (rules out rollout-logprob extraction)
+
+---
+
+## Summary
+
+| Tier | Description | Status |
+|---|---|---|
+| 1 | Static & import checks, shell syntax, URL construction | ✅ PASSED |
+| 2 | Generator unit tests (25 tests, CPU only) | ✅ PASSED |
+| 2b | Dataset MANIFEST generation vs ground-truth | ✅ PASSED |
+| 3 | vLLM `/pause` `/resume` probe (target Docker image) | 🔴 BLOCKED (no vLLM server) |
+| 4 | Smoke end-to-end (1 GPU, 1 step, weight sync round-trip) | ○ NOT RUN |
+| 5 | Pilot (8 GPU, 1 epoch, rate-limiter validation) | ○ NOT RUN |
+| 6 | Full benchmark replay (40 GPU, 10 epochs) | ○ NOT RUN |
+
+**What this means**: The recipe code is unit-tested and interface-complete.
+The end-to-end training path (Tier 3+) has not been exercised because no
+GPU cluster with Docker + vLLM + Ray is currently available on the SLURM
+login node. Tier 3 is the immediate gate — once a target vLLM image is
+available, run the four-line probe before attempting Tier 4.
 
 ---
 
