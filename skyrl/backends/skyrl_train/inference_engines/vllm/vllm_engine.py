@@ -345,6 +345,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+        # vLLM raises if profile() is called without profiler_config; gate on it.
+        self._profile_enabled = self.llm.vllm_config.profiler_config.profiler is not None
+        self._profile_counter = 0
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
@@ -489,16 +492,29 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Generate responses using vLLM's async engine."""
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
-        tasks = []
-        for prompt in prompt_token_ids:
-            # Schedule the collection of outputs for each prompt.
-            # Avoid duplicate request_ids
-            request_id = str(uuid4().hex)
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
-            tasks.append(task)
-        outputs = await asyncio.gather(*tasks)
+        if self._profile_enabled:
+            await self.llm.start_profile(profile_prefix=f"sample_{self._profile_counter}")
+            self._profile_counter += 1
+        try:
+            tasks = []
+            for prompt in prompt_token_ids:
+                # Schedule the collection of outputs for each prompt.
+                # Avoid duplicate request_ids
+                request_id = str(uuid4().hex)
+                task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
+                tasks.append(task)
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            if self._profile_enabled:
+                await self.llm.stop_profile()
 
         return self._postprocess_outputs(outputs)
+
+    async def start_profile(self, profile_prefix: Optional[str] = None) -> None:
+        await self.llm.start_profile(profile_prefix=profile_prefix)
+
+    async def stop_profile(self) -> None:
+        await self.llm.stop_profile()
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))

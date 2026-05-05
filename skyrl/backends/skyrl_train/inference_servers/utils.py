@@ -102,8 +102,15 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     else:
         args.enable_lora = False
 
-    # Add any extra engine_init_kwargs
-    engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    # Add any extra engine_init_kwargs. Copy so we don't mutate the source
+    # config (downstream readers in setup.py expect the original shape).
+    engine_kwargs = dict(get_config_as_dict(ie_cfg.engine_init_kwargs))
+    # vLLM's API server asserts args.profiler_config is a ProfilerConfig
+    # instance (not a dict), so coerce here when the user supplies it as a dict.
+    if isinstance(engine_kwargs.get("profiler_config"), dict):
+        from vllm.config.profiler import ProfilerConfig
+
+        engine_kwargs["profiler_config"] = ProfilerConfig(**engine_kwargs["profiler_config"])
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 
