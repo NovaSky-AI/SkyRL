@@ -1105,9 +1105,17 @@ class FleetTaskEnv(BaseTextEnv):
             effective_taste_list = data["effective_taste"]
             taste_judge_failed_list = data["taste_judge_failed"]
             if taste_reward_list:
-                result[f"{env_key}/avg_taste_reward"] = sum(taste_reward_list) / len(taste_reward_list)
+                n = len(taste_reward_list)
+                mean_tr = sum(taste_reward_list) / n
+                result[f"{env_key}/avg_taste_reward"] = mean_tr
+                if n > 1:
+                    result[f"{env_key}/std_taste_reward"] = (sum((x - mean_tr) ** 2 for x in taste_reward_list) / (n - 1)) ** 0.5
             if effective_taste_list:
-                result[f"{env_key}/avg_effective_taste"] = sum(effective_taste_list) / len(effective_taste_list)
+                n = len(effective_taste_list)
+                mean_et = sum(effective_taste_list) / n
+                result[f"{env_key}/avg_effective_taste"] = mean_et
+                if n > 1:
+                    result[f"{env_key}/std_effective_taste"] = (sum((x - mean_et) ** 2 for x in effective_taste_list) / (n - 1)) ** 0.5
             if taste_judge_failed_list:
                 result[f"{env_key}/taste_judge_fail_rate"] = sum(taste_judge_failed_list) / len(taste_judge_failed_list)
 
@@ -1120,9 +1128,17 @@ class FleetTaskEnv(BaseTextEnv):
         all_effective_taste = [v for d in env_data.values() for v in d["effective_taste"]]
         all_taste_judge_failed = [v for d in env_data.values() for v in d["taste_judge_failed"]]
         if all_taste_reward:
-            result["avg_taste_reward"] = sum(all_taste_reward) / len(all_taste_reward)
+            n = len(all_taste_reward)
+            mean_tr = sum(all_taste_reward) / n
+            result["avg_taste_reward"] = mean_tr
+            if n > 1:
+                result["std_taste_reward"] = (sum((x - mean_tr) ** 2 for x in all_taste_reward) / (n - 1)) ** 0.5
         if all_effective_taste:
-            result["avg_effective_taste"] = sum(all_effective_taste) / len(all_effective_taste)
+            n = len(all_effective_taste)
+            mean_et = sum(all_effective_taste) / n
+            result["avg_effective_taste"] = mean_et
+            if n > 1:
+                result["std_effective_taste"] = (sum((x - mean_et) ** 2 for x in all_effective_taste) / (n - 1)) ** 0.5
         if all_taste_judge_failed:
             result["taste_judge_fail_rate"] = sum(all_taste_judge_failed) / len(all_taste_judge_failed)
 
