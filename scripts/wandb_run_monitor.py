@@ -13,7 +13,7 @@ Fault conditions detected:
 On fault the script:
   1. Sends a wandb.alert() (triggers email if WandB notifications are configured).
   2. Annotates run.summary with fault_reason / fault_time.
-  3. Runs `sky down --cluster <name> -y` if --sky-cluster is supplied.
+  3. Runs `sky down <name> -y` if --sky-cluster is supplied.
   4. Exits with code 1.
 
 Usage:
@@ -62,12 +62,22 @@ def _fault(run, reason: str, sky_cluster: str | None) -> None:
     print(f"\n[MONITOR] FAULT DETECTED — {reason}", flush=True)
     print(f"[MONITOR] Run: {run.url}", flush=True)
 
+    # wandb.alert() requires an active wandb.init() run; initialize briefly just to send.
     try:
+        wandb.init(
+            project=run.project,
+            id=run.id,
+            resume="allow",
+            reinit=True,
+            settings=wandb.Settings(silent=True),
+        )
         wandb.alert(
             title=f"[skyrl-monitor] Faulty run: {run.name}",
             text=f"{reason}\n\nRun: {run.url}\nDetected at: {ts}",
             level=wandb.AlertLevel.ERROR,
         )
+        wandb.finish(quiet=True)
+        print(f"[MONITOR] wandb.alert() sent.", flush=True)
     except Exception as e:
         print(f"[MONITOR] wandb.alert() failed: {e}", flush=True)
 
@@ -77,13 +87,13 @@ def _fault(run, reason: str, sky_cluster: str | None) -> None:
         print(f"[MONITOR] Could not annotate run summary: {e}", flush=True)
 
     if sky_cluster:
-        print(f"[MONITOR] Running: sky down --cluster {sky_cluster} -y", flush=True)
+        print(f"[MONITOR] Running: sky down {sky_cluster} -y", flush=True)
         try:
-            subprocess.run(["sky", "down", "--cluster", sky_cluster, "-y"], check=True)
+            subprocess.run(["sky", "down", sky_cluster, "-y"], check=True)
             print(f"[MONITOR] sky down succeeded.", flush=True)
         except Exception as e:
             print(f"[MONITOR] sky down failed: {e}", flush=True)
-            print(f"[MONITOR] Kill manually:  sky down --cluster {sky_cluster} -y", flush=True)
+            print(f"[MONITOR] Kill manually:  sky down {sky_cluster} -y", flush=True)
     else:
         print("[MONITOR] No --sky-cluster supplied. Kill the cluster manually.", flush=True)
 

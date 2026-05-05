@@ -76,7 +76,7 @@ except Exception as e:  # pragma: no cover
 
 
 _DEFAULT_PROVIDER = "openrouter"
-_DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
+_DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
 
 _DEFAULT_GROUP_PROVIDER = "relative_haiku"
 _DEFAULT_GROUP_MODEL_SONNET = "claude-sonnet-4-6"
@@ -318,11 +318,7 @@ async def score_group_async(
         scored_rollouts.append(entry)
 
     import functools
-    bound_fn = (
-        functools.partial(fn, blind_actions=blind_actions)
-        if provider == "relative_haiku"
-        else fn
-    )
+    bound_fn = functools.partial(fn, blind_actions=blind_actions)
 
     try:
         results: list[dict] = await asyncio.to_thread(

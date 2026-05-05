@@ -181,6 +181,7 @@ def _cache_key(
     blind_actions: bool = False,
     reasoning_traces: Optional[list[str]] = None,
     blind_reasoning: bool = False,
+    screenshots_provided: bool = False,
 ) -> str:
     h = hashlib.sha256()
     payload = json.dumps(
@@ -193,6 +194,7 @@ def _cache_key(
             "blind_actions": blind_actions,
             "reasoning_traces": reasoning_traces,
             "blind_reasoning": blind_reasoning,
+            "screenshots_provided": screenshots_provided,
         },
         sort_keys=True,
         default=str,
@@ -241,6 +243,25 @@ def _sample_screenshots(screenshots: Optional[list[str]], k: int = 4) -> list[st
 
 
 def _media_type_from_path(path: str) -> str:
+    """Detect image format from file magic bytes, falling back to extension.
+
+    The fleet-cu-trajectories dataset saves screenshots as .jpeg but some are
+    actually PNG (browser screenshots rendered as PNG then saved with a .jpeg
+    extension). Reading the first 12 bytes is cheap and reliable.
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+        if header[:8] == b"\x89PNG\r\n\x1a\n":
+            return "image/png"
+        if header[:3] == b"\xff\xd8\xff":
+            return "image/jpeg"
+        if header[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+            return "image/webp"
+    except Exception:
+        pass
     ext = os.path.splitext(path)[1].lower()
     return {
         ".jpg": "image/jpeg",
@@ -252,7 +273,7 @@ def _media_type_from_path(path: str) -> str:
 
 def _screenshot_to_anthropic_block(s: str) -> dict:
     """Accepts either a base64 string or a file path. Returns an Anthropic
-    image content block. Detects JPEG/PNG/GIF/WebP from file extension."""
+    image content block. Detects format from file magic bytes, not extension."""
     if os.path.isfile(s):
         import base64
 
@@ -434,6 +455,7 @@ def score_trajectory_haiku(
     cache_key = _cache_key(
         task, actions, outcome, model, blind_outcome, blind_actions,
         reasoning_traces, blind_reasoning,
+        screenshots_provided=bool(screenshots),
     )
     cached = _cache_get(cache_key)
     if cached is not None:
