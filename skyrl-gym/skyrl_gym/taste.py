@@ -41,9 +41,11 @@ Behavior:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -162,6 +164,20 @@ def _rescale_to_unit_interval(weighted_total: Optional[float]) -> Optional[float
     return v
 
 
+def _save_judge_trace(record: dict) -> None:
+    run_name = os.environ.get("RUN_NAME", "unknown")
+    rollout_dir = os.path.expanduser(
+        os.environ.get("REWARD_ROLLOUT_DIR", "~/reward_rollouts")
+    )
+    try:
+        os.makedirs(rollout_dir, exist_ok=True)
+        path = os.path.join(rollout_dir, f"{run_name}_judge.jsonl")
+        with open(path, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("judge trace save failed: %s", e)
+
+
 def get_judge_provider_info() -> dict[str, str]:
     """Return the resolved (provider, model) for run-once metric logging."""
     provider, model, _, _ = _resolve_provider()
@@ -174,6 +190,7 @@ async def score_trajectory_async(
     outcome: bool,
     screenshots: Optional[list[str]] = None,
     reasoning_traces: Optional[list[str]] = None,
+    instance_id: Optional[str] = None,
 ) -> Optional[float]:
     """Async-friendly entrypoint to the taste judge.
 
@@ -251,11 +268,27 @@ async def score_trajectory_async(
     if not isinstance(result, dict):
         return None
 
+    score = _rescale_to_unit_interval(result.get("weighted_total"))
+    _save_judge_trace({
+        "timestamp": time.time(),
+        "run_name": os.environ.get("RUN_NAME", "unknown"),
+        "instance_id": instance_id,
+        "judge_type": "individual",
+        "provider": provider,
+        "model": model,
+        "outcome": outcome,
+        "n_actions": len(actions),
+        "weighted_total": result.get("weighted_total"),
+        "score": score,
+        "rationale": result.get("rationale"),
+        "raw_response": result.get("raw_response"),
+        "error": result.get("error"),
+    })
+
     if result.get("error"):
-        # The judge already logged; signal fall-back.
         return None
 
-    return _rescale_to_unit_interval(result.get("weighted_total"))
+    return score
 
 
 def get_group_judge_provider_info() -> dict[str, str]:
@@ -267,6 +300,7 @@ def get_group_judge_provider_info() -> dict[str, str]:
 async def score_group_async(
     task: str,
     rollouts: list[dict[str, Any]],
+    instance_id: Optional[str] = None,
 ) -> list[Optional[float]]:
     """Async-friendly group judge: scores all rollouts for one task relative to each other.
 
@@ -340,10 +374,30 @@ async def score_group_async(
         )
         return none_list
 
+    ts = time.time()
+    run_name = os.environ.get("RUN_NAME", "unknown")
     out: list[Optional[float]] = []
-    for r in results:
-        if not isinstance(r, dict) or r.get("error"):
+    for rank, r in enumerate(results):
+        if not isinstance(r, dict):
             out.append(None)
-        else:
-            out.append(_rescale_to_unit_interval(r.get("weighted_total")))
+            continue
+        score = _rescale_to_unit_interval(r.get("weighted_total"))
+        _save_judge_trace({
+            "timestamp": ts,
+            "run_name": run_name,
+            "instance_id": instance_id,
+            "judge_type": "group",
+            "group_rank": rank,
+            "group_size": n,
+            "provider": provider,
+            "model": model,
+            "outcome": rollouts[rank].get("outcome"),
+            "n_actions": len(rollouts[rank].get("actions", [])),
+            "weighted_total": r.get("weighted_total"),
+            "score": score,
+            "rationale": r.get("rationale"),
+            "raw_response": r.get("raw_response"),
+            "error": r.get("error"),
+        })
+        out.append(None if r.get("error") else score)
     return out

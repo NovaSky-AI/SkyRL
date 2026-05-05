@@ -946,7 +946,7 @@ class FleetTaskEnv(BaseTextEnv):
         taste_score: Optional[float]
         try:
             taste_score = await asyncio.wait_for(
-                score_trajectory_async(task_text, actions, outcome),
+                score_trajectory_async(task_text, actions, outcome, instance_id=self.task_key),
                 timeout=self.taste_judge_timeout_s,
             )
         except asyncio.TimeoutError:

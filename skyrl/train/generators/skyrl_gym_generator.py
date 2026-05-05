@@ -184,7 +184,7 @@ async def _apply_group_taste_rewards(
 
         try:
             taste_scores: list = await asyncio.wait_for(
-                score_group_async(task_text, rollouts),
+                score_group_async(task_text, rollouts, instance_id=instance_id),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
