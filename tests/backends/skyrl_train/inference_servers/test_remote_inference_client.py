@@ -236,25 +236,15 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def update_weights(request: Request):
         return {"status": "ok", "server_id": server_id}
 
-    @app.post("/v1/load_lora_adapter")
+    @app.post("/skyrl/v1/load_lora_adapter")
     async def load_lora_adapter(request: Request):
         body = await request.json()
         lora_name = body.get("lora_name")
         lora_path = body.get("lora_path")
-        load_inplace = body.get("load_inplace", True)
         if lora_name is None or lora_path is None:
             return JSONResponse(
                 status_code=400,
                 content={"object": "error", "message": "missing lora_name/lora_path", "type": "BadRequest"},
-            )
-        if lora_name in app.state.lora_registry and not load_inplace:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "object": "error",
-                    "message": f"adapter '{lora_name}' already loaded",
-                    "type": "BadRequest",
-                },
             )
         app.state.lora_registry[lora_name] = lora_path
         return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
@@ -912,22 +902,13 @@ class TestLoRAControlPlane:
     @pytest.mark.asyncio
     async def test_load_lora_adapter_inplace_reload(self, client, mock_servers):
         await client.load_lora_adapter("lora-X", "/tmp/path/v1")
-        await client.load_lora_adapter("lora-X", "/tmp/path/v2", load_inplace=True)
+        await client.load_lora_adapter("lora-X", "/tmp/path/v2")
 
         registries = await _get_lora_registries(mock_servers["server_urls"])
         for reg in registries:
             assert reg.get("lora-X") == "/tmp/path/v2"
 
         await client.unload_lora_adapter("lora-X")
-
-    @pytest.mark.asyncio
-    async def test_load_lora_adapter_inplace_false_raises_on_conflict(self, client):
-        await client.load_lora_adapter("lora-conflict", "/tmp/path/orig")
-        try:
-            with pytest.raises(aiohttp.ClientResponseError):
-                await client.load_lora_adapter("lora-conflict", "/tmp/path/other", load_inplace=False)
-        finally:
-            await client.unload_lora_adapter("lora-conflict")
 
     @pytest.mark.asyncio
     async def test_unload_lora_adapter_fans_out(self, client, mock_servers):

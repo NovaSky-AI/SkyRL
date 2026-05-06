@@ -1,21 +1,28 @@
 import copy
 from argparse import Namespace
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import ray
 from loguru import logger
 from ray.util.placement_group import placement_group as ray_placement_group
 
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl.train.config import InferenceEngineConfig
+from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
 )
 
+from .common import SERVER_PORT_STRIDE
+from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
-from .utils import build_router_args, get_pd_cli_args
+from .utils import (
+    _uses_lora_weight_sync,
+    build_router_args,
+    build_vllm_cli_args,
+    get_pd_cli_args,
+)
 from .vllm_router import VLLMRouter
 
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
@@ -24,14 +31,20 @@ VLLM_START_PORT = 8000
 
 @dataclass
 class InferenceServerSetup:
-    """Simple dataclass for inference server setup result."""
+    """Inference server setup result with optional router and groups.
 
-    router: "VLLMRouter"
+    ``router`` is ``None`` when the caller reuses a fully-external
+    proxy (no internal ``VLLMRouter`` is started). The three
+    server-group lists default to empty when servers are external or
+    when the relevant branch (PD vs non-PD) is not active.
+    """
+
     proxy_url: str
     server_urls: List[str]
-    server_groups: Optional[List["ServerGroup"]] = None
-    prefill_server_groups: Optional[List["ServerGroup"]] = None
-    decode_server_groups: Optional[List["ServerGroup"]] = None
+    router: Optional[VLLMRouter] = None
+    server_groups: List[ServerGroup] = field(default_factory=list)
+    prefill_server_groups: List[ServerGroup] = field(default_factory=list)
+    decode_server_groups: List[ServerGroup] = field(default_factory=list)
 
 
 def create_inference_servers(
@@ -92,7 +105,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + i * servers_per_group,
+                start_port=VLLM_START_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -110,7 +123,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(pd_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group,
+                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -149,6 +162,7 @@ def create_inference_servers(
             router=router,
             proxy_url=proxy_url,
             server_urls=server_urls,
+            server_groups=prefill_server_groups + decode_server_groups,
             prefill_server_groups=prefill_server_groups,
             decode_server_groups=decode_server_groups,
         )
@@ -167,7 +181,7 @@ def create_inference_servers(
                 cli_args=cli_args,
                 num_servers=ie_cfg.data_parallel_size,
                 placement_group=placement_group,
-                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size,
+                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
@@ -196,3 +210,81 @@ def create_inference_servers(
             server_urls=server_urls,
             server_groups=server_groups,
         )
+
+
+def build_new_inference_client(
+    cfg: SkyRLTrainConfig,
+    tokenizer,
+    placement_group: Optional[ResolvedPlacementGroup] = None,
+) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
+    """Build the new HTTP-based inference client and supporting state.
+
+    Resolves the ``(external_proxy_url, external_server_urls)`` matrix:
+    both set means fully external (reuse both as-is); proxy only means
+    the external proxy serves both data and control planes; servers
+    only spawns an internal router over the external servers; neither
+    spawns internal server groups + router via
+    ``create_inference_servers``. Then builds the
+    ``RemoteInferenceClient`` against the resolved endpoints.
+
+    Args:
+        cfg: SkyRL train config.
+        tokenizer: HF tokenizer for the policy model.
+        placement_group: Resolved placement group when colocated, ``None``
+            otherwise. Passed through to ``create_inference_servers`` in
+            the internal-servers branch; ignored on external branches.
+
+    Returns:
+        Tuple of (client, server_setup). ``server_setup.router`` is
+        ``None`` for fully external setups; the three group lists are
+        empty when servers are external or when their PD branch is
+        inactive.
+    """
+    ie_cfg = cfg.generator.inference_engine
+    external_proxy_url = ie_cfg.external_proxy_url
+    external_server_urls = ie_cfg.external_server_urls
+    has_external_proxy = external_proxy_url is not None
+    has_external_servers = external_server_urls is not None
+
+    if has_external_proxy and has_external_servers:
+        proxy_url = external_proxy_url
+        server_urls = list(external_server_urls)
+        logger.info(
+            f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
+        )
+        server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls)
+    elif has_external_proxy and not has_external_servers:
+        proxy_url = external_proxy_url
+        server_urls = [proxy_url]
+        logger.info(f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}")
+        server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls)
+    elif has_external_servers and not has_external_proxy:
+        server_urls = list(external_server_urls)
+        router_args = build_router_args(ie_cfg, server_urls=server_urls)
+        router = VLLMRouter(router_args, log_path=cfg.trainer.log_path)
+        proxy_url = router.start()
+        logger.info(
+            f"HTTP Inference: Created router over external servers - "
+            f"server_urls={server_urls}, proxy_url={proxy_url}"
+        )
+        server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls, router=router)
+    else:
+        cli_args = build_vllm_cli_args(cfg)
+        server_setup = create_inference_servers(
+            ie_cfg,
+            cli_args,
+            log_path=cfg.trainer.log_path,
+            placement_group=placement_group,
+        )
+
+    client = RemoteInferenceClient(
+        proxy_url=server_setup.proxy_url,
+        server_urls=server_setup.server_urls,
+        model_name=cfg.trainer.policy.model.path,
+        enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+        uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
+        data_parallel_size=ie_cfg.data_parallel_size,
+        tokenizer=tokenizer,
+    )
+
+    return client, server_setup

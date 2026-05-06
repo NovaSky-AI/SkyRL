@@ -226,6 +226,12 @@ class RemoteInferenceClient:
     enable_return_routed_experts: bool = False
     """Whether to return routed expert indices (R3 / rollout router replay)."""
 
+    uses_lora_weight_sync: bool = False
+    """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
+    `sleep()` is forced to level=1: level=2 discards the base model from VRAM with no CPU backup,
+    and LoRA-only broadcasts cannot repopulate it. Must be kept in sync with the same gate vLLM
+    uses for `enable_lora` (see `_uses_lora_weight_sync` in inference_servers/utils.py)."""
+
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
@@ -963,6 +969,15 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
+        # Mirror BaseVLLMInferenceEngine.sleep: when the trainer syncs LoRA adapters
+        # only, force level=1 so the base model survives via CPU backup. level=2
+        # discards weights with no source to restore from on wake_up(["weights"]).
+        if self.uses_lora_weight_sync and level != 1:
+            logger.info(
+                "Forcing sleep level=1 (uses_lora_weight_sync=True); requested level=%d would discard the base model.",
+                level,
+            )
+            level = 1
         params: Dict[str, Any] = {"level": str(level)}
         if tags:
             params["tags"] = tags
@@ -1123,41 +1138,39 @@ class RemoteInferenceClient:
         self,
         lora_name: str,
         lora_path: str,
-        load_inplace: bool = True,
     ) -> Dict[str, Any]:
         """
-        Load (or reload) a LoRA adapter on all backend servers via /v1/load_lora_adapter.
+        Load (or reload) a LoRA adapter on all backend servers via the SkyRL
+        custom /skyrl/v1/load_lora_adapter endpoint.
 
         After loading, generation/chat/completion requests can target this LoRA
-        by passing ``model=lora_name`` (or by setting it as the client's
-        ``model_name``). When ``load_inplace=True`` and an adapter with the
-        same name is already registered on the server, vLLM replaces it
-        inplace, preserving its internal int id.
+        by passing ``model=lora_name``.
+
+        TODO(aaron): switch back to vLLM's /v1/load_lora_adapter once the
+        upstream fix in https://github.com/vllm-project/vllm/pull/41482 lands
+        in a vLLM release we depend on.
+
+        The custom endpoint (defined in vllm_server_actor.py) wraps add_lora
+        with load_inplace=True (so the engine reloads the freshly-written
+        safetensors) and then resets the cached LoRARequest's load_inplace=False
+        (so subsequent generates don't reload from disk on every step). This
+        avoids two vLLM 0.19.0 bugs that surface under colocate_all + tp=1 +
+        num_engines>=2 — see vllm_server_actor.py:_skyrl_load_lora_adapter for
+        the detailed explanation.
 
         Args:
             lora_name: Name to register the adapter under on each server.
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
-            load_inplace: When True (default), reloading a previously-loaded and cached
-                adapter with the same name replaces it with the on-disk lora.
 
         Returns:
             Dict mapping server_url to response.
         """
-        payload = {
-            "lora_name": lora_name,
-            "lora_path": lora_path,
-            "load_inplace": load_inplace,
-        }
-
-        # Call /v1/load_lora_adapter on all servers directly.
-        # This endpoint returns a plain text response (not JSON), so we use a
-        # custom call instead of _call_all_servers which expects JSON.
         session = await self._get_session()
 
         async def _load_on_server(server_url: str):
-            url = f"{server_url}/v1/load_lora_adapter"
+            url = f"{server_url}/skyrl/v1/load_lora_adapter"
+            payload = {"lora_name": lora_name, "lora_path": lora_path}
             async with session.post(url, json=payload) as resp:
-                # vLLM returns 200 with text body on success, or JSON ErrorResponse on failure
                 if resp.status >= 400:
                     body = await resp.json()
                     raise_for_status(resp, body)

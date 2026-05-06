@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.setup import create_inference_servers
 from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
     build_vllm_cli_args,
 )
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
@@ -442,7 +443,13 @@ class InferenceEngineState:
         """
         if self.router is not None:
             self.router.shutdown()
-        for group_list in (self.server_groups, self.prefill_server_groups, self.decode_server_groups):
+        # Handle shutdown for prefill and decode server groups separately
+        group_lists = (
+            [self.server_groups]
+            if not self.prefill_server_groups
+            else [self.prefill_server_groups, self.decode_server_groups]
+        )
+        for group_list in group_lists:
             if group_list is not None:
                 for group in group_list:
                     group.shutdown()
@@ -508,7 +515,6 @@ class InferenceEngineState:
         num_inference_engines: Optional[int] = None,
         sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
         enable_lora: bool = False,
-        active_lora_name: Optional[str] = None,
         lora_max_loras: Optional[int] = None,
         lora_max_cpu_loras: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
@@ -601,8 +607,6 @@ class InferenceEngineState:
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
-            if cli_args.enable_lora and active_lora_name is None:
-                active_lora_name = "skyrl-lora"
 
             setup = create_inference_servers(
                 ie_cfg,
@@ -632,6 +636,7 @@ class InferenceEngineState:
                 server_urls=server_urls,
                 model_name=base_model_name,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+                uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
                 data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )

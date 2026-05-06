@@ -8,6 +8,7 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_freeze_moe_router.py
 """
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -54,6 +55,7 @@ class _Model(nn.Module):
         self.decoder = _Decoder(n_layers=n_layers, **mlp_kwargs)
 
 
+@pytest.mark.megatron
 def test_freeze_moe_router_freezes_router_params():
     m = _Model()
     # sanity: all params start trainable
@@ -68,6 +70,7 @@ def test_freeze_moe_router_freezes_router_params():
         assert layer.mlp.router.bias.requires_grad is False
 
 
+@pytest.mark.megatron
 def test_freeze_moe_router_leaves_other_params_trainable():
     m = _Model()
 
@@ -80,6 +83,7 @@ def test_freeze_moe_router_leaves_other_params_trainable():
         assert layer.mlp.shared_experts.gate_bias.requires_grad is True
 
 
+@pytest.mark.megatron
 def test_freeze_moe_router_handles_layer_without_router():
     # PP/VPP stages without MoE layers: layer.mlp has no .router attribute.
     class _NonMoEMLP(nn.Module):
@@ -102,6 +106,7 @@ def test_freeze_moe_router_handles_layer_without_router():
         assert layer.mlp.linear_fc1.weight.requires_grad is True
 
 
+@pytest.mark.megatron
 def test_freeze_moe_router_no_bias():
     class _MoEMLP(nn.Module):
         def __init__(self):
@@ -130,6 +135,7 @@ def test_freeze_moe_router_no_bias():
     assert m.decoder.layers[0].mlp.linear_fc1.weight.requires_grad
 
 
+@pytest.mark.megatron
 def test_freeze_moe_router_list():
     m = _Model()
     # sanity: all params start trainable

@@ -3,7 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
@@ -226,82 +226,6 @@ class HFModelWrapper(nn.Module):
             else chunked_entropy_from_logits
         )
 
-    @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
-        Tuple[torch.LongTensor, torch.LongTensor],
-        Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],
-    ]:
-        generate_args = {
-            "input_ids": input_ids,
-            "top_k": kwargs.get("top_k", None),
-            "top_p": kwargs.get("top_p", None),
-            "min_p": kwargs.get("min_p", None),
-            "do_sample": kwargs.get("do_sample", True),
-            "early_stopping": kwargs.get("num_beams", 1) > 1,
-            "temperature": kwargs.get("temperature", 1),
-            "use_cache": True,
-            "num_beams": kwargs.get("num_beams", 1),
-            "attention_mask": kwargs.get("attention_mask"),
-            "eos_token_id": kwargs.get("eos_token_id"),
-            "pad_token_id": kwargs.get("pad_token_id"),
-            "min_new_tokens": kwargs.get("min_new_tokens", 1),
-        }
-
-        if kwargs.get("max_new_tokens", None):
-            generate_args["max_new_tokens"] = kwargs.get("max_new_tokens")
-        if kwargs.get("max_length", None):
-            generate_args["max_length"] = kwargs.get("max_length")
-
-        # Call generate
-        sequences = self.model.generate(**generate_args)
-
-        # Prepare mask tensor
-        eos_token_id = generate_args["eos_token_id"]
-        pad_token_id = generate_args["pad_token_id"]
-
-        return self.process_sequences(sequences, input_ids.size(1), eos_token_id, pad_token_id)
-
-    def process_sequences(self, sequences: torch.Tensor, input_len, eos_token_id, pad_token_id):
-        """
-        Process generated sequences to create attention masks and action masks.
-
-        Args:
-            sequences (torch.Tensor): Generated sequence tensor
-            input_len (int): Length of the input sequence
-            eos_token_id (int): Token ID for the end-of-sequence token
-            pad_token_id (int): Token ID for the padding token
-
-        Returns:
-            tuple: A tuple containing three elements:
-                - sequences: Original sequence
-                - attention_mask: Attention mask indicating valid token positions
-                - action_mask: Action mask indicating valid action token positions
-        """
-        # Create initial attention mask by marking positions that are neither EOS nor padding tokens
-        attention_mask = (sequences.ne(eos_token_id) & sequences.ne(pad_token_id)).to(dtype=torch.long)
-        seq_length = attention_mask.size(1)
-
-        # Find the position of the last valid token in each sequence
-        eos_indices = seq_length - attention_mask.long().fliplr().argmax(dim=1, keepdim=True).clamp(min=1)
-
-        # Handle cases where EOS tokens might appear in the middle of the prompt (for Llama3 and Qwen2 models)
-        # Find the position of the first valid token in each sequence
-        first_token_indices = attention_mask.long().argmax(dim=1, keepdim=True)
-        # Create position mask
-        mask = torch.arange(seq_length).unsqueeze(0).expand(sequences.size(0), -1).to(device=sequences.device)
-        # Generate final attention mask, keeping only positions between first and last valid tokens
-        attention_mask = (mask >= first_token_indices) & (mask <= eos_indices).to(dtype=torch.long)
-
-        # In reinforcement learning, the state transition is represented as:
-        # state_i (current token) + action_i (next token) -> state_i+1 (next token)
-        # Generate state sequence from input_len-1 to second-to-last token
-        state_seq = sequences[:, input_len - 1 : -1]
-        # Generate action mask indicating valid action token positions
-        action_mask = state_seq.ne(eos_token_id) & state_seq.ne(pad_token_id)
-        action_mask[:, 0] = 1
-
-        return sequences, attention_mask, action_mask
-
     def forward(
         self,
         sequences: torch.LongTensor,
@@ -461,21 +385,6 @@ class HFModelWrapper(nn.Module):
 
     def gradient_checkpointing_disable(self):
         self.model.gradient_checkpointing_disable()
-
-    def print_trainable_parameters(self):
-        self.model.print_trainable_parameters()
-
-
-def reset_position_ids(attention_mask):
-    position_ids = torch.zeros_like(attention_mask, dtype=torch.long)
-    for i in range(attention_mask.size(0)):
-        mask = attention_mask[i]
-        seq_num = mask.max().item()
-        for index in range(1, seq_num + 1):
-            sample_mask = mask == index
-            sample_length = sample_mask.sum().item()
-            position_ids[i, sample_mask] = torch.arange(sample_length, device=mask.device)
-    return position_ids
 
 
 def _get_critic_model(

@@ -156,7 +156,7 @@ async def test_lora_inplace_reload_isolated(ray_init_fixture, qwen3_meowing_lora
             # Inplace reload A from B's adapter path. vLLM keeps the same
             # int_id but should swap the underlying weights; B must be entirely
             # unaffected.
-            await client.load_lora_adapter("lora-A", qwen3_woofing_lora_files, load_inplace=True)
+            await client.load_lora_adapter("lora-A", qwen3_woofing_lora_files)
 
             out_A_after = await _generate_with_lora(client, prompt_token_ids, "lora-A")
             out_B_after = await _generate_with_lora(client, prompt_token_ids, "lora-B")
