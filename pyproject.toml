@@ -98,7 +98,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.20.0; sys_platform == 'linux'",
+    "vllm==0.20.1; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
@@ -118,7 +118,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.20.0; sys_platform == 'linux'",
+    "vllm==0.20.1; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
@@ -270,7 +270,7 @@ explicit = true
 
 [[tool.uv.index]]
 name = "vllm-cu129"
-url = "https://wheels.vllm.ai/0.20.0/cu129"
+url = "https://wheels.vllm.ai/0.20.1/cu129"
 explicit = true
 
 [tool.uv.sources]
@@ -278,7 +278,7 @@ skyrl-gym = { path = "./skyrl-gym", editable = true }
 # flashinfer-jit-cache 0.6.8 is only published against cu128 / cu129. Keep the
 # cu128 index since torch is also cu128 here.
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.20.0 PyPI wheel is built against CUDA 13 (libcudart.so.13). The system
+# vllm 0.20.1 PyPI wheel is built against CUDA 13 (libcudart.so.13). The system
 # has CUDA 12.9 with torch 2.11+cu129, so use the cu129 wheel from the vllm
 # wheels index (not on PyPI).
 vllm = [
