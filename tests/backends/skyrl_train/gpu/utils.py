@@ -398,7 +398,7 @@ def ray_init_for_tests():
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params, tokenizer=None):
+async def run_inference(client, prompts, sampling_params, tokenizer=None, model=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
@@ -414,7 +414,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-    return await client.generate(engine_input)
+    return await client.generate(engine_input, model=model)
 
 
 @dataclass
