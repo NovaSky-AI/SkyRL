@@ -90,7 +90,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.distributed_executor_backend="mp" \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  generator.inference_engine.engine_init_kwargs=$ENGINE_INIT_KWARGS \
+  generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
