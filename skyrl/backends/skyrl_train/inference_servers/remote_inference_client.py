@@ -114,23 +114,6 @@ def _extract_session_id_and_body(
     return session_id, clean_body
 
 
-def _require_model(body: Dict[str, Any], method_name: str) -> str:
-    """Return ``body["model"]``, raising ``ValueError`` if missing or empty.
-
-    The client deliberately does not fall back to any default — every caller
-    must explicitly identify the target base model or LoRA adapter so multi-
-    LoRA routing is unambiguous.
-    """
-    model = body.get("model")
-    if not model:
-        raise ValueError(
-            f"RemoteInferenceClient.{method_name}: request body must include a "
-            f"non-empty 'model' field identifying the target base model or "
-            f"LoRA adapter."
-        )
-    return model
-
-
 class PauseMode(Enum):
     """
     Pause mode for inference servers.
@@ -343,10 +326,30 @@ class RemoteInferenceClient:
     # Data Plane
     # ---------------------------
 
+    def _resolve_model(self, model: Optional[str], method_name: str) -> str:
+        """Pick the target model name for a data-plane call.
+
+        - If ``model`` is non-empty, use it as-is.
+        - Otherwise, when LoRA is in use (``uses_lora_weight_sync=True``) raise
+          ``ValueError`` — the caller must name the adapter explicitly because
+          falling back to the base model would silently bypass LoRA.
+        - Otherwise return ``self.model_name`` (the base model the server was
+          started with).
+        """
+        if model:
+            return model
+        if self.uses_lora_weight_sync:
+            raise ValueError(
+                f"RemoteInferenceClient.{method_name}: `model` is required when LoRA "
+                f"is enabled (uses_lora_weight_sync=True). Pass the LoRA adapter name "
+                f"explicitly so the request doesn't silently target the base model."
+            )
+        return self.model_name
+
     async def generate(
         self,
         input_batch: InferenceEngineInput,
-        model: str,
+        model: Optional[str] = None,
     ) -> InferenceEngineOutput:
         """
         Generate completions via /v1/completions.
@@ -362,14 +365,14 @@ class RemoteInferenceClient:
 
         Args:
             input_batch: Contains prompt_token_ids, sampling_params, and optional session_ids.
-            model: Required model identifier — the base model name or a loaded
-                LoRA adapter name. Callers must always supply this; the client
-                does not fall back to any default. Use ``self.model_name`` if
-                you want the client's configured default.
+            model: Optional model identifier — the base model name or a loaded
+                LoRA adapter name. When omitted, defaults to ``self.model_name``
+                if LoRA is not in use; raises ``ValueError`` if it is.
 
         Returns:
             InferenceEngineOutput with responses, response_ids, and stop_reasons.
         """
+        model = self._resolve_model(model, "generate")
 
         prompt_token_ids = input_batch.get("prompt_token_ids")
         if prompt_token_ids is None:
@@ -591,14 +594,16 @@ class RemoteInferenceClient:
 
         Args:
             request_payload: SampleRequestPayload with {"json": <request-body>}.
-                Expected keys in json: model, prompt, num_samples, sampling_params,
+                Expected keys in json: prompt, num_samples, sampling_params,
                 session_id, include_prompt_logprobs (bool), topk_prompt_logprobs (int).
+                ``model`` is optional and resolved via ``_resolve_model``.
 
         Returns:
             SampleResponse with type="sample", sequences list, prompt_logprobs, and topk_prompt_logprobs.
         """
         session_id, body = _extract_session_id_and_body(request_payload)
-        model = _require_model(body, "sample")
+        model = self._resolve_model(body.get("model"), "sample")
+        body["model"] = model
 
         prompt = body.get("prompt", {})
         num_samples = body.get("num_samples", 1)
@@ -713,16 +718,16 @@ class RemoteInferenceClient:
         Args:
             request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
                 The request body must be an OpenAI-compatible chat completion
-                request and is required to include a ``model`` field
-                identifying the base model or a loaded LoRA adapter; the
-                client does not fall back to any default. ``session_id`` can
-                be included in the body for consistent routing.
+                request. ``model`` is optional and resolved via
+                ``_resolve_model``; if omitted the body is mutated to inject the
+                resolved value before forwarding to vLLM. ``session_id`` can be
+                included in the body for consistent routing.
 
         Returns:
             OpenAI-compatible chat completion response.
         """
         session_id, body = _extract_session_id_and_body(request_payload)
-        _require_model(body, "chat_completion")
+        body["model"] = self._resolve_model(body.get("model"), "chat_completion")
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -745,14 +750,16 @@ class RemoteInferenceClient:
 
         Args:
             request_payload: Dict with {"json": <request-body>}.
-                The request body should be OpenAI-compatible chat completion request.
-                session_id can be included in json for consistent routing.
+                The request body should be OpenAI-compatible chat completion
+                request. ``model`` is optional and resolved via
+                ``_resolve_model``. session_id can be included in json for
+                consistent routing.
 
         Returns:
             Rendered chat completion response (template-applied prompt and token IDs).
         """
         session_id, body = _extract_session_id_and_body(request_payload)
-        _require_model(body, "render_chat_completion")
+        body["model"] = self._resolve_model(body.get("model"), "render_chat_completion")
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -775,14 +782,16 @@ class RemoteInferenceClient:
 
         Args:
             request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
-                The request body should be OpenAI-compatible completion request.
-                session_id can be included in json for consistent routing.
+                The request body should be OpenAI-compatible completion
+                request. ``model`` is optional and resolved via
+                ``_resolve_model``. session_id can be included in json for
+                consistent routing.
 
         Returns:
             OpenAI-compatible completion response.
         """
         session_id, body = _extract_session_id_and_body(request_payload)
-        _require_model(body, "completion")
+        body["model"] = self._resolve_model(body.get("model"), "completion")
 
         headers = {"Content-Type": "application/json"}
         if session_id:

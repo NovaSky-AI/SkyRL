@@ -563,7 +563,7 @@ async def test_client_generate(vllm_server: InferenceEngineState):
         sampling_params=sampling_params,
     )
 
-    output = await client.generate(engine_input, model=client.model_name)
+    output = await client.generate(engine_input)
 
     assert len(output["responses"]) == 1
     assert len(output["response_ids"]) == 1
@@ -595,7 +595,7 @@ async def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngine
 
 def _build_sample_payload(
     token_ids: List[int],
-    model: str = MODEL_QWEN2_5,
+    model: str = SERVED_MODEL_NAME,
     num_samples: int = 1,
     sampling_params: Dict[str, Any] | None = None,
     session_id: str | None = None,
