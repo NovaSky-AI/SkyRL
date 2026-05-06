@@ -7,7 +7,7 @@ which is the actual code path used in SkyRL's MegatronModelWrapper.
 
 Usage (single GPU, torchrun required for distributed init):
     uv run --isolated --extra megatron torchrun --nproc_per_node=1 \\
-        examples/benchmarks/bench_chunked_logprobs.py
+        skyrl/benchmarks/bench_chunked_logprobs.py
 """
 
 import os
@@ -16,10 +16,6 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-
-# Must set NCCL env before initialising the process group
-os.environ.setdefault("NCCL_NET", "Socket")
-os.environ.setdefault("NCCL_NET_PLUGIN", "none")
 
 VOCAB_SIZES = [32000, 64000, 128000]
 SEQ_LENS = [32768, 65536, 131072]
@@ -163,29 +159,29 @@ def main():
                 torch.cuda.empty_cache()
                 continue
 
-            # ----- warmup (skip OOM-prone chunk sizes gracefully) -----
-            oom_chunk_sizes = set()
+            # ----- single pass: warmup + benchmark inline per chunk size -----
+            results: dict[Optional[int], tuple[Optional[float], Optional[float]]] = {}
             for cs in CHUNK_SIZES:
                 try:
                     for _ in range(WARMUP_REPS):
                         measure(logits, target, vocab_start_index, vocab_end_index, cs, tp_group, reps=1)
+                    t_cs, mem_cs = measure(
+                        logits, target, vocab_start_index, vocab_end_index, cs, tp_group, reps=BENCH_REPS
+                    )
+                    results[cs] = (t_cs, mem_cs)
                 except torch.OutOfMemoryError:
-                    oom_chunk_sizes.add(cs)
-                    torch.cuda.empty_cache()
+                    results[cs] = (None, None)
+                finally:
+                    torch.cuda.empty_cache()  # isolate between chunk sizes
 
-            # ----- benchmark: collect baseline (no-chunk) first -----
-            if None in oom_chunk_sizes:
-                t_baseline, mem_baseline = None, None
-            else:
-                t_baseline, mem_baseline = measure(
-                    logits, target, vocab_start_index, vocab_end_index, None, tp_group, reps=BENCH_REPS
-                )
+            t_baseline, mem_baseline = results[None]
 
             # ----- print one row per chunk_size -----
             for cs in CHUNK_SIZES:
                 cs_label = "None" if cs is None else str(cs)
+                t_cs, mem_cs = results[cs]
 
-                if cs in oom_chunk_sizes:
+                if t_cs is None:
                     if dist.get_rank() == 0:
                         print(
                             f"{vocab_size:>10,}  "
@@ -197,27 +193,6 @@ def main():
                             f"{'OOM':>{col_w}}"
                         )
                     continue
-
-                if cs is None:
-                    t_cs, mem_cs = t_baseline, mem_baseline
-                else:
-                    try:
-                        t_cs, mem_cs = measure(
-                            logits, target, vocab_start_index, vocab_end_index, cs, tp_group, reps=BENCH_REPS
-                        )
-                    except torch.OutOfMemoryError:
-                        torch.cuda.empty_cache()
-                        if dist.get_rank() == 0:
-                            print(
-                                f"{vocab_size:>10,}  "
-                                f"{seq_len:>10,}  "
-                                f"{cs_label:>10}  "
-                                f"{'OOM':>{col_w}}  "
-                                f"{'OOM':>{col_w}}  "
-                                f"{'OOM':>{col_w}}  "
-                                f"{'OOM':>{col_w}}"
-                            )
-                        continue
 
                 mem_cs_mb = mem_cs / (1024**2)
                 if t_baseline is not None and t_cs > 0:

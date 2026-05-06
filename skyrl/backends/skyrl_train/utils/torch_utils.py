@@ -28,16 +28,14 @@ except ImportError:
     FLASH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
-CHUNK_SIZE = 1024
-
-
 def chunked_cross_entropy_from_log_probs(
-    logprobs: Float[torch.Tensor, "batch_size seqlen vocab_size"], requires_grad: bool = False
+    logprobs: Float[torch.Tensor, "batch_size seqlen vocab_size"],
+    requires_grad: bool = False,
+    chunk_size: int = 1024,
 ) -> Float[torch.Tensor, "batch_size seqlen"]:
     cm = nullcontext() if requires_grad else torch.no_grad()
     with cm:
         # Calculate entropy in chunks to avoid OOM
-        chunk_size = CHUNK_SIZE
         num_chunks = (logprobs.size(1) + chunk_size - 1) // chunk_size
         entropy_tensor = torch.zeros(
             (logprobs.shape[0], logprobs.shape[1]), dtype=logprobs.dtype, device=logprobs.device
@@ -61,6 +59,7 @@ def chunked_entropy_from_logits(
     logits: Float[torch.Tensor, "batch_size seqlen vocab"],
     requires_grad: bool = False,
     attention_mask: Float[torch.Tensor, "batch_size seqlen"] = None,
+    chunk_size: int = 1024,
 ) -> Float[torch.Tensor, "batch_size seqlen"]:
     """Chunked entropy calculation from logits.
 
@@ -88,7 +87,6 @@ def chunked_entropy_from_logits(
     cm = nullcontext() if requires_grad else torch.no_grad()
     with cm:
         # Calculate entropy in chunks to avoid OOM
-        chunk_size = CHUNK_SIZE
         num_chunks = (logits.size(1) + chunk_size - 1) // chunk_size
         entropy_tensor = torch.zeros((logits.shape[0], logits.shape[1]), dtype=logits.dtype, device=logits.device)
 
