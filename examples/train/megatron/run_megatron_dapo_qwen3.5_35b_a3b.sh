@@ -62,11 +62,10 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 # Qwen3.5 flags
 USE_SAMPLE_PACKING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
-
+ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/vllm-project/vllm/issues/36921#issuecomment-4109702738
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 export _SKYRL_USE_NEW_INFERENCE=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
-export RAY_CGRAPH_get_timeout=1800
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -91,7 +90,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.distributed_executor_backend="mp" \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  generator.inference_engine.engine_init_kwargs='{"gdn_prefill_backend": "triton"}' \
+  generator.inference_engine.engine_init_kwargs=$ENGINE_INIT_KWARGS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
