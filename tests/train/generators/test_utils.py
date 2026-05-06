@@ -3,6 +3,7 @@ uv run --extra dev --extra skyrl-train --isolated pytest tests/train/generators/
 """
 
 import os
+from unittest.mock import patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -780,7 +781,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
-            messages, qwen3_tokenizer, chat_template=chat_template
+            messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": chat_template}
         )
 
         if use_custom_template:
@@ -804,16 +805,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         # Verify our assumptions about token structure
-        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, chat_template=chat_template)
+        _tok_kwargs = {"chat_template": chat_template} if chat_template else None
+        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs)
         assert len(generation_prompt_ids) == 3, "Qwen3 generation prompt should be 3 tokens: <|im_start|>assistant\\n"
 
         user_msg_tokens = encode_messages_subset(
-            [{"role": "user", "content": "1"}], qwen3_tokenizer, chat_template=chat_template
+            [{"role": "user", "content": "1"}], qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs
         )
         assert len(user_msg_tokens) == 6, "User message '1' should be 6 tokens: <|im_start|>user\\n1<|im_end|>\\n"
 
         assistant_msg_tokens = encode_messages_subset(
-            [{"role": "assistant", "content": "b"}], qwen3_tokenizer, chat_template=chat_template
+            [{"role": "assistant", "content": "b"}], qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs
         )
 
         if use_custom_template:
@@ -884,7 +886,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
-            messages, qwen3_tokenizer, chat_template=chat_template
+            messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": chat_template}
         )
 
         # For Qwen3 multi-turn with thinking - both templates produce the same result
@@ -899,16 +901,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         # Verify our assumptions about token structure
-        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, chat_template=chat_template)
+        _tok_kwargs = {"chat_template": chat_template} if chat_template else None
+        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs)
         assert len(generation_prompt_ids) == 3, "Qwen3 generation prompt should be 3 tokens"
 
         user_msg_tokens = encode_messages_subset(
-            [{"role": "user", "content": "1"}], qwen3_tokenizer, chat_template=chat_template
+            [{"role": "user", "content": "1"}], qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs
         )
         assert len(user_msg_tokens) == 6, "User message '1' should be 6 tokens"
 
         assistant_msg_tokens = encode_messages_subset(
-            [{"role": "assistant", "content": thinking_content}], qwen3_tokenizer, chat_template=chat_template
+            [{"role": "assistant", "content": thinking_content}], qwen3_tokenizer, tokenizer_kwargs=_tok_kwargs
         )
         # For Qwen3 with thinking_content "<think>\nmock thinking\n</think>\n\nb":
         # <|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n
@@ -1064,7 +1067,9 @@ class TestCustomChatTemplateSupport:
         )
 
         # Custom template: adds [test] prefix instead of thinking block
-        custom_tokens = encode_messages_subset(messages, qwen3_tokenizer, chat_template=simple_custom_template)
+        custom_tokens = encode_messages_subset(
+            messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": simple_custom_template}
+        )
         custom_decoded = qwen3_tokenizer.decode(custom_tokens)
         expected_custom_str = "<|im_start|>assistant\n[test]Hello<|im_end|>\n"
         assert custom_decoded == expected_custom_str, (
@@ -1085,7 +1090,9 @@ class TestCustomChatTemplateSupport:
         )
 
         # Custom template: generation prompt is "<|im_start|>assistant\n[test]"
-        custom_gen_prompt = get_generation_prompt_ids(qwen3_tokenizer, chat_template=simple_custom_template)
+        custom_gen_prompt = get_generation_prompt_ids(
+            qwen3_tokenizer, tokenizer_kwargs={"chat_template": simple_custom_template}
+        )
         expected_custom_gen_prompt_str = "<|im_start|>assistant\n[test]"
         assert qwen3_tokenizer.decode(custom_gen_prompt) == expected_custom_gen_prompt_str, (
             f"Custom generation prompt should be:\n{repr(expected_custom_gen_prompt_str)}\n"
@@ -1096,3 +1103,36 @@ class TestCustomChatTemplateSupport:
         assert (
             default_gen_prompt != custom_gen_prompt
         ), "Generation prompts should be different between default and custom templates"
+
+    def test_tokenizer_kwargs_forwarded_through_get_response_ids(self, qwen3_tokenizer):
+        """Verify that tokenizer_kwargs passed to get_response_ids_and_loss_mask_from_messages
+        are forwarded unchanged to apply_chat_template.
+
+        Mocks apply_chat_template and asserts that a custom kwarg (chat_template) reaches it.
+        """
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        custom_template = "...some template..."
+        tokenizer_kwargs = {"chat_template": custom_template}
+
+        captured_kwargs = []
+        real_apply = qwen3_tokenizer.__class__.apply_chat_template
+
+        def capturing_apply(self_tok, *args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return real_apply(self_tok, *args, **kwargs)
+
+        with patch.object(type(qwen3_tokenizer), "apply_chat_template", capturing_apply):
+            try:
+                get_response_ids_and_loss_mask_from_messages(
+                    messages, qwen3_tokenizer, tokenizer_kwargs=tokenizer_kwargs
+                )
+            except Exception:
+                pass  # template may be invalid; we only care that the kwarg was forwarded
+
+        assert len(captured_kwargs) > 0, "apply_chat_template was never called"
+        assert all(
+            kw.get("chat_template") == custom_template for kw in captured_kwargs
+        ), f"chat_template not forwarded in all apply_chat_template calls; got: {captured_kwargs}"

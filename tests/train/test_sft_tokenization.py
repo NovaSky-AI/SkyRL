@@ -468,7 +468,6 @@ def test_train_on_what_multi_turn_all_assistants(tokenizer):
         {"messages": messages},
         tokenizer,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        enable_thinking=False,
     )
     assert result is not None
     assert "loss_mask" in result
@@ -509,7 +508,6 @@ def test_train_on_what_non_contiguous_assistants(tokenizer):
         {"messages": messages},
         tokenizer,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        enable_thinking=False,
     )
     assert result is not None
     loss_mask = result["loss_mask"]
@@ -541,7 +539,6 @@ def test_train_on_what_all_assistants_truncation(tokenizer):
         tokenizer,
         max_length=64,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        enable_thinking=False,
     )
     if result is not None:
         assert len(result["input_ids"]) <= 64

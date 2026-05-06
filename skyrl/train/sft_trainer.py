@@ -242,7 +242,7 @@ def _tokenize_chat_all_assistants(
         return None
 
     later_token_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
-        messages[i:], tokenizer, chat_template=tokenizer_kwargs.get("chat_template")
+        messages[i:], tokenizer, tokenizer_kwargs=tokenizer_kwargs
     )
     input_ids = initial_token_ids + later_token_ids
 
