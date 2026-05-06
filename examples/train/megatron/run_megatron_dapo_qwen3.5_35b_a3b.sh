@@ -7,7 +7,7 @@ set -x
 # bash examples/train/megatron/run_megatron_dapo_qwen3.5_35b_a3b.sh
 
 MODEL_NAME="Qwen/Qwen3.5-35B-A3B-Base"
-DATA_DIR="/mnt/local_storage/"
+DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=2
@@ -134,7 +134,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_5_dapo" \
-  trainer.run_name="dapo_qwen3_5_35b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_2nodes" \
+  trainer.run_name="dapo_qwen3_5_35b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.export_path="$HOME/exports/dapo_qwen3_5_35b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
