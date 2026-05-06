@@ -20,7 +20,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${INFERENCE_BACKEND:=vllm}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
-uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
+uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=multipaper_evidence_rlm \
