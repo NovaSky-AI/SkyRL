@@ -31,6 +31,7 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",
+        "env_metrics",
         "pixel_values",
         "image_grid_thw",
     ]
