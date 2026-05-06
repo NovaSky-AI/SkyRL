@@ -108,6 +108,8 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
         if sampling_params.get("additional_kwargs"):
             body_template.update(sampling_params["additional_kwargs"])
 
+        session = await self._get_session()
+
         async def _post_one(messages: List[Dict[str, str]]) -> Dict[str, Any]:
             body = dict(body_template)
             body["messages"] = messages
@@ -118,12 +120,14 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
             last_exc: Optional[Exception] = None
             for attempt in range(3):
                 try:
-                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
-                        async with session.post(
-                            f"{self.BASE_URL}/chat/completions", json=body, headers=headers
-                        ) as resp:
-                            resp.raise_for_status()
-                            return await resp.json()
+                    async with session.post(
+                        f"{self.BASE_URL}/chat/completions",
+                        json=body,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=300),
+                    ) as resp:
+                        resp.raise_for_status()
+                        return await resp.json()
                 except Exception as e:
                     last_exc = e
                     if attempt < 2:
@@ -188,4 +192,5 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
         pass
 
     async def teardown(self) -> None:
-        pass
+        # Defer to RemoteInferenceClient so the shared aiohttp session is closed.
+        await super().teardown()

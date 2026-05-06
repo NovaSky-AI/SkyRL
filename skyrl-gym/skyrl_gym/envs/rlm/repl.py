@@ -1,6 +1,4 @@
 import io
-import json
-import os
 import shutil
 import signal
 import tempfile
@@ -75,8 +73,11 @@ _SAFE_BUILTINS = {
     "property": property,
     "staticmethod": staticmethod,
     "classmethod": classmethod,
-    "__import__": __import__,
-    "open": open,
+    # Blocked to prevent sandbox escape. To expose specific libraries to the RLM,
+    # pre-bind them into self.globals in setup() (e.g. self.globals["math"] = math)
+    # so the model can use them without needing __import__ or open.
+    "__import__": None,
+    "open": None,
     # Exceptions
     "Exception": Exception,
     "BaseException": BaseException,
@@ -206,20 +207,16 @@ class PersistentREPL:
     # ------------------------------------------------------------------
 
     def add_context(self, context_payload, context_index: int = 0):
-        """Write context to a temp file and load it into self.locals via execute()."""
+        """Bind the context payload directly into the REPL namespace.
+
+        Assigning to self.locals avoids depending on `open`/`__import__` inside
+        the sandbox (both are blocked) and skips an unnecessary temp-file
+        round-trip.
+        """
         var_name = f"context_{context_index}"
-        if isinstance(context_payload, str):
-            context_path = os.path.join(self.temp_dir, f"context_{context_index}.txt")
-            with open(context_path, "w") as f:
-                f.write(context_payload)
-            self.execute(f"with open(r'{context_path}', 'r') as f:\n    {var_name} = f.read()")
-        else:
-            context_path = os.path.join(self.temp_dir, f"context_{context_index}.json")
-            with open(context_path, "w") as f:
-                json.dump(context_payload, f)
-            self.execute(f"import json\nwith open(r'{context_path}', 'r') as f:\n    {var_name} = json.load(f)")
+        self.locals[var_name] = context_payload
         if context_index == 0:
-            self.execute(f"context = {var_name}")
+            self.locals["context"] = context_payload
 
     # ------------------------------------------------------------------
     # Scaffold functions injected into the REPL namespace
