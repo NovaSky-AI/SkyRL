@@ -996,12 +996,24 @@ def reduce_loss(
     return (loss * loss_mask).sum() if loss_mask is not None else loss.sum()
 
 
+def resolve_seq_loss_normalizer(config: AlgorithmConfig) -> int:
+    """Return the constant used for Dr. GRPO-style sequence normalization."""
+    if config.max_response_length is not None:
+        return config.max_response_length
+    if config.max_seq_len is not None:
+        return config.max_seq_len
+    raise ValueError(
+        "`seq_mean_token_sum_norm` requires either `trainer.algorithm.max_response_length` "
+        "or `trainer.algorithm.max_seq_len` to be set"
+    )
+
+
 def apply_loss_reduction_to_advantages_minibatch(
     advantages: torch.Tensor,
     loss_mask: torch.Tensor,
     loss_reduction: str,
     micro_batch_size: int,
-    max_seq_len: int,
+    normalizer_length: Optional[int] = None,
 ) -> torch.Tensor:
     """Scale advantages so that summing produces the desired loss reduction.
 
@@ -1011,7 +1023,7 @@ def apply_loss_reduction_to_advantages_minibatch(
         loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
         loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "seq_mean_token_sum_norm".
         micro_batch_size: Number of sequences per micro-batch
-        max_seq_len: Maximum sequence length.
+        normalizer_length: Constant used by ``seq_mean_token_sum_norm``.
 
     Returns:
         Scaled advantages tensor.
@@ -1043,7 +1055,9 @@ def apply_loss_reduction_to_advantages_minibatch(
 
     # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
     elif loss_reduction == "seq_mean_token_sum_norm":
-        normalized_advantages = advantages / (batch_size * max_seq_len)
+        if normalizer_length is None:
+            raise ValueError("`normalizer_length` must be provided for `seq_mean_token_sum_norm`")
+        normalized_advantages = advantages / (batch_size * normalizer_length)
 
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")

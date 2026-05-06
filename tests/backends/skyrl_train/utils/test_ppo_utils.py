@@ -25,7 +25,9 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     reduce_loss,
     register_advantage_estimator,
     register_policy_loss,
+    resolve_seq_loss_normalizer,
 )
+from skyrl.train.config import AlgorithmConfig
 
 
 @pytest.fixture
@@ -591,7 +593,7 @@ class TestApplyLossReductionToAdvantagesMinibatch:
             loss_mask=loss_mask,
             loss_reduction="token_mean",
             micro_batch_size=1,
-            max_seq_len=3,
+            normalizer_length=3,
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(3.6))
@@ -605,7 +607,7 @@ class TestApplyLossReductionToAdvantagesMinibatch:
             loss_mask=loss_mask,
             loss_reduction="token_mean",
             micro_batch_size=1,
-            max_seq_len=2,
+            normalizer_length=2,
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(0.0))
@@ -621,7 +623,7 @@ class TestApplyLossReductionToAdvantagesMinibatch:
             loss_mask=loss_mask,
             loss_reduction="sequence_mean",
             micro_batch_size=1,
-            max_seq_len=2,
+            normalizer_length=2,
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(2.25))
@@ -637,7 +639,7 @@ class TestApplyLossReductionToAdvantagesMinibatch:
             loss_mask=loss_mask,
             loss_reduction="seq_mean_token_sum_norm",
             micro_batch_size=1,
-            max_seq_len=10,
+            normalizer_length=10,
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(0.7))
@@ -655,7 +657,7 @@ class TestApplyLossReductionToAdvantagesMinibatch:
             loss_mask=loss_mask,
             loss_reduction="token_mean_legacy",
             micro_batch_size=2,
-            max_seq_len=2,
+            normalizer_length=2,
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(8.5))
@@ -670,5 +672,21 @@ class TestApplyLossReductionToAdvantagesMinibatch:
                 loss_mask=loss_mask,
                 loss_reduction="invalid",
                 micro_batch_size=1,
-                max_seq_len=1,
+                normalizer_length=1,
             )
+
+
+def test_resolve_seq_loss_normalizer_prefers_max_response_length():
+    config = AlgorithmConfig(max_response_length=1024, max_seq_len=4096)
+    assert resolve_seq_loss_normalizer(config) == 1024
+
+
+def test_resolve_seq_loss_normalizer_falls_back_to_max_seq_len():
+    config = AlgorithmConfig(max_seq_len=4096)
+    assert resolve_seq_loss_normalizer(config) == 4096
+
+
+def test_resolve_seq_loss_normalizer_requires_one_length():
+    config = AlgorithmConfig(max_response_length=None, max_seq_len=None)
+    with pytest.raises(ValueError, match="requires either"):
+        resolve_seq_loss_normalizer(config)

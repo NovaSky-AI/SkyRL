@@ -127,9 +127,13 @@ trainer:
     tis_imp_ratio_cap: -1.0
     use_tis: false
 
-    # Used for seq_mean_token_sum_norm loss reduction.
-    # Must be set explicitly when trainer.algorithm.loss_reduction=seq_mean_token_sum_norm.
-    # Choose the total sequence-length normalization constant for your setup.
+    # Preferred response-length constant for seq_mean_token_sum_norm loss reduction and
+    # trainer-side corrections such as DAPO overlong handling.
+    max_response_length: null
+
+    # Maximum total sequence length (prompt + response). Used for batching-related expectations
+    # and as the legacy fallback normalizer for seq_mean_token_sum_norm when max_response_length is unset.
+    # Set either max_response_length or max_seq_len when using seq_mean_token_sum_norm.
     max_seq_len: null
 
     # references

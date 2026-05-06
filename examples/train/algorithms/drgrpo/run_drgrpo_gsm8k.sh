@@ -12,12 +12,14 @@ LOGGER="wandb"  # change to "console" to print to stdout
 MAX_PROMPT_LENGTH=512
 MAX_GENERATE_LENGTH=1024
 MAX_SEQ_LEN=$((MAX_PROMPT_LENGTH + MAX_GENERATE_LENGTH))
+MAX_RESPONSE_LENGTH=$MAX_GENERATE_LENGTH
 
 # Dr. GRPO parameters
 
 LOSS_REDUCTION="seq_mean_token_sum_norm"
 GRPO_NORM_BY_STD=false
 USE_KL_LOSS=false
+MAX_RESPONSE_LENGTH=1024
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -44,6 +46,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
+  trainer.algorithm.max_response_length=$MAX_RESPONSE_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   trainer.algorithm.max_seq_len=$MAX_SEQ_LEN \
   trainer.policy.optimizer_config.lr=1.0e-6 \

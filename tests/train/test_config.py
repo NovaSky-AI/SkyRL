@@ -5,6 +5,7 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 import typing
 from dataclasses import dataclass, field
 from typing import Annotated, List, Optional
+from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import DictConfig, OmegaConf
@@ -16,6 +17,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import validate_cfg
 from tests.train.util import example_dummy_config
 
@@ -215,12 +217,20 @@ class TestMaxSeqLenValidation:
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
         assert cfg.trainer.algorithm.max_seq_len == 32768
 
-    def test_validate_cfg_requires_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+    def test_max_response_length_defaults_to_none(self):
+        cfg = SkyRLTrainConfig.from_cli_overrides([])
+        assert cfg.trainer.algorithm.max_response_length is None
+
+    def test_max_response_length_preserved_when_explicitly_set(self):
+        cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_response_length=2048"])
+        assert cfg.trainer.algorithm.max_response_length == 2048
+
+    def test_validate_cfg_requires_one_seq_normalizer_for_seq_mean_token_sum_norm(self):
         cfg = _make_validated_test_config()
         cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
         cfg.trainer.algorithm.max_seq_len = None
 
-        with pytest.raises(ValueError, match=r"trainer\.algorithm\.max_seq_len"):
+        with pytest.raises(ValueError, match=r"max_response_length.*max_seq_len"):
             validate_cfg(cfg)
 
     @pytest.mark.parametrize("loss_reduction", ["token_mean", "sequence_mean"])
@@ -231,9 +241,32 @@ class TestMaxSeqLenValidation:
 
         validate_cfg(cfg)
 
-    def test_validate_cfg_allows_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+    def test_validate_cfg_allows_explicit_max_seq_len_for_seq_mean_token_sum_norm(self, monkeypatch):
         cfg = _make_validated_test_config()
         cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
         cfg.trainer.algorithm.max_seq_len = 4096
 
+        warning = MagicMock()
+        monkeypatch.setattr(train_utils.logger, "warning", warning)
+
+        validate_cfg(cfg)
+        warning.assert_any_call(
+            "`trainer.algorithm.max_response_length` is unset while using "
+            "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
+            "Falling back to `trainer.algorithm.max_seq_len` for backward compatibility."
+        )
+
+    def test_validate_cfg_allows_max_response_length_without_max_seq_len_for_seq_mean_token_sum_norm(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+        cfg.trainer.algorithm.max_seq_len = None
+        cfg.trainer.algorithm.max_response_length = 2048
+
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_non_positive_max_response_length():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.logger=console", "trainer.algorithm.max_response_length=0"])
+
+    with pytest.raises(ValueError, match="max_response_length"):
         validate_cfg(cfg)
