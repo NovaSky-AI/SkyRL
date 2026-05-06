@@ -11,9 +11,9 @@ from skyrl_gym.envs.registration import register
 
 register(
     id="evidence_rlm",
-    entry_point="examples.train.rlm.envs.evidence_rlm_env:EvidenceRLMEnv",
+    entry_point="examples.train.rlm.multi_paper_env.evidence_rlm_env:EvidenceRLMEnv",
 )
 register(
     id="multipaper_evidence_rlm",
-    entry_point="examples.train.rlm.envs.evidence_rlm_env:MultipaperEvidenceRLMEnv",
+    entry_point="examples.train.rlm.multi_paper_env.evidence_rlm_env:MultipaperEvidenceRLMEnv",
 )

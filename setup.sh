@@ -19,5 +19,5 @@ apt update && apt-get install build-essential libnuma-dev && apt install -y tmux
 # Prepare dataset 
 python examples/train/rlm/datasets/rlm_dataset_qasper.py
 python examples/train/rlm/datasets/multi_paper_dataset.py
-python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py
+python examples/train/rlm/rlm_dataset_synthetic_multi.py
 
