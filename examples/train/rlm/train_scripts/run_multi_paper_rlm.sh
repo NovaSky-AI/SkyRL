@@ -46,8 +46,8 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   trainer.eval_batch_size=16 \
   trainer.train_batch_size=4 \
   trainer.policy_mini_batch_size=4 \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=100 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
