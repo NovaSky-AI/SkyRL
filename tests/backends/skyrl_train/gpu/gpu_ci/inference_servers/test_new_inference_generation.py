@@ -501,7 +501,7 @@ async def test_client_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     with pytest.raises(aiohttp.ClientResponseError):
-        await client.chat_completion({"json": {"model": SERVED_MODEL_NAME}})
+        await client.chat_completion({"json": {}})
 
     # Wrong model name
     with pytest.raises(aiohttp.ClientResponseError):
@@ -595,7 +595,6 @@ async def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngine
 
 def _build_sample_payload(
     token_ids: List[int],
-    model: str = SERVED_MODEL_NAME,
     num_samples: int = 1,
     sampling_params: Dict[str, Any] | None = None,
     session_id: str | None = None,
@@ -604,7 +603,6 @@ def _build_sample_payload(
 ) -> Dict[str, Any]:
     """Build a Tinker-format sample request payload."""
     body: Dict[str, Any] = {
-        "model": model,
         "prompt": {"chunks": [{"tokens": token_ids}]},
         "num_samples": num_samples,
         "sampling_params": sampling_params or {"temperature": 0.7, "max_tokens": 64},

@@ -113,7 +113,7 @@ async def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture)
             }
         ]
 
-        result = await client.render_chat_completion({"json": {"model": MODEL_QWEN3_VL, "messages": messages}})
+        result = await client.render_chat_completion({"json": {"messages": messages}})
 
         assert isinstance(result, dict)
 
@@ -203,7 +203,6 @@ async def test_sample_with_multimodal_image(module_scoped_ray_init_fixture):
 
         request_payload = {
             "json": {
-                "model": MODEL_QWEN3_VL,
                 "prompt": prompt,
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.0, "max_tokens": 20},
@@ -398,7 +397,7 @@ async def test_generate_with_multimodal_features_red_square(module_scoped_ray_in
             }
         ]
 
-        render_result = await client.render_chat_completion({"json": {"model": MODEL_QWEN3_VL, "messages": messages}})
+        render_result = await client.render_chat_completion({"json": {"messages": messages}})
 
         token_ids = render_result["token_ids"]
         features = render_result.get("features")

@@ -90,7 +90,6 @@ def _build_vlm_generator(tokenizer):
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=mock_client,
         tokenizer=tokenizer,
-        policy_model_name="mock-model",
     )
     return generator
 

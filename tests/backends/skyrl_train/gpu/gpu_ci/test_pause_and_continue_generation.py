@@ -325,7 +325,6 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                 async def one_req(i: int):
                     if api == "chat_completion":
                         body = {
-                            "model": MODEL,
                             "messages": convs[i],
                             **sampling_params,
                         }
@@ -333,7 +332,6 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                     else:
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
                         body = {
-                            "model": MODEL,
                             "prompt": prompt_str,
                             **sampling_params,
                         }

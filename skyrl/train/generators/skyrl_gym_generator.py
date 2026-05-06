@@ -142,7 +142,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
-        policy_model_name: str,
+        policy_model_name: Optional[str] = None,
     ):
         """
         Args:
@@ -151,7 +151,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             tokenizer: tokenizer object for encoding and decoding text
             policy_model_name: identifier the inference engine knows the policy
                 by (base model path or registered LoRA adapter name). Threaded
-                into every ``client.generate(...)`` call as ``model``.
+                into every ``client.generate(...)`` call as ``model``. When
+                ``None`` (default), the client falls back to its own
+                ``model_name``
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
