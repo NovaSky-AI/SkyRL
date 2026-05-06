@@ -62,6 +62,7 @@ def _patch_qwen3_5():
             Qwen3_5TextModel,
             is_fast_path_available,
         )
+
         if is_fast_path_available:
             logger.info("Qwen3.5 fast path is ENABLED (causal-conv1d + flash-linear-attention)")
         else:
@@ -70,7 +71,7 @@ def _patch_qwen3_5():
                 "causal conv1d and gated delta rule (both forward and backward). "
                 "Install causal-conv1d and flash-linear-attention to enable the fast path."
             )
- 
+
         # Patch 1: Fix 3D position_ids → 2D. Skip on transformers >=5.4.0 where the
         # upstream fix makes this monkey-patch unnecessary.
         # See https://github.com/huggingface/transformers/pull/44399.
@@ -79,19 +80,20 @@ def _patch_qwen3_5():
         source = inspect.getsource(Qwen3_5TextModel.forward)
         if "decoder_layer" not in source or "position_ids=text_position_ids" not in source.split("decoder_layer")[-1]:
             _original_decoder_forward = Qwen3_5DecoderLayer.forward
- 
+
             def _patched_decoder_forward(self, hidden_states, position_ids=None, **kwargs):
                 if position_ids is not None and position_ids.ndim == 3:
                     position_ids = position_ids[0]
                 return _original_decoder_forward(self, hidden_states, position_ids=position_ids, **kwargs)
- 
+
             Qwen3_5DecoderLayer.forward = _patched_decoder_forward
             logger.info("Patched Qwen3.5 decoder layer to fix 3D position_ids")
     except ImportError:
         pass  # Not using Qwen3.5, no patches needed
- 
- 
+
+
 _patch_qwen3_5()
+
 
 class HFModelWrapper(nn.Module):
     """
