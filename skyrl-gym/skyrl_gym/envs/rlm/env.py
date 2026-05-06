@@ -190,7 +190,7 @@ class BaseRLMEnv(BaseTextEnv):
                                          (called after ``self._context`` is set,
                                          so closures can capture it)
 
-    See ``examples/train/rlm/envs/evidence_rlm_env.py`` for a worked example.
+    See ``examples/train/rlm/multi_paper_env/evidence_rlm_env.py`` for a worked example.
 
     All per-rollout knobs come through ``extras``:
       • ``repl_timeout`` — REPL execution timeout in seconds (default 180)
