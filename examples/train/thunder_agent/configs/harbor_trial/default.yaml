@@ -8,9 +8,6 @@ agent:
     record_terminal_session: false
     store_all_messages: true
     temperature: 0.3
-    llm_call_kwargs:
-      extra_body:
-        program_id: null
 environment:
   type: docker
   override_cpus: 2

@@ -11,11 +11,15 @@ set -euo pipefail
 
 # Submit with, for example:
 #   MODEL_PATH=/path/to/Qwen3-32B DATA_ROOT=$HOME/data/harbor \
-#     sbatch --partition=<partition> examples/train/thunder_agent/run_r2egym_32b_sbatch.sh
+#     sbatch --partition=<partition> examples/train/thunder_agent/scripts/r2egym_32b/run_sbatch.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-WRAPPER="$SCRIPT_DIR/run_r2egym_32b_recipe.sh"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+
+# run_stages.sh is the only wrapper this sbatch entrypoint calls. It starts the
+# rollout servers and trainer driver through script-local helpers on the right
+# Slurm nodes.
+WRAPPER="$SCRIPT_DIR/run_stages.sh"
 
 cd "$REPO_ROOT"
 

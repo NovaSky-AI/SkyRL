@@ -6,11 +6,11 @@ set -euo pipefail
 # Canonical path:
 #   cleanup-stage all -> prepare -> head -> ray -> rollout -> status -> driver
 #
-# This is a recipe-local replacement for the old runtime-full handoff wrapper.
-# The training driver calls examples/train/thunder_agent/run_harbor_thunder_agent_32b.sh.
+# This script replaces the old runtime-full handoff wrapper for this run.
+# The training driver calls the script-local run_trainer.sh helper.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 WORKSPACE_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
 
 ACTION="${1:-status}"
@@ -78,6 +78,7 @@ MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-32B}"
 MAX_TRAIN_TASKS="${MAX_TRAIN_TASKS:-256}"
 MAX_EVAL_TASKS="${MAX_EVAL_TASKS:-64}"
 HARBOR_AGENT_MAX_TURNS="${HARBOR_AGENT_MAX_TURNS:-25}"
+HARBOR_AGENT_TEMPERATURE="${HARBOR_AGENT_TEMPERATURE:-0.3}"
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-9000}"
 MINI_SWE_MODEL_TIMEOUT_SEC="${MINI_SWE_MODEL_TIMEOUT_SEC:-1200}"
 HARBOR_VERIFIER_TIMEOUT_MAX_ATTEMPTS="${HARBOR_VERIFIER_TIMEOUT_MAX_ATTEMPTS:-1}"
@@ -325,7 +326,7 @@ for name in ["ray", "torch", "vllm", "fastapi", "uvicorn"]:
     mod = importlib.import_module(name)
     print(f"{name}={getattr(mod, '__version__', 'ok')}")
 from examples.train.thunder_agent.main_harbor_thunder_agent import HarborThunderAgentFullyAsyncExp
-from examples.train.thunder_agent.skyrl_integration.harbor_generator import ThunderAgentHarborGenerator
+from examples.train.thunder_agent.skyrl_integration.generator import ThunderAgentHarborGenerator
 from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap
 print("pr_core_imports=ok")
 PY
@@ -379,7 +380,7 @@ run_head() {
       docker network inspect '$HARBOR_DOCKER_SHARED_NETWORK_NAME' >/dev/null 2>&1 || \
         docker network create --subnet '$HARBOR_DOCKER_SHARED_NETWORK_SUBNET' '$HARBOR_DOCKER_SHARED_NETWORK_NAME'
       if [ '$PREPULL_R2EGYM_IMAGES' = true ] || [ '$PREPULL_R2EGYM_IMAGES' = 1 ]; then
-        PYTHONPATH='$REPO_ROOT' '$PYTHON_BIN' '$SCRIPT_DIR/prepull_harbor_images.py' \
+        PYTHONPATH='$REPO_ROOT' '$PYTHON_BIN' '$SCRIPT_DIR/prepull_images.py' \
           --train-data $train_data_escaped \
           --eval-data $eval_data_escaped \
           --mode pull \
@@ -453,6 +454,8 @@ run_ray() {
 }
 
 run_rollout() {
+  # Run on the rollout node. The helper only starts local vLLM server processes;
+  # run_stages.sh owns node selection, ports, logging, and readiness checks.
   start_detached_client "rollout" "$ROLLOUT_LOG" \
     srun --jobid "$ROLLOUT_JOB_ID_EFFECTIVE" --overlap --overcommit --immediate=10 -w "$ROLLOUT_NODE_EFFECTIVE" --ntasks=1 --nodes=1 --cpus-per-task="$ROLLOUT_CPUS" --gres="gpu:$ROLLOUT_GPUS" \
     bash -lc "set -euo pipefail
@@ -470,13 +473,15 @@ run_rollout() {
       export ROLLOUT_TP_SIZE='$ROLLOUT_TP_SIZE'
       export ROLLOUT_ENFORCE_EAGER='$ROLLOUT_ENFORCE_EAGER'
       export VLLM_SERVER_MODULE='$VLLM_SERVER_MODULE'
-      bash '$SCRIPT_DIR/start_harbor_rollout_servers.sh'"
+      bash '$SCRIPT_DIR/start_rollout_servers.sh'"
   for port in "${ROLLOUT_PORTS[@]}"; do
     wait_for_http "http://$ROLLOUT_IP:$port/health" "rollout:$port" 900
   done
 }
 
 run_driver() {
+  # Run on the head node after Ray and rollout servers are ready. The helper
+  # only translates environment defaults into the SkyRL training command.
   local train_data_escaped=""
   local eval_data_escaped=""
   printf -v train_data_escaped '%q' "$TRAIN_DATA"
@@ -531,6 +536,7 @@ run_driver() {
       export USE_KL_LOSS='$USE_KL_LOSS'
       export KL_LOSS_COEF='$KL_LOSS_COEF'
       export HARBOR_AGENT_MAX_TURNS='$HARBOR_AGENT_MAX_TURNS'
+      export HARBOR_AGENT_TEMPERATURE='$HARBOR_AGENT_TEMPERATURE'
       export AGENT_TIMEOUT_SEC='$AGENT_TIMEOUT_SEC'
       export MINI_SWE_MODEL_TIMEOUT_SEC='$MINI_SWE_MODEL_TIMEOUT_SEC'
       export HARBOR_VERIFIER_TIMEOUT_MAX_ATTEMPTS='$HARBOR_VERIFIER_TIMEOUT_MAX_ATTEMPTS'
@@ -552,7 +558,7 @@ run_driver() {
       export THUNDERAGENT_WATCHDOG_ENABLED='$THUNDERAGENT_WATCHDOG_ENABLED'
       export RUN_PREFLIGHT_CHECKS='$RUN_PREFLIGHT_CHECKS'
       unset SKYRL_DISABLE_THUNDERAGENT
-      stdbuf -oL -eL bash '$SCRIPT_DIR/run_harbor_thunder_agent_32b.sh' full" \
+      stdbuf -oL -eL bash '$SCRIPT_DIR/run_trainer.sh' full" \
     >"$TRAIN_DRIVER_LOG" 2>&1
 }
 
@@ -574,7 +580,7 @@ show_status() {
   done
 }
 
-cleanup_harbor_docker() {
+cleanup_docker() {
   srun --jobid "$MERGED_JOB_ID" --overlap --overcommit --immediate=30 -w "$MERGED_NODE" --ntasks=1 --nodes=1 --cpus-per-task=1 --gres=gpu:0 \
     bash -lc "set -euo pipefail
       export PATH='$PYTHON_BIN_DIR':\$HOME/.local/bin:\$PATH
@@ -586,7 +592,7 @@ cleanup_harbor_docker() {
           sudo -n setfacl -m u:'$USER':rw /var/run/docker.sock /run/docker.sock 2>/dev/null || true
         fi
       fi
-      bash '$SCRIPT_DIR/cleanup_harbor_docker.sh'"
+      bash '$SCRIPT_DIR/cleanup_docker.sh'"
 }
 
 cleanup_stage() {
@@ -614,7 +620,7 @@ cleanup_stage() {
       fi
       ;;
     harbor_docker)
-      cleanup_harbor_docker
+      cleanup_docker
       ;;
     all)
       cleanup_stage rollout

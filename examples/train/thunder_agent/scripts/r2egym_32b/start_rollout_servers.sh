@@ -6,7 +6,7 @@ set -euo pipefail
 # does not depend on the old runtime-full worktree.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 TMP_LOG_ROOT="${TMP_LOG_ROOT:-$(cd "$REPO_ROOT/.." && pwd)/tmp_logs}"
 
 resolve_python_bin() {

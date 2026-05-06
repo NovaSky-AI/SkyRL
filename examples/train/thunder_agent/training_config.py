@@ -2,7 +2,7 @@
 ThunderAgent integration config for SkyRL.
 
 Extends InferenceEngineConfig with ThunderAgent-specific scheduling options,
-then wires through GeneratorConfig via make_config().
+then wires through the Harbor training config.
 """
 
 from dataclasses import dataclass, field
@@ -36,10 +36,12 @@ class ThunderAgentInferenceEngineConfig(InferenceEngineConfig):
 class ThunderAgentGeneratorConfig(GeneratorConfig):
     """GeneratorConfig with ThunderAgent-aware inference engine config."""
 
-    inference_engine: ThunderAgentInferenceEngineConfig = field(default_factory=ThunderAgentInferenceEngineConfig)
+    inference_engine: ThunderAgentInferenceEngineConfig = field(
+        default_factory=ThunderAgentInferenceEngineConfig
+    )
 
 
-ThunderAgentConfig = make_config(generator_cls=ThunderAgentGeneratorConfig)
+_ThunderAgentBaseConfig = make_config(generator_cls=ThunderAgentGeneratorConfig)
 
 
 @dataclass
@@ -50,7 +52,7 @@ class ThunderAgentHarborGeneratorConfig(ThunderAgentGeneratorConfig):
 
 
 @dataclass
-class ThunderAgentHarborConfig(ThunderAgentConfig):
+class ThunderAgentHarborConfig(_ThunderAgentBaseConfig):
     """Config for Harbor + ThunderAgent fully-async training."""
 
     harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
@@ -59,4 +61,3 @@ class ThunderAgentHarborConfig(ThunderAgentConfig):
     )
     max_train_tasks: Optional[int] = None
     max_eval_tasks: Optional[int] = None
-

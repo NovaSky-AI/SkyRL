@@ -1,5 +1,5 @@
 """
-Create MANIFEST-based R2EGym dataset subsets from base difficulty-bucket directories.
+Create R2EGym dataset subsets from base difficulty-bucket directories.
 
 The subsets used by the R2EGym 32B ThunderAgent recipe are:
   r2egym-train256-medium-hard-v1   (256 tasks, trivial=4  easy=16 medium=120 hard=116)
@@ -8,18 +8,20 @@ The subsets used by the R2EGym 32B ThunderAgent recipe are:
 Both are deterministic selections from the base buckets
   r2egym-trivial / r2egym-easy / r2egym-medium / r2egym-hard
 which must already exist under DATA_ROOT (default: ~/data/harbor/).
+The output directories contain task symlinks that the shared HarborTaskDataset
+can scan directly, plus MANIFEST.json for reproducibility and image pre-pull.
 
 Usage:
 
     # Create both subsets (default):
-    python examples/train/thunder_agent/prepare_r2egym_subset.py
+    python examples/train/thunder_agent/scripts/r2egym_32b/prepare_dataset.py
 
     # Create with explicit data root:
-    python examples/train/thunder_agent/prepare_r2egym_subset.py \
+    python examples/train/thunder_agent/scripts/r2egym_32b/prepare_dataset.py \
         --data-root /data/harbor
 
     # Dry-run: print what would be created without writing files:
-    python examples/train/thunder_agent/prepare_r2egym_subset.py --dry-run
+    python examples/train/thunder_agent/scripts/r2egym_32b/prepare_dataset.py --dry-run
 
 If the base bucket directories do not exist, the script will print the
 HuggingFace download command and exit.  The base datasets are hosted at:
@@ -41,6 +43,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -179,20 +183,59 @@ def build_manifest(
     }
 
 
-def write_manifest(
+def _subset_entry_name(rel_task_path: str) -> str:
+    return rel_task_path.replace("/", "__")
+
+
+def _clean_subset_entries(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    for child in output_dir.iterdir():
+        if child.name == "MANIFEST.json":
+            continue
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+
+
+def _link_or_copy_task(src: Path, dst: Path, materialize: bool) -> None:
+    if materialize:
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        os.symlink(src, dst, target_is_directory=True)
+
+
+def write_subset(
     manifest: Dict,
+    data_root: Path,
     output_dir: Path,
+    materialize: bool = False,
     dry_run: bool = False,
 ) -> None:
+    task_rels = [task for bucket_tasks in manifest["tasks"].values() for task in bucket_tasks]
     if dry_run:
-        print(f"[dry-run] Would write {output_dir}/MANIFEST.json  ({manifest['total']} tasks)")
+        print(f"[dry-run] Would create {output_dir}  ({manifest['total']} tasks)")
+        print(f"[dry-run] Would write {output_dir}/MANIFEST.json")
         for bucket, tasks in manifest["tasks"].items():
             print(f"  {bucket}: {len(tasks)}")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
+    _clean_subset_entries(output_dir)
+
+    seen_names = set()
+    for rel_task_path in task_rels:
+        src = (data_root / rel_task_path).resolve()
+        dst_name = _subset_entry_name(rel_task_path)
+        if dst_name in seen_names:
+            raise ValueError(f"duplicate subset entry name: {dst_name}")
+        seen_names.add(dst_name)
+        _link_or_copy_task(src, output_dir / dst_name, materialize=materialize)
+
     manifest_path = output_dir / "MANIFEST.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"Wrote {manifest_path}  ({manifest['total']} tasks)")
+    mode = "copied" if materialize else "symlinked"
+    print(f"Wrote {manifest_path} and {mode} {manifest['total']} tasks into {output_dir}")
     for bucket, tasks in manifest["tasks"].items():
         print(f"  {bucket}: {len(tasks)}")
 
@@ -244,6 +287,11 @@ def main() -> None:
         default="all",
         help="Which subset(s) to create (default: all)",
     )
+    parser.add_argument(
+        "--materialize",
+        action="store_true",
+        help="Copy task directories instead of creating symlinks",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print what would be created without writing files")
     args = parser.parse_args()
 
@@ -268,7 +316,13 @@ def main() -> None:
             prefix_manifest=eval32_manifest,
             excluded_manifest=train128_manifest,
         )
-        write_manifest(eval_manifest, data_root / EVAL_64_SPEC.name, dry_run=args.dry_run)
+        write_subset(
+            eval_manifest,
+            data_root,
+            data_root / EVAL_64_SPEC.name,
+            materialize=args.materialize,
+            dry_run=args.dry_run,
+        )
 
     if args.subset in ("train256", "all"):
         # If we didn't build eval64 above, try to load the existing one.
@@ -285,7 +339,13 @@ def main() -> None:
             prefix_manifest=train128_manifest,
             excluded_manifest=eval_manifest,
         )
-        write_manifest(train_manifest, data_root / TRAIN_256_SPEC.name, dry_run=args.dry_run)
+        write_subset(
+            train_manifest,
+            data_root,
+            data_root / TRAIN_256_SPEC.name,
+            materialize=args.materialize,
+            dry_run=args.dry_run,
+        )
 
     print("\nDone.")
     if not args.dry_run:

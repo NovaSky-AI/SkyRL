@@ -6,7 +6,7 @@ set -euo pipefail
 # needs explicit torch/vLLM pins that match the cluster CUDA driver.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 ACTION="${1:-sync}"
 
 if [ -z "${RECIPE_HOME:-}" ]; then
@@ -84,9 +84,9 @@ for name, expected_prefix in expected.items():
         raise SystemExit(f"{name} version mismatch: expected {expected_prefix}*, got {actual}")
 
 from examples.train.thunder_agent.main_harbor_thunder_agent import HarborThunderAgentFullyAsyncExp
-from examples.train.thunder_agent.skyrl_integration.harbor_generator import ThunderAgentHarborGenerator
-from examples.train.thunder_agent.skyrl_integration.harbor_dataset import ThunderAgentHarborDataset
+from examples.train.thunder_agent.skyrl_integration.generator import ThunderAgentHarborGenerator
 from examples.train.thunder_agent.skyrl_integration.remote_inference_client import ThunderAgentRemoteInferenceClient
+from examples.train_integrations.harbor.dataset import HarborTaskDataset
 from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap
 
 print("pr_core_thunder_agent_imports=ok")

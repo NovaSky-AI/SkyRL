@@ -26,6 +26,33 @@ Use the `sbatch` entrypoint for a fresh 5-node run. The lower-level stage
 wrapper is still available for debugging or for attaching to an existing
 allocation.
 
+### Layout
+
+The top level contains only the Python entrypoints, shared integration code,
+configs, docs, and script groups. The R2EGym 32B operational files are
+all under `scripts/r2egym_32b/`.
+
+User-facing entrypoints:
+
+| File | Purpose |
+|---|---|
+| `run_sbatch.sh` | One-command 5-node Slurm entrypoint |
+| `run_stages.sh` | Stage wrapper for existing allocations and retries |
+| `setup_env.sh` | Creates or validates the vLLM 0.20.1 CUDA 12.9 training venv |
+| `prepare_dataset.py` | Creates curated train/eval Harbor task directories |
+
+Internal helpers called by `run_stages.sh`:
+
+| File | Called by | Purpose |
+|---|---|---|
+| `start_rollout_servers.sh` | `run_stages.sh rollout` | Starts the four vLLM rollout servers on the rollout node |
+| `run_trainer.sh` | `run_stages.sh driver` | Runs the SkyRL training driver on the head node after Ray and rollout are ready |
+| `prepull_images.py` | `run_stages.sh head` | Lists or pre-pulls Docker images required by the curated tasks |
+| `cleanup_docker.sh` | `run_stages.sh cleanup-stage harbor_docker` | Cleans Docker containers and networks for this run |
+
+The Harbor trial defaults live in `configs/harbor_trial/default.yaml`; reusable
+SkyRL integration code stays in `skyrl_integration/`.
+
 ### 1. Prepare Data
 
 Download the four base difficulty-bucket datasets from HuggingFace:
@@ -38,16 +65,16 @@ for BUCKET in trivial easy medium hard; do
 done
 ```
 
-Then generate the curated train/eval MANIFEST subsets used by this recipe:
+Then generate the curated train/eval task directories used by this recipe:
 
 ```bash
-python examples/train/thunder_agent/prepare_r2egym_subset.py \
+python examples/train/thunder_agent/scripts/r2egym_32b/prepare_dataset.py \
   --data-root ~/data/harbor
 ```
 
 This creates:
-- `~/data/harbor/r2egym-train256-medium-hard-v1/MANIFEST.json` (256 tasks)
-- `~/data/harbor/r2egym-eval64-medium-hard-v1/MANIFEST.json`  (64 tasks)
+- `~/data/harbor/r2egym-train256-medium-hard-v1/` with 256 task symlinks and `MANIFEST.json`
+- `~/data/harbor/r2egym-eval64-medium-hard-v1/` with 64 task symlinks and `MANIFEST.json`
 
 ### 2. Submit Training
 
@@ -70,7 +97,7 @@ export ROLLOUT_ENFORCE_EAGER=true
 sbatch \
   --partition=<partition> \
   --account=<account> \
-  examples/train/thunder_agent/run_r2egym_32b_sbatch.sh
+  examples/train/thunder_agent/scripts/r2egym_32b/run_sbatch.sh
 ```
 
 The `sbatch` script requests 5 GPU nodes by default. It uses node 0 for Ray
@@ -93,13 +120,14 @@ The wrapper defaults match the benchmark variant:
 The rollout launcher uses PR-core's native vLLM server module with
 `skyrl.backends.skyrl_train.inference_servers.vllm_worker.WorkerWrap` directly.
 
-For CUDA 12.9 drivers, `setup_env.sh` installs the official
+For CUDA 12.9 drivers, `scripts/r2egym_32b/setup_env.sh` installs the official
 vLLM release asset `vllm-0.20.1+cu129`; installing plain `vllm==0.20.1` from
 PyPI can select the CUDA 13 wheel.
 
-`setup_env.sh` uses `uv` and installs an editable copy of the local repo into
-the recipe venv. Set `SETUP_ENV=check` when reusing an existing environment, or
-`SETUP_ENV=skip` when `PYTHON_BIN` and `RAY_BIN` are already exported.
+`scripts/r2egym_32b/setup_env.sh` uses `uv` and installs an editable copy of
+the local repo into the training venv. Set `SETUP_ENV=check` when reusing an
+existing environment, or `SETUP_ENV=skip` when `PYTHON_BIN` and `RAY_BIN` are
+already exported.
 
 `head` uses system Docker by default. If Docker Hub
 rate-limits anonymous pulls, run `docker login` on the head/rollout node before
@@ -108,7 +136,7 @@ pre-pulling the 320 curated train/eval task images instead of silently masking
 many Harbor trials during training. To inspect the exact image set:
 
 ```bash
-python examples/train/thunder_agent/prepull_harbor_images.py \
+python examples/train/thunder_agent/scripts/r2egym_32b/prepull_images.py \
   --train-data "$TRAIN_DATA" \
   --eval-data "$EVAL_DATA" \
   --mode list
@@ -123,7 +151,7 @@ If you already have nodes allocated, use the stage wrapper directly. This is
 mainly useful for debugging failed stages without waiting for a new allocation.
 
 ```bash
-export WRAPPER="$REPO_ROOT/examples/train/thunder_agent/run_r2egym_32b_recipe.sh"
+export WRAPPER="$REPO_ROOT/examples/train/thunder_agent/scripts/r2egym_32b/run_stages.sh"
 
 export MERGED_JOB_ID=<slurm_job_id>
 export MERGED_NODE=<head_and_rollout_node>
@@ -145,12 +173,13 @@ For a single Slurm allocation, use the same `<job_id>` for all entries. The
 Before a full allocation, run the CPU-only checks:
 
 ```bash
-bash examples/train/thunder_agent/setup_env.sh check
-bash -n examples/train/thunder_agent/*.sh
+bash examples/train/thunder_agent/scripts/r2egym_32b/setup_env.sh check
+bash -n examples/train/thunder_agent/scripts/r2egym_32b/*.sh
 "$PYTHON_BIN" -m py_compile \
   examples/train/thunder_agent/main_harbor_thunder_agent.py \
-  examples/train/thunder_agent/harbor_runtime_setup.py \
-  examples/train/thunder_agent/prepull_harbor_images.py
+  examples/train/thunder_agent/skyrl_integration/runtime_setup.py \
+  examples/train/thunder_agent/scripts/r2egym_32b/prepull_images.py \
+  examples/train/thunder_agent/scripts/r2egym_32b/prepare_dataset.py
 ```
 
 ---
@@ -172,13 +201,17 @@ bash -n examples/train/thunder_agent/*.sh
 | `PREPULL_R2EGYM_IMAGES` | `true` | Pull all train/eval Harbor images during `head` |
 
 All training hyperparameters can still be overridden through environment
-variables before invoking the wrapper, or by running the driver script directly
-when Ray and rollout servers are already up:
+variables before invoking `run_sbatch.sh` or `run_stages.sh`.
+
+For debugging only, `run_trainer.sh` can be called directly after Ray and the
+rollout servers are already up. Normal runs should go through `run_stages.sh`
+so node placement, rollout startup, readiness checks, and cleanup stay in one
+place:
 
 ```bash
-bash examples/train/thunder_agent/run_harbor_thunder_agent_32b.sh full \
+bash examples/train/thunder_agent/scripts/r2egym_32b/run_trainer.sh full \
   trainer.policy.optimizer_config.lr=5e-7 \
-  generator.sampling_params.temperature=0.6
+  harbor_trial_config.agent.kwargs.temperature=0.6
 ```
 
 ---
@@ -202,7 +235,7 @@ The run script accepts two input conventions for rollout server endpoints:
 
 ## Dataset Subsets (reproducible selection)
 
-`prepare_r2egym_subset.py` reproduces the exact train/eval splits using a deterministic
+`scripts/r2egym_32b/prepare_dataset.py` reproduces the exact train/eval splits using a deterministic
 SHA-256 selection:
 
 ```

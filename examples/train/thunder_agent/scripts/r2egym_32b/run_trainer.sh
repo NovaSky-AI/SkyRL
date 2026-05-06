@@ -14,7 +14,7 @@ set -euo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 STAGE="${1:-full}"
 if [ "$#" -gt 0 ]; then
   shift
@@ -115,6 +115,7 @@ THUNDER_AGENT_METRICS_ENABLED="${THUNDER_AGENT_METRICS_ENABLED:-true}"
 # Harbor runtime
 # ---------------------------------------------------------------------------
 HARBOR_AGENT_MAX_TURNS="${HARBOR_AGENT_MAX_TURNS:-25}"
+HARBOR_AGENT_TEMPERATURE="${HARBOR_AGENT_TEMPERATURE:-0.3}"
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-9000}"
 MINI_SWE_MODEL_TIMEOUT_SEC="${MINI_SWE_MODEL_TIMEOUT_SEC:-1200}"
 DOCKER_MODE="${DOCKER_MODE:-rootful}"
@@ -315,10 +316,6 @@ fi
   generator.n_samples_per_prompt="$N_SAMPLES" \
   generator.eval_n_samples_per_prompt="$EVAL_N_SAMPLES" \
   generator.apply_overlong_filtering="$APPLY_OVERLONG_FILTERING" \
-  generator.sampling_params.temperature=0.3 \
-  generator.sampling_params.logprobs=null \
-  generator.eval_sampling_params.temperature=0.0 \
-  generator.eval_sampling_params.logprobs=null \
   generator.inference_engine.num_engines="$ROLLOUT_ENGINES" \
   generator.inference_engine.tensor_parallel_size="$ROLLOUT_TP_SIZE" \
   generator.inference_engine.run_engines_locally=false \
@@ -345,6 +342,7 @@ fi
   harbor_trial_config.environment.kwargs.auto_stop_interval_mins=null \
   harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
   harbor_trial_config.agent.kwargs.max_turns="$HARBOR_AGENT_MAX_TURNS" \
+  harbor_trial_config.agent.kwargs.temperature="$HARBOR_AGENT_TEMPERATURE" \
   harbor_trial_config.agent.kwargs.enable_summarize=false \
   harbor_trial_config.agent.kwargs.record_terminal_session=false \
   harbor_trial_config.agent.kwargs.store_all_messages=true \

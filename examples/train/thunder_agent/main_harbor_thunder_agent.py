@@ -2,23 +2,24 @@
 Main entrypoint for fully async Harbor training with ThunderAgent routing.
 """
 
-import sys
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import ray
 import yaml
 
+from skyrl.backends.skyrl_train.utils.ppo_utils import sync_registries
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import prepare_runtime_environment
-from skyrl.backends.skyrl_train.utils.ppo_utils import sync_registries
 
 from .main_thunder_agent import FullyAsyncThunderAgentExp
 from .training_config import ThunderAgentHarborConfig
 
-
-HARBOR_DEFAULT_CONFIG = Path(__file__).parent / "harbor_trial_config" / "default.yaml"
+HARBOR_DEFAULT_CONFIG = (
+    Path(__file__).parent / "configs" / "harbor_trial" / "default.yaml"
+)
 REPO_ROOT = str(Path(__file__).resolve().parents[3])
 
 
@@ -58,7 +59,7 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
     """Harbor fully-async experiment that routes inference through ThunderAgent."""
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
-        from .skyrl_integration.harbor_generator import ThunderAgentHarborGenerator
+        from .skyrl_integration.generator import ThunderAgentHarborGenerator
 
         return ThunderAgentHarborGenerator(
             generator_cfg=cfg.generator,
@@ -68,23 +69,34 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
             max_seq_len=cfg.trainer.algorithm.max_seq_len,
         )
 
-    def get_train_dataset(self):
-        from .skyrl_integration.harbor_dataset import ThunderAgentHarborDataset
+    @staticmethod
+    def _build_harbor_task_dataset(data_files, max_tasks=None):
+        from examples.train_integrations.harbor.dataset import HarborTaskDataset
 
-        prompts_dataset = ThunderAgentHarborDataset(
+        dataset = HarborTaskDataset(data_files=data_files)
+        if len(dataset) == 0:
+            raise ValueError(
+                f"HarborTaskDataset resolved zero task directories from data_files={data_files!r}. "
+                "Each entry must be a task directory or a directory of task subdirectories "
+                "containing instruction.md."
+            )
+        if max_tasks is not None and max_tasks < len(dataset.task_paths):
+            dataset.task_paths = dataset.task_paths[:max_tasks]
+        return dataset
+
+    def get_train_dataset(self):
+        prompts_dataset = self._build_harbor_task_dataset(
             data_files=self.cfg.data.train_data,
             max_tasks=self.cfg.max_train_tasks,
         )
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
+            f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        )
         return prompts_dataset
 
     def get_eval_dataset(self):
-        from .skyrl_integration.harbor_dataset import ThunderAgentHarborDataset
-
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            return ThunderAgentHarborDataset(
+            return self._build_harbor_task_dataset(
                 data_files=self.cfg.data.val_data,
                 max_tasks=self.cfg.max_eval_tasks,
             )
@@ -93,7 +105,7 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
-    from .harbor_runtime_setup import patch_mini_swe_agent_environment
+    from .skyrl_integration.runtime_setup import patch_mini_swe_agent_environment
 
     patch_mini_swe_agent_environment()
     exp = HarborThunderAgentFullyAsyncExp(cfg)
@@ -104,7 +116,9 @@ def _recipe_runtime_env(cfg) -> dict[str, str]:
     env_vars = prepare_runtime_environment(cfg)
     socket_ifname = os.environ.get("NCCL_SOCKET_IFNAME") or _default_socket_ifname()
     env_vars.setdefault("NCCL_SOCKET_IFNAME", socket_ifname)
-    env_vars.setdefault("GLOO_SOCKET_IFNAME", os.environ.get("GLOO_SOCKET_IFNAME", socket_ifname))
+    env_vars.setdefault(
+        "GLOO_SOCKET_IFNAME", os.environ.get("GLOO_SOCKET_IFNAME", socket_ifname)
+    )
 
     for name in (
         "SKYRL_WORKER_NCCL_TIMEOUT_IN_S",
@@ -123,7 +137,9 @@ def _recipe_runtime_env(cfg) -> dict[str, str]:
             env_vars[name] = os.environ[name]
 
     pythonpath = env_vars.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
-    env_vars["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
+    env_vars["PYTHONPATH"] = (
+        REPO_ROOT if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
+    )
     return env_vars
 
 
