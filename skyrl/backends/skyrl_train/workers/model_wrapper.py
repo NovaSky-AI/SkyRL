@@ -31,6 +31,8 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
