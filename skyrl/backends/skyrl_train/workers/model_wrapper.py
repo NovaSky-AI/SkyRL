@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     logprobs_from_logits,
 )
 
+
 def _patch_qwen3_5():
     """Apply patches for Qwen3.5 model compatibility issues in transformers 5.3.0.
     1. Fix 3D MRoPE position_ids passed to decoder layers instead of 2D text_position_ids,
@@ -49,14 +50,18 @@ def _patch_qwen3_5():
     """
     try:
         import inspect
+
         import transformers
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5TextModel
- 
+
         # Verify that the fast-path kernels (causal-conv1d + flash-linear-attention)
         # are available.  Without them the model falls back to pure-PyTorch
         # implementations of causal conv1d and the gated delta rule, which are
         # significantly slower for both forward and backward passes.
-        from transformers.models.qwen3_5.modeling_qwen3_5 import is_fast_path_available
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5DecoderLayer,
+            Qwen3_5TextModel,
+            is_fast_path_available,
+        )
         if is_fast_path_available:
             logger.info("Qwen3.5 fast path is ENABLED (causal-conv1d + flash-linear-attention)")
         else:
