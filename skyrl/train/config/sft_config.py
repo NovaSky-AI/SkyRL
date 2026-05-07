@@ -6,8 +6,10 @@ bridge function ``build_skyrl_config_for_sft`` that maps it to the internal
 ``SkyRLTrainConfig`` used by the SkyRL backend.
 """
 
+import os
 from dataclasses import dataclass, field
-from typing import List, Union
+from enum import StrEnum
+from typing import List, Optional, Union
 
 from omegaconf import OmegaConf
 
@@ -19,6 +21,23 @@ from skyrl.train.config import (
     OptimizerConfig,
     SkyRLTrainConfig,
 )
+
+# ---------------------------------------------------------------------------
+# TrainOnWhat enum
+# ---------------------------------------------------------------------------
+
+
+class TrainOnWhat(StrEnum):
+    """Enum controlling which parts of the sequence to compute loss on.
+
+    Members:
+        LAST_ASSISTANT_MESSAGE: Train only on the final assistant message.
+        ALL_ASSISTANT_MESSAGES: Train on every assistant message in the conversation.
+    """
+
+    LAST_ASSISTANT_MESSAGE = "last_assistant_message"
+    ALL_ASSISTANT_MESSAGES = "all_assistant_messages"
+
 
 # ---------------------------------------------------------------------------
 # SFT-specific config dataclasses
@@ -66,11 +85,17 @@ class SFTConfig(BaseConfig):
 
         Returns:
             A fully constructed SFTConfig with CLI overrides applied.
+
+        Raises:
+            ValueError: If both ``num_epochs`` and ``num_steps`` are explicitly provided.
         """
         if isinstance(args, dict):
             args = [f"{k}={v}" for k, v in args.items()]
 
         overrides = OmegaConf.from_cli(args)
+        # Check for mutual exclusion before constructing the full config
+        if "num_epochs" in overrides and "num_steps" in overrides:
+            raise ValueError("Cannot specify both num_epochs and num_steps")
         return cls.from_dict_config(overrides)
 
     # ---- Reused SkyRL config objects ----
@@ -103,8 +128,13 @@ class SFTConfig(BaseConfig):
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
     messages_key: str = "messages"  # column name for chat-format datasets
-    max_length: int = 512
-    num_steps: int = 10
+    max_length: Optional[int] = None
+    """Maximum length of tokenized sequences. If specified, all sequences will be truncated to this value
+    By default, no truncation is performed"""
+    num_steps: Optional[int] = None
+    """Number of training steps. If None, num_epochs is used to derive the step count."""
+    num_epochs: Optional[int] = 1
+    """Number of training epochs. Used when num_steps is None. Default: 1 epoch."""
     batch_size: int = 4
     micro_train_batch_size_per_gpu: int = 2
     logger: str = "console"  # "console" or "wandb"
@@ -115,7 +145,18 @@ class SFTConfig(BaseConfig):
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
+
+    # ---- HF export ----
+    hf_save_interval: int = 0
+    """Save HuggingFace-format weights every N steps. 0 = disabled."""
+    export_path: str = ""
+    """Directory for HF-format exports. Defaults to ckpt_path/hf_exports if empty."""
+
     seed: int = 42
+
+    # ---- Training target ----
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
+    """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
 
     # ---- Packing ----
     use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)
@@ -145,8 +186,13 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError(f"micro_train_batch_size_per_gpu must be > 0, got {cfg.micro_train_batch_size_per_gpu}")
     if cfg.batch_size <= 0:
         raise ValueError(f"batch_size must be > 0, got {cfg.batch_size}")
-    if cfg.num_steps <= 0:
+    if cfg.num_steps is not None and cfg.num_steps <= 0:
         raise ValueError(f"num_steps must be > 0, got {cfg.num_steps}")
+    if cfg.num_steps is None:
+        if cfg.num_epochs is None:
+            raise ValueError("One of num_steps or num_epochs must be set")
+        if cfg.num_epochs <= 0:
+            raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
@@ -224,5 +270,14 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     if sft_cfg.ckpt_path:
         cfg.trainer.ckpt_path = sft_cfg.ckpt_path
         cfg.trainer.ckpt_interval = sft_cfg.ckpt_interval
+
+    # HF export
+    if sft_cfg.hf_save_interval > 0:
+        cfg.trainer.hf_save_interval = sft_cfg.hf_save_interval
+        if sft_cfg.export_path:
+            cfg.trainer.export_path = sft_cfg.export_path
+        elif sft_cfg.ckpt_path:
+            cfg.trainer.export_path = os.path.join(sft_cfg.ckpt_path, "hf_exports")
+        # else: leave cfg.trainer.export_path at its default (~/exports/)
 
     return cfg

@@ -95,18 +95,8 @@ class SQLEnv(BaseTextEnv):
             return True
         return "<solution>" in action and "</solution>" in action
 
-    def _validate_action(self, action: str):
-        stop_tags = ["</sql>", "</solution>"]
-        for tag in stop_tags:
-            if tag in action:
-                assert action.split(tag, 1)[1] == "", (
-                    f"{tag} detected in the response but it is not the last string generated. "
-                    f"Use {stop_tags} as stop strings in the configuration."
-                )
-
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        self._validate_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None

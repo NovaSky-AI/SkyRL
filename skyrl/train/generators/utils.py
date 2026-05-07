@@ -147,26 +147,33 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemp
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) -> List[int]:
+def get_generation_prompt_ids(tokenizer, tokenizer_kwargs: Optional[dict] = None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
 
     Args:
         tokenizer: HuggingFace tokenizer with chat_template support.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``). If None, uses defaults.
+                          ``enable_thinking`` is not supported here; use
+                          ``encode_messages_subset`` instead.
 
     Returns:
         List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
+    assert "enable_thinking" not in (
+        tokenizer_kwargs or {}
+    ), "enable_thinking is not supported in get_generation_prompt_ids; use encode_messages_subset instead"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
     empty_user = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, chat_template=chat_template
+        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, **kwargs
     )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": ""}],
         add_generation_prompt=True,
         tokenize=True,
         return_dict=False,
-        chat_template=chat_template,
+        **kwargs,
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -444,7 +451,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer, chat_template: Optional[str] = None):
+def encode_messages_subset(messages: ConversationType, tokenizer, tokenizer_kwargs: Optional[dict] = None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -467,17 +474,19 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
     # TODO(Charlie): what are the tokenizers that could lead to clipping issues? Namely the previous turn ending
     # token can be combined with the tokens of the start of a turn. e.g. Qwen3 with a dummy chat template in
-    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, chat_template=dummy_chat_template)`
+    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": dummy_chat_template})`
     # But this case is not realistic.
 
     assert len(messages), "messages list cannot be empty"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -487,8 +496,8 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=chat_template,
         return_dict=False,
+        **kwargs,
     )
 
     full_conversation = base_conversation + messages
@@ -496,15 +505,49 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=chat_template,
         return_dict=False,
+        **kwargs,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
+def _find_generation_prompt_boundary(cur_token_ids: List[int], generation_prompt_ids: List[int]) -> int:
+    """Return the index in ``cur_token_ids`` where assistant-generated content starts.
+
+    Handles the common case (exact prefix match) and a merge case where the last
+    token of the generation prompt is merged with the assistant content's leading
+    whitespace by the tokenizer (e.g. ``\\n`` + ``\\nHello`` -> ``\\n\\n`` token).
+    In the merge case, returns ``len(generation_prompt_ids) - 1`` so the merged
+    boundary token is attributed to the assistant's content (loss 1).
+
+    Args:
+        cur_token_ids: Token IDs for a single assistant message.
+        generation_prompt_ids: Expected generation-prompt prefix token IDs.
+
+    Returns:
+        Index into ``cur_token_ids`` at which generated content begins.
+
+    Raises:
+        AssertionError: If neither the exact nor the merge pattern matches.
+    """
+    n = len(generation_prompt_ids)
+    if cur_token_ids[:n] == generation_prompt_ids:
+        return n
+    # Merge fallback: everything except the last header token matches, and the
+    # last header token differs because it was merged with the content's
+    # leading whitespace during tokenization.
+    if n >= 1 and len(cur_token_ids) >= n and cur_token_ids[: n - 1] == generation_prompt_ids[: n - 1]:
+        return n - 1
+    raise AssertionError(
+        "Assistant message tokens should start with generation prompt (or a "
+        "merge variant thereof). "
+        f"Expected prefix {generation_prompt_ids}, got {cur_token_ids[:n]}"
+    )
+
+
 def get_response_ids_and_loss_mask_from_messages(
-    messages: ConversationType, tokenizer, assistant_logprobs=None, chat_template: Optional[str] = None
+    messages: ConversationType, tokenizer, assistant_logprobs=None, tokenizer_kwargs: Optional[dict] = None
 ):
     """
     Get the response ids and loss mask from a list of messages.
@@ -518,8 +561,8 @@ def get_response_ids_and_loss_mask_from_messages(
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
                 `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
-                       This should be the same chat template used for serving if a custom one was used.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
 
     Returns:
         Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
@@ -527,7 +570,7 @@ def get_response_ids_and_loss_mask_from_messages(
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer, chat_template=chat_template)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, tokenizer_kwargs=tokenizer_kwargs)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -538,7 +581,7 @@ def get_response_ids_and_loss_mask_from_messages(
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer, chat_template=chat_template)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, tokenizer_kwargs=tokenizer_kwargs)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
@@ -554,25 +597,33 @@ def get_response_ids_and_loss_mask_from_messages(
             # 1) generation prompt IDs -- mask is 0
             # 2) tokens actually generated by the assistant (including the EOS) -- mask is 1
             # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
-            assert cur_token_ids[: len(generation_prompt_ids)] == generation_prompt_ids, (
-                f"Assistant message tokens should start with generation prompt. "
-                f"Expected {generation_prompt_ids}, got {cur_token_ids[:len(generation_prompt_ids)]}"
-            )
+            # Handle the common case (exact prefix) and the merge case, where the
+            # last generation-prompt token (e.g. '\n' -> id 198 in Qwen) is merged
+            # with the assistant content's leading whitespace by the tokenizer
+            # (e.g. content '\nHello' -> header ends with '\n\n' id 271). This
+            # occurs for datasets like TULU3 where assistant replies may begin
+            # with a blank line.
+            header_boundary = _find_generation_prompt_boundary(cur_token_ids, generation_prompt_ids)
             if tokenizer.eos_token_id in cur_token_ids:
                 last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
-                generated_token_ids = cur_token_ids[len(generation_prompt_ids) : last_eos_token_index + 1]
+                generated_token_ids = cur_token_ids[header_boundary : last_eos_token_index + 1]
                 tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
             else:
-                generated_token_ids = cur_token_ids[len(generation_prompt_ids) :]
+                generated_token_ids = cur_token_ids[header_boundary:]
                 tokens_after_eos = []
-            assert len(generation_prompt_ids) + len(generated_token_ids) + len(tokens_after_eos) == len(
+            assert header_boundary + len(generated_token_ids) + len(tokens_after_eos) == len(
                 cur_token_ids
             ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
 
             # 3.2.1. Add the generation prompt IDs.
-            loss_mask.extend([0] * len(generation_prompt_ids))
+            # Use header_boundary (not len(generation_prompt_ids)) so the mask
+            # lines up with `cur_token_ids` even when the last header token got
+            # merged with the content's leading whitespace. In that merge case,
+            # header_boundary == len(generation_prompt_ids) - 1 and the merged
+            # boundary token ends up in `generated_token_ids` (loss 1).
+            loss_mask.extend([0] * header_boundary)
             if assistant_logprobs:
-                rollout_logprobs.extend([0.0] * len(generation_prompt_ids))
+                rollout_logprobs.extend([0.0] * header_boundary)
 
             # 3.2.2. Add what the assistant actually generated
             loss_mask.extend([1] * len(generated_token_ids))

@@ -26,6 +26,9 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
     should_use_meta_init,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    SKYRL_LORA_ADAPTER_NAME,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -193,6 +196,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.policy.language_model_only,
+            logprobs_chunk_size=self.cfg.logprobs_chunk_size,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
@@ -261,7 +265,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
 
             if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.update_lora_from_disk(lora_sync_path)
+                await inference_engine_client.load_lora_adapter(SKYRL_LORA_ADAPTER_NAME, lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path)
                 await inference_engine_client.update_named_weights(lora_request)
@@ -415,6 +419,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.ref.language_model_only,
+            logprobs_chunk_size=self.cfg.logprobs_chunk_size,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

@@ -32,6 +32,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    SKYRL_LORA_ADAPTER_NAME,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -877,12 +880,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             with open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(adapter_config, f, ensure_ascii=False, indent=4)
 
+            # Send LoRA disk loading request to inference engine.
             from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
                 RemoteInferenceClient,
             )
 
             if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.update_lora_from_disk(lora_sync_path)
+                await inference_engine_client.load_lora_adapter(SKYRL_LORA_ADAPTER_NAME, lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path)
                 await inference_engine_client.update_named_weights(lora_request)

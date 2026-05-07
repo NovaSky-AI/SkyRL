@@ -74,7 +74,7 @@ def mock_llm():
     mock = MagicMock()
 
     # Mock the new generate method
-    def mock_generate(input_batch):
+    def mock_generate(input_batch, model=None):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
         return {
             "responses": ["mocked output"] * num_prompts,
@@ -266,7 +266,7 @@ async def test_agent_loop_single_turn(
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    def mock_generate(_):
+    def mock_generate(_, model=None):
         result = {
             "responses": ["4"],
             "response_ids": [mock_llm_output_ids.copy()],
@@ -468,7 +468,7 @@ async def test_length_limit_exceeded_during_conversation(
     max_input_length = 20  # Low limit to trigger length exceeded
 
     # Mock the new generate method
-    def mock_generate(input_batch):
+    def mock_generate(input_batch, model=None):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
         if turns_to_exceed == 1:
             mock_llm_output_ids = [1] * 20  # Enough to exceed limit immediately (4 + 20 + 4 = 28 > 20)
@@ -735,7 +735,7 @@ async def test_apply_overlong_filtering_non_batched(
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
 
         if input_batch.get("sampling_params") is not None:
             max_len = input_batch["sampling_params"]["max_generate_length"]
@@ -901,7 +901,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     mock_tokenizer.encode.side_effect = encode_side_effect
 
     # LLM returns fixed response tokens per step: 3 tokens + eos
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = (
             len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
         )  # noqa: E501
@@ -989,7 +989,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
 
     # LLM outputs include EOS and are kept in multi-turn path
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = (
             len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
         )  # noqa: E501
@@ -1079,7 +1079,7 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
 
     # LLM generate in retokenize mode uses prompts; we can return any ids
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = (
             len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
         )  # noqa: E501
@@ -1160,7 +1160,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     mock_tokenizer.eos_token_id = 4
 
     # LLM returns 4 assistant tokens per turn (no eos here; final EOS appended by generator for non-conv-mt)
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
 
         if input_batch.get("sampling_params") is not None:
@@ -1256,7 +1256,7 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
     mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
 
     # LLM returns 3 tokens + eos per step
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
         return {
             "responses": ["step"] * num,
@@ -1378,7 +1378,7 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
 
     # LLM returns 3 tokens + eos per step
-    async def llm_generate_side_effect(input_batch):
+    async def llm_generate_side_effect(input_batch, model=None):
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
         return {
             "responses": ["step"] * num,

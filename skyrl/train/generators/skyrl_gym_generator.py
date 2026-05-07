@@ -142,17 +142,24 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        policy_model_name: Optional[str] = None,
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            policy_model_name: identifier the inference engine knows the policy
+                by (base model path or registered LoRA adapter name). Threaded
+                into every ``client.generate(...)`` call as ``model``. When
+                ``None`` (default), the client falls back to its own
+                ``model_name``
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.policy_model_name = policy_model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
@@ -338,7 +345,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -671,7 +678,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
+        engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]

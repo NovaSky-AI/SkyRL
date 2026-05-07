@@ -501,7 +501,7 @@ async def test_client_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     with pytest.raises(aiohttp.ClientResponseError):
-        await client.chat_completion({"json": {"model": SERVED_MODEL_NAME}})
+        await client.chat_completion({"json": {}})
 
     # Wrong model name
     with pytest.raises(aiohttp.ClientResponseError):
