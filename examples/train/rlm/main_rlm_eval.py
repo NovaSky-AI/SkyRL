@@ -15,7 +15,6 @@ from skyrl.train.config import make_config
 from skyrl.train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 
-from . import multi_paper_env  # noqa: F401  -- registers evidence_rlm / multipaper_evidence_rlm env ids
 from .rlm_config import RLMGeneratorConfig
 from .rlm_generator import RLMGymGenerator
 
