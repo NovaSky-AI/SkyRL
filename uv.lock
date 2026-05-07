@@ -274,7 +274,7 @@ overrides = [
     { name = "ml-dtypes", marker = "sys_platform == 'linux'", specifier = ">=0.5.0" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux'", specifier = "==2.11.0" },
-    { name = "transformers", marker = "sys_platform == 'linux'", specifier = ">=5.6.1,<6.0.0" },
+    { name = "transformers", marker = "sys_platform == 'linux'", specifier = ">=5.6.1,<=5.8.0" },
 ]
 
 [[package]]
