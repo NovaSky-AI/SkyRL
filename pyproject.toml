@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=5.0.0,<=5.3.0",
+    "transformers>=5.6.1,<6.0.0",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -217,7 +217,10 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
-    "transformers>=5.5.0,<=5.6.0; sys_platform == 'linux'",
+    # 5.6.1 fixes a flash_attention.py NoneType bug introduced in 5.6.0:
+    # https://github.com/huggingface/transformers/pull/.../flash_attention.py#L84
+    # We use override-dependencies to bypass Megatron-Bridge's `<=5.6.0` upper bound.
+    "transformers>=5.6.1,<6.0.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
