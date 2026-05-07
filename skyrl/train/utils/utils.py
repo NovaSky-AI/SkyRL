@@ -665,6 +665,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
+    # Force NCCL_NET=Socket on all workers. On B200 nodes the default gIB NET plugin
+    # fails to initialize, causing DistBackendError on FSDP weight scattering.
+    # NCCL_NET_PLUGIN=none disables the plugin search so Socket is used directly.
+    logger.info("Setting NCCL_NET=Socket and NCCL_NET_PLUGIN=none in ray runtime env")
+    env_vars["NCCL_NET"] = "Socket"
+    env_vars["NCCL_NET_PLUGIN"] = "none"
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):

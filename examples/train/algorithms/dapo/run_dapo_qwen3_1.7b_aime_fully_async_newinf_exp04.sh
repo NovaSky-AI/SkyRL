@@ -1,8 +1,11 @@
 set -x
 
-# Fully async DAPO training+generation for Qwen3-1.7B-Base on DAPO training data and validate on AIME 2024.
-# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime_fully_async.sh
+# Fully async DAPO - Exp04: same as Exp03 but token_mean instead of token_mean_legacy.
+# Hypothesis: token_mean_legacy amplifies gradients from short-response microbatches,
+# causing instability. Sync uses token_mean and doesn't collapse.
+# Exp03 used token_mean_legacy and collapsed ~step 900 despite TIS+icepop.
+# Off-policy correction: TIS (token, cap 2.0) + Icepop (token masking, [0.5, 2.0]).
+# No geometric sequence masking.
 
 MODEL_NAME="Qwen/Qwen3-1.7B-Base"
 DATA_DIR="$HOME/data/dapo"
@@ -12,19 +15,15 @@ NUM_NODES=1
 NUM_GPUS_PER_NODE=4
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
-LOGGER="wandb"  # change to "console" to print to stdout
+LOGGER="wandb"
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
-# use dr. grpo loss reduction
 LOSS_REDUCTION="token_mean"
-# applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
-# apply soft overlong punishment with custom trainer impl in main_dapo_fully_async.py
 OVERLONG_BUFFER_LEN=$((1024 * 4))
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
 
-# other DAPO parameters
 USE_KL_LOSS=false
 TEMPERATURE=1.0
 TOP_P=1.0
@@ -33,30 +32,37 @@ CLIP_RATIO_C=10.0
 MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
-# repro run parameters
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
+ENFORCE_EAGER=true
 LR=1e-6
 
-# Fully async specific configuration knobs:
-: "${MAX_STALENESS_STEPS:=8}"
-: "${NUM_PARALLEL_GENERATION_WORKERS:=144}"
+# bs=32 matches sync policy_mini_batch_size: same per-gradient-update data volume.
+# num_parallel_generation_workers must be in [bs, bs*(max_staleness+1)] = [32, 96].
+# 64 gives a buffer above 32 to keep workers busy without allowing excessive staleness.
+: "${MAX_STALENESS_STEPS:=2}"
+: "${NUM_PARALLEL_GENERATION_WORKERS:=96}"
 : "${MINI_BATCH_SIZE:=32}"
-: "${EVAL_CKPT_INTERVAL:=80}"
+: "${EVAL_CKPT_INTERVAL:=100}"
 
-RUN_NAME=dapo_qwen3_1.7b_base-async-TIS_2.0-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen_commit
+RUN_NAME=dapo_qwen3_1.7b_base-async-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen_tis_icepop_tokenmean_newinf
 
-USE_TIS=true
-TIS_IMP_RATIO_CAP=2.0
+# TIS: token-level, cap 2.0
+TIS_RATIO_TYPE=token
+TOKEN_TIS_CLIP_HIGH=2.0
+# Icepop: token masking, zeros out tokens with IS ratio outside [0.5, 2.0]
+TOKEN_MASK_LOW=0.5
+TOKEN_MASK_HIGH=2.0
 
 uv run --isolated --extra fsdp --env-file .env.test -m examples.train.algorithms.dapo.main_dapo_fully_async \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TOKEN_TIS_CLIP_HIGH \
+  trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=$TOKEN_MASK_LOW \
+  trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=$TOKEN_MASK_HIGH \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \

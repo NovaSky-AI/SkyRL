@@ -1,8 +1,10 @@
 set -x
 
 # Fully async DAPO training+generation for Qwen3-1.7B-Base on DAPO training data and validate on AIME 2024.
+# Exp02: Remove geometric sequence masking (was causing ~25% data waste due to train/inference
+# kernel IS ratio mismatch between vLLM and FSDP). Keep token TIS with cap 2.0 only.
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime_fully_async.sh
+# bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime_fully_async_newinf_exp02.sh
 
 MODEL_NAME="Qwen/Qwen3-1.7B-Base"
 DATA_DIR="$HOME/data/dapo"
@@ -16,8 +18,9 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
-# use dr. grpo loss reduction
-LOSS_REDUCTION="token_mean"
+# token_mean_legacy: normalizes per-microbatch then averages, more stable when response
+# lengths vary widely across microbatches (common in async training with mixed-vintage data)
+LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo_fully_async.py
@@ -40,23 +43,30 @@ ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
 
 # Fully async specific configuration knobs:
-: "${MAX_STALENESS_STEPS:=8}"
-: "${NUM_PARALLEL_GENERATION_WORKERS:=144}"
-: "${MINI_BATCH_SIZE:=32}"
-: "${EVAL_CKPT_INTERVAL:=80}"
+# MINI_BATCH_SIZE=512 matches sync DAPO's TRAIN_BATCH_SIZE=512, ensuring the same
+# amount of data (512 prompts x 16 samples = 8192 trajectories) per gradient step.
+: "${MAX_STALENESS_STEPS:=2}"
+# NUM_PARALLEL_GENERATION_WORKERS must be >= MINI_BATCH_SIZE (512) per docs constraint.
+# 576 gives a small buffer above 512 to overlap generation with training.
+: "${NUM_PARALLEL_GENERATION_WORKERS:=576}"
+: "${MINI_BATCH_SIZE:=512}"
+: "${EVAL_CKPT_INTERVAL:=5}"
 
-RUN_NAME=dapo_qwen3_1.7b_base-async-TIS_2.0-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen_commit
+RUN_NAME=dapo_qwen3_1.7b_base-async-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen_tis_only_newinf
 
-USE_TIS=true
-TIS_IMP_RATIO_CAP=2.0
+# Off-policy correction: token-level TIS with cap 2.0 only (no geometric sequence masking).
+# Geo masking was discarding ~25% of sequences due to train/inference kernel IS ratio
+# mismatch (vLLM vs FSDP), NOT actual off-policy staleness. Removed to recover that data.
+TIS_RATIO_TYPE=token
+TOKEN_TIS_CLIP_HIGH=2.0
 
 uv run --isolated --extra fsdp --env-file .env.test -m examples.train.algorithms.dapo.main_dapo_fully_async \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TOKEN_TIS_CLIP_HIGH \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \

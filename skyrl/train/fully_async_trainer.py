@@ -399,8 +399,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # should handle the case where the dataloader is exhausted and the buffer is empty, or
                         # else this loop will never exit.
                         while len(cur_generation_group_mini_batch) < self.mini_batch_size:
+                            if self.async_train_dataloader._exhausted:
+                                # exhausted dataloader - reset it
+                                await self.async_train_dataloader.reset_at_epoch_end()
+                                # replenish generator tasks
+                                for task in generator_tasks:
+                                    task.cancel()
+                                try:
+                                    await asyncio.gather(*generator_tasks, return_exceptions=True)
+                                except Exception:
+                                    pass
+                                generator_tasks = [
+                                    asyncio.create_task(
+                                        self._run_generate_for_a_group_loop(generation_output_group_buffer)
+                                    )
+                                    for _ in range(self.num_parallel_generation_workers)
+                                ]
+                                continue
                             # We do finish-time FIFO here (not schedule-time FIFO)
-                            cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                            sample = await generation_output_group_buffer.get()
+                            if (
+                                self.global_step - sample.global_step_when_scheduled
+                                > self.cfg.trainer.fully_async.max_staleness_steps
+                            ):
+                                # skip
+                                continue
+                            cur_generation_group_mini_batch.append(sample)
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
@@ -595,7 +619,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # If a slot was acquired but we exit early, release running count
             try:
                 if "slot_acquired" in locals() and slot_acquired:
-                    raise RuntimeError("Generation workers should only be cancelled when they finish running.")
+                    await asyncio.shield(self._staleness_manager.on_rollout_rejected())
             finally:
                 return
         except Exception as e:
