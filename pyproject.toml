@@ -211,11 +211,6 @@ no-build-isolation-package = [
     "transformer-engine-torch",
     "transformer-engine",
     "nv-grouped-gemm",
-    # causal-conv1d and mamba-ssm need to compile against torch 2.11 (no
-    # upstream wheels yet); building with isolation would pin a different
-    # torch in the build env than the runtime.
-    "causal-conv1d",
-    "mamba-ssm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
@@ -231,10 +226,6 @@ override-dependencies = [
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
-# causal-conv1d / mamba-ssm need torch + ninja in the build env (we run them
-# with build isolation disabled but uv still uses extra-build-dependencies).
-causal-conv1d = [{requirement = "torch", match-runtime = true}, "ninja", "packaging", "wheel", "setuptools"]
-mamba-ssm = [{requirement = "torch", match-runtime = true}, "ninja", "packaging", "wheel", "setuptools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -284,11 +275,13 @@ flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == '
 vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
 ]
-# NOTE (overnight 2026-04-30): bumped to torch 2.11 so vllm 0.20.0 install
-# resolves cleanly. There are no upstream torch-2.11 wheels for causal-conv1d
-# or mamba-ssm yet, so those build from source against torch 2.11. Keep the
-# flash-attn URL pinned to the lesj0610 fork's torch-2.11 wheel.
+# torch-2.11 wheels for flash-attn / causal-conv1d / mamba-ssm are not yet
+# published upstream. flash-attn uses lesj0610's fork; causal-conv1d and
+# mamba-ssm use locally-built wheels published as release assets on
+# erictang000 forks (built with cu128 / cxx11abiTRUE / Python 3.12).
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config).
 # Stay on the cu128 index because torch 2.11+cu128 exists there and the
 # flashrl extra requires torch 2.7 (only on cu128). The vllm 0.20 wheel pulled
