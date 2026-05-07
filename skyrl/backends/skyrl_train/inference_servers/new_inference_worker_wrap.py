@@ -69,12 +69,16 @@ class NewInferenceWorkerWrap:
             )
 
         if is_checkpoint_format:
+            from vllm.config import set_current_vllm_config
             from vllm.model_executor.model_loader.reload import (
                 initialize_layerwise_reload,
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            # Same context requirement as update_weights_chunk:
+            # initialize_layerwise_reload may instantiate per-layer wrappers
+            # that read the current vllm config.
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 initialize_layerwise_reload(model)
 
         self._skyrl_is_checkpoint_format = is_checkpoint_format
@@ -132,8 +136,16 @@ class NewInferenceWorkerWrap:
             weights.append((name, packed_tensor[offset : offset + size].view(*shape)))
             offset += size
 
+        # Some MoE backends (e.g. vllm.model_executor.layers.fused_moe.
+        # flashinfer_cutlass_moe) instantiate kernels during
+        # process_weights_after_loading and call get_current_vllm_config()
+        # to read compilation config. That requires a set_current_vllm_config
+        # context — vllm sets it around init_device / load_model etc., but
+        # our update_weights_chunk runs outside of those, so reapply it here.
+        from vllm.config import set_current_vllm_config
+
         model = self.model_runner.model
-        with torch.device(self.device):
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
             else:
@@ -157,12 +169,16 @@ class NewInferenceWorkerWrap:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         if self._skyrl_is_checkpoint_format:
+            from vllm.config import set_current_vllm_config
             from vllm.model_executor.model_loader.reload import (
                 finalize_layerwise_reload,
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            # finalize_layerwise_reload runs process_weights_after_loading on
+            # any layers not finalized during chunked loading; same vllm_config
+            # context requirement as update_weights_chunk.
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
 
         self._skyrl_weight_update_active = False
