@@ -198,13 +198,6 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
-    if cfg.trainer.flash_attn:
-        import flash_attn
-
-        version = flash_attn.__version__
-        if version > "2.8.1":
-            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
-
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
