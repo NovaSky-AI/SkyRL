@@ -641,8 +641,8 @@ class TrainerConfig(BaseConfig):
     """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
     logprobs_chunk_size: int = 1024
     """Chunk size along the sequence dimension when computing log-probs from logits.
-    Reducing this lowers peak GPU memory at the cost of ~2x wall-clock time.
-    Set to None to disable chunking. See https://github.com/NovaSky-AI/SkyRL/pull/1610."""
+    This lowers peak GPU memory at the cost of ~2x wall-clock time.
+    Set to None to disable chunking. See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
