@@ -217,7 +217,7 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
-    "transformers>=5.6.0,<6.0; sys_platform == 'linux'",
+    "transformers>=5.5.0,<=5.6.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]

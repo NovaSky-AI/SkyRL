@@ -19,26 +19,28 @@ class ModelConfig(PretrainedConfig):
         mhc_expansion_rate: mHC expansion rate. Connectors are trainable when this is > 1.
     """
 
-    # Type hints for config attributes
-    max_lora_adapters: int
-    max_lora_rank: int
-    shard_attention_heads: bool
-    loss_chunk_size: int
-    gradient_checkpointing: bool
-    mhc_expansion_rate: int
+    # NOTE: do NOT add class-level annotations here. transformers >=5.4 turned
+    # PretrainedConfig into a pydantic-validated dataclass; class-level
+    # annotations get picked up as required dataclass fields, and
+    # `_get_generation_parameters` calls `self.__class__()` with no args,
+    # so all params need defaults. See huggingface/transformers#45070.
 
     def __init__(
         self,
-        config: PretrainedConfig | dict,
+        config: PretrainedConfig | dict | None = None,
         *,
-        max_lora_adapters: int,
-        max_lora_rank: int,
-        shard_attention_heads: bool,
+        max_lora_adapters: int = 0,
+        max_lora_rank: int = 0,
+        shard_attention_heads: bool = True,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
+        **kwargs,
     ):
-        super().__init__(**(config if isinstance(config, dict) else config.__dict__))
+        if config is not None:
+            super().__init__(**(config if isinstance(config, dict) else config.__dict__))
+        else:
+            super().__init__(**kwargs)
 
         # In transformers v5, rope_parameters may not contain rope_theta
         # even when it exists as a top-level config attribute (e.g. DeepSeek v3).
