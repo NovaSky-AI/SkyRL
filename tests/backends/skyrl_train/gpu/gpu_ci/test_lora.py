@@ -17,9 +17,7 @@ import ray
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    SKYRL_LORA_ADAPTER_NAME,
-)
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -153,9 +151,10 @@ async def test_policy_local_engines_e2e(
         policy.offload_to_cpu()
         await client.wake_up(tags=["kv_cache"])
         await client.reset_prefix_cache()
-        # When vLLM has the LoRA adapter loaded, address it by name so this
-        # test actually exercises LoRA inference. For megatron+merge_lora the
-        # adapter isn't loaded — merged weights live under the base model.
-        inference_model = SKYRL_LORA_ADAPTER_NAME if needs_vllm_lora else None
-        outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params, model=inference_model)
+        # Use the same resolver production uses so this test actually exercises
+        # the LoRA adapter when vLLM has it loaded (FSDP+LoRA, megatron+adapter)
+        # and falls back to the base model for megatron+merge_lora.
+        outputs = await run_inference(
+            client, get_test_prompts(MODEL), sampling_params, model=resolve_policy_model_name(cfg)
+        )
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

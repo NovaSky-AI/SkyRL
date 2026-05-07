@@ -78,6 +78,7 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
 
         # 2. Render the chat template server-side to get prompt token IDs
         render_payload = {
+            "model": MODEL_QWEN3,
             "messages": messages,
             "max_tokens": 10,
         }
