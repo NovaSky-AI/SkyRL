@@ -279,10 +279,16 @@ vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
 ]
 # torch-2.11 wheels for flash-attn / causal-conv1d / mamba-ssm are not yet
-# published upstream. flash-attn uses lesj0610's fork; causal-conv1d and
-# mamba-ssm use locally-built wheels published as release assets on
-# erictang000 forks (built with cu128 / cxx11abiTRUE / Python 3.12).
-flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# published upstream. All three are built locally and hosted as release
+# assets on erictang000 forks (cu128 / cxx11abiTRUE / Python 3.12).
+# flash-attn is repackaged from lesj0610's wheel with the
+# +cu12torch2.11cxx11abiTRUE local-version suffix stripped from the wheel
+# METADATA. transformer-engine's get_attention_backend pins
+# max_version="2.8.3"; PEP 440 says 2.8.3+local > 2.8.3, so the local-version
+# wheel is rejected as unsupported and TE silently falls back to the
+# (broken) unfused attention backend. Stripping the local suffix lets the
+# version check pass.
+flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config).
