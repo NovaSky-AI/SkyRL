@@ -89,7 +89,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in self.engines]
         return await asyncio.gather(*awaitables)
 
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(
+        self,
+        input_batch: InferenceEngineInput,
+        model: Optional[str] = None,
+    ) -> InferenceEngineOutput:
+        # `model` is accepted for signature parity with `RemoteInferenceClient.generate`
+        # (added in #1579 for multi-LoRA routing). The legacy path only supports a single
+        # LoRA via the `LoraLoadRequest` smuggling mechanism, so per-call routing is a no-op
+        # here — we just need to tolerate the kwarg.
+        del model
+
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
