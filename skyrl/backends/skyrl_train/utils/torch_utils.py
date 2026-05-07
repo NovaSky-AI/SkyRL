@@ -70,6 +70,7 @@ def chunked_entropy_from_logits(
         requires_grad: Whether to enable gradient computation
         attention_mask: Optional attention mask of shape (batch_size, seqlen). When provided,
                        entropy values for padded positions (mask=0) will be zeroed out.
+        chunk_size: Sequence dimension chunk size (must be a positive integer).
 
     Returns:
         Entropy tensor of shape (batch_size, seqlen). If attention_mask is provided,

@@ -639,15 +639,28 @@ class TrainerConfig(BaseConfig):
     rope_theta: Optional[float] = None
     log_example_interval: int = 1
     """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
-    logprobs_chunk_size: int = 1024
+    logprobs_chunk_size: Optional[int] = 1024
     """Chunk size along the sequence dimension when computing log-probs from logits.
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
-    Set to None to disable chunking. See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
+    See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
+
+        if self.logprobs_chunk_size is not None and (
+            not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
+        ):
+            raise ValueError(
+                f"logprobs_chunk_size must be a positive integer or None, got {self.logprobs_chunk_size!r}."
+            )
+        if self.logprobs_chunk_size is None and self.strategy != "megatron":
+            raise ValueError(
+                "logprobs_chunk_size=None (no chunking) is only supported with the Megatron backend. "
+                f"Set a positive integer for strategy={self.strategy!r}."
+            )
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
