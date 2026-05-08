@@ -14,6 +14,12 @@ Coverage:
     bit-exact when they were both pristine + saw identical data.
   - test_delete_then_train_remaining: deleting one of two adapters does
     not tear down the Ray runtime; the other adapter continues to train.
+  - test_per_adapter_sample_isolation: pristine adapters following an
+    identical training trajectory produce bit-identical greedy samples
+    on vLLM at every step.
+  - test_two_adapters_sample_independently: weight-sync of adapter B
+    does not clobber adapter A's slot on vLLM; A's optimizer state
+    survives B's intervention end-to-end through sampling.
 
 Run with:
   uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
@@ -51,10 +57,10 @@ TINKER_API_KEY = "tml-dummy"
 TEST_PORT = 8011
 
 # Tiny config: 1 GPU for the policy worker, 1 for vLLM. With a tiny model
-# + LoRA rank 8, this fits comfortably on any modern GPU pair. We set
-# merge_lora=False so vLLM serves per-tenant LoRA adapters by name (the
-# RL contract) — required for the sampling tests, harmless for the
-# train-only tests since they don't exercise the sample/sync path.
+# + LoRA rank 8, this fits comfortably on any modern GPU pair. merge_lora
+# is False so vLLM serves per-tenant LoRA adapters by name — required for
+# the per-adapter sampling tests below; harmless for the train-only tests
+# since they don't hit the sample/sync path.
 BACKEND_CONFIG = {
     "strategy": "megatron",
     "trainer.placement.policy_num_gpus_per_node": 1,
@@ -293,10 +299,10 @@ def test_delete_then_train_remaining(service_client):
 
 
 # ---------------------------------------------------------------------------
-# Per-adapter sampling tests. These exercise the RL-side weight-sync path:
-# save_weights_for_sampler(model_id) loads the LoRA into vLLM under
+# Per-adapter sampling tests. These exercise the per-tenant weight-sync
+# path: save_weights_for_sampler(model_id) loads the LoRA into vLLM under
 # model_id's name, and sample(model=model_id) routes to that adapter.
-# Require merge_lora=False on the Megatron side (see RL_BACKEND_CONFIG).
+# Require merge_lora=False on the Megatron side (set in BACKEND_CONFIG).
 # ---------------------------------------------------------------------------
 
 
