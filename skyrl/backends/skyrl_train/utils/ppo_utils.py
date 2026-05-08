@@ -120,8 +120,8 @@ def compute_approx_kl(
 
     if loss_mask is not None:
         # Multiplying by `loss_mask` can leak `nan` from masked positions,
-        # so fill them with 0.0 instead
-        kld = kld.masked_fill(~loss_mask.bool(), 0.0)
+        # so route masked positions to 0.0 directly while keeping mask scaling elsewhere
+        kld = torch.where(loss_mask.bool(), kld * loss_mask, 0.0)
     return kld
 
 
