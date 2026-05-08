@@ -303,9 +303,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # tenant (model_id=None) keeps the legacy single-path behavior.
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
             lora_name = model_id if model_id is not None else SKYRL_LORA_ADAPTER_NAME
-            lora_sync_path = (
-                os.path.join(base_sync_path, model_id) if model_id is not None else base_sync_path
-            )
+            lora_sync_path = os.path.join(base_sync_path, model_id) if model_id is not None else base_sync_path
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )

@@ -454,9 +454,7 @@ class WorkerDispatch:
             )
         )
 
-    def _broadcast_to_inference_engines(
-        self, inference_engine_client, model_id: Optional[str] = None
-    ) -> None:
+    def _broadcast_to_inference_engines(self, inference_engine_client, model_id: Optional[str] = None) -> None:
         """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler.
 
         ``model_id`` is forwarded to the worker so that, on the LoRA path, the

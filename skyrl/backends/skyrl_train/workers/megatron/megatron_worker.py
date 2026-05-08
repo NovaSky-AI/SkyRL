@@ -928,9 +928,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # adapter name + shared path.
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
             lora_name = model_id if model_id is not None else SKYRL_LORA_ADAPTER_NAME
-            lora_sync_path = (
-                os.path.join(base_sync_path, model_id) if model_id is not None else base_sync_path
-            )
+            lora_sync_path = os.path.join(base_sync_path, model_id) if model_id is not None else base_sync_path
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Extract and send weights using the sender created at init time
