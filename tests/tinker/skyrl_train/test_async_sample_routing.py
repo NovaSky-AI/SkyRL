@@ -218,6 +218,11 @@ def test_sample_uses_external_path(server_db_path):
     This is the "test" half of the design: the API hoists the sample off
     the engine's serial loop and into the API process's asyncio loop.
     """
+    from sqlmodel import Session, create_engine, func, select
+
+    from skyrl.tinker import types as skyrl_types
+    from skyrl.tinker.db_models import FutureDB
+
     proc, db_path, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
     tc = sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -226,46 +231,40 @@ def test_sample_uses_external_path(server_db_path):
     _train_one_step(tc, tok)
     sampler = tc.save_weights_and_get_sampling_client(name="external_path_a")
 
-    fut = sampler.sample(
+    # Snapshot the max future_id before submitting our sample so we can
+    # filter out any EXTERNAL futures from earlier tests.
+    eng = create_engine(f"sqlite:///{db_path}", echo=False)
+    try:
+        with Session(eng) as s:
+            max_before = s.exec(select(func.max(FutureDB.request_id))).one() or 0
+    finally:
+        eng.dispose()
+
+    out = sampler.sample(
         prompt=tinker_types.ModelInput.from_ints(tok.encode("Hi", add_special_tokens=True)),
         num_samples=1,
         sampling_params=tinker_types.SamplingParams(max_tokens=4, temperature=0.0, top_k=1, seed=0),
-    )
-
-    # The Tinker SDK exposes the request id via the future. Ask the DB
-    # directly to confirm the request_type. Poll briefly because the
-    # SDK's future ID may not be queryable for a moment after submission.
-    request_id = None
-    raw = getattr(fut, "_request_id", None) or getattr(fut, "request_id", None)
-    if raw is not None:
-        request_id = int(raw)
-    else:
-        # Fall back: scan for the most recent future row.
-        from sqlmodel import Session, create_engine, select
-
-        from skyrl.tinker.db_models import FutureDB
-
-        eng = create_engine(f"sqlite:///{db_path}", echo=False)
-        try:
-            with Session(eng) as s:
-                stmt = select(FutureDB.request_id, FutureDB.request_type).order_by(FutureDB.request_id.desc())
-                row = s.exec(stmt).first()
-                if row is not None:
-                    request_id = int(row[0])
-        finally:
-            eng.dispose()
-
-    assert request_id is not None, "could not locate the sample's FutureDB row"
-    rtype = _read_future_request_type(db_path, request_id)
-    assert rtype is not None, f"missing future row for id={request_id}"
-    # The SQLModel Enum stores either the literal value 'external' or the
-    # repr 'RequestType.EXTERNAL' depending on the dialect. Match both.
-    assert "EXTERNAL" in rtype.upper(), (
-        f"expected EXTERNAL request type for forwarded sample, got {rtype!r}"
-    )
-
-    out = fut.result()
+    ).result()
     assert len(out.sequences) == 1
+
+    # Look for an EXTERNAL future with id > max_before. If async routing
+    # is on, every sample creates exactly one such row.
+    eng = create_engine(f"sqlite:///{db_path}", echo=False)
+    try:
+        with Session(eng) as s:
+            stmt = (
+                select(FutureDB.request_id, FutureDB.request_type)
+                .where(FutureDB.request_id > max_before)
+                .where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
+            )
+            rows = s.exec(stmt).all()
+    finally:
+        eng.dispose()
+
+    assert len(rows) >= 1, (
+        f"expected at least one EXTERNAL future to be created by the sample call, "
+        f"found {len(rows)}; async sample routing may not be active"
+    )
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):

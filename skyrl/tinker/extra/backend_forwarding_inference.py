@@ -127,7 +127,11 @@ class BackendForwardingInferenceClient:
             "temperature": sample_req.sampling_params.temperature,
             "top_p": sample_req.sampling_params.top_p,
             "top_k": sample_req.sampling_params.top_k,
-            "logprobs": True,
+            # vLLM (and the upstream vllm-router) expects an integer for the
+            # OpenAI-compatible /v1/completions endpoint — the number of top
+            # tokens to return logprobs for. 1 gives the chosen token's
+            # logprob, which is what the Tinker SampleOutput requires.
+            "logprobs": 1,
             "stream": False,
             "return_token_ids": True,
         }
