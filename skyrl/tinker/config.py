@@ -43,6 +43,14 @@ class EngineConfig(BaseModel):
         default=Path("/tmp/lora_models"),
         description="Directory where LoRA models will be extracted for external inference engines",
     )
+    max_concurrent_samples: int = Field(
+        default=64,
+        description=(
+            "Per-API-process cap on concurrent sample requests forwarded to the "
+            "engine-managed vLLM via BackendForwardingInferenceClient. Bounds "
+            "fan-out from many tenants; vLLM's own max_num_seqs is the ultimate cap."
+        ),
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",

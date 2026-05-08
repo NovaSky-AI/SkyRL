@@ -40,7 +40,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
-from skyrl.tinker.extra import ExternalInferenceClient
+from skyrl.tinker.extra import BackendForwardingInferenceClient, ExternalInferenceClient
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -111,10 +111,36 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Setup external inference client if configured
+    # Setup external inference client if configured.
+    #
+    # Three cases:
+    #   1. external_inference_url set: forward sample requests to a fully
+    #      external vLLM (existing behavior).
+    #   2. backend in (megatron, fsdp) and colocate_all=False: install
+    #      BackendForwardingInferenceClient so sample requests go directly
+    #      to the backend-managed vLLM, bypassing the engine's serial loop.
+    #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
+    #      through the engine subprocess.
+    #
+    # The colocated path stays on the engine because vLLM is asleep during
+    # training and only the engine's synchronous sample path knows how to
+    # wake it (save_weights_for_sampler → broadcast → sample).
+    backend_name = app.state.engine_config.backend
+    backend_cfg = app.state.engine_config.backend_config or {}
+    # SkyRL-Train default is colocate_all=True; only opt into forwarding
+    # when the operator explicitly sets it to False.
+    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     if app.state.engine_config.external_inference_url:
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
+    elif backend_name in ("megatron", "fsdp") and not is_colocated:
+        app.state.external_inference_client = BackendForwardingInferenceClient(
+            app.state.engine_config, app.state.db_engine
+        )
+        logger.info(
+            "Backend-forwarding inference client enabled for non-colocated backend=%s",
+            backend_name,
+        )
     else:
         app.state.external_inference_client = None
         logger.info("Using internal engine for inference")

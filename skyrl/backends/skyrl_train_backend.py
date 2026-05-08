@@ -138,6 +138,12 @@ class SkyRLTrainBackend(AbstractBackend):
         self._server_groups: list = []
         self._inference_router = None
 
+        # Database URL for publishing inference endpoint to EngineStateDB.
+        # Set by the engine via set_engine_database_url() if available; the
+        # backend silently no-ops _publish_engine_state when None (e.g. when
+        # constructed outside a Tinker engine in unit tests).
+        self._engine_database_url: str | None = None
+
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
 
@@ -325,6 +331,53 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.generator.inference_engine,
         )
 
+    def set_engine_database_url(self, database_url: str) -> None:
+        """Wire the engine's database URL so we can publish inference state.
+
+        Called by the Tinker engine after backend construction. When set,
+        ``_publish_engine_state`` writes a singleton row to ``EngineStateDB``
+        each time the inference engine is built or torn down. The API
+        process reads that row to decide whether to forward sample requests
+        directly to vLLM (the async sample routing path).
+        """
+        self._engine_database_url = database_url
+
+    def _publish_engine_state(self, *, proxy_url: str | None, server_urls: list[str], is_colocated: bool) -> None:
+        """Upsert the singleton row in EngineStateDB.
+
+        Idempotent. Safe to call repeatedly. ``proxy_url=None`` signals that
+        no vLLM is currently up (post-teardown) — the API process will fall
+        back to the engine's synchronous sample path.
+        """
+        if self._engine_database_url is None:
+            # Backend not wired to a Tinker engine (unit tests, non-Tinker uses).
+            return
+
+        from datetime import datetime, timezone
+
+        from sqlmodel import Session, SQLModel, create_engine
+
+        from skyrl.tinker.db_models import EngineStateDB, enable_sqlite_wal
+
+        db_engine = create_engine(self._engine_database_url, echo=False)
+        enable_sqlite_wal(db_engine)
+        # The API process creates the schema, but in unit tests the backend
+        # may run without an API. Make sure the table exists before writing.
+        SQLModel.metadata.create_all(db_engine, tables=[EngineStateDB.__table__])
+        try:
+            with Session(db_engine) as session:
+                row = session.get(EngineStateDB, 1)
+                if row is None:
+                    row = EngineStateDB(singleton_id=1)
+                row.inference_proxy_url = proxy_url
+                row.inference_server_urls = list(server_urls)
+                row.is_colocated = bool(is_colocated)
+                row.updated_at = datetime.now(timezone.utc)
+                session.add(row)
+                session.commit()
+        finally:
+            db_engine.dispose()
+
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
         from skyrl.backends.skyrl_train.inference_servers.setup import (
@@ -340,6 +393,14 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_router = server_setup.router
         self._server_groups = server_setup.server_groups
         self._inference_engine_client = client
+
+        # Publish inference endpoint so the API can forward samples directly
+        # (only meaningful in non-colocated mode; the API gates on this).
+        self._publish_engine_state(
+            proxy_url=server_setup.proxy_url,
+            server_urls=list(server_setup.server_urls),
+            is_colocated=bool(is_colocated),
+        )
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -489,6 +550,9 @@ class SkyRLTrainBackend(AbstractBackend):
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
+        # Tell the API there is no inference engine to forward to. Next
+        # _create_new_inference_client will repopulate this row.
+        self._publish_engine_state(proxy_url=None, server_urls=[], is_colocated=False)
         self._cfg = None
         self._dispatch = None
         self._inference_engine_client = None

@@ -246,6 +246,12 @@ class TinkerEngine:
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
+        # Backends that support async sample routing publish their inference
+        # endpoint to EngineStateDB so the API process can forward sample
+        # requests directly. Pass the database URL so the backend can write.
+        if hasattr(self.backend, "set_engine_database_url"):
+            self.backend.set_engine_database_url(config.database_url)
+
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
 
