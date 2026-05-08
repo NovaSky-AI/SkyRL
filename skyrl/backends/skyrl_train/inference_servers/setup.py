@@ -112,6 +112,7 @@ def create_inference_servers(
                 enable_pd=True,
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
+                enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
             )
             for i in range(num_prefill)
         ]
@@ -130,6 +131,7 @@ def create_inference_servers(
                 enable_pd=True,
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + (num_prefill + i) * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
+                enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
             )
             for i in range(num_decode)
         ]
@@ -185,6 +187,7 @@ def create_inference_servers(
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
+                enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
             )
             for i in range(ie_cfg.num_engines)
         ]
