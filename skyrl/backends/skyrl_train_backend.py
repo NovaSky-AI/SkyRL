@@ -3,6 +3,7 @@
 import asyncio
 import io
 import os
+import shutil
 import tarfile
 import tempfile
 
@@ -459,6 +460,31 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return ResolvedPlacementGroup(pg)
 
+    def _cleanup_lora_sync_subdir(self, model_id: str) -> None:
+        """Remove the per-tenant lora_sync_path subdir written by the worker.
+
+        The Megatron / FSDP workers write each adapter's safetensors into
+        ``lora_sync_path/<basename(model_id)>/`` on every save_weights_for_sampler.
+        Without cleanup these subdirs accumulate as adapters churn. Mirror the
+        worker's path construction (incl. basename sanitization) to avoid
+        deleting anything outside the configured base.
+        """
+        try:
+            base = self._cfg.policy.model.lora.lora_sync_path
+        except AttributeError:
+            return
+        if not base:
+            return
+        safe_id = os.path.basename(model_id)
+        if not safe_id:
+            return
+        subdir = os.path.join(base, safe_id)
+        try:
+            shutil.rmtree(subdir, ignore_errors=True)
+        except OSError as e:
+            # Best-effort cleanup — log but don't propagate.
+            logger.warning(f"Failed to remove lora_sync subdir {subdir}: {e}")
+
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
 
@@ -469,6 +495,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if len(self._model_ids_to_role) > 1:
             if role == "policy" and self._base_lora_signature is not None:
                 self._dispatch.delete_adapter("policy", model_id)
+                self._cleanup_lora_sync_subdir(model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
                 logger.info(f"Removed LoRA adapter '{model_id}'")

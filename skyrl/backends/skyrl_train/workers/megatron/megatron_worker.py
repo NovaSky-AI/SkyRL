@@ -898,7 +898,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if isinstance(inference_engine_client, RemoteInferenceClient):
                 await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
             else:
-                lora_request = LoraLoadRequest(lora_path=lora_sync_path)
+                lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
                 await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
@@ -927,8 +927,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # works: model_id is None, we fall back to the legacy single
             # adapter name + shared path.
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            lora_name = model_id if model_id is not None else SKYRL_LORA_ADAPTER_NAME
-            lora_sync_path = os.path.join(base_sync_path, model_id) if model_id is not None else base_sync_path
+            # Defense in depth: api.py validates model_id against ID_PATTERN,
+            # but route everything through basename here so that even an
+            # internally-misformed id can't escape lora_sync_path.
+            safe_model_id = os.path.basename(model_id) if model_id is not None else None
+            lora_name = safe_model_id if safe_model_id else SKYRL_LORA_ADAPTER_NAME
+            lora_sync_path = os.path.join(base_sync_path, safe_model_id) if safe_model_id else base_sync_path
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Extract and send weights using the sender created at init time
