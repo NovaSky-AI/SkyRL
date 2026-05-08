@@ -302,8 +302,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # Multi-tenant: per-adapter subdir + per-adapter vLLM name. Single
             # tenant (model_id=None) keeps the legacy single-path behavior.
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            # Defense in depth: api.py validates model_id against ID_PATTERN,
-            # but route everything through basename here so that even an
+            # api.py validates model_id against ID_PATTERN, but route everything through basename here so that even an
             # internally-misformed id can't escape lora_sync_path.
             safe_model_id = os.path.basename(model_id) if model_id is not None else None
             lora_name = safe_model_id if safe_model_id else SKYRL_LORA_ADAPTER_NAME

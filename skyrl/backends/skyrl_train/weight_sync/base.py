@@ -43,8 +43,8 @@ class WeightUpdateRequest:
 class LoraLoadRequest(WeightUpdateRequest):
     """Request to load LoRA weights from disk.
 
-    This is a special request type used for loading pre-trained LoRA adapters
-    from disk rather than transferring weights from training. Unlike other
+    This is a special request type used for loading LoRA adapters
+    from disk rather than transferring weights over network in training. Unlike other
     WeightUpdateRequest subclasses, this doesn't transfer weights - it tells
     the inference engine to load LoRA from a path.
 

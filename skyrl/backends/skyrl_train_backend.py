@@ -876,8 +876,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._ensure_inference_engines()
 
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
-        # RL legitimately mixes adapters in one batched sample call (the engine
-        # batches across model_ids in find_batchable_sample); we route per
+        # RL mixes adapters in one batched sample call (the engine
+        # batches across model_ids in find_batchable_sample); we route each
         # request via the `model` field in _sample_with_remote_client below.
         unique_models = set(prepared_batch.all_model_ids)
         unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]

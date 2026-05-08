@@ -924,8 +924,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # lora_sync_path and registers under its own name on vLLM. The
             # `model_id` arg is the Tinker-provided name for the adapter
             # currently swapped in (set up by AdapterStore.swap_to before
-            # this call). Single-tenant FSDP/Megatron pre-multi-LoRA still
-            # works: model_id is None, we fall back to the legacy single
+            # this call). For single-tenant, model_id is None, and we fall back to the default
             # adapter name + shared path.
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
@@ -993,11 +992,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def _resolve_lora_sync_target(self, model_id: Optional[str]) -> tuple[str, str]:
         """Return ``(lora_name, lora_sync_path)`` for a given Tinker model_id.
 
-        The single-tenant fallback (``model_id=None``) preserves the legacy
+        The single-tenant fallback (``model_id=None``) uses the default
         shared adapter name + shared sync path. Multi-tenant routes through
-        ``os.path.basename`` for defense in depth — api.py validates
-        model_id against ID_PATTERN, but this guard ensures even an
-        internally-misformed id can't escape lora_sync_path.
+        ``os.path.basename`` on the lora_sync_path.
         """
         base_sync_path = self.cfg.policy.model.lora.lora_sync_path
         safe_model_id = os.path.basename(model_id) if model_id is not None else None

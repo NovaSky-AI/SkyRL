@@ -505,8 +505,7 @@ class WorkerDispatch:
 
         # Sync weights to inference engine
         self._prepare_for_weight_sync()
-        # Make the requested adapter live on every worker before broadcasting
-        # — otherwise we'd export some other tenant's LoRA weights to vLLM.
+        # Make the requested adapter is live on every worker before broadcasting
         self.ensure_active_adapter("policy", model_id)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
