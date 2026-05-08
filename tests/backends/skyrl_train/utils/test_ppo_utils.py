@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
 )
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 
 
 @pytest.fixture
@@ -64,6 +65,21 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+
+
+@pytest.mark.parametrize("kl_estimator_type", ["k1", "k2", "k3", "abs"])
+def test_compute_approx_kl_nan_at_masked_position_does_not_leak(kl_estimator_type: str) -> None:
+    """Masked positions are zeroed even when inputs there are non-finite."""
+    log_probs = torch.tensor([[0.2, 0.3, 0.5]])
+    # nan at the position that loss_mask zeroes out
+    log_probs_base = torch.tensor([[0.1, 0.2, float("nan")]])
+    mask = torch.tensor([[1.0, 1.0, 0.0]])
+
+    kld = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type=kl_estimator_type)
+
+    assert torch.isfinite(kld).all(), f"{kl_estimator_type}: kld leaked non-finite values: {kld}"
+    assert kld[0, 2].item() == 0.0, f"{kl_estimator_type}: masked position not zeroed"
+    assert torch.isfinite(masked_mean(kld, mask)), f"{kl_estimator_type}: masked_mean is non-finite"
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():

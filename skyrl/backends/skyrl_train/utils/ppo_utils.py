@@ -119,7 +119,9 @@ def compute_approx_kl(
         raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
 
     if loss_mask is not None:
-        kld = kld * loss_mask
+        # Multiplying by `loss_mask` can leak `nan` from masked positions,
+        # so fill them with 0.0 instead
+        kld = kld.masked_fill(~loss_mask.bool(), 0.0)
     return kld
 
 
