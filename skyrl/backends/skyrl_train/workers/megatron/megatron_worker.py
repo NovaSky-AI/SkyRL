@@ -1,4 +1,5 @@
 import os
+import shutil
 from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -926,13 +927,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # this call). Single-tenant FSDP/Megatron pre-multi-LoRA still
             # works: model_id is None, we fall back to the legacy single
             # adapter name + shared path.
-            base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            # Defense in depth: api.py validates model_id against ID_PATTERN,
-            # but route everything through basename here so that even an
-            # internally-misformed id can't escape lora_sync_path.
-            safe_model_id = os.path.basename(model_id) if model_id is not None else None
-            lora_name = safe_model_id if safe_model_id else SKYRL_LORA_ADAPTER_NAME
-            lora_sync_path = os.path.join(base_sync_path, safe_model_id) if safe_model_id else base_sync_path
+            lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Extract and send weights using the sender created at init time
@@ -995,10 +990,36 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise RuntimeError("register_adapter called before register_pristine_adapter")
         self.adapter_store.create(model_id, self.actor_module, self.optimizer, signature)
 
+    def _resolve_lora_sync_target(self, model_id: Optional[str]) -> tuple[str, str]:
+        """Return ``(lora_name, lora_sync_path)`` for a given Tinker model_id.
+
+        The single-tenant fallback (``model_id=None``) preserves the legacy
+        shared adapter name + shared sync path. Multi-tenant routes through
+        ``os.path.basename`` for defense in depth — api.py validates
+        model_id against ID_PATTERN, but this guard ensures even an
+        internally-misformed id can't escape lora_sync_path.
+        """
+        base_sync_path = self.cfg.policy.model.lora.lora_sync_path
+        safe_model_id = os.path.basename(model_id) if model_id is not None else None
+        if safe_model_id:
+            return safe_model_id, os.path.join(base_sync_path, safe_model_id)
+        return SKYRL_LORA_ADAPTER_NAME, base_sync_path
+
     def delete_adapter(self, model_id: str) -> None:
         if self.adapter_store is None:
             raise RuntimeError("AdapterStore not initialised (FFT path)")
         self.adapter_store.delete(model_id)
+        # Drop the per-tenant safetensors subdir written by
+        # _save_lora_adapters_and_sync. Rank 0 wrote it; rank 0 cleans it.
+        # Other ranks no-op. Best-effort — log on failure but don't propagate.
+        if self._rank == 0:
+            _, lora_sync_path = self._resolve_lora_sync_target(model_id)
+            base_sync_path = self.cfg.policy.model.lora.lora_sync_path
+            if lora_sync_path != base_sync_path:
+                try:
+                    shutil.rmtree(lora_sync_path, ignore_errors=True)
+                except OSError as e:
+                    logger.warning(f"Failed to remove lora_sync subdir {lora_sync_path}: {e}")
 
     def swap_to_adapter(self, model_id: str) -> None:
         """Make ``model_id`` the live adapter on this worker. No-op if it
