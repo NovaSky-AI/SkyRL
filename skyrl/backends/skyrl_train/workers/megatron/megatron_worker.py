@@ -1012,7 +1012,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
             if lora_sync_path != base_sync_path:
                 try:
-                    shutil.rmtree(lora_sync_path, ignore_errors=True)
+                    shutil.rmtree(lora_sync_path)
+                except FileNotFoundError:
+                    pass  # already gone, fine
                 except OSError as e:
                     logger.warning(f"Failed to remove lora_sync subdir {lora_sync_path}: {e}")
 

@@ -83,7 +83,7 @@ def _build_skyrl_train_config(
     assert overrides.strategy in (
         "fsdp2",
         "megatron",
-    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    ), f"Only fsdp2 and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
