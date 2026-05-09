@@ -920,12 +920,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         if self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora:
-            # Multi-tenant: each adapter syncs into its own subdir of
-            # lora_sync_path and registers under its own name on vLLM. The
-            # `model_id` arg is the Tinker-provided name for the adapter
-            # currently swapped in (set up by AdapterStore.swap_to before
-            # this call). For single-tenant, model_id is None, and we fall back to the default
-            # adapter name + shared path.
+            # AdapterStore.swap_to has already made `model_id` the live adapter
+            # before we get here; sync that adapter to vLLM under its own name
+            # so sample(model=<model_id>) routes correctly. Single-tenant
+            # (model_id=None) keeps the legacy shared path + name.
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:

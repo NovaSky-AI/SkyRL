@@ -36,7 +36,7 @@ Required `--backend-config` keys to run multi-tenant LoRA on Megatron:
 
 All adapters must share the same `(rank, alpha, target_modules)` signature. Mismatches are hard-rejected at `create_model` with a `LoRA signature mismatch …` error.
 
-The first `create_model` on a fresh server triggers the policy build and the AdapterStore bootstrap; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. When the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()`; the next `create_model` rebuilds it.
+The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. When the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()`; the next `create_model` rebuilds it.
 
 ## Quickstart — Two SL clients
 
@@ -123,7 +123,7 @@ uv run --extra tinker --extra megatron -m skyrl.tinker.api \
         "generator.inference_engine.tensor_parallel_size": 1,
         "trainer.policy.model.lora.max_loras": 2,
         "trainer.policy.model.lora.max_cpu_loras": 2,
-        "trainer.logprobs_chunk_size": None,
+        "trainer.logprobs_chunk_size": null,
     }'
 ```
 

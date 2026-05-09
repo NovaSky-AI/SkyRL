@@ -299,11 +299,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if self._is_lora:
             assert hasattr(peft_model, "peft_config"), "LoRA model should have peft_config"
 
-            # Multi-tenant: per-adapter subdir + per-adapter vLLM name. Single
-            # tenant (model_id=None) keeps the legacy single-path behavior.
+            # Multi-tenant: per-adapter subdir + per-adapter vLLM name.
+            # Single-tenant (model_id=None) keeps the legacy shared path +
+            # name. basename guards against a malformed model_id escaping
+            # lora_sync_path even though api.py already validates IDs.
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            # api.py validates model_id against ID_PATTERN, but route everything through basename here so that even an
-            # internally-misformed id can't escape lora_sync_path.
             safe_model_id = os.path.basename(model_id) if model_id is not None else None
             lora_name = safe_model_id if safe_model_id else SKYRL_LORA_ADAPTER_NAME
             lora_sync_path = os.path.join(base_sync_path, safe_model_id) if safe_model_id else base_sync_path
