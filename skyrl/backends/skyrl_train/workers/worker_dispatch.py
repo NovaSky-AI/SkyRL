@@ -23,7 +23,6 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
@@ -192,16 +191,60 @@ class WorkerDispatch:
             return
         self._gpu_state[model] = GPUState()
 
-    def forward(self, model: str, data: TrainingInputBatch, model_id: Optional[str] = None) -> TrainingOutputBatch:
-        """Run inference forward pass. Only loads model (not optimizer)."""
+    def forward(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run inference forward pass. Only loads model (not optimizer).
+
+        Always returns a ``dict``:
+        - When ``loss_fn`` is None (RL/inference path): returns ``{"output": Tensor[batch, max_response_len]}``
+          where ``Tensor`` is the concatenated output across DP ranks (e.g., logprobs for policy/ref,
+          values for critic).
+        - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): returns a metrics dict containing at
+          minimum ``"loss"`` and ``"loss_fn_outputs"`` (per-sample list aggregated across DP ranks).
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            data: Training batch data
+            loss_fn: Optional resolved loss function name (e.g., "cross_entropy"). When set,
+                     the worker computes loss + per-sample outputs without backward (no_grad).
+            loss_fn_config: Optional config overrides for the loss function.
+            model_id: Optional Tinker model_id; when set, the corresponding LoRA adapter
+                     is swapped in before the forward.
+        """
         self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
         results = ray.get(refs)
 
+        if loss_fn is not None:
+            # Forward-with-loss path: each DP rank returns a dict of metrics + per-sample loss_fn_outputs.
+            # Concatenate loss_fn_outputs across DP ranks (rank order); scalar metrics are already all-reduced.
+            all_loss_fn_outputs = []
+            for status in results:
+                if status and "loss_fn_outputs" in status:
+                    all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+            result = results[0] if results else {}
+            if all_loss_fn_outputs:
+                result["loss_fn_outputs"] = all_loss_fn_outputs
+            return result
+
+        # Inference path (no loss_fn): worker returns TrainingOutputBatch per DP rank; concatenate
+        # across DP and unwrap into a plain dict so the API is uniformly ``dict``.
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
-        return output
+        return dict(output.items())
 
     def stage_data(
         self,

@@ -331,12 +331,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def forward(
         self,
         data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
+        loss_fn=None,
+        loss_fn_config=None,
+    ):
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
         """
-        output = super().forward(data)
+        output = super().forward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
