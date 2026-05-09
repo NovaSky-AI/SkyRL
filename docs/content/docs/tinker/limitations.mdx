@@ -6,21 +6,11 @@ The Tinker integration is under active development. This page documents current 
 
 ## Current Limitations
 
-### Single Model
+### Multi-tenant LoRA: Megatron only
 
-Only one training model and one set of sampling weights can be loaded at a time. Calling `create_model` when a model already exists will return an error. After a weight sync, all subsequent `sample()` calls use the updated weights — there is no support for maintaining multiple sampling snapshots concurrently. To switch models, restart the server.
+Multi-tenant LoRA training and sampling are supported on the **Megatron** backend with vLLM serving per-tenant adapters by name. See [Multi-tenancy](./multi_tenancy) for the operator contract and SL/RL quickstarts. **FSDP2** support is pending, and full-parameter fine-tuning remains single-tenant on both backends — calling `create_model` with `lora_rank=0` while another model exists returns an error.
 
-### Single-tenant LoRA
-Related to the above limitation, even when training with LoRA adaptors, the SkyRL-Train backend only supports one training model and one set of sampling weights. We plan to support training and sampling on multiple LoRA adaptors concurrently in the future.
-
-### Vision Language Models
-
-Vision language models (VLMs) are supported through the Tinker integration. We have validated the path end-to-end on [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) — see the [Vision Language cookbook recipe](./cookbook#vision-language-vlm_classifier) for a runnable example. We welcome contributions that extend coverage to additional VLM families.
-
-
-### Batch Size Constraint
-
-The batch size must be evenly divisible by the data parallelism size (number of GPUs). For example, with 4 GPUs you cannot use a batch size of 5.
+All adapters registered against one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
 
 ### No Prompt Logprobs
 

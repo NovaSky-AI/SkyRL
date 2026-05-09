@@ -122,9 +122,11 @@ The Tinker SDK sends a `sampling_session_seq_id` field when using the ephemeral 
 
 Persistent saves can be very expensive because they write full model weights to disk on every call. In RL training loops that sync weights every batch, ephemeral mode avoids this overhead entirely. In typical RL loops (e.g., tinker-cookbook's `rl_loop`), every iteration uses ephemeral mode before sampling, and persistent saves are reserved for periodic checkpointing.
 
-### Single Model Constraint
+### Multiple LoRA tenants
 
-SkyRL currently supports only one copy of sampling model weights at a time. This differs from Thinking Machines' hosted service that supports arbitrarily many sampling clients attached to various sampling model weights. In SkyRL, after a weight sync, all subsequent `sample()` calls automatically use the updated weights.
+On the Megatron backend, SkyRL supports multiple LoRA adapters trained and sampled concurrently against a single server. Each tenant's adapter weights and optimizer state live in pinned-CPU slots; the live GPU adapter is swapped on demand at the top of every per-model dispatch entry point (forward, forward_backward, optim_step, save_weights_for_sampler). On the inference side, vLLM serves each tenant's adapter by `model_id` after `save_weights_for_sampler` registers it via `load_lora_adapter`. See [Multi-tenancy](./multi_tenancy) for the design and operator contract.
+
+Full-parameter fine-tuning and the FSDP backend remain single-tenant — calling `create_model` a second time on those paths returns an error.
 
 ## Checkpointing
 
@@ -163,4 +165,4 @@ Tinker represents training data as `Datum` objects with a `ModelInput` (containi
 - **Shifts** tokens: Tinker pre-shifts inputs/targets, but SkyRL-Train shifts internally, so the backend appends the last target token to reconstruct full sequences
 - Builds `attention_mask`, `loss_mask`, and `response_mask` tensors from token weights
 
-There is currently a limitation that batch size must be divisible by the data parallelism size (number of GPUs). The engine layer handles batching multiple client requests together before passing them to the backend.
+The engine layer also batches multiple client requests together before passing them to the backend.
