@@ -94,9 +94,7 @@ class BackendForwardingInferenceClient:
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
-    async def _forward_with_retry(
-        self, sample_req, model_id: str, *, base_model: str | None
-    ) -> types.SampleOutput:
+    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         """Forward once; on connection error, refresh the cached URL and retry once."""
         try:
             proxy_url = await self._resolve_proxy_url()
@@ -143,9 +141,7 @@ class BackendForwardingInferenceClient:
             response = await http_client.post("/v1/completions", json=payload)
             if response.status_code >= 400:
                 # Surface vLLM's body verbatim (e.g. 404 for unknown LoRA name).
-                raise RuntimeError(
-                    f"vLLM /v1/completions returned {response.status_code}: {response.text}"
-                )
+                raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
             result = response.json()
 
         sequences = []

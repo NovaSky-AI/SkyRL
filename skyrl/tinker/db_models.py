@@ -161,6 +161,4 @@ class EngineStateDB(SQLModel, table=True):
     # training and only the engine's synchronous sample path can wake it.
     is_colocated: bool = False
 
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True)
-    )
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))

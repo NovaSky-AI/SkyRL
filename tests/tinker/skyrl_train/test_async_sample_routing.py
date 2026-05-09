@@ -31,7 +31,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import urllib.request
 from contextlib import contextmanager
 
 import pytest
@@ -44,9 +43,7 @@ try:  # pragma: no cover - import guard
 except Exception:
     cuda_available = False
 
-pytestmark = pytest.mark.skipif(
-    not cuda_available, reason="async sample routing tests require at least one CUDA GPU"
-)
+pytestmark = pytest.mark.skipif(not cuda_available, reason="async sample routing tests require at least one CUDA GPU")
 
 tinker = pytest.importorskip("tinker")
 from tinker import types as tinker_types  # noqa: E402
@@ -204,9 +201,9 @@ def test_engine_state_published(server_db_path):
 
     row = _read_engine_state(db_path)
     assert row is not None, "EngineStateDB row missing — backend never published state"
-    assert row.inference_proxy_url is not None and row.inference_proxy_url.startswith("http"), (
-        f"expected an http(s) proxy URL, got {row.inference_proxy_url!r}"
-    )
+    assert row.inference_proxy_url is not None and row.inference_proxy_url.startswith(
+        "http"
+    ), f"expected an http(s) proxy URL, got {row.inference_proxy_url!r}"
     assert row.is_colocated is False, "non-colocated backend should publish is_colocated=False"
     # server_urls should also be populated for non-external setups (data plane URLs).
     assert isinstance(row.inference_server_urls, list)
@@ -384,9 +381,7 @@ def test_concurrent_samples_per_adapter(server_db_path):
             target.sample(
                 prompt=tinker_types.ModelInput.from_ints(tok.encode("Q", add_special_tokens=True)),
                 num_samples=1,
-                sampling_params=tinker_types.SamplingParams(
-                    max_tokens=4, temperature=0.0, top_k=1, seed=i
-                ),
+                sampling_params=tinker_types.SamplingParams(max_tokens=4, temperature=0.0, top_k=1, seed=i),
             )
         )
 
