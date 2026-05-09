@@ -59,7 +59,8 @@ uv run --extra tinker --extra megatron -m skyrl.tinker.api \
         "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
         "trainer.policy.megatron_config.lora_config.merge_lora": false,
         "trainer.policy.model.lora.max_loras": 2,
-        "trainer.policy.model.lora.max_cpu_loras": 2
+        "trainer.policy.model.lora.max_cpu_loras": 2,
+        "trainer.logprobs_chunk_size": null
     }'
 ```
 
@@ -116,12 +117,13 @@ uv run --extra tinker --extra megatron -m skyrl.tinker.api \
         "trainer.policy.megatron_config.tensor_model_parallel_size": 1,
         "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
         "trainer.policy.megatron_config.lora_config.merge_lora": false,
-        "trainer.micro_train_batch_size_per_gpu": 16,    # tune based on your GPU memory and supported max context length
-        "trainer.micro_forward_batch_size_per_gpu": 16,  # tune based on your GPU memory and supported max context length
+        "trainer.micro_train_batch_size_per_gpu": 64,
+        "trainer.micro_forward_batch_size_per_gpu": 64,
         "generator.inference_engine.num_engines": 1,
         "generator.inference_engine.tensor_parallel_size": 1,
         "trainer.policy.model.lora.max_loras": 2,
-        "trainer.policy.model.lora.max_cpu_loras": 2
+        "trainer.policy.model.lora.max_cpu_loras": 2,
+        "trainer.logprobs_chunk_size": None,
     }'
 ```
 

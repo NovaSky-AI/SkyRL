@@ -77,6 +77,14 @@ def _build_skyrl_train_config(
     # that resolves other config derived from the policy model path.
     user_overrides["trainer.policy.model.path"] = base_model
     user_overrides["trainer.critic.model.path"] = base_model
+    # Strategy must be set on the override dict (not after from_cli_overrides) so
+    # TrainerConfig.__post_init__ sees the right value during validation —
+    # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
+    assert overrides.strategy in (
+        "fsdp2",
+        "megatron",
+    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -87,12 +95,6 @@ def _build_skyrl_train_config(
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
-
-    assert overrides.strategy in (
-        "fsdp2",
-        "megatron",
-    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = overrides.strategy
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:

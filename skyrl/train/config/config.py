@@ -821,7 +821,11 @@ class SkyRLTrainConfig(BaseConfig):
             ValueError: If an argument uses the unsupported '+' prefix.
         """
         if isinstance(args, dict):
-            args = [f"{k}={v}" for k, v in args.items()]
+            # OmegaConf's CLI parser only treats "null" as None; Python's
+            # None stringifies to "None" which is parsed as the literal
+            # string. Map None -> "null" so JSON-style overrides survive
+            # the round-trip through OmegaConf.from_cli below.
+            args = [f"{k}=null" if v is None else f"{k}={v}" for k, v in args.items()]
 
         from skyrl.train.config.legacy import (
             is_legacy_config,
