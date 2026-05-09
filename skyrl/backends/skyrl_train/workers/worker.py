@@ -958,6 +958,132 @@ class PolicyWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
+    def forward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Union[TrainingOutputBatch, Dict[str, Any]]:
+        """Run forward pass.
+
+        - When ``loss_fn`` is None: behaves like :meth:`Worker.forward` and returns a
+          ``TrainingOutputBatch`` with ``"output"`` containing the logprobs.
+        - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): runs the loss in ``no_grad`` mode
+          (no backward), iterating over micro-batches of ``micro_forward_batch_size_per_gpu``,
+          and returns a metrics dict including ``"loss"`` and per-sample ``"loss_fn_outputs"``.
+          Metrics are all-reduced across the DP group to mirror :meth:`forward_backward`.
+        """
+        if loss_fn is None:
+            return super().forward(data)
+
+        micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
+        all_metrics = defaultdict(list)
+        all_loss_fn_outputs: List[Dict[str, Any]] = []
+
+        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+            metrics = self._forward_micro_with_loss(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
+
+        # SFT path averages metrics across microbatches and DP ranks (mirror forward_backward).
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        dp_group = self.device_mesh.get_group("dp")
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
+
+        if all_loss_fn_outputs:
+            result["loss_fn_outputs"] = all_loss_fn_outputs
+
+        return result
+
+    def _forward_micro_with_loss(
+        self,
+        experience: Experience,
+        loss_fn: str,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Forward-only counterpart of :meth:`_forward_backward_micro`'s SFT branch.
+
+        Runs the model + loss under ``torch.no_grad()`` (no backward, no KL/entropy terms),
+        and returns the same metrics shape as the SFT branch of ``_forward_backward_micro``,
+        minus ``lr`` (no optimizer state involved).
+        """
+        self.model.eval()
+        experience.to_device(torch.cuda.current_device())
+
+        sequences = experience.sequences
+        old_action_log_probs = experience.action_log_probs
+        advantages = experience.advantages
+        num_actions = experience.num_actions
+        attention_mask = experience.attention_mask
+        loss_mask = experience.loss_mask
+        action_mask = experience.action_mask
+        rollout_action_logprobs = experience.rollout_logprobs
+
+        current_loss_fn = PolicyLossRegistry.get(loss_fn)
+
+        # Build config for loss function, applying any overrides
+        loss_config = self.cfg.algorithm
+        if loss_fn_config is not None:
+            from dataclasses import asdict
+
+            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
+            loss_config = type(loss_config).from_dict_config(new_loss_config)
+
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            action_log_probs, _ = self.model(
+                sequences,
+                num_actions,
+                attention_mask=attention_mask,
+                temperature=self.cfg.algorithm.temperature,
+                return_output=True,
+                compute_entropy=False,
+                entropy_requires_grad=False,
+                pixel_values=experience.pixel_values,
+                image_grid_thw=experience.image_grid_thw,
+            )
+            policy_loss, _ = current_loss_fn(
+                action_log_probs,
+                old_action_log_probs,
+                advantages,
+                config=loss_config,
+                loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
+            )
+
+            elementwise_loss = -action_log_probs
+            if loss_mask is not None:
+                elementwise_loss = elementwise_loss * loss_mask
+
+            batch_size = action_log_probs.shape[0]
+            loss_fn_outputs = []
+            for i in range(batch_size):
+                if action_mask is not None:
+                    valid_len = int(action_mask[i].sum().item())
+                elif loss_mask is not None:
+                    valid_len = int(loss_mask[i].sum().item())
+                else:
+                    valid_len = action_log_probs.shape[1]
+
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else [],
+                        "elementwise_loss": (
+                            elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                        ),
+                    }
+                )
+
+        return {
+            "loss": policy_loss.item(),
+            "response_length": num_actions,
+            "loss_fn_outputs": loss_fn_outputs,
+        }
+
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
         micro_batch.to(device)

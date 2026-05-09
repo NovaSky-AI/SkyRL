@@ -676,6 +676,106 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
+    def forward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ):
+        """Forward pass.
+
+        - Without ``loss_fn``: delegates to :meth:`MegatronWorker.forward`, returning a
+          ``TrainingOutputBatch`` with ``"output"`` containing logprobs.
+        - With ``loss_fn`` (e.g., ``"cross_entropy"``): runs the SFT loss through Megatron's
+          pipeline schedule with ``forward_only=True`` (no backward) and returns a metrics
+          dict containing ``"loss"`` and per-sample ``"loss_fn_outputs"``.
+        """
+        if loss_fn is None:
+            return MegatronWorker.forward(self, data)
+
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        self.model.eval()
+
+        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        all_metrics = defaultdict(list)
+        all_loss_fn_outputs: List[Dict[str, Any]] = []
+
+        # Move data to GPU
+        data.to(torch.cuda.current_device())
+
+        # Build micro-batch dicts expected by forward_backward_mini_batch
+        micro_buffer = []
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            micro_buffer.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                }
+            )
+
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
+
+        if not micro_buffer:
+            return {}
+
+        seq_len = micro_buffer[0]["sequences"].shape[1]
+        micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        with torch.no_grad():
+            metrics_list = self.model.forward_backward_mini_batch(
+                micro_batches=micro_buffer,
+                seq_len=seq_len,
+                micro_batch_size=micro_bsz,
+                temperature=self.cfg.algorithm.temperature,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                forward_only=True,
+            )
+
+        if self.empty_cuda_cache:
+            torch.cuda.empty_cache()
+
+        # Aggregate metrics across micro-batches
+        for metrics in metrics_list:
+            if metrics is None:
+                continue
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
+
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        group = mpu.get_data_parallel_group(with_context_parallel=False)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+
+        if all_loss_fn_outputs:
+            status["loss_fn_outputs"] = all_loss_fn_outputs
+
+        clear_router_replay()
+        return status
+
     def forward_backward(
         self,
         data: TrainingInputBatch,

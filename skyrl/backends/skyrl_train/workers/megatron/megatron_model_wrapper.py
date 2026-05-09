@@ -201,6 +201,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        forward_only: bool = False,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -216,6 +217,9 @@ class MegatronModelWrapper:
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
+            forward_only: If True, run the forward pass without backward (no gradients).
+                          Useful for evaluation / loss-only inference paths (e.g., SFT
+                          ``forward(loss_fn=...)`` codepath).
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -468,7 +472,7 @@ class MegatronModelWrapper:
             num_microbatches=len(micro_batches),
             seq_length=seq_len,
             micro_batch_size=micro_batch_size,
-            forward_only=False,
+            forward_only=forward_only,
         )
 
         # broadcast metrics to all pp ranks

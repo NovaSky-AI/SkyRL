@@ -3,9 +3,12 @@ Run with:
 uv run --isolated --extra dev --extra fsdp -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py
 """
 
+import math
+
 import pytest
 import ray
 
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -285,6 +288,58 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
             assert "elementwise_loss" in output, f"Output {i} missing elementwise_loss"
             # Verify trimmed to valid length (loss_mask is all 1s, so should equal num_actions)
             assert len(output["logprobs"]) == num_actions
+
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy",
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
+    """forward(loss_fn='cross_entropy') returns a non-zero loss + per-sample loss_fn_outputs (no grads)."""
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+    validate_cfg(cfg)
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        batch_size = dp_size * 2  # Ensure multiple samples per DP rank
+        num_actions = 4
+        dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
+
+        dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
+
+        result = dispatch.forward(
+            "policy",
+            dummy_batch,
+            loss_fn="cross_entropy",
+            loss_fn_config=None,
+        )
+
+        assert isinstance(result, dict)
+        assert "loss" in result
+        assert math.isfinite(result["loss"]) and result["loss"] > 1e-3
+        assert "loss_fn_outputs" in result
+        assert len(result["loss_fn_outputs"]) == batch_size
+        for out in result["loss_fn_outputs"]:
+            assert "logprobs" in out and len(out["logprobs"]) == num_actions
+            assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions
 
     finally:
         ray.shutdown()
