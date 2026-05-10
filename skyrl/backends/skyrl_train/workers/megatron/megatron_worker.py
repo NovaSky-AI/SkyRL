@@ -673,6 +673,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
+            policy_loss_fn_resolver=self._get_policy_loss_fn,
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache

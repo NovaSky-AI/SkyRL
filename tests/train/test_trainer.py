@@ -11,6 +11,11 @@ from jaxtyping import Float, Integer
 from pytest import approx
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    repopulate_all_registries,
+    snapshot_policy_loss_registry_for_workers,
+)
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
@@ -60,6 +65,66 @@ def dummy_tokenizer():
 @pytest.fixture
 def dummy_generator():
     return MagicMock()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_default_registries_for_trainer_tests():
+    repopulate_all_registries()
+
+
+def test_policy_worker_uses_local_policy_loss_snapshot(monkeypatch, dummy_config):
+    dummy_config.trainer.algorithm.policy_loss_type = "regular"
+    snapshot = snapshot_policy_loss_registry_for_workers()
+
+    def fail_sync():
+        pytest.fail("policy workers should resolve losses from the local snapshot")
+
+    monkeypatch.setattr(PolicyLossRegistry, "sync_with_actor", fail_sync)
+
+    worker = PolicyWorkerBase(
+        cfg=dummy_config.trainer,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+        policy_loss_registry_snapshot=snapshot,
+    )
+
+    assert worker.policy_loss_fn is worker._get_policy_loss_fn("regular")
+    assert worker._get_policy_loss_fn("cross_entropy") is not None
+
+    with pytest.raises(ValueError, match="custom policy loss"):
+        worker._get_policy_loss_fn("missing_policy_loss")
+
+
+def test_policy_worker_repopulates_builtin_losses_without_actor_sync(monkeypatch, dummy_config):
+    dummy_config.trainer.algorithm.policy_loss_type = "regular"
+    saved_functions = dict(PolicyLossRegistry._functions)
+    PolicyLossRegistry._functions.clear()
+
+    def fail_sync():
+        pytest.fail("policy worker fallback should not sync with the registry actor")
+
+    monkeypatch.setattr(PolicyLossRegistry, "sync_with_actor", fail_sync)
+
+    try:
+        worker = PolicyWorkerBase(
+            cfg=dummy_config.trainer,
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            master_addr="localhost",
+            master_port=12345,
+            sequence_parallel_size=1,
+        )
+
+        assert worker.policy_loss_fn is not None
+        assert "regular" in PolicyLossRegistry._functions
+    finally:
+        PolicyLossRegistry._functions.clear()
+        PolicyLossRegistry._functions.update(saved_functions)
 
 
 def _get_test_data(trainer: RayPPOTrainer):

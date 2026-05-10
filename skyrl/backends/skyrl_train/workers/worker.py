@@ -5,7 +5,17 @@ import socket
 from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Type,
+    Union,
+)
 
 import ray
 import torch
@@ -486,6 +496,7 @@ class PPORayActorGroup:
         colocate_all: bool = False,
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
+        worker_init_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Args:
@@ -504,6 +515,7 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self.worker_init_kwargs = dict(worker_init_kwargs or {})
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
@@ -572,16 +584,18 @@ class PPORayActorGroup:
         if sched is not None:
             actor_options["scheduling_strategy"] = sched
 
-        master_actor = self.ray_actor_type.options(**actor_options).remote(
-            cfg=self.cfg,
-            world_size=world_size,
-            rank=0,
-            local_rank=0,
-            master_addr=None,
-            master_port=None,
-            sequence_parallel_size=self.sequence_parallel_size,
-            record_memory=self.record_memory,
-        )
+        master_actor_kwargs = {
+            **self.worker_init_kwargs,
+            "cfg": self.cfg,
+            "world_size": world_size,
+            "rank": 0,
+            "local_rank": 0,
+            "master_addr": None,
+            "master_port": None,
+            "sequence_parallel_size": self.sequence_parallel_size,
+            "record_memory": self.record_memory,
+        }
+        master_actor = self.ray_actor_type.options(**actor_options).remote(**master_actor_kwargs)
         self._actor_handlers = [master_actor]
 
         if world_size > 1:
@@ -598,16 +612,18 @@ class PPORayActorGroup:
                 if sched is not None:
                     actor_options["scheduling_strategy"] = sched
 
-                worker_actor = self.ray_actor_type.options(**actor_options).remote(
-                    cfg=self.cfg,
-                    world_size=world_size,
-                    rank=rank,
-                    local_rank=local_rank,
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    sequence_parallel_size=self.sequence_parallel_size,
-                    record_memory=self.record_memory,
-                )
+                worker_actor_kwargs = {
+                    **self.worker_init_kwargs,
+                    "cfg": self.cfg,
+                    "world_size": world_size,
+                    "rank": rank,
+                    "local_rank": local_rank,
+                    "master_addr": master_addr,
+                    "master_port": master_port,
+                    "sequence_parallel_size": self.sequence_parallel_size,
+                    "record_memory": self.record_memory,
+                }
+                worker_actor = self.ray_actor_type.options(**actor_options).remote(**worker_actor_kwargs)
                 self._actor_handlers.append(worker_actor)
 
         # Initialize process group
@@ -682,15 +698,31 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
-    def __init__(self, **kwargs):
+    def __init__(self, policy_loss_registry_snapshot: Optional[Mapping[str, bytes]] = None, **kwargs):
         super().__init__(**kwargs)
+        if policy_loss_registry_snapshot is None:
+            PolicyLossRegistry.repopulate_local_registry()
+        else:
+            PolicyLossRegistry.install_serialized(policy_loss_registry_snapshot)
         self.model: nn.Module = None
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
+        self._policy_loss_fn_cache: Dict[str, Callable] = {}
+        self.policy_loss_fn: Callable = self._get_policy_loss_fn(self.cfg.algorithm.policy_loss_type)
+
+    def _get_policy_loss_fn(self, loss_name: str) -> Callable:
+        try:
+            if loss_name not in self._policy_loss_fn_cache:
+                self._policy_loss_fn_cache[loss_name] = PolicyLossRegistry.get_local(loss_name)
+            return self._policy_loss_fn_cache[loss_name]
+        except ValueError as e:
+            raise ValueError(
+                f"{e}. If this is a custom policy loss, register it before initialize_ray()/worker creation "
+                "so it is included in the policy-loss snapshot."
+            ) from e
 
     def forward_backward(
         self,
@@ -789,7 +821,7 @@ class PolicyWorkerBase(Worker):
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
         if loss_fn is not None:
             # Use the provided loss function (Tinker API style)
-            current_loss_fn = PolicyLossRegistry.get(loss_fn)
+            current_loss_fn = self._get_policy_loss_fn(loss_fn)
         else:
             # Fall back to config default
             current_loss_fn = self.policy_loss_fn
