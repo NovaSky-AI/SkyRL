@@ -13,14 +13,11 @@
 # Overview
 
 > [!IMPORTANT]
-> **Note:** SkyRL is undergoing a repo reorganization into the [`skyrl/`](./skyrl) folder, which unifies the skyrl libraries below into a single package. The existing packages below are fully functional but will be migrated to new paths shortly. For full [Tinker API](https://docs.skyrl.ai/docs/tinker/overview) support please use the `skyrl/` folder. See the [Tinker Quickstart docs](https://docs.skyrl.ai/docs/tinker/quickstart) to get started. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+> **Note:** SkyRL has reorganized the previous `skyrl-train` and `skyrl-tx` packages into the unified [`skyrl/`](./skyrl) package. For full [Tinker API](https://docs.skyrl.ai/docs/tinker/overview) support, use the `skyrl/` package. See the [Tinker Quickstart docs](https://docs.skyrl.ai/docs/tinker/quickstart) to get started. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
 
 SkyRL is a full-stack RL library that provides the following components:
 
-- [skyrl](./skyrl): Our new unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). `skyrl` combines our previous work:
-
-  * [`skyrl-train`](./skyrl-train): A modular, performant training framework for RL.  
-  * [`skyrl-tx`](./skyrl-tx): A cross-platform library implementing a backend for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview), with a unified engine for training and inference.
+- [skyrl](./skyrl): Our unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). The training stack lives in [`skyrl/train`](./skyrl/train) and [`skyrl/backends/skyrl_train`](./skyrl/backends/skyrl_train), while the Tinker/TX stack lives in [`skyrl/tinker`](./skyrl/tinker), [`skyrl/tx`](./skyrl/tx), and [`skyrl/backends`](./skyrl/backends).
 - [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. For exact reproduction of [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0) results, please checkout to commit a0d50c482436af7fac8caffa4533616a78431d66.
 - [`skyrl-gym`](./skyrl-gym): Our gymnasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
 
