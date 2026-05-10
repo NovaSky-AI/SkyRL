@@ -3,7 +3,6 @@ SkyRLVLMGymGenerator: VLM (vision-language model) multi-turn RL generator.
 """
 
 import copy
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 from uuid import uuid4
 
@@ -24,6 +23,12 @@ from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     SkyRLGymGenerator,
     TrajectoryOutput,
+)
+from skyrl.train.generators.utils import (
+    compute_request_max_tokens,
+    get_max_model_len,
+    normalize_sampling_params,
+    sampling_params_with_max_tokens,
 )
 
 
@@ -97,11 +102,11 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         prompt_ids = initial_render["prompt_ids"]
         latest_features = initial_render["features"]
 
-        current_sampling_params: dict = (
-            sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
-        )
-        get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
-        stop_strs = current_sampling_params.get("stop", None)
+        base_sampling_params = normalize_sampling_params(self.generator_cfg, sampling_params)
+        max_model_len = get_max_model_len(self.generator_cfg)
+        generated_tokens_used = 0
+        get_logprobs = base_sampling_params.get("logprobs", None) is not None
+        stop_strs = base_sampling_params.get("stop", None)
 
         # ── Accumulators ───────────────────────────────────────────────
         response_ids: List[int] = []
@@ -142,6 +147,17 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 stop_reason = "length"
                 break
 
+            request_max_tokens = compute_request_max_tokens(
+                max_tokens - generated_tokens_used,
+                len(input_ids),
+                max_model_len,
+            )
+            if request_max_tokens <= 0:
+                stop_reason = "length"
+                break
+
+            current_sampling_params = sampling_params_with_max_tokens(base_sampling_params, request_max_tokens)
+
             # 2. Generate
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[input_ids],
@@ -170,6 +186,12 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
+
+            generated_tokens_used += len(gen_ids) - int(added_eos)
+            if generated_tokens_used >= max_tokens and not done:
+                stop_reason = "length"
+                done = True
+                new_obs = []
 
             # 4. Append assistant message to conversation
             conversation.append({"role": "assistant", "content": gen_text})

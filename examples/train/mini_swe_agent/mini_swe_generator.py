@@ -1,27 +1,36 @@
 import asyncio
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Tuple
-import yaml
 import traceback
-import ray
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from minisweagent.models import get_model
+import ray
+import yaml
 from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
-from .mini_swe_utils import evaluate_trajectory, get_sb_environment
+from minisweagent.models import get_model
+from minisweagent.run.utils.save import save_traj
 
-from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl.train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.generators.utils import (
-    get_rollout_metrics,
-    get_response_ids_and_loss_mask_from_messages,
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
 )
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
+from skyrl.train.generators.base import BatchMetadata, TrainingPhase, TrajectoryID
+from skyrl.train.generators.skyrl_gym_generator import (
+    GeneratorInput,
+    GeneratorOutput,
+    SkyRLGymGenerator,
+)
+from skyrl.train.generators.utils import (
+    get_response_ids_and_loss_mask_from_messages,
+    get_rollout_metrics,
+)
+
+from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
 
 @dataclass
@@ -199,15 +208,27 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         # Extract prompt ids
         prompt_ids = initial_input_ids
 
-        # Calculate maximum response tokens allowed
-        max_response_tokens = max_tokens + max_input_length - initial_prompt_length
+        # Truncate by assistant-token budget first. Environment/user observations are kept only
+        # insofar as they fit the secondary packed-sequence guard below; they do not consume
+        # max_generate_length because their loss mask is 0.
+        assistant_tokens = 0
+        assistant_budget_response_tokens = len(response_ids)
+        assistant_budget_exceeded = False
+        for idx, mask in enumerate(loss_mask):
+            assistant_tokens += int(bool(mask))
+            if assistant_tokens > max_tokens:
+                assistant_budget_response_tokens = idx
+                assistant_budget_exceeded = True
+                break
 
-        # Determine stop reason
+        # Keep the packed prompt+response sequence bounded for training tensor sizes.
+        packed_response_tokens = max(0, max_tokens + max_input_length - initial_prompt_length)
+        max_response_tokens = min(assistant_budget_response_tokens, packed_response_tokens)
+
         stop_reason = "complete"  # Default for trial completion
-        if len(response_ids) > max_response_tokens:
+        if assistant_budget_exceeded or len(response_ids) > packed_response_tokens:
             stop_reason = "length"
 
-        # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 

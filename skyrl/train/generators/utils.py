@@ -9,6 +9,7 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
+from skyrl.train.config.config import GeneratorConfig
 from skyrl.train.generators.base import (
     BatchMetadata,
     GeneratorInput,
@@ -100,6 +101,54 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endfor %}"
     ),
 }
+
+
+def get_max_model_len(generator_cfg: GeneratorConfig) -> Optional[int]:
+    """Return the configured inference context window, if one is explicitly set."""
+    max_model_len = generator_cfg.inference_engine.engine_init_kwargs.get("max_model_len")
+    if max_model_len is None:
+        return None
+    try:
+        return int(max_model_len)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "generator.inference_engine.engine_init_kwargs.max_model_len must be an integer when set, "
+            f"got {max_model_len!r}"
+        ) from exc
+
+
+def normalize_sampling_params(
+    generator_cfg: GeneratorConfig, sampling_params: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Return backend-shaped sampling params without mutating the caller's dict."""
+    if sampling_params is not None:
+        request_sampling_params = copy.deepcopy(sampling_params)
+        max_generate_length = request_sampling_params.pop("max_generate_length", None)
+        if "max_tokens" not in request_sampling_params and max_generate_length is not None:
+            request_sampling_params["max_tokens"] = max_generate_length
+        return request_sampling_params
+    from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend  # noqa: I001
+
+    return get_sampling_params_for_backend(generator_cfg.inference_engine.backend, generator_cfg.sampling_params)
+
+
+def sampling_params_with_max_tokens(sampling_params: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
+    """Return a copy of backend sampling params with the per-request decode cap set."""
+    request_sampling_params = copy.deepcopy(sampling_params)
+    request_sampling_params["max_tokens"] = max_tokens
+    return request_sampling_params
+
+
+def compute_request_max_tokens(
+    remaining_generate_tokens: int,
+    input_length: int,
+    max_model_len: Optional[int],
+) -> int:
+    """Compute the safe max_tokens for the next inference request."""
+    request_max_tokens = remaining_generate_tokens
+    if max_model_len is not None:
+        request_max_tokens = min(request_max_tokens, max_model_len - input_length)
+    return max(0, request_max_tokens)
 
 
 def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemplateConfig]] = None) -> Optional[str]:

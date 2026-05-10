@@ -295,7 +295,9 @@ generator:
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
-  max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length
+  # Max input/context length checked before each generation turn. For single-turn, set equal to max_prompt_length.
+  # This is distinct from sampling_params.max_generate_length, which budgets assistant-generated tokens.
+  max_input_length: ${trainer.max_prompt_length}
   # VLLM_ENABLE_V1_MULTIPROCESSING=0 for reproducibility
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
@@ -334,11 +336,14 @@ generator:
 
   # Inference engine arguments. Arguments are passed directly to the vLLM engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
+  # If max_model_len is set, each rollout request's max_tokens is capped so prompt+completion fits this window.
   engine_init_kwargs: {}
   
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:
+    # Trajectory-level assistant/generated-token budget. Multi-turn environment observations are loss-masked
+    # and do not count against this value.
     max_generate_length: 1024
     repetition_penalty: 1.0
     temperature: 1.0

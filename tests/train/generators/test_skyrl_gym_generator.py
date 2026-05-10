@@ -612,6 +612,212 @@ async def test_multi_turn_response_truncation(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+async def test_agent_loop_caps_each_request_to_remaining_generate_budget(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Observation tokens should not consume the trajectory-level assistant generation budget."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 3
+    generator_cfg.sampling_params.max_generate_length = 5
+    generator_cfg.use_conversation_multi_turn = True
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    step_count = 0
+
+    def mock_step_multi_turn(_output):
+        nonlocal step_count
+        step_count += 1
+        return BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}],
+            reward=1.0,
+            done=step_count >= 2,
+            metadata={},
+        )
+
+    mock_env.step.side_effect = mock_step_multi_turn
+    requested_max_tokens = []
+
+    async def llm_generate_side_effect(input_batch, model=None):
+        request_max_tokens = input_batch["sampling_params"]["max_tokens"]
+        requested_max_tokens.append(request_max_tokens)
+        response = [10, 11, 12] if len(requested_max_tokens) == 1 else [20, 21]
+        response = response[:request_max_tokens]
+        return {
+            "responses": ["step"] * len(input_batch["prompt_token_ids"]),
+            "stop_reasons": ["length" if len(response) == request_max_tokens else "stop"],
+            "response_logprobs": None,
+            "response_ids": [response],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Initial prompt"}],
+        "test_env",
+        {},
+        max_tokens=5,
+        max_input_length=512,
+    )
+
+    assert requested_max_tokens == [5, 2]
+    assert sum(output.loss_mask) == 5
+    assert output.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_caps_request_to_max_model_len(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Per-request max_tokens should also fit inside vLLM's prompt+completion window."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 1
+    generator_cfg.sampling_params.max_generate_length = 5
+    generator_cfg.inference_engine.engine_init_kwargs["max_model_len"] = 6
+    generator_cfg.use_conversation_multi_turn = True
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = lambda _output: BaseTextEnvStepOutput(
+        observations=[],
+        reward=1.0,
+        done=True,
+        metadata={},
+    )
+    requested_max_tokens = []
+
+    async def llm_generate_side_effect(input_batch, model=None):
+        requested_max_tokens.append(input_batch["sampling_params"]["max_tokens"])
+        return {
+            "responses": ["done"],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+            "response_ids": [[10, 11]],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Initial prompt"}],
+        "test_env",
+        {},
+        max_tokens=5,
+        max_input_length=512,
+    )
+
+    assert requested_max_tokens == [2]
+    assert output.response_ids == [10, 11]
+    assert sum(output.loss_mask) == 2
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_stops_when_max_model_len_has_no_decode_room(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """A full context window should stop cleanly without issuing an invalid vLLM request."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 1
+    generator_cfg.sampling_params.max_generate_length = 5
+    generator_cfg.inference_engine.engine_init_kwargs["max_model_len"] = len(MOCK_TOKENIZER_ENCODED_IDS)
+    generator_cfg.use_conversation_multi_turn = True
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Initial prompt"}],
+        "test_env",
+        {},
+        max_tokens=5,
+        max_input_length=512,
+    )
+
+    mock_llm.generate.assert_not_called()
+    mock_env.step.assert_not_called()
+    assert output.response_ids == []
+    assert output.loss_mask == []
+    assert output.reward == []
+    assert output.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_uses_input_sampling_params_max_tokens_budget(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Eval/custom sampling params should control the trajectory budget when provided."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 3
+    generator_cfg.sampling_params.max_generate_length = 50
+    generator_cfg.use_conversation_multi_turn = True
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.get_metrics.return_value = {}
+    mock_env.step.side_effect = lambda _output: BaseTextEnvStepOutput(
+        observations=[{"role": "user", "content": "next"}],
+        reward=1.0,
+        done=False,
+        metadata={},
+    )
+    requested_max_tokens = []
+
+    async def llm_generate_side_effect(input_batch, model=None):
+        requested_max_tokens.append(input_batch["sampling_params"]["max_tokens"])
+        return {
+            "responses": ["step"],
+            "stop_reasons": ["length"],
+            "response_logprobs": None,
+            "response_ids": [[10, 11]],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    output = await generator.generate(
+            {
+                "prompts": [[{"role": "user", "content": "Initial prompt"}]],
+                "env_classes": [mock_env_cfg.env_class],
+                "env_extras": [{}],
+                "sampling_params": {"max_tokens": 2, "logprobs": None},
+            },
+        disable_tqdm=True,
+    )
+
+    assert requested_max_tokens == [2]
+    assert sum(output["loss_masks"][0]) == 2
+    assert output["stop_reasons"] == ["length"]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mock_env, mock_env_cfg, generator_cfg):
     """
     Tests that if the environment returns a `postprocessed_action`, it is used
@@ -738,7 +944,9 @@ async def test_apply_overlong_filtering_non_batched(
     async def llm_generate_side_effect(input_batch, model=None):
 
         if input_batch.get("sampling_params") is not None:
-            max_len = input_batch["sampling_params"]["max_generate_length"]
+            max_len = input_batch["sampling_params"].get(
+                "max_tokens", input_batch["sampling_params"].get("max_generate_length")
+            )
         else:
             max_len = generator_cfg.sampling_params.max_generate_length
 
@@ -1164,7 +1372,9 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
 
         if input_batch.get("sampling_params") is not None:
-            max_len = input_batch["sampling_params"]["max_generate_length"]
+            max_len = input_batch["sampling_params"].get(
+                "max_tokens", input_batch["sampling_params"].get("max_generate_length")
+            )
         else:
             max_len = cfg.sampling_params.max_generate_length
 

@@ -58,7 +58,7 @@ For issues with SkyRL or the Mini-SWE-Agent integration, please [open an Issue](
 
 ### Common Issues
 
-- **Context length errors**: If you see `ValueError: The decoder prompt (length xxxx) is longer than the maximum model length`, increase `max_input_length` and `max_generate_length` or reduce steps in `swebench.yaml`.
+- **Context length errors**: If you see `ValueError: The decoder prompt (length xxxx) is longer than the maximum model length`, increase the vLLM `engine_init_kwargs.max_model_len`, reduce `max_input_length`, or reduce steps in `swebench.yaml`. `max_generate_length` is the assistant-token budget for a trajectory and does not increase the model context window.
 
 - **All zero rewards**: If rewards are consistently zero, the task may be too difficult. Consider:
   - Filtering data for a better mix of easy/hard samples

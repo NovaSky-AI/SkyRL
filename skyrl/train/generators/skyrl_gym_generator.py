@@ -8,7 +8,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 import asyncio
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -33,9 +33,13 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     apply_overlong_filtering,
+    compute_request_max_tokens,
     get_custom_chat_template,
     get_generation_prompt_ids,
+    get_max_model_len,
     get_rollout_metrics,
+    normalize_sampling_params,
+    sampling_params_with_max_tokens,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
@@ -330,11 +334,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
 
-        # `sampling_params` if provided is a dict in the format expected by the inference engine backend
-        # we cast default config to a dict for consistency
-        current_sampling_params: dict = (
-            sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
-        )
+        # `sampling_params` if provided is a dict in the format expected by the inference engine backend.
+        # When absent, normalize the config dataclass into the backend shape here so agent_loop() direct
+        # callers receive the same behavior as the main generator path.
+        base_sampling_params = normalize_sampling_params(self.generator_cfg, sampling_params)
+        max_model_len = get_max_model_len(self.generator_cfg)
+        generated_tokens_used = 0
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
@@ -343,7 +348,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         agent_loop_output = StepWiseOutput(step_outputs=[]) if is_step_wise else None
 
-        get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+        get_logprobs = base_sampling_params.get("logprobs", None) is not None
         agent_loop_state = AgentLoopState(
             chat_history=chat_history,
             input_ids=initial_input_ids,
@@ -352,6 +357,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             response_end_idx=None,
             done=False,
         )
+        new_obs: ConversationType = []
 
         while not agent_loop_state.done:
 
@@ -373,8 +379,20 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
+            request_max_tokens = compute_request_max_tokens(
+                max_tokens - generated_tokens_used,
+                len(agent_loop_state.input_ids),
+                max_model_len,
+            )
+            if request_max_tokens <= 0:
+                stop_reason = "length"
+                break
+
+            current_sampling_params = sampling_params_with_max_tokens(base_sampling_params, request_max_tokens)
             engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                prompt_token_ids=[agent_loop_state.input_ids],
+                session_ids=[session_id],
+                sampling_params=current_sampling_params,
             )
             engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
             output = engine_output["responses"][0]
@@ -440,6 +458,22 @@ class SkyRLGymGenerator(GeneratorInterface):
             if turn_output.rollout_expert_indices is not None and agent_loop_state.rollout_expert_indices is None:
                 agent_loop_state.rollout_expert_indices = []
 
+            turn_generated_tokens = sum(turn_output.get_turn_loss_mask())
+            if not self.use_conversation_multi_turn and not retokenize_chat_history:
+                new_resp_tokens = turn_output.output_ids.copy()
+                if new_resp_tokens and new_resp_tokens[-1] == self.tokenizer.eos_token_id:
+                    new_resp_tokens = new_resp_tokens[:-1]
+                turn_generated_tokens = len(new_resp_tokens)
+            generated_tokens_used += turn_generated_tokens
+            if generated_tokens_used >= max_tokens and not agent_loop_state.done:
+                # The trajectory-level assistant budget is exhausted. Do not append the
+                # next observation, since there will be no following generation request.
+                stop_reason = "length"
+                agent_loop_state.done = True
+                new_obs = []
+                turn_output.new_obs = []
+                turn_output.obs_ids = []
+
             if is_step_wise:
                 # current response + observation ids
                 turn_response_ids = turn_output.output_ids + turn_output.obs_ids
@@ -489,6 +523,23 @@ class SkyRLGymGenerator(GeneratorInterface):
         rollout_expert_indices_out = None
         response_ids = None
 
+        if not is_step_wise and not retokenize_chat_history and agent_loop_state.response_end_idx is None:
+            agent_loop_output = TrajectoryOutput(
+                response_ids=[],
+                reward=[],
+                stop_reason=stop_reason,
+                loss_mask=[],
+                prompt_ids=prompt_ids,
+                rollout_logprobs=[] if get_logprobs else None,
+                env_metrics=env_metrics,
+                rollout_expert_indices=None,
+            )
+            return self._post_process_agent_loop_output(
+                agent_loop_output,
+                env_extras,
+                trajectory_id,
+            )
+
         # Prepare the final loss_mask, response_ids and rollout_logprobs .
         # We remove the final observation messages /token IDs here
         # Note that during the agent loop, we still add the final observation messages/ tokens because we terminate the agent loop if the input length
@@ -531,17 +582,21 @@ class SkyRLGymGenerator(GeneratorInterface):
         if not self.use_conversation_multi_turn:
             assert response_ids is not None and loss_mask is not None
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
-                response_ids.append(self.tokenizer.eos_token_id)
-                # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
-                # masked with 0, why bother adding it?
-                loss_mask.append(1)
-                if rollout_logprobs is not None:
-                    rollout_logprobs.append(0.0)
-                if rollout_expert_indices_out is not None and rollout_expert_indices_out:
-                    layer_num = len(rollout_expert_indices_out[0])
-                    topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
-                    rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
-                appended_eos_token = True
+                if generated_tokens_used < max_tokens:
+                    response_ids.append(self.tokenizer.eos_token_id)
+                    # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
+                    # masked with 0, why bother adding it?
+                    loss_mask.append(1)
+                    if rollout_logprobs is not None:
+                        rollout_logprobs.append(0.0)
+                    if rollout_expert_indices_out is not None and rollout_expert_indices_out:
+                        layer_num = len(rollout_expert_indices_out[0])
+                        topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
+                        rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
+                    generated_tokens_used += 1
+                    appended_eos_token = True
+                else:
+                    stop_reason = "length"
 
         if self.generator_cfg.step_wise_trajectories:
             for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
@@ -713,7 +768,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             tokenize=True,
             return_dict=False,
         )
-        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
+        request_sampling_params = sampling_params_with_max_tokens(
+            normalize_sampling_params(self.generator_cfg, sampling_params), max_tokens
+        )
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=request_sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
@@ -788,7 +846,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.generator_cfg.step_wise_trajectories:
             assert trajectory_ids is not None, "`trajectory_ids` is a required field for step wise training"
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
-        max_tokens = self.generator_cfg.sampling_params.max_generate_length
+        base_sampling_params = normalize_sampling_params(self.generator_cfg, sampling_params)
+        max_tokens = int(base_sampling_params.get("max_tokens", self.generator_cfg.sampling_params.max_generate_length))
         max_input_length = self.generator_cfg.max_input_length
 
         if self.batched:
