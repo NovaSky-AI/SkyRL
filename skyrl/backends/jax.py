@@ -546,7 +546,13 @@ class JaxBackendImpl(AbstractBackend):
         """Check if a model is registered with the backend."""
         return model_id in self.models
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+    def create_model(
+        self,
+        model_id: str,
+        lora_config: types.LoraConfig,
+        model_role: str = "policy",
+        seed_was_provided: bool = True,
+    ) -> None:
         """Create a new model in the backend.
 
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
@@ -1109,8 +1115,20 @@ class JaxBackend(JaxBackendImpl):
             )
         return getattr(super(), method)(**kwargs)
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
-        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config, model_role=model_role)
+    def create_model(
+        self,
+        model_id: str,
+        lora_config: types.LoraConfig,
+        model_role: str = "policy",
+        seed_was_provided: bool = True,
+    ) -> None:
+        self._broadcast_and_call(
+            "create_model",
+            model_id=model_id,
+            lora_config=lora_config,
+            model_role=model_role,
+            seed_was_provided=seed_was_provided,
+        )
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
         return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)

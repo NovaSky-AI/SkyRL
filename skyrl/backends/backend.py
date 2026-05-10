@@ -43,7 +43,13 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+    def create_model(
+        self,
+        model_id: str,
+        lora_config: types.LoraConfig,
+        model_role: str = "policy",
+        seed_was_provided: bool = True,
+    ) -> None:
         """Create a new model in the backend.
 
         Creates optimizer and configures LoRA adapter.
@@ -52,6 +58,7 @@ class AbstractBackend(ABC):
             model_id: The model identifier
             lora_config: LoRA configuration with rank and alpha
             model_role: Logical role for the model (e.g. policy or critic)
+            seed_was_provided: Whether the client explicitly set the seed.
         """
         pass
 

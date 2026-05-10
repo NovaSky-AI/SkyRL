@@ -445,7 +445,12 @@ class TinkerEngine:
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Create model in backend (allocates adapter_index, creates optimizer, and configures adapter)
-        self.backend.create_model(model_id, request_data.lora_config, model_role=request_data.model_role)
+        self.backend.create_model(
+            model_id,
+            request_data.lora_config,
+            model_role=request_data.model_role,
+            seed_was_provided=request_data.seed_was_provided,
+        )
 
         logger.info(f"Created LoRA model {model_id}")
 
