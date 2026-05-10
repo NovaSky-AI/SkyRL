@@ -43,7 +43,13 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         tokenizer,
         policy_model_name: Optional[str] = None,
     ):
-        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, policy_model_name)
+        super().__init__(
+            generator_cfg,
+            skyrl_gym_cfg,
+            inference_engine_client,
+            tokenizer,
+            policy_model_name,
+        )
         logger.info("Initialized SkyRLVLMGymGenerator (VLM multi-modal generator)")
 
     def _validate_cfg(self, generator_cfg: GeneratorConfig):
@@ -59,7 +65,12 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
     async def _render_conversation(self, conversation: ConversationType) -> RenderedConversation:
         rendered = await self.inference_engine_client.render_chat_completion(
-            {"json": {"model": self.inference_engine_client.model_name, "messages": conversation}}
+            {
+                "json": {
+                    "model": self.inference_engine_client.model_name,
+                    "messages": conversation,
+                }
+            }
         )
         return RenderedConversation(prompt_ids=rendered["token_ids"], features=rendered.get("features", None))
 
@@ -88,19 +99,27 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         )
 
         conversation = copy.deepcopy(prompt)
-        conversation, _ = await self._run_in_executor_if_available(env.init, conversation)
+        try:
+            conversation, _ = await self._run_in_executor_if_available(env.init, conversation)
+        except Exception:
+            await self._close_env_after_exception(env, "env.init")
+            raise
 
         # Render initial conversation → prompt_ids
         # latest_features always points to the most recent render's features
         # (each render covers the full conversation, so later renders supersede earlier ones)
-        initial_render = await self._render_conversation(conversation)
+        try:
+            initial_render = await self._render_conversation(conversation)
+        except Exception:
+            await self._close_env_after_exception(env, "initial conversation rendering")
+            raise
         prompt_ids = initial_render["prompt_ids"]
         latest_features = initial_render["features"]
 
         current_sampling_params: dict = (
             sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
         )
-        get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+        get_logprobs = self._uses_rollout_logprobs(sampling_params)
         stop_strs = current_sampling_params.get("stop", None)
 
         # ── Accumulators ───────────────────────────────────────────────
@@ -125,7 +144,11 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
         while not done:
             # 1. Render full conversation for this turn's generation input
-            rendered_conversation = await self._render_conversation(conversation)
+            try:
+                rendered_conversation = await self._render_conversation(conversation)
+            except Exception:
+                await self._close_env_after_exception(env, "conversation rendering")
+                raise
             input_ids = rendered_conversation["prompt_ids"]
             latest_features = rendered_conversation["features"]
 
@@ -149,7 +172,11 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=current_sampling_params,
                 mm_features=[latest_features] if latest_features is not None else None,
             )
-            engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
+            try:
+                engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
+            except Exception:
+                await self._close_env_after_exception(env, "inference generation")
+                raise
 
             gen_text = engine_output["responses"][0]
             gen_ids = engine_output["response_ids"][0]
@@ -166,7 +193,11 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                     added_eos = True
 
             # 3. Environment step
-            env_step_output = await self._run_in_executor_if_available(env.step, gen_text)
+            try:
+                env_step_output = await self._run_in_executor_if_available(env.step, gen_text)
+            except Exception:
+                await self._close_env_after_exception(env, "env.step")
+                raise
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]

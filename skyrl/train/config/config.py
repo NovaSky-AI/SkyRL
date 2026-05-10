@@ -544,6 +544,8 @@ class GeneratorConfig(BaseConfig):
     eval_n_samples_per_prompt: int = 1
     zero_reward_on_non_stop: bool = False
     """Set reward to 0 when ``stop_reason`` is not ``"stop"`` (i.e., generation was truncated or aborted)."""
+    skip_failed_rollouts: bool = False
+    """Replace failed non-batched rollouts with zero-reward, loss-masked placeholders."""
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
     exceed max length (truncated, no EOS token)."""
