@@ -32,6 +32,7 @@ from examples.train.thunder_agent.thunderagent import (
     register_routes,
     set_config,
 )
+from examples.train.thunder_agent.thunderagent.scheduler.vllm_request_processor import remove_program_id
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
@@ -148,7 +149,9 @@ class ThunderAgentRouter:
 
     def _forward_headers(self, request: Request) -> dict:
         return {
-            k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length", "transfer-encoding", "connection")
         }
 
     # ------------------------------------------------------------------
@@ -158,12 +161,17 @@ class ThunderAgentRouter:
     def _build_app(self) -> FastAPI:
         ta_router = self._ta_router
         proxy_client = self._proxy_client
+        if ta_router is None or proxy_client is None:
+            raise RuntimeError("ThunderAgentRouter app built before start() initialized router state")
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             await ta_router.start()
-            yield
-            await ta_router.stop()
+            try:
+                yield
+            finally:
+                await ta_router.stop()
+                await proxy_client.aclose()
 
         app = FastAPI(
             title="SkyRL ThunderAgent Router",
@@ -203,8 +211,8 @@ class ThunderAgentRouter:
 
             backend = ta_router.get_backend_for_program(program_id)
 
-            # Strip program_id before forwarding to vLLM
-            forward_payload = {k: v for k, v in payload.items() if k != "program_id"}
+            # Strip ThunderAgent-only request metadata before forwarding to vLLM.
+            forward_payload = remove_program_id(payload)
 
             url = f"{backend.url}/inference/v1/generate"
             headers = self._forward_headers(request)

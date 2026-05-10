@@ -55,10 +55,13 @@ def create_mock_server(server_id: int) -> FastAPI:
 
     @app.post("/inference/v1/generate")
     async def inference_generate(request: Request):
-        await request.json()
+        payload = await request.json()
+        extra_body = payload.get("extra_body", {})
         return JSONResponse(
             {
                 "server_id": server_id,
+                "saw_program_id": "program_id" in payload,
+                "saw_extra_body_program_id": isinstance(extra_body, dict) and "program_id" in extra_body,
                 "choices": [{"token_ids": [100, 200, 300], "finish_reason": "stop"}],
             }
         )
@@ -242,6 +245,25 @@ def test_session_id_header_fallback_used_as_program_id(env):
     )
     prog_resp = httpx.get(f"{env}/programs", timeout=5.0)
     assert session_id in prog_resp.json()
+
+
+def test_inference_generate_strips_program_metadata(env):
+    """ThunderAgent metadata is not forwarded to the vLLM generation endpoint."""
+    resp = httpx.post(
+        f"{env}/inference/v1/generate",
+        json={
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "model": "test",
+            "program_id": "strip-prog-1",
+            "extra_body": {"program_id": "strip-prog-extra"},
+        },
+        timeout=10.0,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["saw_program_id"] is False
+    assert data["saw_extra_body_program_id"] is False
 
 
 def test_programs_endpoint(env):

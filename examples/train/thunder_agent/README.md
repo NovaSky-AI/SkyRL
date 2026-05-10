@@ -12,8 +12,7 @@ Train Qwen3-32B on R2EGym with ThunderAgent-accelerated rollout scheduling.
 
 | Role | Nodes | GPUs | Notes |
 |---|---|---|---|
-| Head / merged | 1 | 0 GPU (CPU-only SLURM step) | Ray head, ThunderAgent proxy, training driver |
-| Rollout | 1 | 8 × H100 | 4 vLLM servers at TP=2 |
+| Head + rollout | 1 | 8 × H100 | Ray head, ThunderAgent proxy, training driver, 4 vLLM servers at TP=2 |
 | Trainer | 4 | 8 × H100 each | FSDP2 policy + ref model |
 
 Total: 5 SLURM nodes, 40 H100 GPUs.
@@ -100,9 +99,9 @@ sbatch \
   examples/train/thunder_agent/scripts/r2egym_32b/run_sbatch.sh
 ```
 
-The `sbatch` script requests 5 GPU nodes by default. It uses node 0 for Ray
-head, Docker setup, the training driver, and the 4 rollout vLLM servers; nodes
-1-4 are trainer workers. It then runs:
+The `sbatch` script requests 5 GPU nodes by default. In the default merged
+layout, node 0 runs Ray head, Docker setup, the training driver, and the 4
+rollout vLLM servers; nodes 1-4 are trainer workers. It then runs:
 
 ```text
 setup_env -> cleanup -> prepare -> head -> ray -> rollout -> status -> driver
