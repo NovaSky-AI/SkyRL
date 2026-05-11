@@ -31,6 +31,8 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 # Qwen3.5 flags
 USE_SAMPLE_PACKING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 
+export _SKYRL_USE_NEW_INFERENCE=0
+
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

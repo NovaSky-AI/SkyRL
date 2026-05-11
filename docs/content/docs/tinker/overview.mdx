@@ -40,9 +40,10 @@ SkyRL brings the Tinker API to your own hardware. By utilizing the fully Tinker 
 | FSDP2 strategy | Supported |
 | Megatron strategy | Supported |
 | Vision models | Supported |
-| Multi-tenant LoRA | Not yet supported |
-| Multi-model sampling | Not yet supported |
-| Multi-model training | Not yet supported |
+| Multi-tenant LoRA training (Megatron + vLLM) | Supported — see [Multi-tenancy](./multi_tenancy) |
+| Multi-tenant LoRA sampling (Megatron + vLLM) | Supported — see [Multi-tenancy](./multi_tenancy) |
+| Multi-tenant LoRA on FSDP2 | Not yet supported |
+| Multi-tenant full-parameter fine-tuning | Not yet supported |
 
 For more details, see the [Limitations & Roadmap](./limitations) page.
 
@@ -50,5 +51,6 @@ For more details, see the [Limitations & Roadmap](./limitations) page.
 
 - [Quickstart](./quickstart) - Start a SkyRL Tinker server and run your first training script
 - [Architecture](./architecture) - Understand how SkyRL implements the Tinker API
+- [Multi-tenancy](./multi_tenancy) - Run multiple LoRA tenants concurrently against one server
 - [Cookbook Scripts](./cookbook) - Run the official tinker-cookbook recipes on SkyRL
 - [Limitations & Roadmap](./limitations) - Known limitations and future plans

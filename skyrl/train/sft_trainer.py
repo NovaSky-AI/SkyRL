@@ -23,6 +23,8 @@ Or as a CLI entrypoint::
 import os
 import random
 from dataclasses import asdict
+from math import ceil
+from typing import Optional
 
 import ray
 import torch
@@ -38,7 +40,11 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
     SFTConfig,
+    TrainOnWhat,
     build_skyrl_config_for_sft,
+)
+from skyrl.train.generators.utils import (
+    get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
@@ -94,30 +100,75 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512, **toke
 def tokenize_chat_example(
     example: dict,
     tokenizer,
-    max_length: int = 512,
+    max_length: Optional[int] = None,
     messages_key: str = "messages",
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     **tokenizer_kwargs,
 ) -> dict | None:
-    """Tokenize a chat-format example. Loss on last assistant message only.
+    """Tokenize a chat-format example with configurable loss targets.
 
-    Uses apply_chat_template to tokenize prompt (all messages except the last)
-    and full conversation, then computes num_actions from the difference.
+    Uses ``apply_chat_template`` to tokenize the conversation and determine
+    which tokens to train on based on ``train_on_what``.
 
-    Returns dict with input_ids, attention_mask, num_actions -- same format as
-    tokenize_sft_example(), so collate_sft_batch() works unchanged.
+    Args:
+        example: Dict containing a ``messages_key`` column with chat messages.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Maximum sequence length (truncation boundary).
+        messages_key: Key in *example* that holds the messages list.
+        train_on_what: Which tokens to compute loss on.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``
+            (e.g. ``enable_thinking``).
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        optionally ``loss_mask`` (a per-token list of 0/1 within the action
+        window).  Returns ``None`` when the example should be skipped.
     """
+    # Validate supported modes
+    _SUPPORTED = {TrainOnWhat.LAST_ASSISTANT_MESSAGE, TrainOnWhat.ALL_ASSISTANT_MESSAGES}
+    if train_on_what not in _SUPPORTED:
+        raise NotImplementedError(
+            f"train_on_what={train_on_what!r} is not yet supported. "
+            f"Supported values: {sorted(v.value for v in _SUPPORTED)}"
+        )
     messages = example[messages_key]
 
     # Validate: last message must be from assistant
     if not messages or messages[-1]["role"] != "assistant":
         return None
 
+    if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
+        return _tokenize_chat_last_assistant(messages, tokenizer, max_length, **tokenizer_kwargs)
+    else:
+        # ALL_ASSISTANT_MESSAGES
+        return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+
+
+def _tokenize_chat_last_assistant(
+    messages: list[dict],
+    tokenizer,
+    max_length: Optional[int] = None,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Tokenize a conversation and compute loss only on the last assistant message.
+
+    Args:
+        messages: Full conversation (must end with an assistant message).
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates both prompt and full
+            conversation to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, and ``num_actions`` (number
+        of last-assistant tokens), or ``None`` if truncation left no response tokens.
+    """
     # Tokenize prompt (everything except last assistant message)
     prompt_ids = tokenizer.apply_chat_template(
         messages[:-1],
         add_generation_prompt=True,
         tokenize=True,
-        truncation=True,
+        truncation=max_length is not None,
         max_length=max_length,
         return_dict=False,
         **tokenizer_kwargs,
@@ -128,7 +179,7 @@ def tokenize_chat_example(
         messages,
         add_generation_prompt=False,
         tokenize=True,
-        truncation=True,
+        truncation=max_length is not None,
         max_length=max_length,
         return_dict=False,
         **tokenizer_kwargs,
@@ -142,6 +193,74 @@ def tokenize_chat_example(
         "input_ids": full_ids,
         "attention_mask": [1] * len(full_ids),
         "num_actions": num_actions,
+        "loss_mask": [1] * num_actions,
+    }
+
+
+def _tokenize_chat_all_assistants(
+    messages: list[dict],
+    tokenizer,
+    max_length: Optional[int] = None,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Tokenize a conversation and compute loss on all assistant messages.
+
+    Builds a per-token loss mask covering every assistant turn. ``num_actions``
+    spans from the first assistant token to the end of the conversation, with
+    interior 0s masking out user/system tokens between assistant turns.
+
+    Args:
+        messages: Full conversation. May start with system/user messages;
+            must contain at least one assistant message.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        ``loss_mask`` (per-token 0/1 list within the action window), or
+        ``None`` if no assistant tokens survived after truncation.
+    """
+
+    # Find the index of the first assistant message.
+    i = 0
+    while i < len(messages) and messages[i]["role"] != "assistant":
+        i += 1
+
+    # Encode leading non-assistant messages separately because
+    # `get_response_ids_and_loss_mask_from_messages` does not accept system messages.
+
+    initial_token_ids = tokenizer.apply_chat_template(
+        messages[:i],
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        **tokenizer_kwargs,
+    )
+    # no assistant message
+    if i >= len(messages):
+        return None
+
+    later_token_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        messages[i:], tokenizer, tokenizer_kwargs=tokenizer_kwargs
+    )
+    input_ids = initial_token_ids + later_token_ids
+
+    # truncate
+    if max_length is not None:
+        input_ids = input_ids[:max_length]
+        max_assistant_length = max(max_length - len(initial_token_ids), 0)
+        loss_mask = loss_mask[:max_assistant_length]
+
+    if sum(loss_mask) == 0:
+        return None  # No assistant tokens survived truncation
+
+    num_actions = len(loss_mask)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": [1] * len(input_ids),
+        "num_actions": num_actions,
+        "loss_mask": loss_mask,
     }
 
 
@@ -157,6 +276,9 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     - sequences: [batch_size, seq_len] - token IDs (left-padded)
     - attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
     - loss_mask: [batch_size, num_actions] - 1 for tokens to compute loss on
+
+    All examples are expected to carry a ``loss_mask`` key (guaranteed by both
+    ``_tokenize_chat_last_assistant`` and ``_tokenize_chat_all_assistants``).
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
@@ -170,9 +292,9 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         # Left-pad sequences (SkyRL convention)
         sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
         attention_masks.append([0] * pad_len + ex["attention_mask"])
-        # Per-example loss_mask: 0s for padding, 1s only for this example's response tokens
+
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + [1] * ex["num_actions"])
+        loss_masks.append([0] * action_pad + ex["loss_mask"])
 
     batch = TrainingInputBatch(
         {
@@ -214,6 +336,8 @@ class SFTTrainer:
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
         self.global_step = 0
+        # running count of total non-padding tokens trained on
+        self._total_tokens_processed = 0
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -268,6 +392,8 @@ class SFTTrainer:
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
         )
+        # num_steps may be None when num_epochs is used; the worker will use its
+        # default (large value) for the LR scheduler in that case.
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,
@@ -314,7 +440,13 @@ class SFTTrainer:
         if self.sft_cfg.messages_key in columns:
             # Chat format
             tokenized = [
-                tokenize_chat_example(ex, self.tokenizer, self.sft_cfg.max_length, self.sft_cfg.messages_key)
+                tokenize_chat_example(
+                    ex,
+                    self.tokenizer,
+                    self.sft_cfg.max_length,
+                    self.sft_cfg.messages_key,
+                    train_on_what=self.sft_cfg.train_on_what,
+                )
                 for ex in dataset
             ]
         elif "instruction" in columns and "output" in columns:
@@ -334,6 +466,37 @@ class SFTTrainer:
     def load_dataset(self) -> list:
         """Load and tokenize the training dataset."""
         return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
+
+    def _log_dataset_stats(self, tokenized: list) -> None:
+        """Log tokenized sequence length statistics over the training set.
+
+        Reports count, mean, median (q50), q25, q75, min, max of the tokenized
+        ``input_ids`` lengths. Logs once via ``logger.info``.
+        """
+        if not tokenized:
+            logger.warning("No tokenized examples to compute stats over")
+            return
+
+        lengths = [len(ex["input_ids"]) for ex in tokenized]
+        n = len(lengths)
+        sorted_lengths = sorted(lengths)
+
+        def pct(p: float) -> int:
+            # Simple nearest-rank percentile over ints; adequate for dataset stats.
+            idx = max(0, min(n - 1, int(round((p / 100.0) * (n - 1)))))
+            return sorted_lengths[idx]
+
+        mean_len = sum(lengths) / n
+        q25 = pct(25)
+        q50 = pct(50)
+        q75 = pct(75)
+        min_len = sorted_lengths[0]
+        max_len = sorted_lengths[-1]
+
+        logger.info(
+            f"Dataset stats (tokenized lengths over {n} examples):\n"
+            f"total={sum(lengths)}, mean={mean_len:.1f}, median={q50}, q25={q25}, q75={q75}, min={min_len}, max={max_len}"
+        )
 
     def collate_batch(self, examples: list) -> TrainingInputBatch:
         """Collate examples into a TrainingInputBatch with loss normalization.
@@ -535,6 +698,7 @@ class SFTTrainer:
                 all_timings.update(step_result["timings"])
 
             actual_num_tokens = batch["attention_mask"].sum().item()
+            self._total_tokens_processed += actual_num_tokens
             tokens_per_second = actual_num_tokens / all_timings["step"]
 
             log_dict = {
@@ -542,6 +706,7 @@ class SFTTrainer:
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
                 "train/actual_num_tokens": actual_num_tokens,
+                "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
 
@@ -563,8 +728,21 @@ class SFTTrainer:
 
         tokenized = self.load_dataset()
 
+        # Log tokenized sequence length statistics (once, before training loop)
+        self._log_dataset_stats(tokenized)
+
         batch_size = self.sft_cfg.batch_size
-        num_steps = self.sft_cfg.num_steps
+
+        # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
+        if self.sft_cfg.num_steps is not None:
+            num_steps = self.sft_cfg.num_steps
+        else:
+            steps_per_epoch = ceil(len(tokenized) / batch_size)
+            num_steps = self.sft_cfg.num_epochs * steps_per_epoch
+            logger.info(
+                f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
+                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = {num_steps} steps"
+            )
 
         # Early validation: dataset must have at least batch_size examples
         if len(tokenized) < batch_size:
@@ -620,6 +798,7 @@ class SFTTrainer:
             # Compute throughput using actual (non-padding) tokens
             batch_padded_seq_len = batch["sequences"].shape[1]
             actual_num_tokens = batch["attention_mask"].sum().item()
+            self._total_tokens_processed += actual_num_tokens
             tokens_per_second = actual_num_tokens / all_timings["step"]
 
             # Build log dict
@@ -629,6 +808,7 @@ class SFTTrainer:
                 "train/tokens_per_second": tokens_per_second,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
+                "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
 
@@ -642,6 +822,12 @@ class SFTTrainer:
                 with Timer("save_checkpoint", all_timings):
                     self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+
+            # HF export at regular intervals
+            if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
+                with Timer("save_hf_model", all_timings):
+                    self.save_hf_model()
+                log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
             self.tracker.log(log_dict, step=self.global_step, commit=True)
 
@@ -669,6 +855,15 @@ class SFTTrainer:
             if not already_saved:
                 logger.info(f"Saving final checkpoint at step {final_step}")
                 self.save_checkpoint()
+
+        # Save final HF model if enabled (only if not already saved at last step)
+        if self.sft_cfg.hf_save_interval > 0:
+            final_step = num_steps
+            already_saved = final_step % self.sft_cfg.hf_save_interval == 0
+            if not already_saved:
+                self.global_step = final_step
+                logger.info(f"Saving final HF model at step {final_step}")
+                self.save_hf_model()
 
         logger.info("SFT training complete!")
 
@@ -699,6 +894,21 @@ class SFTTrainer:
 
         # Clean up old checkpoints after successful save
         cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
+
+    def save_hf_model(self):
+        """Save policy weights in HuggingFace format.
+
+        Export path: cfg.trainer.export_path/global_step_{step}/policy
+        Mirrors the pattern used by the RL trainer's save_models().
+        """
+        step = self.global_step
+        policy_export_dir = os.path.join(
+            self.cfg.trainer.export_path,
+            f"{GLOBAL_STEP_PREFIX}{step}",
+            "policy",
+        )
+        self.dispatch.save_hf_model("policy", policy_export_dir, self.tokenizer)
+        logger.info(f"Saved HF model weights at step {step} to {policy_export_dir}")
 
     # ------------------------------------------------------------------ #
     # Lifecycle

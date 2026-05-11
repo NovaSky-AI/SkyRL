@@ -4,6 +4,11 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # Run Megatron tests:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron"
+
+Multi-LoRA serving tests live separately in
+``tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_multi_lora_serving.py``
+since they exercise the inference-server LoRA control plane, not the
+trainer + weight-sync path covered here.
 """
 
 import pytest
@@ -12,6 +17,7 @@ import ray
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -145,5 +151,10 @@ async def test_policy_local_engines_e2e(
         policy.offload_to_cpu()
         await client.wake_up(tags=["kv_cache"])
         await client.reset_prefix_cache()
-        outputs = await run_inference(client, get_test_prompts(MODEL), sampling_params)
+        # Use the same resolver production uses so this test actually exercises
+        # the LoRA adapter when vLLM has it loaded (FSDP+LoRA, megatron+adapter)
+        # and falls back to the base model for megatron+merge_lora.
+        outputs = await run_inference(
+            client, get_test_prompts(MODEL), sampling_params, model=resolve_policy_model_name(cfg)
+        )
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

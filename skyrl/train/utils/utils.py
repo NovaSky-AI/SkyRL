@@ -612,6 +612,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
+    # NOTE (erictang000): This should no longer be required since this has been removed in vllm
+    # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
+    # that previously ran successfully, so keeping this to maintain backwards compatibility.
+    if cfg.generator.inference_engine.weight_sync_backend == "nccl":
+        env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
     if cfg.trainer.strategy == "megatron":
         # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
         env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
@@ -645,6 +651,18 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+        if os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"):
+            logger.info(
+                f"Exporting `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to ray runtime env: {os.environ['VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS']}"
+            )
+            env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
+
+        if os.environ.get("RAY_CGRAPH_get_timeout"):
+            logger.info(
+                f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
+            )
+            env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
