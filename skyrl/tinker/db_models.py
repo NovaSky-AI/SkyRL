@@ -140,8 +140,8 @@ class EngineStateDB(SQLModel, table=True):
     """Engine→API handoff for the inference engine the backend stands up.
 
     Singleton row (``singleton_id=1``). Written by the backend when a new
-    inference client is built (or torn down) and read by the API process to
-    decide whether to forward sample requests directly to vLLM.
+    inference client is built (or torn down) and read by the API's
+    forwarding client to resolve the vLLM proxy URL.
     """
 
     __tablename__ = "engine_state"
@@ -151,14 +151,5 @@ class EngineStateDB(SQLModel, table=True):
     # Proxy URL of the engine-managed vLLM. None when no vLLM has been
     # stood up yet (no create_model, FFT path, or last delete tore down).
     inference_proxy_url: str | None = None
-
-    # Backend vLLM URLs (data-parallel). Optional — the forwarding client
-    # only uses inference_proxy_url for /v1/completions.
-    inference_server_urls: list[str] = Field(default_factory=list, sa_type=JSON)
-
-    # Whether the backend is running in colocated mode. When True, the API
-    # MUST NOT install a forwarding client because vLLM is asleep during
-    # training and only the engine's synchronous sample path can wake it.
-    is_colocated: bool = False
 
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))

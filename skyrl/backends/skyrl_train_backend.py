@@ -342,12 +342,15 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         self._engine_database_url = database_url
 
-    def _publish_engine_state(self, *, proxy_url: str | None, server_urls: list[str], is_colocated: bool) -> None:
+    def _publish_engine_state(self, *, proxy_url: str | None) -> None:
         """Upsert the singleton row in EngineStateDB.
 
         Idempotent. Safe to call repeatedly. ``proxy_url=None`` signals that
         no vLLM is currently up (post-teardown) — the API process will fall
         back to the engine's synchronous sample path.
+
+        Best-effort: on any DB error we log and return rather than raise.
+        Callers rely on local state being reset regardless of publish outcome.
         """
         if self._engine_database_url is None:
             # Backend not wired to a Tinker engine (unit tests, non-Tinker uses).
@@ -359,24 +362,25 @@ class SkyRLTrainBackend(AbstractBackend):
 
         from skyrl.tinker.db_models import EngineStateDB, enable_sqlite_wal
 
-        db_engine = create_engine(self._engine_database_url, echo=False)
-        enable_sqlite_wal(db_engine)
-        # The API process creates the schema, but in unit tests the backend
-        # may run without an API. Make sure the table exists before writing.
-        SQLModel.metadata.create_all(db_engine, tables=[EngineStateDB.__table__])
         try:
-            with Session(db_engine) as session:
-                row = session.get(EngineStateDB, 1)
-                if row is None:
-                    row = EngineStateDB(singleton_id=1)
-                row.inference_proxy_url = proxy_url
-                row.inference_server_urls = list(server_urls)
-                row.is_colocated = bool(is_colocated)
-                row.updated_at = datetime.now(timezone.utc)
-                session.add(row)
-                session.commit()
-        finally:
-            db_engine.dispose()
+            db_engine = create_engine(self._engine_database_url, echo=False)
+            enable_sqlite_wal(db_engine)
+            # The API process creates the schema, but in unit tests the backend
+            # may run without an API. Make sure the table exists before writing.
+            SQLModel.metadata.create_all(db_engine, tables=[EngineStateDB.__table__])
+            try:
+                with Session(db_engine) as session:
+                    row = session.get(EngineStateDB, 1)
+                    if row is None:
+                        row = EngineStateDB(singleton_id=1)
+                    row.inference_proxy_url = proxy_url
+                    row.updated_at = datetime.now(timezone.utc)
+                    session.add(row)
+                    session.commit()
+            finally:
+                db_engine.dispose()
+        except Exception as e:
+            logger.warning(f"Failed to publish engine state (proxy_url={proxy_url!r}): {e}")
 
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
@@ -396,11 +400,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Publish inference endpoint so the API can forward samples directly
         # (only meaningful in non-colocated mode; the API gates on this).
-        self._publish_engine_state(
-            proxy_url=server_setup.proxy_url,
-            server_urls=list(server_setup.server_urls),
-            is_colocated=bool(is_colocated),
-        )
+        self._publish_engine_state(proxy_url=server_setup.proxy_url)
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -550,9 +550,6 @@ class SkyRLTrainBackend(AbstractBackend):
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
-        # Tell the API there is no inference engine to forward to. Next
-        # _create_new_inference_client will repopulate this row.
-        self._publish_engine_state(proxy_url=None, server_urls=[], is_colocated=False)
         self._cfg = None
         self._dispatch = None
         self._inference_engine_client = None
@@ -560,6 +557,11 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
+        # Local state is fully reset above. Tell the API there is no
+        # inference engine to forward to last — _publish_engine_state is
+        # best-effort, so a DB failure here won't leave the controller
+        # half-torn-down. Next _create_new_inference_client repopulates.
+        self._publish_engine_state(proxy_url=None)
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:

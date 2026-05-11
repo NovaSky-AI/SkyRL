@@ -8,8 +8,7 @@ bypassing the engine subprocess's serial scheduling loop.
 
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
-    engine's vLLM proxy URL is written to ``EngineStateDB`` and the row
-    has ``is_colocated=False``.
+    engine's vLLM proxy URL is written to ``EngineStateDB``.
   - test_sample_uses_external_path: an issued sample creates a future of
     type ``EXTERNAL`` (not ``SAMPLE``) and resolves successfully.
   - test_sample_concurrent_with_training_is_fast: the central
@@ -17,6 +16,9 @@ Coverage:
     + ``optim_step`` calls is in flight, a sample request resolves in
     much less time than the training stream takes, demonstrating that
     sample latency is no longer bounded by training-step duration.
+  - test_concurrent_samples_per_adapter: many concurrent samples across
+    two adapters all resolve via the forwarding client's connection pool
+    and per-adapter (``model=<model_id>``) routing on vLLM.
 
 Run:
   uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
@@ -75,6 +77,7 @@ BACKEND_CONFIG = {
 
 def _server_is_up(port: int) -> bool:
     import urllib.error
+    import urllib.request
 
     try:
         urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
@@ -204,9 +207,6 @@ def test_engine_state_published(server_db_path):
     assert row.inference_proxy_url is not None and row.inference_proxy_url.startswith(
         "http"
     ), f"expected an http(s) proxy URL, got {row.inference_proxy_url!r}"
-    assert row.is_colocated is False, "non-colocated backend should publish is_colocated=False"
-    # server_urls should also be populated for non-external setups (data plane URLs).
-    assert isinstance(row.inference_server_urls, list)
 
 
 def test_sample_uses_external_path(server_db_path):
@@ -359,9 +359,10 @@ def test_sample_concurrent_with_training_is_fast(server_db_path):
 def test_concurrent_samples_per_adapter(server_db_path):
     """Issue several concurrent samples across two adapters; all resolve.
 
-    This exercises the per-API-process semaphore and confirms that the
-    forwarding client correctly multiplexes by model_id (each adapter
-    name maps to vLLM's per-tenant LoRA registration).
+    Exercises the forwarding client's httpx connection pool and confirms
+    that requests route to the correct adapter via ``model=<model_id>``
+    (each Tinker model_id maps to a LoRA registered on vLLM under the
+    same name during save_weights_for_sampler).
     """
     proc, _, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)

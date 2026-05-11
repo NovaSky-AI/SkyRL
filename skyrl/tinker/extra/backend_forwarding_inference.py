@@ -92,6 +92,10 @@ class BackendForwardingInferenceClient:
             return row.inference_proxy_url
 
     async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
+        # Hot path: cache is warm and caller didn't ask for refresh.
+        # Skip the lock so concurrent samples don't serialize here.
+        if not force_refresh and self._cached_proxy_url is not None:
+            return self._cached_proxy_url
         async with self._cache_lock:
             if force_refresh or self._cached_proxy_url is None:
                 url = await self._read_proxy_url_from_db()
