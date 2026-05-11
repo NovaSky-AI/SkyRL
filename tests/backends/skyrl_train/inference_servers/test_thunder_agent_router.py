@@ -5,7 +5,6 @@ import concurrent.futures
 import importlib
 import threading
 import time
-from types import SimpleNamespace
 from typing import List
 
 import httpx
@@ -14,18 +13,12 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-pytest.importorskip("examples.train.thunder_agent.thunderagent.config", reason="ThunderAgent deps missing")
+pytest.importorskip("ThunderAgent.config", reason="ThunderAgent not installed")
 
-program_module = importlib.import_module("examples.train.thunder_agent.thunderagent.program.state")
-Program = program_module.Program
-ProgramStatus = program_module.ProgramStatus
-BackendState = importlib.import_module("examples.train.thunder_agent.thunderagent.backend.state").BackendState
+BackendState = importlib.import_module("ThunderAgent.backend.state").BackendState
 SGLangMetricsClient = importlib.import_module(
-    "examples.train.thunder_agent.thunderagent.backend.sglang_metrics"
+    "ThunderAgent.backend.sglang_metrics"
 ).SGLangMetricsClient
-MultiBackendRouter = importlib.import_module(
-    "examples.train.thunder_agent.thunderagent.scheduler.router"
-).MultiBackendRouter
 get_open_port = importlib.import_module("skyrl.backends.skyrl_train.inference_servers.common").get_open_port
 ThunderAgentRouter = importlib.import_module(
     "examples.train.thunder_agent.skyrl_integration.router"
@@ -425,82 +418,3 @@ def test_sglang_metrics_client_uses_root_level_probe_endpoints():
     client = SGLangMetricsClient("http://127.0.0.1:8000/v1/")
     assert client.metrics_url == "http://127.0.0.1:8000/metrics"
     assert client.server_info_url == "http://127.0.0.1:8000/get_server_info"
-
-
-# --------------------------------------------------------------------------
-# Scheduler Internals
-# --------------------------------------------------------------------------
-
-
-def _build_scheduler_router(*, capacity: int):
-    router = MultiBackendRouter(
-        ["http://backend-0"],
-        scheduling_enabled=True,
-        backend_type="vllm",
-    )
-    backend_url = next(iter(router.backends))
-    backend = router.backends[backend_url]
-    backend.metrics_client.cache_config = SimpleNamespace(total_tokens_capacity=capacity)
-    backend.metrics_client.healthy = True
-    return router, backend_url
-
-
-def _add_program(
-    router,
-    backend_url: str,
-    *,
-    program_id: str,
-    total_tokens: int,
-    status: ProgramStatus = ProgramStatus.REASONING,
-) -> Program:
-    program = Program(
-        program_id=program_id,
-        backend_url=backend_url,
-        status=status,
-    )
-    program.total_tokens = total_tokens
-    router.programs[program_id] = program
-    router.backends[backend_url].register_program(program_id, program)
-    return program
-
-
-@pytest.mark.asyncio
-async def test_pause_until_safe_stops_once_marked_tokens_cover_overflow():
-    router, backend_url = _build_scheduler_router(capacity=1000)
-    backend = router.backends[backend_url]
-
-    smallest = _add_program(router, backend_url, program_id="prog-small", total_tokens=250)
-    middle = _add_program(router, backend_url, program_id="prog-mid", total_tokens=300)
-    largest = _add_program(router, backend_url, program_id="prog-large", total_tokens=350)
-
-    assert backend.remaining_capacity() == -200
-
-    await router._pause_until_safe(backend)
-
-    assert smallest.marked_for_pause is True
-    assert middle.marked_for_pause is False
-    assert largest.marked_for_pause is False
-    assert backend.future_paused_tokens == 250
-    assert backend.marked_for_pause_count == 1
-    assert backend.remaining_capacity(include_future_release=True) >= 0
-
-
-@pytest.mark.asyncio
-async def test_pause_until_safe_counts_future_buffer_release_for_zero_token_programs():
-    router, backend_url = _build_scheduler_router(capacity=250)
-    backend = router.backends[backend_url]
-
-    first = _add_program(router, backend_url, program_id="prog-a", total_tokens=0)
-    second = _add_program(router, backend_url, program_id="prog-b", total_tokens=0)
-    third = _add_program(router, backend_url, program_id="prog-c", total_tokens=0)
-
-    assert backend.remaining_capacity() == -50
-
-    await router._pause_until_safe(backend)
-
-    assert first.marked_for_pause is True
-    assert second.marked_for_pause is False
-    assert third.marked_for_pause is False
-    assert backend.future_paused_tokens == 0
-    assert backend.marked_for_pause_count == 1
-    assert backend.remaining_capacity(include_future_release=True) >= 0

@@ -25,14 +25,14 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from examples.train.thunder_agent.thunderagent import (
+from ThunderAgent import (
     Config,
     MultiBackendRouter,
     get_program_id,
     register_routes,
     set_config,
 )
-from examples.train.thunder_agent.thunderagent.scheduler.vllm_request_processor import remove_program_id
+from ThunderAgent.scheduler.vllm_request_processor import remove_program_id
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 

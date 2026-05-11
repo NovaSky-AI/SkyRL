@@ -49,6 +49,9 @@ sync_env() {
     torchdata peft debugpy tensordict jaxtyping polars s3fs pybind11 \
     wandb cloudpathlib hf_transfer harbor mini-swe-agent litellm skyrl-gym
 
+  uv pip install --python "$python_bin" \
+    "thunderagent @ git+https://github.com/ThunderAgent-org/ThunderAgent.git"
+
   uv pip install --python "$python_bin" --no-deps --editable "$REPO_ROOT"
 
   if [ "$INSTALL_DEV" = "1" ]; then
