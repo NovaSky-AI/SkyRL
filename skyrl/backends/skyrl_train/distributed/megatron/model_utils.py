@@ -586,12 +586,13 @@ class _VocabParallelEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
         vocab_parallel_logits, softmax_logits, sum_softmax_times_logits = ctx.saved_tensors
+        # Use out-of-place subtraction to avoid bumping the version of
+        # vocab_parallel_logits, which may be a view of a tensor saved by
+        # another autograd function (e.g. ChunkedDistributedLogprob).
         # reuse softmax_logits as grad
-        vocab_parallel_logits.sub_(sum_softmax_times_logits)
-        softmax_logits.mul_(vocab_parallel_logits)
+        centered_logits = vocab_parallel_logits - sum_softmax_times_logits
+        softmax_logits.mul_(centered_logits)
         softmax_logits.mul_(grad_output.unsqueeze(dim=-1))
-        # recover vocab_parallel_logits
-        vocab_parallel_logits.add_(sum_softmax_times_logits)
         softmax_logits.mul_(-1)
         return softmax_logits
 
