@@ -32,11 +32,6 @@ from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 def init_megatron_optim_config(
     optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
 ) -> OptimizerConfig:
-    # SkyRL's OptimizerConfig stores betas as a single list (matches the
-    # FSDP path's torch.optim.AdamW signature); Megatron's OptimizerConfig
-    # splits them into adam_beta1 / adam_beta2. Translate here so users
-    # don't silently get Megatron's defaults (0.9, 0.999) regardless of
-    # what they set. See https://github.com/NovaSky-AI/SkyRL/issues/1646.
     adam_betas = getattr(optim_config, "adam_betas", (0.9, 0.999))
     optim_args = {
         "optimizer": getattr(optim_config, "optimizer", "adam"),
