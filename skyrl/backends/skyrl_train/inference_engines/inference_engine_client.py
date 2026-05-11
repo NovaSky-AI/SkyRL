@@ -89,7 +89,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in self.engines]
         return await asyncio.gather(*awaitables)
 
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(
+        self,
+        input_batch: InferenceEngineInput,
+        model: Optional[str] = None,
+    ) -> InferenceEngineOutput:
+
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")

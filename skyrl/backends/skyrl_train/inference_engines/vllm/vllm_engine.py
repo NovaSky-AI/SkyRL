@@ -308,10 +308,16 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(pickled_init_info,),
         )
 
-    async def _load_lora_from_disk(self, lora_path: str):
-        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+    async def _load_lora_from_disk(self, lora_path: str, lora_name: str = ""):
+        """Load LoRA adapters from disk using vLLM's native add_lora method.
+
+        When ``lora_name`` is empty (legacy single-tenant), a numeric name is
+        generated. Multi-tenant callers pass ``lora_name`` so subsequent
+        ``model=<lora_name>`` sampling routes to the right adapter.
+        """
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
-        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        name = lora_name or f"{lora_id}"
+        lora_request = LoRARequest(lora_name=name, lora_int_id=lora_id, lora_path=lora_path)
         result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
@@ -320,7 +326,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # Handle LoRA disk loading request
         if isinstance(request, LoraLoadRequest):
-            return await self._load_lora_from_disk(request.lora_path)
+            return await self._load_lora_from_disk(request.lora_path, lora_name=request.lora_name)
 
         if not len(request):
             raise ValueError("Weight update request must not be empty")
@@ -453,10 +459,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             return None
 
-    async def _load_lora_from_disk(self, lora_path: str):
-        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+    async def _load_lora_from_disk(self, lora_path: str, lora_name: str = ""):
+        """Load LoRA adapters from disk using vLLM's native add_lora method.
+
+        When ``lora_name`` is empty (legacy single-tenant), a numeric name is
+        generated. Multi-tenant callers pass ``lora_name`` so subsequent
+        ``model=<lora_name>`` sampling routes to the right adapter.
+        """
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
-        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        name = lora_name or f"{lora_id}"
+        lora_request = LoRARequest(lora_name=name, lora_int_id=lora_id, lora_path=lora_path)
         result = await self.llm.add_lora(lora_request)
         return result
 
@@ -539,7 +551,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # Check for LoRA disk loading request
         if isinstance(request, LoraLoadRequest):
-            return await self._load_lora_from_disk(request.lora_path)
+            return await self._load_lora_from_disk(request.lora_path, lora_name=request.lora_name)
 
         if not len(request):
             raise ValueError("Weight update request must not be empty")

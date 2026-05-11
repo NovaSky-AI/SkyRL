@@ -1,0 +1,84 @@
+set -x
+
+# Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data with fp8 rollouts 
+# and full precision trainer.
+# Uses 1 node with 8 GPUs.
+# hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# export WANDB_API_KEY=<your_key_here>
+# bash examples/train/text_to_sql/run_skyrl_sql_fp8.sh
+
+# change these paths to your own
+DATA_DIR="$HOME/data/sql"
+DB_PATH="$HOME/data/sql/db_files/data"
+CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
+
+NUM_GPUS=8
+NUM_INFERENCE_ENGINES=2
+TP_SIZE=4
+MAX_INPUT_LENGTH=29000
+MAX_GENERATE_LENGTH=3000
+TRAIN_BATCH_SIZE=256
+
+# TIS parameters
+TIS_IMP_RATIO_CAP=4.0
+TIS_TYPE=sequence
+# returns rollout logprobs for the generated tokens; required for TIS
+LOGPROBS=0
+
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.off_policy_correction.sequence_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+  generator.sampling_params.logprobs=$LOGPROBS \
+  trainer.algorithm.advantage_estimator="grpo" \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
+  trainer.epochs=30 \
+  trainer.placement.colocate_all=true \
+  trainer.strategy=fsdp2 \
+  trainer.policy.fsdp_config.cpu_offload=false \
+  trainer.ref.fsdp_config.cpu_offload=true \
+  trainer.policy.optimizer_config.max_grad_norm=0.5 \
+  trainer.policy.sequence_parallel_size=1 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
+  trainer.train_batch_size=$TRAIN_BATCH_SIZE \
+  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.max_prompt_length=6000 \
+  generator.max_input_length=$MAX_INPUT_LENGTH \
+  generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.policy_mini_batch_size=256 \
+  trainer.algorithm.use_kl_loss=false \
+  trainer.ckpt_interval=60 \
+  trainer.hf_save_interval=30 \
+  trainer.dump_data_batch=true \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.async_engine=true \
+  generator.inference_engine.engine_init_kwargs.quantization=fp8 \
+  generator.batched=false \
+  environment.env_class=text2sql \
+  generator.use_conversation_multi_turn=false \
+  generator.n_samples_per_prompt=5 \
+  generator.inference_engine.gpu_memory_utilization=0.7 \
+  generator.max_turns=6 \
+  generator.sampling_params.temperature=0.6 \
+  generator.sampling_params.top_p=0.95 \
+  generator.sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+  trainer.logger="wandb" \
+  trainer.project_name="skyrlsql-quantized" \
+  trainer.run_name="skyrlsql_repro-fp8-tis-sequence" \
+  trainer.resume_mode=latest \
+  trainer.ckpt_path=$CKPT_PATH \
+  trainer.eval_batch_size=1024 \
+  trainer.eval_before_train=true \
+  trainer.eval_interval=5 \
+  $@

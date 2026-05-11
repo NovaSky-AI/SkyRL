@@ -154,7 +154,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     if "Qwen3" in model_name:
         mock_response_text = "<think>\nmock thinking\n</think>\n\n" + mock_response_text
 
-    def mock_generate(input_batch):
+    def mock_generate(input_batch, model=None):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
 
         mock_llm_output_text = mock_response_text + tokenizer.eos_token
@@ -351,7 +351,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         mock_llm = MagicMock()
 
         # The LLM engine will generate and return the stop tag, but no EOS token ID.
-        def mock_generate(input_batch):
+        def mock_generate(input_batch, model=None):
             num_prompts = (
                 len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
             )

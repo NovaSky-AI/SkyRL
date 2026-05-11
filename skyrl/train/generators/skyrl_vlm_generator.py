@@ -41,8 +41,9 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: RemoteInferenceClient,
         tokenizer,
+        policy_model_name: Optional[str] = None,
     ):
-        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
+        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, policy_model_name)
         logger.info("Initialized SkyRLVLMGymGenerator (VLM multi-modal generator)")
 
     def _validate_cfg(self, generator_cfg: GeneratorConfig):
@@ -148,7 +149,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=current_sampling_params,
                 mm_features=[latest_features] if latest_features is not None else None,
             )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
 
             gen_text = engine_output["responses"][0]
             gen_ids = engine_output["response_ids"][0]

@@ -28,9 +28,6 @@ from .vllm_router import VLLMRouter
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
 VLLM_START_PORT = 8000
 
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
-
 
 @dataclass
 class InferenceServerSetup:
@@ -280,16 +277,11 @@ def build_new_inference_client(
             placement_group=placement_group,
         )
 
-    lora_cfg = cfg.trainer.policy.model.lora
-    active_lora_name = (
-        _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 and cfg.trainer.strategy != "megatron" else None
-    )
     client = RemoteInferenceClient(
         proxy_url=server_setup.proxy_url,
         server_urls=server_setup.server_urls,
         model_name=cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-        active_lora_name=active_lora_name,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,

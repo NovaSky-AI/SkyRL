@@ -20,6 +20,7 @@ Usage:
     uv run -m skyrl.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
+import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -111,6 +112,22 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     num_processes: int | None = Field(
         default=None,
         description="Total number of processes in the multi-node cluster",
+    )
+    # RayJaxBackend configuration
+    use_ray: bool = Field(
+        default=False,
+        description="Use Ray to schedule JAX workers",
+    )
+
+    ray_actor_options: dict = Field(
+        default_factory=dict,
+        description="Options to pass to Ray actors (e.g., resources, num_cpus)",
+        json_schema_extra={"argparse_type": json.loads},
+    )
+    ray_pg_bundles: list = Field(
+        default_factory=list,
+        description="Bundles for the Ray placement group (e.g., [{'CPU': 1}] * num_processes)",
+        json_schema_extra={"argparse_type": json.loads},
     )
 
 

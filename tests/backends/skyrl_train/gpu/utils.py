@@ -398,7 +398,7 @@ def ray_init_for_tests():
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params, tokenizer=None):
+async def run_inference(client, prompts, sampling_params, tokenizer=None, model=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
@@ -414,7 +414,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-    return await client.generate(engine_input)
+    return await client.generate(engine_input, model=model)
 
 
 @dataclass
@@ -515,7 +515,8 @@ class InferenceEngineState:
         num_inference_engines: Optional[int] = None,
         sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
         enable_lora: bool = False,
-        active_lora_name: Optional[str] = None,
+        lora_max_loras: Optional[int] = None,
+        lora_max_cpu_loras: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
@@ -560,6 +561,13 @@ class InferenceEngineState:
         if enable_pd:
             ie_cfg.enable_pd = True
             ie_cfg.num_prefill = num_prefill
+        # Propagate the LoRA limits onto the trainer config so build_vllm_cli_args
+        # (which reads from cfg.trainer.policy.model.lora) and any downstream
+        # path picks them up before vLLM is started.
+        if lora_max_loras is not None:
+            cfg.trainer.policy.model.lora.max_loras = lora_max_loras
+        if lora_max_cpu_loras is not None:
+            cfg.trainer.policy.model.lora.max_cpu_loras = lora_max_cpu_loras
         if language_model_only is not None:
             ie_cfg.language_model_only = language_model_only
 
@@ -599,8 +607,6 @@ class InferenceEngineState:
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
-            if cli_args.enable_lora and active_lora_name is None:
-                active_lora_name = "skyrl-lora"
 
             setup = create_inference_servers(
                 ie_cfg,
@@ -615,12 +621,21 @@ class InferenceEngineState:
             proxy_url = setup.proxy_url
             server_urls = setup.server_urls
 
+            # When LoRA is enabled, point the client's default ``model_name`` at
+            # the active LoRA adapter so existing tests that don't pass an
+            # explicit ``model=`` keep routing through the adapter. Tests that
+            # need multi-LoRA can pass ``model=`` per call and rely on the
+            # client's underlying base model name only when needed.
+            # ``model_name`` is the base model the server was started with;
+            # LoRA-aware test cases are expected to pass adapter names
+            # explicitly per call (e.g. ``client.generate(..., model="lora-X")``).
+            base_model_name = served_model_name if served_model_name else cfg.trainer.policy.model.path
+
             client = RemoteInferenceClient(
                 proxy_url=proxy_url,
                 server_urls=server_urls,
-                model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
+                model_name=base_model_name,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-                active_lora_name=active_lora_name,
                 uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
                 data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
