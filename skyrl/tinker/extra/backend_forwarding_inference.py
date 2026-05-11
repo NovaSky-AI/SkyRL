@@ -52,19 +52,25 @@ class BackendForwardingInferenceClient:
         self.db_engine = db_engine
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
-        # Persistent client with a high connection pool ceiling. Backpressure
-        # is layered: this httpx pool -> vllm-router (load balances across
-        # vLLM servers) -> each vLLM server's max_num_seqs (final cap).
-        # We intentionally do NOT impose an additional asyncio.Semaphore in
-        # the API process — that would just create an extra serializing
-        # bottleneck above what vLLM already enforces. Closed via aclose()
-        # in api.py lifespan shutdown.
+        # Persistent client. Backpressure is layered: this httpx pool ->
+        # vllm-router (load balances across vLLM servers) -> each vLLM
+        # server's max_num_seqs (final cap). We intentionally do NOT
+        # impose an asyncio.Semaphore in the API process — that would
+        # just serialize work above what vLLM already enforces.
+        #
+        # Default `forwarding_inference_max_connections=None` means
+        # unlimited — vllm-router/vLLM are the only queues. The only
+        # cost of "unlimited" is file descriptors, so make sure the
+        # host's `ulimit -n` is sized for the peak concurrent samples
+        # across all tenants. Set an int to enforce a per-process cap.
+        # Closed via aclose() in api.py lifespan shutdown.
         max_conn = engine_config.forwarding_inference_max_connections
+        max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
-                max_keepalive_connections=max(max_conn // 4, 32),
+                max_keepalive_connections=max_keepalive,
             ),
         )
 
