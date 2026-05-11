@@ -139,10 +139,8 @@ def apply_monkey_patch(
     else:
         module = sys.modules[model.__module__]
 
-    # VLM composite configs (e.g. Gemma4Config from https://github.com/huggingface/transformers/pull/45192)
-    # nest attention fields under text_config; PreTrainedConfig.get_text_config
-    # returns self for text-only models, so this is a no-op for them:
-    # https://github.com/huggingface/transformers/blob/v5.6.0/src/transformers/configuration_utils.py#L1205-L1215
+    # VLM composite configs nest attention fields under text_config;
+    # get_text_config returns self for text-only models.
     text_config = model.config.get_text_config()
     num_attention_heads, num_key_value_heads = text_config.num_attention_heads, text_config.num_key_value_heads
     assert (

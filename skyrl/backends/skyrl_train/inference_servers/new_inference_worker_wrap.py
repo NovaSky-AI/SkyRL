@@ -75,9 +75,6 @@ class NewInferenceWorkerWrap:
             )
 
             model = self.model_runner.model
-            # Same context requirement as update_weights_chunk:
-            # initialize_layerwise_reload may instantiate per-layer wrappers
-            # that read the current vllm config.
             with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 initialize_layerwise_reload(model)
 
@@ -136,12 +133,9 @@ class NewInferenceWorkerWrap:
             weights.append((name, packed_tensor[offset : offset + size].view(*shape)))
             offset += size
 
-        # Some MoE backends (e.g. vllm.model_executor.layers.fused_moe.
-        # flashinfer_cutlass_moe) instantiate kernels during
-        # process_weights_after_loading and call get_current_vllm_config()
-        # to read compilation config. That requires a set_current_vllm_config
-        # context — vllm sets it around init_device / load_model etc., but
-        # our update_weights_chunk runs outside of those, so reapply it here.
+        # process_weights_after_loading reads get_current_vllm_config() (e.g.
+        # flashinfer_cutlass_moe needs the compilation config to build kernels),
+        # and vllm only sets that context around init_device / load_model.
         from vllm.config import set_current_vllm_config
 
         model = self.model_runner.model
@@ -175,9 +169,6 @@ class NewInferenceWorkerWrap:
             )
 
             model = self.model_runner.model
-            # finalize_layerwise_reload runs process_weights_after_loading on
-            # any layers not finalized during chunked loading; same vllm_config
-            # context requirement as update_weights_chunk.
             with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
 

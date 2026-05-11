@@ -34,10 +34,7 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
     base_config.intermediate_size = 128
     base_config.num_attention_heads = 2
     base_config.num_key_value_heads = 2
-    # transformers >=5.4 has a strict validator (validate_layer_type) that
-    # asserts len(layer_types) == num_hidden_layers when layer_types is set.
-    # When we shrink num_hidden_layers above, also truncate layer_types so
-    # validation still passes.
+    # transformers >=5.4 validates len(layer_types) == num_hidden_layers.
     layer_types = getattr(base_config, "layer_types", None)
     if layer_types is not None:
         base_config.layer_types = list(layer_types[: base_config.num_hidden_layers])

@@ -398,8 +398,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             base_model_paths=base_model_paths,
         )
         renderer = renderer_from_config(engine.vllm_config)
-        # vllm 0.20 dropped the `io_processor` kwarg from OpenAIServingRender
-        # (the multimodal IO processor pipeline was reworked).
         openai_serving_render = OpenAIServingRender(
             model_config=engine.model_config,
             renderer=renderer,
