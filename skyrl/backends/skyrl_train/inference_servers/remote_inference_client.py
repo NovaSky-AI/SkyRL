@@ -1140,7 +1140,7 @@ class RemoteInferenceClient:
                 if resp.status >= 400:
                     body = await resp.json()
                     raise_for_status(resp, body)
-                return server_url, await resp.json()
+                return server_url, {"status": resp.status, "body": await resp.text()}
 
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
