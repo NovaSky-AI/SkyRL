@@ -9693,7 +9693,7 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'megatron'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", marker = "extra == 'skyrl-train'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
-    { name = "transformers", specifier = ">=5.6.1,<6.0.0" },
+    { name = "transformers", specifier = ">=5.6.1,<=5.8.0" },
     { name = "ty", marker = "extra == 'dev'" },
     { name = "typer", specifier = ">=0.17.4" },
     { name = "uvicorn", marker = "extra == 'skyrl-train'" },
