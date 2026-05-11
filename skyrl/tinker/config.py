@@ -43,12 +43,16 @@ class EngineConfig(BaseModel):
         default=Path("/tmp/lora_models"),
         description="Directory where LoRA models will be extracted for external inference engines",
     )
-    max_concurrent_samples: int = Field(
-        default=64,
+    forwarding_inference_max_connections: int = Field(
+        default=1024,
         description=(
-            "Per-API-process cap on concurrent sample requests forwarded to the "
-            "engine-managed vLLM via BackendForwardingInferenceClient. Bounds "
-            "fan-out from many tenants; vLLM's own max_num_seqs is the ultimate cap."
+            "Cap on the httpx connection pool used by "
+            "BackendForwardingInferenceClient to forward sample requests to "
+            "the engine-managed vLLM. The natural backpressure chain is "
+            "httpx pool -> vllm-router -> vLLM's max_num_seqs; this knob "
+            "only sets the API-side connection ceiling. Sized for the peak "
+            "concurrent in-flight samples across all tenants — raise it for "
+            "very high fan-out workloads."
         ),
     )
     session_cleanup_interval_sec: int = Field(

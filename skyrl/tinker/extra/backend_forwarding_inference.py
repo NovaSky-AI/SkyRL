@@ -1,21 +1,34 @@
 """Forwards EXTERNAL sample requests to the backend-managed vLLM.
 
-Differs from :class:`ExternalInferenceClient`:
+This client is intentionally thin — its job is schema translation, not
+request scheduling. Concurrency is bounded only by the httpx connection
+pool; vllm-router + each vLLM server's ``max_num_seqs`` are the real
+backpressure points. Don't add an asyncio.Semaphore on top: that would
+just serialize work above what vLLM already manages.
 
-  - Reads the vLLM proxy URL lazily from ``EngineStateDB`` (written by the
-    backend after ``_create_new_inference_client``) rather than from
-    ``EngineConfig``.
-  - Uses ``model=<model_id>`` for LoRA sampling — the backend's
-    ``save_weights_for_sampler`` already registered the adapter under that
-    name on vLLM via ``RemoteInferenceClient.load_lora_adapter``. No
-    checkpoint extraction step.
-  - For base-model sampling (no LoRA), uses ``model=<base_model>``.
+What the client does:
+  - Resolve the vLLM proxy URL lazily from ``EngineStateDB`` (written by
+    the backend after ``_create_new_inference_client``); refresh-on-error.
+  - Translate Tinker ``SamplingParams`` to a vLLM ``/v1/completions``
+    payload (max_tokens, temperature, top_p, top_k, stop, stop_token_ids,
+    logprobs, seed).
+  - Translate vLLM's completion response back into ``SampleOutput`` —
+    normalize ``finish_reason`` ({"stop", "stop_token"} -> "stop", else
+    "length"), zero-fill missing logprobs (RL workloads need them), and
+    set ``prompt_logprobs=None``.
+  - Write the result into ``FutureDB`` so ``/api/v1/retrieve_future``
+    sees a completed row.
 
-Failure modes (see design doc for the full list):
-  - Proxy URL not yet published → fail the future with a clear message.
-  - Connection error → refresh cached URL once and retry; if still failing,
-    fail the future.
-  - vLLM 4xx/5xx → fail the future with the upstream body verbatim.
+For LoRA tenants: uses ``model=<model_id>`` since the backend's
+``save_weights_for_sampler`` already registered the adapter under that
+name on vLLM via ``RemoteInferenceClient.load_lora_adapter``. For
+base-model sampling, uses ``model=<base_model>`` directly.
+
+Failure modes:
+  - Proxy URL not yet published -> fail the future with a clear message.
+  - Connection error -> refresh cached URL once and retry; if still
+    failing, fail the future.
+  - vLLM 4xx/5xx -> fail the future with the upstream body verbatim.
 """
 
 import asyncio
@@ -39,13 +52,20 @@ class BackendForwardingInferenceClient:
         self.db_engine = db_engine
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
-        self._concurrency = asyncio.Semaphore(engine_config.max_concurrent_samples)
-        # Persistent client so we get connection pooling + no per-request
-        # TCP/TLS handshake. base_url is set when we first resolve the
-        # proxy_url; refreshed on connection error. Closed via aclose() in
-        # api.py lifespan shutdown.
+        # Persistent client with a high connection pool ceiling. Backpressure
+        # is layered: this httpx pool -> vllm-router (load balances across
+        # vLLM servers) -> each vLLM server's max_num_seqs (final cap).
+        # We intentionally do NOT impose an additional asyncio.Semaphore in
+        # the API process — that would just create an extra serializing
+        # bottleneck above what vLLM already enforces. Closed via aclose()
+        # in api.py lifespan shutdown.
+        max_conn = engine_config.forwarding_inference_max_connections
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=max_conn,
+                max_keepalive_connections=max(max_conn // 4, 32),
+            ),
         )
 
     async def aclose(self) -> None:
@@ -88,15 +108,14 @@ class BackendForwardingInferenceClient:
         base_model: str | None = None,
     ):
         """Forward a sample request to vLLM and write the result to FutureDB."""
-        async with self._concurrency:
-            try:
-                result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
-                result_data = result.model_dump()
-                status = RequestStatus.COMPLETED
-            except Exception as e:
-                logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
-                result_data = {"error": str(e), "status": "failed"}
-                status = RequestStatus.FAILED
+        try:
+            result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
+            result_data = result.model_dump()
+            status = RequestStatus.COMPLETED
+        except Exception as e:
+            logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
+            result_data = {"error": str(e), "status": "failed"}
+            status = RequestStatus.FAILED
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
@@ -145,10 +164,15 @@ class BackendForwardingInferenceClient:
             "stream": False,
             "return_token_ids": True,
         }
-        if sp.stop_strings:
-            payload["stop"] = sp.stop_strings
-        if sp.stop_tokens:
-            payload["stop_token_ids"] = sp.stop_tokens
+        # API-level SamplingParams.stop is polymorphic: list[str] -> stop
+        # strings, list[int] -> stop token ids. Mirrors the dispatch in
+        # api.py SamplingParams.to_types().
+        stop = getattr(sp, "stop", None)
+        if stop:
+            if all(isinstance(s, int) for s in stop):
+                payload["stop_token_ids"] = list(stop)
+            elif all(isinstance(s, str) for s in stop):
+                payload["stop"] = list(stop)
 
         url = f"{proxy_url}/v1/completions"
         response = await self._http_client.post(url, json=payload)
