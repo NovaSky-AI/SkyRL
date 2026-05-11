@@ -128,6 +128,18 @@ class SFTConfig(BaseConfig):
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
     messages_key: str = "messages"  # column name for chat-format datasets
+
+    # ---- Evaluation dataset ----
+    eval_dataset_name: Optional[str] = None
+    """HuggingFace dataset name (or path) used to compute eval loss during training.
+    When ``None`` (default), eval is disabled."""
+    eval_dataset_split: str = "validation"
+    """Split of the eval dataset to load (e.g. ``"validation"``, ``"test[:500]"``)."""
+    eval_steps: int = 0
+    """Run eval every N training steps. Eval also runs once at the end of training
+    when an eval dataset is configured. ``0`` disables periodic eval."""
+    eval_batch_size: Optional[int] = None
+    """Batch size to use during eval. Defaults to :attr:`batch_size` when ``None``."""
     max_length: Optional[int] = None
     """Maximum length of tokenized sequences. If specified, all sequences will be truncated to this value
     By default, no truncation is performed"""
@@ -197,6 +209,14 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("model.path must be set")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
+
+    # Eval config
+    if cfg.eval_steps < 0:
+        raise ValueError(f"eval_steps must be >= 0, got {cfg.eval_steps}")
+    if cfg.eval_batch_size is not None and cfg.eval_batch_size <= 0:
+        raise ValueError(f"eval_batch_size must be > 0 when set, got {cfg.eval_batch_size}")
+    if cfg.eval_steps > 0 and not cfg.eval_dataset_name:
+        raise ValueError("eval_steps > 0 requires eval_dataset_name to be set")
 
     #  checks for megatron
     if cfg.strategy == "megatron":

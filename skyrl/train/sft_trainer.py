@@ -467,6 +467,12 @@ class SFTTrainer:
         """Load and tokenize the training dataset."""
         return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
 
+    def load_eval_dataset(self) -> Optional[list]:
+        """Load and tokenize the eval dataset, or return ``None`` if not configured."""
+        if not self.sft_cfg.eval_dataset_name:
+            return None
+        return self._load_and_tokenize(self.sft_cfg.eval_dataset_name, self.sft_cfg.eval_dataset_split)
+
     def _log_dataset_stats(self, tokenized: list) -> None:
         """Log tokenized sequence length statistics over the training set.
 
@@ -498,7 +504,7 @@ class SFTTrainer:
             f"total={sum(lengths)}, mean={mean_len:.1f}, median={q50}, q25={q25}, q75={q75}, min={min_len}, max={max_len}"
         )
 
-    def collate_batch(self, examples: list) -> TrainingInputBatch:
+    def collate_batch(self, examples: list, batch_size: Optional[int] = None) -> TrainingInputBatch:
         """Collate examples into a TrainingInputBatch with loss normalization.
 
         Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
@@ -510,6 +516,12 @@ class SFTTrainer:
         (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
         accumulation so that the effective gradient equals
         ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
+
+        Args:
+            examples: Tokenized examples to collate.
+            batch_size: Optional override for the global batch dimension used in
+                the loss-mask scaling factor. Defaults to ``sft_cfg.batch_size``.
+                Useful for eval where the eval batch may differ in size.
         """
         batch = collate_sft_batch(examples, self.tokenizer)
         # Loss normalization: divide by non-pad token count (not padded seq length)
@@ -517,7 +529,8 @@ class SFTTrainer:
         # by number of micro batches, but aggregate otherwise
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
         total_nonpad = max(batch["loss_mask"].sum().item(), 1)
-        batch["loss_mask"] = batch["loss_mask"].float() * (self.sft_cfg.batch_size / (micro_batch_size * total_nonpad))
+        effective_batch_size = batch_size if batch_size is not None else self.sft_cfg.batch_size
+        batch["loss_mask"] = batch["loss_mask"].float() * (effective_batch_size / (micro_batch_size * total_nonpad))
         return batch
 
     # ------------------------------------------------------------------ #
@@ -602,6 +615,68 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
     # Training
     # ------------------------------------------------------------------ #
+
+    def run_eval(self, eval_tokenized: list) -> dict:
+        """Compute eval loss over the full eval dataset.
+
+        Iterates the eval dataset in fixed-size eval batches, calls
+        :meth:`WorkerDispatch.forward` with ``loss_fn="cross_entropy"`` (which
+        runs the model in ``eval()`` mode under ``no_grad``), and aggregates the
+        per-batch losses into a token-weighted mean.
+
+        The aggregated loss is a token-weighted mean of the per-batch losses,
+        which are themselves per-non-pad-token means within each batch. This
+        yields the true per-non-pad-token mean across the eval dataset.
+
+        Args:
+            eval_tokenized: Pre-tokenized eval dataset (output of
+                :meth:`load_eval_dataset`).
+
+        Returns:
+            Dict with ``eval_loss`` and ``eval_num_batches``.
+        """
+        eval_batch_size = self.sft_cfg.eval_batch_size or self.sft_cfg.batch_size
+        num_eval = len(eval_tokenized)
+        if num_eval == 0:
+            logger.warning("Eval dataset is empty; skipping eval")
+            return {}
+
+        # Drop a trailing partial batch to keep DP/microbatch divisibility identical
+        # to training. Eval datasets are typically large enough that this is a no-op.
+        num_full_batches = num_eval // eval_batch_size
+        if num_full_batches == 0:
+            logger.warning(
+                f"Eval dataset has {num_eval} examples, which is less than eval_batch_size={eval_batch_size}; "
+                "skipping eval"
+            )
+            return {}
+
+        total_loss_weighted = 0.0
+        total_tokens = 0
+        for batch_idx in range(num_full_batches):
+            start = batch_idx * eval_batch_size
+            end = start + eval_batch_size
+            batch_examples = eval_tokenized[start:end]
+            batch = self.collate_batch(batch_examples, batch_size=eval_batch_size)
+            # Count non-pad response tokens (from the unscaled mask, recovered from the batch)
+            # We use the attention_mask response window via collate_sft_batch's loss_mask which
+            # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
+            nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            metrics = self.dispatch.forward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                loss_fn_config=None,
+            )
+            batch_loss = float(metrics.get("loss", float("nan")))
+            total_loss_weighted += batch_loss * nonpad_tokens
+            total_tokens += nonpad_tokens
+
+        eval_loss = total_loss_weighted / max(total_tokens, 1)
+        return {
+            "eval_loss": eval_loss,
+            "eval_num_batches": num_full_batches,
+        }
 
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.
@@ -732,6 +807,12 @@ class SFTTrainer:
         # Log tokenized sequence length statistics (once, before training loop)
         self._log_dataset_stats(tokenized)
 
+        # Load eval dataset (if configured). We load once up-front so the
+        # tokenization cost is amortized across all eval invocations.
+        eval_tokenized = self.load_eval_dataset()
+        if eval_tokenized is not None:
+            logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
+
         batch_size = self.sft_cfg.batch_size
 
         # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
@@ -837,6 +918,25 @@ class SFTTrainer:
                     f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
                 )
 
+            # Periodic eval. The worker's forward() sets the model to eval() under
+            # no_grad; subsequent train_step calls re-enter train() inside
+            # forward_backward, so we don't need to manually toggle modes here.
+            if (
+                eval_tokenized is not None
+                and self.sft_cfg.eval_steps > 0
+                and self.global_step % self.sft_cfg.eval_steps == 0
+            ):
+                with Timer("eval", all_timings):
+                    eval_metrics = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                    eval_log["timing/eval"] = all_timings["eval"]
+                    self.tracker.log(eval_log, step=self.global_step, commit=True)
+                    logger.info(
+                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                    )
+
             # Check for epoch boundary and reshuffle
             epoch = (self.global_step * batch_size) // len(tokenized)
             if epoch > current_epoch:
@@ -865,6 +965,24 @@ class SFTTrainer:
                 self.global_step = final_step
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
+
+        # Final eval pass (skip if the last step already ran eval).
+        if eval_tokenized is not None:
+            already_ran = self.sft_cfg.eval_steps > 0 and num_steps % self.sft_cfg.eval_steps == 0
+            if not already_ran:
+                self.global_step = num_steps
+                eval_timings: dict[str, float] = {}
+                with Timer("eval", eval_timings):
+                    eval_metrics = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                    eval_log["timing/eval"] = eval_timings["eval"]
+                    self.tracker.log(eval_log, step=self.global_step, commit=True)
+                    logger.info(
+                        f"Final eval at step {self.global_step}: "
+                        f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                    )
 
         logger.info("SFT training complete!")
 
