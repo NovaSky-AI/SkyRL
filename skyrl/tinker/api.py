@@ -40,7 +40,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
-from skyrl.tinker.extra import BackendForwardingInferenceClient, ExternalInferenceClient
+from skyrl.tinker.extra import ExternalInferenceClient, SkyRLTrainInferenceForwardingClient
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -117,8 +117,8 @@ async def lifespan(app: FastAPI):
     #   1. external_inference_url set: forward sample requests to a fully
     #      external vLLM (existing behavior).
     #   2. backend in (megatron, fsdp) and colocate_all=False: install
-    #      BackendForwardingInferenceClient so sample requests go directly
-    #      to the backend-managed vLLM, bypassing the engine's serial loop.
+    #      SkyRLTrainInferenceForwardingClient so sample requests go directly
+    #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
     #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
     #      through the engine subprocess.
     #
@@ -134,11 +134,11 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_inference_client = BackendForwardingInferenceClient(
+        app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine
         )
         logger.info(
-            "Backend-forwarding inference client enabled for non-colocated backend=%s",
+            "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
             backend_name,
         )
     else:

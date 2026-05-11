@@ -47,7 +47,7 @@ class EngineConfig(BaseModel):
         default=None,
         description=(
             "Optional cap on the httpx connection pool used by "
-            "BackendForwardingInferenceClient to forward sample requests to "
+            "SkyRLTrainInferenceForwardingClient to forward sample requests to "
             "the engine-managed vLLM. The natural backpressure chain is "
             "httpx pool -> vllm-router -> vLLM's max_num_seqs; this knob "
             "only sets the API-side connection ceiling. Default `None` is "

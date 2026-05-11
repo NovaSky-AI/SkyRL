@@ -1,5 +1,5 @@
 """End-to-end tests for the async sample routing path (EngineStateDB +
-``BackendForwardingInferenceClient``).
+``SkyRLTrainInferenceForwardingClient``).
 
 GPU-gated: requires at least one CUDA device. Spins up a real Tinker API
 server with the SkyRL-Train Megatron backend in non-colocated mode so the
@@ -59,7 +59,7 @@ TEST_PORT = 8019
 
 # Tiny config — same shape as test_multi_lora_megatron's BACKEND_CONFIG.
 # Non-colocated is required: that's what triggers the API to install
-# BackendForwardingInferenceClient in the lifespan. merge_lora=False makes
+# SkyRLTrainInferenceForwardingClient in the lifespan. merge_lora=False makes
 # vLLM serve LoRA adapters by tenant name, which is the contract the
 # forwarding client relies on (model=<model_id>).
 BACKEND_CONFIG = {

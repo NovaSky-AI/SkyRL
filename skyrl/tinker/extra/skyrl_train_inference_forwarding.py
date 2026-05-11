@@ -1,4 +1,4 @@
-"""Forwards EXTERNAL sample requests to the backend-managed vLLM.
+"""Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM.
 
 This client is intentionally thin — its job is schema translation, not
 request scheduling. Concurrency is bounded only by the httpx connection
@@ -44,8 +44,14 @@ from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.utils.log import logger
 
 
-class BackendForwardingInferenceClient:
-    """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
+class SkyRLTrainInferenceForwardingClient:
+    """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM.
+
+    Pair to :class:`ExternalInferenceClient` — same EXTERNAL future-write
+    contract, but resolves the target URL from ``EngineStateDB`` (populated
+    by the SkyRL-Train backend's ``_publish_engine_state``) instead of from
+    a user-supplied ``EngineConfig.external_inference_url``.
+    """
 
     def __init__(self, engine_config: EngineConfig, db_engine):
         self.engine_config = engine_config
