@@ -99,9 +99,7 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
             )
         elif has_external_servers and not has_external_proxy:
             server_urls = list(external_server_urls)
-            self._inference_router = self._create_thunder_agent_router(
-                server_urls, ie_cfg
-            )
+            self._inference_router = self._create_thunder_agent_router(server_urls, ie_cfg)
             proxy_url = self._inference_router.start()
             logger.info(
                 "HTTP Inference (ThunderAgent): Created router over external "
@@ -118,9 +116,7 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
 
-            self._inference_router = self._create_thunder_agent_router(
-                server_urls, ie_cfg
-            )
+            self._inference_router = self._create_thunder_agent_router(server_urls, ie_cfg)
             proxy_url = self._inference_router.start()
             logger.info(
                 "HTTP Inference (ThunderAgent): Built servers and router internally - "
@@ -136,9 +132,7 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
     def _create_thunder_agent_router(self, server_urls, ie_cfg):
         from .skyrl_integration.router import ThunderAgentRouter
 
-        thunderagent_log_file = str(
-            Path(self.cfg.trainer.log_path) / "thunderagent.log"
-        )
+        thunderagent_log_file = str(Path(self.cfg.trainer.log_path) / "thunderagent.log")
         thunderagent_port = int(os.environ.get("THUNDER_AGENT_ROUTER_PORT", "8080"))
         return ThunderAgentRouter(
             server_urls=server_urls,

@@ -16,13 +16,9 @@ from fastapi.responses import JSONResponse
 pytest.importorskip("ThunderAgent.config", reason="ThunderAgent not installed")
 
 BackendState = importlib.import_module("ThunderAgent.backend.state").BackendState
-SGLangMetricsClient = importlib.import_module(
-    "ThunderAgent.backend.sglang_metrics"
-).SGLangMetricsClient
+SGLangMetricsClient = importlib.import_module("ThunderAgent.backend.sglang_metrics").SGLangMetricsClient
 get_open_port = importlib.import_module("skyrl.backends.skyrl_train.inference_servers.common").get_open_port
-ThunderAgentRouter = importlib.import_module(
-    "examples.train.thunder_agent.skyrl_integration.router"
-).ThunderAgentRouter
+ThunderAgentRouter = importlib.import_module("examples.train.thunder_agent.skyrl_integration.router").ThunderAgentRouter
 ThunderAgentRemoteInferenceClient = importlib.import_module(
     "examples.train.thunder_agent.skyrl_integration.remote_inference_client"
 ).ThunderAgentRemoteInferenceClient

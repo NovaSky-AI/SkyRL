@@ -17,9 +17,7 @@ from skyrl.train.utils.utils import prepare_runtime_environment
 from .main_thunder_agent import FullyAsyncThunderAgentExp
 from .training_config import ThunderAgentHarborConfig
 
-HARBOR_DEFAULT_CONFIG = (
-    Path(__file__).parent / "configs" / "harbor_trial" / "default.yaml"
-)
+HARBOR_DEFAULT_CONFIG = Path(__file__).parent / "configs" / "harbor_trial" / "default.yaml"
 REPO_ROOT = str(Path(__file__).resolve().parents[3])
 
 
@@ -89,9 +87,9 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
             data_files=self.cfg.data.train_data,
             max_tasks=self.cfg.max_train_tasks,
         )
-        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
-            f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
-        )
+        assert (
+            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
+        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         return prompts_dataset
 
     def get_eval_dataset(self):
@@ -116,9 +114,7 @@ def _recipe_runtime_env(cfg) -> dict[str, str]:
     env_vars = prepare_runtime_environment(cfg)
     socket_ifname = os.environ.get("NCCL_SOCKET_IFNAME") or _default_socket_ifname()
     env_vars.setdefault("NCCL_SOCKET_IFNAME", socket_ifname)
-    env_vars.setdefault(
-        "GLOO_SOCKET_IFNAME", os.environ.get("GLOO_SOCKET_IFNAME", socket_ifname)
-    )
+    env_vars.setdefault("GLOO_SOCKET_IFNAME", os.environ.get("GLOO_SOCKET_IFNAME", socket_ifname))
 
     for name in (
         "SKYRL_WORKER_NCCL_TIMEOUT_IN_S",
@@ -137,9 +133,7 @@ def _recipe_runtime_env(cfg) -> dict[str, str]:
             env_vars[name] = os.environ[name]
 
     pythonpath = env_vars.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
-    env_vars["PYTHONPATH"] = (
-        REPO_ROOT if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
-    )
+    env_vars["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
     return env_vars
 
 

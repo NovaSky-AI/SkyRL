@@ -45,9 +45,7 @@ def task_dirs(dataset_dir: Path) -> list[Path]:
     if manifest_paths is not None:
         return manifest_paths
     return sorted(
-        child
-        for child in dataset_dir.iterdir()
-        if child.is_dir() and (child / "environment" / "Dockerfile").exists()
+        child for child in dataset_dir.iterdir() if child.is_dir() and (child / "environment" / "Dockerfile").exists()
     )
 
 
@@ -88,8 +86,7 @@ def pull_images(images: list[str], retries: int, retry_sleep: int) -> None:
                 break
             if attempt < retries:
                 print(
-                    f"docker pull failed for {image}; retrying in {retry_sleep}s "
-                    f"({attempt}/{retries})",
+                    f"docker pull failed for {image}; retrying in {retry_sleep}s " f"({attempt}/{retries})",
                     file=sys.stderr,
                     flush=True,
                 )

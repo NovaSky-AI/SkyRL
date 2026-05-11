@@ -49,19 +49,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
 HF_BASE_REPOS = {
     "trivial": "NovaSky-AI/r2egym-trivial",
-    "easy":    "NovaSky-AI/r2egym-easy",
-    "medium":  "NovaSky-AI/r2egym-medium",
-    "hard":    "NovaSky-AI/r2egym-hard",
+    "easy": "NovaSky-AI/r2egym-easy",
+    "medium": "NovaSky-AI/r2egym-medium",
+    "hard": "NovaSky-AI/r2egym-hard",
 }
 
 BUCKET_DIRS = {
     "trivial": "r2egym-trivial",
-    "easy":    "r2egym-easy",
-    "medium":  "r2egym-medium",
-    "hard":    "r2egym-hard",
+    "easy": "r2egym-easy",
+    "medium": "r2egym-medium",
+    "hard": "r2egym-hard",
 }
 
 
@@ -144,8 +143,7 @@ def _select_tasks(
 
     if len(selected) < count:
         raise ValueError(
-            f"Not enough tasks in bucket '{bucket}': "
-            f"need {count}, found {len(selected)} (after exclusions)."
+            f"Not enough tasks in bucket '{bucket}': " f"need {count}, found {len(selected)} (after exclusions)."
         )
     return selected
 
@@ -169,9 +167,7 @@ def build_manifest(
         if excluded_manifest:
             excluded = set(excluded_manifest.get("tasks", {}).get(bucket, []))
 
-        tasks[bucket] = _select_tasks(
-            all_tasks, count, spec.seed, bucket, prefix=prefix, excluded=excluded
-        )
+        tasks[bucket] = _select_tasks(all_tasks, count, spec.seed, bucket, prefix=prefix, excluded=excluded)
 
     total = sum(len(v) for v in tasks.values())
     return {
@@ -269,7 +265,7 @@ def load_prerequisite(data_root: Path, key: str) -> Optional[Dict]:
     path = data_root / dirname / "MANIFEST.json"
     if not path.exists():
         print(f"WARNING: prerequisite subset '{dirname}' not found at {path}.")
-        print(f"  Selection will proceed without it; results may differ from the reference.")
+        print("  Selection will proceed without it; results may differ from the reference.")
         return None
     return json.loads(path.read_text())
 

@@ -61,30 +61,18 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         proxy_url = getattr(inference_engine_client, "proxy_url", None)
         if proxy_url:
             self.base_url = proxy_url
-            self._harbor_trial_config_template["agent"].setdefault("kwargs", {})[
-                "api_base"
-            ] = f"{self.base_url}/v1"
+            self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         thunderagent_disabled = os.getenv("SKYRL_DISABLE_THUNDERAGENT", "0") == "1"
-        self._supports_program_release = (
-            proxy_url is not None and not thunderagent_disabled
-        )
+        self._supports_program_release = proxy_url is not None and not thunderagent_disabled
         self._release_program_fn: Optional[Callable[[str], Any]] = getattr(
             inference_engine_client, "release_program", None
         )
         self._release_endpoint = f"{self.base_url}/programs/release"
-        self._release_timeout_sec = max(
-            1.0, float(os.getenv("THUNDERAGENT_RELEASE_TIMEOUT_SEC", "30"))
-        )
-        self._release_max_attempts = max(
-            1, int(os.getenv("THUNDERAGENT_RELEASE_MAX_ATTEMPTS", "4"))
-        )
-        self._release_retry_backoff_sec = max(
-            0.0, float(os.getenv("THUNDERAGENT_RELEASE_RETRY_BACKOFF_SEC", "0.5"))
-        )
-        self._release_max_inflight = max(
-            1, int(os.getenv("THUNDERAGENT_RELEASE_MAX_INFLIGHT", "64"))
-        )
+        self._release_timeout_sec = max(1.0, float(os.getenv("THUNDERAGENT_RELEASE_TIMEOUT_SEC", "30")))
+        self._release_max_attempts = max(1, int(os.getenv("THUNDERAGENT_RELEASE_MAX_ATTEMPTS", "4")))
+        self._release_retry_backoff_sec = max(0.0, float(os.getenv("THUNDERAGENT_RELEASE_RETRY_BACKOFF_SEC", "0.5")))
+        self._release_max_inflight = max(1, int(os.getenv("THUNDERAGENT_RELEASE_MAX_INFLIGHT", "64")))
         self._release_client: Optional[httpx.AsyncClient] = None
         self._release_semaphore: Optional[asyncio.Semaphore] = None
 
@@ -96,12 +84,8 @@ class ThunderAgentHarborGenerator(HarborGenerator):
             ).split(",")
             if item.strip()
         }
-        self._task_circuit_breaker_enabled = self._get_bool_env(
-            "HARBOR_TASK_CIRCUIT_BREAKER_ENABLED", True
-        )
-        self._task_circuit_breaker_threshold = self._get_int_env(
-            "HARBOR_TASK_CIRCUIT_BREAKER_THRESHOLD", 2, minimum=1
-        )
+        self._task_circuit_breaker_enabled = self._get_bool_env("HARBOR_TASK_CIRCUIT_BREAKER_ENABLED", True)
+        self._task_circuit_breaker_threshold = self._get_int_env("HARBOR_TASK_CIRCUIT_BREAKER_THRESHOLD", 2, minimum=1)
         self._task_hard_failure_streaks: dict[str, int] = defaultdict(int)
         self._task_circuit_breaker_open: set[str] = set()
 
@@ -123,8 +107,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
             raise ValueError("`trajectory_ids` is required in the input batch")
         if len(prompts) != len(trajectory_ids):
             raise ValueError(
-                f"Prompt count ({len(prompts)}) doesn't match "
-                f"trajectory_ids count ({len(trajectory_ids)})"
+                f"Prompt count ({len(prompts)}) doesn't match " f"trajectory_ids count ({len(trajectory_ids)})"
             )
 
         all_outputs: List[ThunderAgentHarborOutput] = [None] * len(prompts)  # type: ignore[list-item]
@@ -146,16 +129,12 @@ class ThunderAgentHarborGenerator(HarborGenerator):
 
         try:
             async with asyncio.TaskGroup() as tg:
-                for idx, (prompt, trajectory_id) in enumerate(
-                    zip(prompts, trajectory_ids)
-                ):
+                for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
                     tg.create_task(_worker(idx, prompt, trajectory_id))
         finally:
             progress.close()
 
-        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(
-            all_outputs
-        )
+        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
         rollout_metrics["generate/num_hard_verifier_failures"] = sum(
             1 for output in all_outputs if output.hard_verifier_failure
         )
@@ -187,9 +166,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
     def _mask_failed_instances_and_compute_metrics(
         all_outputs: List[ThunderAgentHarborOutput],
     ) -> tuple[List[ThunderAgentHarborOutput], dict]:
-        masked_outputs, rollout_metrics = (
-            HarborGenerator._mask_failed_instances_and_compute_metrics(all_outputs)
-        )
+        masked_outputs, rollout_metrics = HarborGenerator._mask_failed_instances_and_compute_metrics(all_outputs)
         for output in masked_outputs:
             if output.stop_reason == "error" and output.rollout_logprobs is not None:
                 output.rollout_logprobs = [0.0]
@@ -210,9 +187,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         try:
             return max(minimum, int(value))
         except ValueError:
-            logger.warning(
-                f"Invalid integer for {name}={value!r}; falling back to {default}"
-            )
+            logger.warning(f"Invalid integer for {name}={value!r}; falling back to {default}")
             return default
 
     @staticmethod
@@ -232,9 +207,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
             return
         self._task_hard_failure_streaks.pop(task_key, None)
 
-    def _record_hard_verifier_failure(
-        self, task_key: str, task_label: str, exc_type: str
-    ) -> bool:
+    def _record_hard_verifier_failure(self, task_key: str, task_label: str, exc_type: str) -> bool:
         if not self._task_circuit_breaker_enabled:
             return False
         self._task_hard_failure_streaks[task_key] += 1
@@ -258,17 +231,13 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         return sampling_params.get("logprobs") not in (None, False, 0)
 
     @staticmethod
-    def _attach_trial_routing_ids(
-        config: Dict[str, Any], session_id: str
-    ) -> Dict[str, Any]:
+    def _attach_trial_routing_ids(config: Dict[str, Any], session_id: str) -> Dict[str, Any]:
         agent_kwargs = config.setdefault("agent", {}).setdefault("kwargs", {})
         agent_kwargs["session_id"] = session_id
         llm_call_kwargs = agent_kwargs.setdefault("llm_call_kwargs", {})
         extra_body = llm_call_kwargs.setdefault("extra_body", {})
         if not isinstance(extra_body, dict):
-            raise TypeError(
-                "harbor_trial_config.agent.kwargs.llm_call_kwargs.extra_body must be a mapping"
-            )
+            raise TypeError("harbor_trial_config.agent.kwargs.llm_call_kwargs.extra_body must be a mapping")
         extra_body["program_id"] = session_id
         return config
 
@@ -305,15 +274,12 @@ class ThunderAgentHarborGenerator(HarborGenerator):
             return
 
         client = self._ensure_release_client()
-        response = await client.post(
-            self._release_endpoint, json={"program_id": program_id}
-        )
+        response = await client.post(self._release_endpoint, json={"program_id": program_id})
         if response.status_code in (200, 404):
             return
         body = response.text[:200].replace("\n", " ")
         raise RuntimeError(
-            f"Program release returned status {response.status_code} "
-            f"for program_id={program_id}. body={body!r}"
+            f"Program release returned status {response.status_code} " f"for program_id={program_id}. body={body!r}"
         )
 
     async def _release_program(self, program_id: Optional[str]) -> None:
@@ -335,9 +301,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
                             f"{attempt} attempts ({type(exc).__name__}: {exc!r})"
                         )
                         return
-                    await asyncio.sleep(
-                        self._release_retry_backoff_sec * (2 ** (attempt - 1))
-                    )
+                    await asyncio.sleep(self._release_retry_backoff_sec * (2 ** (attempt - 1)))
 
     @staticmethod
     def _get_maybe_mapping_value(obj: Any, key: str, default: Any = None) -> Any:
@@ -355,9 +319,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         direct_field_name: Optional[str] = None,
     ) -> Optional[List[List[int] | List[float]]]:
         if direct_field_name is not None:
-            direct_field_value = cls._get_maybe_mapping_value(
-                agent_result, direct_field_name
-            )
+            direct_field_value = cls._get_maybe_mapping_value(agent_result, direct_field_name)
             if direct_field_value is not None:
                 return direct_field_value
 
@@ -367,9 +329,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
 
         flattened_values: List[List[int] | List[float]] = []
         for rollout_detail in rollout_details:
-            cur_rollout_field = cls._get_maybe_mapping_value(
-                rollout_detail, rollout_field_name
-            )
+            cur_rollout_field = cls._get_maybe_mapping_value(rollout_detail, rollout_field_name)
             if not cur_rollout_field:
                 continue
             if (
@@ -410,9 +370,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
                 continue
 
             if cur_message["role"] != "assistant":
-                raise ValueError(
-                    f"Expected message role 'user' or 'assistant', got {cur_message['role']}"
-                )
+                raise ValueError(f"Expected message role 'user' or 'assistant', got {cur_message['role']}")
             if assistant_msg_idx >= len(assistant_completion_token_ids):
                 raise ValueError(
                     f"Missing completion token ids for assistant message #{assistant_msg_idx + 1}. "
@@ -426,11 +384,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
 
             generated_token_ids = assistant_completion_token_ids[assistant_msg_idx]
             if self.tokenizer.eos_token_id in cur_token_ids:
-                last_eos_token_index = (
-                    len(cur_token_ids)
-                    - 1
-                    - cur_token_ids[::-1].index(self.tokenizer.eos_token_id)
-                )
+                last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(self.tokenizer.eos_token_id)
                 tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
             else:
                 tokens_after_eos = []
@@ -503,9 +457,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         task_label = self._task_label(prompt)
 
         if task_key in self._task_circuit_breaker_open:
-            logger.warning(
-                f"Skipping Harbor trial for {task_label}: task circuit breaker already open"
-            )
+            logger.warning(f"Skipping Harbor trial for {task_label}: task circuit breaker already open")
             return self._failed_output(
                 trajectory_id,
                 stop_reason="error",
@@ -520,16 +472,10 @@ class ThunderAgentHarborGenerator(HarborGenerator):
             try:
                 config = deepcopy(self._harbor_trial_config_template)
                 config["task"] = {"path": prompt}
-                config = self._apply_rollout_detail_request_to_trial_config(
-                    config, sampling_params
-                )
+                config = self._apply_rollout_detail_request_to_trial_config(config, sampling_params)
                 trial_session_id = uuid4().hex
-                config = self._attach_trial_routing_ids(
-                    config, session_id=trial_session_id
-                )
-                collect_rollout_details = bool(
-                    config["agent"]["kwargs"].get("collect_rollout_details", False)
-                )
+                config = self._attach_trial_routing_ids(config, session_id=trial_session_id)
+                collect_rollout_details = bool(config["agent"]["kwargs"].get("collect_rollout_details", False))
 
                 trial_config = TrialConfig.model_validate(config)
                 trial = Trial(trial_config)
@@ -537,62 +483,41 @@ class ThunderAgentHarborGenerator(HarborGenerator):
                 async with self._rate_limiter:
                     results = await trial.run()
 
-                exc_type = (
-                    results.exception_info.exception_type
-                    if results.exception_info
-                    else None
-                )
+                exc_type = results.exception_info.exception_type if results.exception_info else None
                 is_context_length_error = exc_type == "ContextLengthExceededError"
                 is_agent_timeout_error = exc_type == "AgentTimeoutError"
 
                 if is_agent_timeout_error:
                     self._record_non_hard_outcome(task_key)
-                    logger.debug(
-                        f"{prefix} hit AgentTimeoutError (no retry). Results: {results}"
-                    )
+                    logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
                     break
                 elif is_context_length_error:
                     self._record_non_hard_outcome(task_key)
                     logger.debug(
-                        f"{prefix} hit ContextLengthExceededError, will train with reward=0. "
-                        f"Results: {results}"
+                        f"{prefix} hit ContextLengthExceededError, will train with reward=0. " f"Results: {results}"
                     )
                     reward = 0
                 elif self._is_hard_verifier_failure(exc_type):
                     hard_verifier_failure = True
-                    breaker_open = self._record_hard_verifier_failure(
-                        task_key, task_label, cast(str, exc_type)
-                    )
-                    logger.warning(
-                        f"{prefix} hit hard verifier failure {exc_type} (no retry). "
-                        f"Results: {results}"
-                    )
+                    breaker_open = self._record_hard_verifier_failure(task_key, task_label, cast(str, exc_type))
+                    logger.warning(f"{prefix} hit hard verifier failure {exc_type} (no retry). " f"Results: {results}")
                     if breaker_open:
-                        logger.warning(
-                            f"{prefix} opened circuit breaker for {task_label}"
-                        )
+                        logger.warning(f"{prefix} opened circuit breaker for {task_label}")
                     break
                 elif not results.verifier_result:
                     self._record_non_hard_outcome(task_key)
-                    logger.warning(
-                        f"{prefix} failed: Exception info: {results.exception_info}. "
-                        f"Results: {results}"
-                    )
+                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. " f"Results: {results}")
                     continue
                 else:
                     self._record_non_hard_outcome(task_key)
                     reward = results.verifier_result.rewards["reward"]
 
                 chat_history = results.agent_result.metadata["all_messages"]
-                summarization_count = results.agent_result.metadata[
-                    "summarization_count"
-                ]
+                summarization_count = results.agent_result.metadata["summarization_count"]
                 num_turns = results.agent_result.metadata["n_episodes"]
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
-                    logger.debug(
-                        f"{prefix} successful: reward={reward}. Results: {results}"
-                    )
+                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
                     break
 
                 logger.warning(
@@ -601,9 +526,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
                 )
             except Exception as exc:
                 self._record_non_hard_outcome(task_key)
-                logger.warning(
-                    f"{prefix} failed: Error running trial: {exc}. Results: {results}"
-                )
+                logger.warning(f"{prefix} failed: Error running trial: {exc}. Results: {results}")
                 continue
             finally:
                 await self._release_program(trial_session_id)
@@ -611,8 +534,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         if not successful:
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
             logger.warning(
-                f"Trajectory {trajectory_id} failed (stop_reason={stop_reason}), "
-                "will set loss mask to [0]."
+                f"Trajectory {trajectory_id} failed (stop_reason={stop_reason}), " "will set loss mask to [0]."
             )
             return self._failed_output(
                 trajectory_id,
@@ -638,34 +560,24 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         assistant_completion_token_ids = self._extract_assistant_rollout_field(
             results.agent_result, "completion_token_ids"
         )
-        if collect_rollout_details and (
-            assistant_logprobs is None or assistant_completion_token_ids is None
-        ):
+        if collect_rollout_details and (assistant_logprobs is None or assistant_completion_token_ids is None):
             raise ValueError(
                 f"Harbor trial for trajectory {trajectory_id} did not return "
                 "assistant logprobs/token ids despite collect_rollout_details=True."
             )
 
         if assistant_completion_token_ids is not None:
-            response_ids, loss_mask, rollout_logprobs = (
-                self._get_response_ids_and_loss_mask_from_harbor_rollout(
-                    response_messages,
-                    assistant_completion_token_ids=cast(
-                        List[List[int]], assistant_completion_token_ids
-                    ),
-                    assistant_logprobs=cast(
-                        Optional[List[List[float]]], assistant_logprobs
-                    ),
-                )
+            response_ids, loss_mask, rollout_logprobs = self._get_response_ids_and_loss_mask_from_harbor_rollout(
+                response_messages,
+                assistant_completion_token_ids=cast(List[List[int]], assistant_completion_token_ids),
+                assistant_logprobs=cast(Optional[List[List[float]]], assistant_logprobs),
             )
         else:
-            response_ids, loss_mask, rollout_logprobs = (
-                get_response_ids_and_loss_mask_from_messages(
-                    response_messages,
-                    self.tokenizer,
-                    cast(Optional[List[List[float]]], assistant_logprobs),
-                    chat_template=self.custom_chat_template_content,
-                )
+            response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+                response_messages,
+                self.tokenizer,
+                cast(Optional[List[List[float]]], assistant_logprobs),
+                chat_template=self.custom_chat_template_content,
             )
 
         max_response_tokens = max(0, self.max_seq_len - initial_prompt_length)
@@ -674,10 +586,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         else:
             stop_reason = "complete"
 
-        if (
-            self.generator_cfg.apply_overlong_filtering
-            and stop_reason == "context_length"
-        ):
+        if self.generator_cfg.apply_overlong_filtering and stop_reason == "context_length":
             loss_mask = [0] * len(loss_mask)
 
         response_ids = response_ids[:max_response_tokens]

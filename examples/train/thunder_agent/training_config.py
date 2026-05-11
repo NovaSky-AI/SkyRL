@@ -36,9 +36,7 @@ class ThunderAgentInferenceEngineConfig(InferenceEngineConfig):
 class ThunderAgentGeneratorConfig(GeneratorConfig):
     """GeneratorConfig with ThunderAgent-aware inference engine config."""
 
-    inference_engine: ThunderAgentInferenceEngineConfig = field(
-        default_factory=ThunderAgentInferenceEngineConfig
-    )
+    inference_engine: ThunderAgentInferenceEngineConfig = field(default_factory=ThunderAgentInferenceEngineConfig)
 
 
 _ThunderAgentBaseConfig = make_config(generator_cls=ThunderAgentGeneratorConfig)
@@ -56,8 +54,6 @@ class ThunderAgentHarborConfig(_ThunderAgentBaseConfig):
     """Config for Harbor + ThunderAgent fully-async training."""
 
     harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
-    generator: ThunderAgentHarborGeneratorConfig = field(
-        default_factory=ThunderAgentHarborGeneratorConfig
-    )
+    generator: ThunderAgentHarborGeneratorConfig = field(default_factory=ThunderAgentHarborGeneratorConfig)
     max_train_tasks: Optional[int] = None
     max_eval_tasks: Optional[int] = None

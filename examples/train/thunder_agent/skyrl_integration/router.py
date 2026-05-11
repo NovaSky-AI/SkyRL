@@ -24,7 +24,6 @@ import httpcore
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
-
 from ThunderAgent import (
     Config,
     MultiBackendRouter,
@@ -33,6 +32,7 @@ from ThunderAgent import (
     set_config,
 )
 from ThunderAgent.scheduler.vllm_request_processor import remove_program_id
+
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
@@ -50,9 +50,7 @@ def _attach_thunderagent_file_handler(
 
     file_handler = logging.FileHandler(log_path.resolve(), encoding="utf-8")
     file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s")
-    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"))
 
     file_logger = logging.getLogger("examples.train.thunder_agent.skyrl_integration")
     file_logger.setLevel(logging.INFO)
