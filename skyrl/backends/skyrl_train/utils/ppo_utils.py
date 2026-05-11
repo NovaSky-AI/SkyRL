@@ -119,7 +119,9 @@ def compute_approx_kl(
         raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
 
     if loss_mask is not None:
-        kld = kld * loss_mask
+        # Multiplying by `loss_mask` can leak `nan` from masked positions,
+        # so route masked positions to 0.0 directly while keeping mask scaling elsewhere
+        kld = torch.where(loss_mask.bool(), kld * loss_mask, 0.0)
     return kld
 
 

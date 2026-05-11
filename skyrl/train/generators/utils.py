@@ -280,7 +280,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         result[key] = _flatten_field(generator_outputs, key)
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+    )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
     # computes basic stats (response length, reward); generators may add custom keys, which we
@@ -342,6 +344,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    loss_masks: Optional[List[List[int]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -351,6 +354,7 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
+        loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
 
     Returns:
         Dictionary of aggregated metrics
@@ -381,6 +385,17 @@ def get_rollout_metrics(
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if loss_masks is not None:
+        assistant_tokens_arr = np.array([sum(mask) for mask in loss_masks])
+        rollout_metrics.update(
+            {
+                "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
+                "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
+                "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
+                "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+            }
+        )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

@@ -77,6 +77,14 @@ def _build_skyrl_train_config(
     # that resolves other config derived from the policy model path.
     user_overrides["trainer.policy.model.path"] = base_model
     user_overrides["trainer.critic.model.path"] = base_model
+    # Strategy must be set on the override dict (not after from_cli_overrides) so
+    # TrainerConfig.__post_init__ sees the right value during validation —
+    # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
+    assert overrides.strategy in (
+        "fsdp2",
+        "megatron",
+    ), f"Only fsdp2 and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
+    user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -87,12 +95,6 @@ def _build_skyrl_train_config(
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
-
-    assert overrides.strategy in (
-        "fsdp2",
-        "megatron",
-    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = overrides.strategy
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:
@@ -128,6 +130,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         self._renderer = None
+        # Captured at first LoRA create_model; subsequent create_models must
+        # match this signature exactly. None when no LoRA model is registered.
+        self._base_lora_signature: tuple | None = None
 
         # New inference infrastructure
         self._server_groups: list = []
@@ -205,10 +210,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return sub_batches
 
-    def _build_policy(self, PolicyWorker):
+    def _build_policy(self, PolicyWorker, model_id: str):
         cfg = self._cfg
         colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
+        is_lora = cfg.trainer.policy.model.lora.rank > 0
 
         if colocate_all:
             assert pg is not None, "placement group must be created when colocate_all=True"
@@ -245,6 +251,15 @@ class SkyRLTrainBackend(AbstractBackend):
             )
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+
+        if is_lora:
+            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
+            # the freshly-initialised LoRA into a per-worker pristine slot, then
+            # register the first adapter under `model_id`. Must happen while the
+            # model + optimizer are still GPU-resident (i.e. before the offload).
+            ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
+            ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
+            ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
 
         if colocate_all:
             policy_model.offload_to_cpu()
@@ -340,12 +355,52 @@ class SkyRLTrainBackend(AbstractBackend):
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
 
+    def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
+        # Tinker's public LoraConfig only exposes rank + alpha (plus
+        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
+        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
+        # AdapterStore additionally verifies parallel-state equality via
+        # its own LoraSignature.
+        return (int(lora_config.rank), int(lora_config.alpha))
+
     def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         if model_id in self._model_ids_to_role:
             raise ValueError(f"Model '{model_id}' already exists")
-        if model_role in self._model_ids_to_role.values():
-            raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
 
+        is_lora = lora_config is not None and lora_config.rank > 0
+        is_first_policy = "policy" not in self._model_ids_to_role.values()
+
+        # Multi-LoRA path: allow additional policy adapters when LoRA is active
+        # and the first model has already been built. FFT (rank=0) keeps the
+        # original single-tenant gate.
+        if model_role == "policy" and not is_first_policy:
+            if not is_lora:
+                raise ValueError(
+                    "SkyRLTrainBackend already has a 'policy' model; multi-tenant "
+                    "training is only supported for LoRA (rank > 0)"
+                )
+            if self._base_lora_signature is None:
+                raise ValueError(
+                    "Cannot register an additional LoRA adapter: the first policy "
+                    "model was created without LoRA. Recreate the server with a "
+                    "LoRA-enabled first model."
+                )
+            new_signature = self._lora_signature_from(lora_config)
+            if new_signature != self._base_lora_signature:
+                raise ValueError(
+                    f"LoRA signature mismatch for model '{model_id}': "
+                    f"got (rank, alpha)={new_signature}, "
+                    f"first adapter registered with {self._base_lora_signature}. "
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
+                    "adapters; target_modules is fixed server-side."
+                )
+            self._dispatch.register_adapter("policy", model_id)
+            self._model_ids_to_role[model_id] = model_role
+            self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+            logger.info(f"Registered additional LoRA adapter '{model_id}'")
+            return
+
+        # First-time setup OR critic creation (existing path).
         if model_role == "policy":
             self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
@@ -367,8 +422,12 @@ class SkyRLTrainBackend(AbstractBackend):
                 raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
             logger.info("Building models.")
-            self._build_policy(PolicyWorker)
+            self._build_policy(PolicyWorker, model_id=model_id)
+            if is_lora:
+                self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
+            if model_role in self._model_ids_to_role.values():
+                raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
             if "policy" not in self._model_ids_to_role.values():
                 raise ValueError("Create a policy model before creating a critic model")
             if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
@@ -403,11 +462,23 @@ class SkyRLTrainBackend(AbstractBackend):
         return ResolvedPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
-        self._get_role(model_id)
+        role = self._get_role(model_id)
 
-        # Models in this backend share one Ray runtime and inference stack, so
-        # deleting any model tears down the whole backend and it will be
-        # re-initialized on the next create_model() call.
+        # Multi-LoRA: if more than one model is currently registered, drop just
+        # this adapter slot rather than tearing down the shared Ray runtime.
+        # The live GPU state may still mirror this adapter; it'll be
+        # overwritten on the next swap_to (no eager swap-away here).
+        if len(self._model_ids_to_role) > 1:
+            if role == "policy" and self._base_lora_signature is not None:
+                self._dispatch.delete_adapter("policy", model_id)
+                del self._model_ids_to_role[model_id]
+                self._model_metadata.pop(model_id, None)
+                logger.info(f"Removed LoRA adapter '{model_id}'")
+                return
+            # Fall through to teardown for non-LoRA roles or unexpected mixes.
+
+        # Last model (or non-LoRA path): tear down the shared Ray runtime.
+        # The Tinker engine will rebuild on the next create_model().
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
         for group in self._server_groups:
             group.shutdown()
@@ -424,6 +495,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engines_initialized = False
         self._renderer = None
         self._colocate_pg = None
+        self._base_lora_signature = None
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:
@@ -669,18 +741,22 @@ class SkyRLTrainBackend(AbstractBackend):
             )
         loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
         loss_fn, loss_fn_config = self._normalize_policy_loss_request(role, loss_fn, loss_fn_config)
+        # Single model_id per sub-batch (split upstream); pass it so the
+        # dispatch layer can swap to the right LoRA adapter before the op.
+        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
         if role == "critic":
             self._dispatch.set_algorithm_config(
                 "critic",
                 value_clip=(loss_fn_config or {}).get("value_clip", self._cfg.trainer.algorithm.value_clip),
             )
-            data = self._dispatch.forward_backward("critic", batch)
+            data = self._dispatch.forward_backward("critic", batch, model_id=model_id)
         else:
             data = self._dispatch.forward_backward(
                 role,
                 batch,
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
+                model_id=model_id,
             )
 
         # Trim padding entries from loss_fn_outputs
@@ -737,7 +813,8 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
-        data = self._dispatch.forward(role, batch)
+        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        data = self._dispatch.forward(role, batch, model_id=model_id)
 
         # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
         # Trim padding entries from output
@@ -776,9 +853,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # Apply learning rate from AdamParams before optimizer step
         # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
         adam_params = request_data.adam_params
-        self._dispatch.set_lr(role, adam_params.learning_rate)
+        self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
-        grad_norm = self._dispatch.optim_step(role)
+        grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
         metrics: dict[str, float] = {}
@@ -800,18 +877,22 @@ class SkyRLTrainBackend(AbstractBackend):
         # 1. Ensure inference engines are initialized
         self._ensure_inference_engines()
 
-        # 2. Validate single model
+        # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
+        # mixes adapters in one batched sample call (the engine batches across
+        # model_ids in find_batchable_sample); we route each request via the
+        # `model` field in _sample_with_remote_client below.
         unique_models = set(prepared_batch.all_model_ids)
-        if len(unique_models) != 1:
+        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
+        if unknown:
             error = types.ErrorResponse(
-                error=f"Expected exactly one model_id for sampling, got {unique_models}", status="error"
+                error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
-        model_id = next(iter(unique_models))
-        role = self._model_ids_to_role.get(model_id)
-        if role != "policy":
+        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
+        if non_policy:
             error = types.ErrorResponse(
-                error=f"Sampling is only supported for policy models, got '{model_id}'", status="error"
+                error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
+                status="error",
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
@@ -868,12 +949,15 @@ class SkyRLTrainBackend(AbstractBackend):
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
 
-        # Every sample() body must explicitly identify the target model/LoRA
-        # adapter — the client does not fall back to any default. Resolve
-        # what name the inference engine knows the policy by from config
-        # (LoRA adapter when LoRA weights are sync'd as an adapter, base
-        # model otherwise).
-        model_name = resolve_policy_model_name(self._cfg)
+        # Resolve the inference-engine model name per request. With multi-LoRA
+        # the adapter name on vLLM IS the Tinker model_id (registered by
+        # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
+        # FFT path falls back to resolve_policy_model_name(cfg).
+        fallback_model_name = resolve_policy_model_name(self._cfg)
+        per_request_models = [
+            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
+            for mid in prepared_batch.all_model_ids
+        ]
 
         async def sample_all():
             tasks = []
@@ -883,7 +967,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 request_payload = {
                     "json": {
-                        "model": model_name,
+                        "model": per_request_models[i],
                         "prompt": model_input.model_dump(),
                         "num_samples": 1,
                         "sampling_params": sampling_params.model_dump(),
@@ -1001,7 +1085,7 @@ class SkyRLTrainBackend(AbstractBackend):
             ckpt_dir = os.path.join(temp_dir, "checkpoint")
 
             # Save checkpoint directory (includes optimizer state automatically)
-            self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer)
+            self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer, model_id=model_id)
 
             # Create tar archive
             self._create_tar_from_directory(ckpt_dir, output_path)
@@ -1020,7 +1104,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
             # Load checkpoint (includes optimizer and scheduler states)
             self._dispatch.load_checkpoint(
-                model=role, ckpt_dir=temp_dir, load_optimizer_states=True, load_lr_scheduler_states=True
+                model=role,
+                ckpt_dir=temp_dir,
+                load_optimizer_states=True,
+                load_lr_scheduler_states=True,
+                model_id=model_id,
             )
 
         logger.info(f"Loaded checkpoint for {model_id} from {checkpoint_path}")
@@ -1039,7 +1127,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
-        asyncio.run(self._dispatch.save_weights_for_sampler())
+        # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
+        # before broadcasting and the worker registers it on vLLM under that
+        # name. None for the FFT / single-tenant path uses legacy behavior.
+        sync_id = model_id if self._base_lora_signature is not None else None
+        asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:

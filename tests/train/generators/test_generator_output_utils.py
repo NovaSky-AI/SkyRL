@@ -31,6 +31,7 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",
+        "env_metrics",
         "pixel_values",
         "image_grid_thw",
     ]
@@ -76,6 +77,10 @@ def test_generator_output_concatenation():
         "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
         "generate/avg_tokens_non_zero_rewards": 2.0,
         "generate/avg_tokens_zero_rewards": 0,
+        "generate/avg_assistant_tokens": 2.0,
+        "generate/min_assistant_tokens": 1,
+        "generate/max_assistant_tokens": 3,
+        "generate/std_assistant_tokens": np.std([2, 2, 3, 1]).item(),
     }
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():

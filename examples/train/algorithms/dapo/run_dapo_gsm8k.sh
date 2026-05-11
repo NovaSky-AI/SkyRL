@@ -15,7 +15,7 @@ EPS_CLIP_LOW=0.2
 EPS_CLIP_HIGH=0.28
 DYNAMIC_SAMPLING_TYPE=filter
 DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
-LOSS_REDUCTION="token_mean"
+LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py

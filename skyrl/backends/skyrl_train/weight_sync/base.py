@@ -43,16 +43,22 @@ class WeightUpdateRequest:
 class LoraLoadRequest(WeightUpdateRequest):
     """Request to load LoRA weights from disk.
 
-    This is a special request type used for loading pre-trained LoRA adapters
-    from disk rather than transferring weights from training. Unlike other
+    This is a special request type used for loading LoRA adapters
+    from disk rather than transferring weights over network in training. Unlike other
     WeightUpdateRequest subclasses, this doesn't transfer weights - it tells
     the inference engine to load LoRA from a path.
+
+    ``lora_name`` is the name vLLM should register the adapter under and is
+    what callers later pass as ``model=<lora_name>`` when sampling. Empty
+    string preserves the legacy single-tenant behavior where the engine
+    generates a numeric name itself.
     """
 
     names: List[str] = field(default_factory=list)
     dtypes: List[str] = field(default_factory=list)
     shapes: List[List[int]] = field(default_factory=list)
     lora_path: str = ""
+    lora_name: str = ""
 
 
 @dataclass
