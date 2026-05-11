@@ -308,7 +308,13 @@ def from_parallel_logits_to_logprobs(
     cp_rank = torch.distributed.get_rank(cp_group)
     target = _get_tokens_on_this_cp_rank(target, cp_rank, cp_size, seq_dim=1)
 
-    if chunk_size is not None:
+    # Only use the chunked path when chunking actually splits the sequence into
+    # multiple chunks. When chunk_size >= seq_len the whole sequence is one
+    # chunk, but ChunkedDistributedLogprob still saves the raw
+    # vocab_parallel_logits and recomputes softmax in backward (~3x peak memory
+    # vs DistributedLogprob's ~2x), so chunking actively hurts in that regime.
+    seq_len_local = vocab_parallel_logits.shape[1]
+    if chunk_size is not None and chunk_size < seq_len_local:
         logprobs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
             vocab_parallel_logits,
             target,
@@ -396,8 +402,15 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     rolled_targets = rolled_targets.unsqueeze(0)
     vocab_parallel_logits = vocab_parallel_logits.unsqueeze(0)
 
-    # Apply distributed log probability computation
-    if chunk_size is not None:
+    # Apply distributed log probability computation.
+    #
+    # Only use the chunked path when chunking actually splits the sequence into
+    # multiple chunks. When chunk_size >= seq_len the whole sequence is one
+    # chunk, but ChunkedDistributedLogprob still saves the raw
+    # vocab_parallel_logits and recomputes softmax in backward (~3x peak memory
+    # vs DistributedLogprob's ~2x), so chunking actively hurts in that regime.
+    seq_len_local = vocab_parallel_logits.shape[1]
+    if chunk_size is not None and chunk_size < seq_len_local:
         probs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
             vocab_parallel_logits,
             rolled_targets,
