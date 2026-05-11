@@ -98,7 +98,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.20.1; sys_platform == 'linux'",
+    "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
@@ -118,7 +118,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.20.1; sys_platform == 'linux'",
+    "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
@@ -261,14 +261,14 @@ explicit = true
 
 [[tool.uv.index]]
 name = "vllm-cu129"
-url = "https://wheels.vllm.ai/0.20.1/cu129"
+url = "https://wheels.vllm.ai/0.20.2/cu129"
 explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.20.1's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
+# vllm 0.20.2's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
 # links libcudart.so.12, which torch+cu128 supplies.
 vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
