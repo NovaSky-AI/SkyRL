@@ -40,6 +40,17 @@ class BackendForwardingInferenceClient:
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         self._concurrency = asyncio.Semaphore(engine_config.max_concurrent_samples)
+        # Persistent client so we get connection pooling + no per-request
+        # TCP/TLS handshake. base_url is set when we first resolve the
+        # proxy_url; refreshed on connection error. Closed via aclose() in
+        # api.py lifespan shutdown.
+        self._http_client: httpx.AsyncClient = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
+
+    async def aclose(self) -> None:
+        """Close the persistent httpx client. Called from api.py lifespan shutdown."""
+        await self._http_client.aclose()
 
     async def _read_proxy_url_from_db(self) -> str | None:
         """Read the singleton EngineStateDB row.
@@ -116,15 +127,16 @@ class BackendForwardingInferenceClient:
         model_input = sample_req.prompt.to_types()
         prompt_tokens = render_model_input([model_input])[0].prompt_ids
 
+        sp = sample_req.sampling_params
         payload = {
             "model": model_name,
             "prompt": prompt_tokens,
             "n": sample_req.num_samples,
-            "seed": sample_req.sampling_params.seed,
-            "max_tokens": sample_req.sampling_params.max_tokens,
-            "temperature": sample_req.sampling_params.temperature,
-            "top_p": sample_req.sampling_params.top_p,
-            "top_k": sample_req.sampling_params.top_k,
+            "seed": sp.seed,
+            "max_tokens": sp.max_tokens,
+            "temperature": sp.temperature,
+            "top_p": sp.top_p,
+            "top_k": sp.top_k,
             # vLLM (and the upstream vllm-router) expects an integer for the
             # OpenAI-compatible /v1/completions endpoint — the number of top
             # tokens to return logprobs for. 1 gives the chosen token's
@@ -133,26 +145,41 @@ class BackendForwardingInferenceClient:
             "stream": False,
             "return_token_ids": True,
         }
+        if sp.stop_strings:
+            payload["stop"] = sp.stop_strings
+        if sp.stop_tokens:
+            payload["stop_token_ids"] = sp.stop_tokens
 
-        async with httpx.AsyncClient(
-            base_url=proxy_url,
-            timeout=httpx.Timeout(300.0, connect=10.0),
-        ) as http_client:
-            response = await http_client.post("/v1/completions", json=payload)
-            if response.status_code >= 400:
-                # Surface vLLM's body verbatim (e.g. 404 for unknown LoRA name).
-                raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
-            result = response.json()
+        url = f"{proxy_url}/v1/completions"
+        response = await self._http_client.post(url, json=payload)
+        if response.status_code >= 400:
+            # Surface vLLM's body verbatim (e.g. 404 for unknown LoRA name).
+            raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
+        result = response.json()
 
         sequences = []
-        for choice in result["choices"]:
-            lp = choice["logprobs"]
+        for choice in result.get("choices", []):
+            tokens = choice.get("token_ids", [])
+            lp = choice.get("logprobs") or {}
+            logprobs = lp.get("token_logprobs") or []
+            # vLLM occasionally returns logprobs=None even when requested
+            # (upstream issue under load). RL workloads compute advantages
+            # against these, so zero-fill rather than return a ragged shape
+            # — matches the legacy in-process sample path's behavior.
+            if not logprobs and tokens:
+                logger.warning("No logprobs returned from vLLM — filling with zeros")
+                logprobs = [0.0] * len(tokens)
+            # Map vLLM's finish_reason ({"stop", "stop_token", "length", ...})
+            # to Tinker's Literal["stop", "length"]. Mirrors the
+            # normalization in skyrl_train_backend._sample_with_remote_client.
+            finish_reason = choice.get("finish_reason")
+            stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
             sequences.append(
                 types.GeneratedSequence(
-                    tokens=choice["token_ids"],
-                    logprobs=lp["token_logprobs"],
-                    stop_reason=choice["finish_reason"],
+                    tokens=tokens,
+                    logprobs=logprobs,
+                    stop_reason=stop_reason,
                 )
             )
 
-        return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+        return types.SampleOutput(sequences=sequences, prompt_logprobs=None)

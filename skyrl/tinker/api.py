@@ -184,6 +184,15 @@ async def lifespan(app: FastAPI):
     shutting_down = True
     monitor_task.cancel()
 
+    # Close the forwarding client's persistent httpx connection pool if we
+    # installed one. Cheap no-op when external_inference_client doesn't own
+    # an httpx client (ExternalInferenceClient creates one per call).
+    inference_client = getattr(app.state, "external_inference_client", None)
+    aclose = getattr(inference_client, "aclose", None)
+    if aclose is not None:
+        with suppress(Exception):
+            await aclose()
+
     logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
     with suppress(ProcessLookupError):
         background_engine.terminate()
