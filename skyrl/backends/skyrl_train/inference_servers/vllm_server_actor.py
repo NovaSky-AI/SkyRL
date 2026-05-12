@@ -344,6 +344,9 @@ class VLLMServerActor(ServerActorProtocol):
             access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
         )
         server = uvicorn.Server(config)
+        # vllm's engine_error_handler reads app.state.server to call
+        # terminate_if_errored; normally wired up by vllm's own launcher.
+        app.state.server = server
         await server.serve(sockets=[sock])
 
     def _add_custom_endpoints(self, app) -> None:
