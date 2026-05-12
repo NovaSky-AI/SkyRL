@@ -1,34 +1,7 @@
 """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM.
 
-This client is intentionally thin — its job is schema translation, not
-request scheduling. Concurrency is bounded only by the httpx connection
-pool; vllm-router + each vLLM server's ``max_num_seqs`` are the real
-backpressure points. Don't add an asyncio.Semaphore on top: that would
-just serialize work above what vLLM already manages.
-
-What the client does:
-  - Resolve the vLLM proxy URL lazily from ``EngineStateDB`` (written by
-    the backend after ``_create_new_inference_client``); refresh-on-error.
-  - Translate Tinker ``SamplingParams`` to a vLLM ``/v1/completions``
-    payload (max_tokens, temperature, top_p, top_k, stop, stop_token_ids,
-    logprobs, seed).
-  - Translate vLLM's completion response back into ``SampleOutput`` —
-    normalize ``finish_reason`` ({"stop", "stop_token"} -> "stop", else
-    "length"), zero-fill missing logprobs (RL workloads need them), and
-    set ``prompt_logprobs=None``.
-  - Write the result into ``FutureDB`` so ``/api/v1/retrieve_future``
-    sees a completed row.
-
-For LoRA tenants: uses ``model=<model_id>`` since the backend's
-``save_weights_for_sampler`` already registered the adapter under that
-name on vLLM via ``RemoteInferenceClient.load_lora_adapter``. For
-base-model sampling, uses ``model=<base_model>`` directly.
-
-Failure modes:
-  - Proxy URL not yet published -> fail the future with a clear message.
-  - Connection error -> refresh cached URL once and retry; if still
-    failing, fail the future.
-  - vLLM 4xx/5xx -> fail the future with the upstream body verbatim.
+Pair to :class:`ExternalInferenceClient`; resolves the target URL from
+``EngineStateDB`` instead of from a user-supplied ``external_inference_url``.
 """
 
 import asyncio
@@ -45,31 +18,16 @@ from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
-    """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM.
-
-    Pair to :class:`ExternalInferenceClient` — same EXTERNAL future-write
-    contract, but resolves the target URL from ``EngineStateDB`` (populated
-    by the SkyRL-Train backend's ``_publish_engine_state``) instead of from
-    a user-supplied ``EngineConfig.external_inference_url``.
-    """
+    """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
     def __init__(self, engine_config: EngineConfig, db_engine):
         self.engine_config = engine_config
         self.db_engine = db_engine
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
-        # Persistent client. Backpressure is layered: this httpx pool ->
-        # vllm-router (load balances across vLLM servers) -> each vLLM
-        # server's max_num_seqs (final cap). We intentionally do NOT
-        # impose an asyncio.Semaphore in the API process — that would
-        # just serialize work above what vLLM already enforces.
-        #
-        # Default `forwarding_inference_max_connections=None` means
-        # unlimited — vllm-router/vLLM are the only queues. The only
-        # cost of "unlimited" is file descriptors, so make sure the
-        # host's `ulimit -n` is sized for the peak concurrent samples
-        # across all tenants. Set an int to enforce a per-process cap.
-        # Closed via aclose() in api.py lifespan shutdown.
+        # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
+        # Default `forwarding_inference_max_connections=None` is unlimited;
+        # the only cost is file descriptors (raise `ulimit -n` accordingly).
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
@@ -85,12 +43,6 @@ class SkyRLTrainInferenceForwardingClient:
         await self._http_client.aclose()
 
     async def _read_proxy_url_from_db(self) -> str | None:
-        """Read the singleton EngineStateDB row.
-
-        Returns the published proxy URL, or None when no row exists yet
-        (e.g. before the first ``create_model``) or when the backend last
-        published ``proxy_url=None`` (post-teardown).
-        """
         async with AsyncSession(self.db_engine) as session:
             row = await session.get(EngineStateDB, 1)
             if row is None or row.inference_proxy_url is None:
@@ -98,8 +50,7 @@ class SkyRLTrainInferenceForwardingClient:
             return row.inference_proxy_url
 
     async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
-        # Hot path: cache is warm and caller didn't ask for refresh.
-        # Skip the lock so concurrent samples don't serialize here.
+        # Skip the lock when the cache is warm so concurrent samples don't serialize.
         if not force_refresh and self._cached_proxy_url is not None:
             return self._cached_proxy_url
         async with self._cache_lock:
@@ -107,9 +58,7 @@ class SkyRLTrainInferenceForwardingClient:
                 url = await self._read_proxy_url_from_db()
                 if url is None:
                     raise RuntimeError(
-                        "inference engine not ready: no proxy URL has been "
-                        "published to EngineStateDB. Either no create_model has "
-                        "been issued yet, or the engine just tore down vLLM."
+                        "inference engine not ready: no proxy URL published to EngineStateDB"
                     )
                 self._cached_proxy_url = url
             return self._cached_proxy_url
@@ -136,14 +85,9 @@ class SkyRLTrainInferenceForwardingClient:
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
-                # The future row was deleted (manual cleanup, stale-session
-                # GC, etc.) between asample handler scheduling us and our
-                # arrival here. Nothing to write back; the retrieve_future
-                # poller will time out on the caller's side.
-                logger.warning(
-                    "FutureDB row %s missing on completion write — skipping (request was likely cancelled)",
-                    request_id,
-                )
+                # Row was deleted between scheduling and completion (cancelled
+                # request, stale-session GC). Nothing to write back.
+                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
             future.result_data = result_data
             future.status = status
@@ -151,14 +95,8 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        """Forward once; on transport-level failure, refresh URL and retry once.
-
-        Catches httpx.RequestError (the umbrella for ConnectError, ReadError,
-        RemoteProtocolError, TimeoutException, PoolTimeout, etc.) so any
-        network-level failure triggers a single URL refresh + retry. RuntimeError
-        (HTTP 4xx/5xx from vLLM) is NOT retried — that's a real upstream error
-        that should surface to the caller.
-        """
+        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
+        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
         try:
             proxy_url = await self._resolve_proxy_url()
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
@@ -175,10 +113,8 @@ class SkyRLTrainInferenceForwardingClient:
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
     ) -> types.SampleOutput:
-        """POST {proxy_url}/v1/completions and parse into SampleOutput."""
-        # vLLM identifies the LoRA adapter by the name passed to load_lora_adapter,
-        # which was set to model_id in save_weights_for_sampler. For base-model
-        # sampling we point at the underlying HF model name directly.
+        # model_id matches the LoRA name registered with vLLM during
+        # save_weights_for_sampler; base_model is used for non-LoRA sampling.
         model_name = base_model if base_model else model_id
 
         model_input = sample_req.prompt.to_types()
@@ -194,17 +130,12 @@ class SkyRLTrainInferenceForwardingClient:
             "temperature": sp.temperature,
             "top_p": sp.top_p,
             "top_k": sp.top_k,
-            # vLLM (and the upstream vllm-router) expects an integer for the
-            # OpenAI-compatible /v1/completions endpoint — the number of top
-            # tokens to return logprobs for. 1 gives the chosen token's
-            # logprob, which is what the Tinker SampleOutput requires.
+            # vllm-router rejects boolean; 1 = return the chosen token's logprob.
             "logprobs": 1,
             "stream": False,
             "return_token_ids": True,
         }
-        # API-level SamplingParams.stop is polymorphic: list[str] -> stop
-        # strings, list[int] -> stop token ids. Mirrors the dispatch in
-        # api.py SamplingParams.to_types().
+        # SamplingParams.stop is polymorphic (list[str] | list[int]).
         stop = getattr(sp, "stop", None)
         if stop:
             if all(isinstance(s, int) for s in stop):
@@ -215,15 +146,11 @@ class SkyRLTrainInferenceForwardingClient:
         url = f"{proxy_url}/v1/completions"
         response = await self._http_client.post(url, json=payload)
         if response.status_code >= 400:
-            # Surface vLLM's body verbatim (e.g. 404 for unknown LoRA name).
             raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
         try:
             result = response.json()
         except ValueError as e:
-            # vLLM-router or any intermediate proxy may return HTML on
-            # transient errors (502 Bad Gateway etc.) even with a 2xx
-            # status. Surface the raw body so the failure mode is
-            # diagnosable from the FutureDB error_data alone.
+            # vllm-router can return HTML on transient errors even with 2xx status.
             raise RuntimeError(
                 f"vLLM /v1/completions returned non-JSON ({response.status_code}, "
                 f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
@@ -234,16 +161,12 @@ class SkyRLTrainInferenceForwardingClient:
             tokens = choice.get("token_ids", [])
             lp = choice.get("logprobs") or {}
             logprobs = lp.get("token_logprobs") or []
-            # vLLM occasionally returns logprobs=None even when requested
-            # (upstream issue under load). RL workloads compute advantages
-            # against these, so zero-fill rather than return a ragged shape
-            # — matches the legacy in-process sample path's behavior.
+            # vLLM occasionally returns None for logprobs under load; zero-fill so
+            # RL advantage computation doesn't see a ragged shape.
             if not logprobs and tokens:
                 logger.warning("No logprobs returned from vLLM — filling with zeros")
                 logprobs = [0.0] * len(tokens)
-            # Map vLLM's finish_reason ({"stop", "stop_token", "length", ...})
-            # to Tinker's Literal["stop", "length"]. Mirrors the
-            # normalization in skyrl_train_backend._sample_with_remote_client.
+            # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
             finish_reason = choice.get("finish_reason")
             stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
             sequences.append(
