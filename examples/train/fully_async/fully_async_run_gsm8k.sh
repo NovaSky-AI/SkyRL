@@ -69,11 +69,12 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization=0.15 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k-async" \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enable_ray_prometheus_stats=true \
   $@

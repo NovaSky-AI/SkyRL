@@ -29,34 +29,43 @@ def _snapshot(
     itl_sum: float,
     itl_count: float,
     replicas: int = 2,
+    replica_id_offset: int = 0,
 ) -> str:
-    """Build a Prometheus text payload split across N replica labels."""
+    """Build a Prometheus text payload split across N replica labels.
+
+    ``replica_id_offset`` shifts the ``ReplicaId`` numbering (default 0 → r0,
+    r1, ...).  Used by multi-node tests to give each simulated node a unique
+    set of replica IDs so merges across nodes don't collide.
+    """
     lines = []
 
     def per_replica_split(value: float):
         return [value / replicas] * replicas
 
+    def rid(i: int) -> str:
+        return f"r{i + replica_id_offset}"
+
     def emit_gauge(name: str, value: float):
         lines.append(f"# HELP {name} test")
         lines.append(f"# TYPE {name} gauge")
         for i, v in enumerate(per_replica_split(value)):
-            lines.append(f'{name}{{ReplicaId="r{i}"}} {v}')
+            lines.append(f'{name}{{ReplicaId="{rid(i)}"}} {v}')
 
     def emit_counter(name_base: str, value: float):
         lines.append(f"# HELP {name_base} test")
         lines.append(f"# TYPE {name_base} counter")
         for i, v in enumerate(per_replica_split(value)):
-            lines.append(f'{name_base}_total{{ReplicaId="r{i}"}} {v}')
+            lines.append(f'{name_base}_total{{ReplicaId="{rid(i)}"}} {v}')
 
     def emit_histogram_sumcount(base: str, total_sum: float, total_count: float):
         # Skip _bucket lines; the scraper only uses _sum / _count.
         lines.append(f"# HELP {base} test")
         lines.append(f"# TYPE {base} histogram")
         for i, (s, c) in enumerate(zip(per_replica_split(total_sum), per_replica_split(total_count))):
-            lines.append(f'{base}_sum{{ReplicaId="r{i}"}} {s}')
-            lines.append(f'{base}_count{{ReplicaId="r{i}"}} {c}')
+            lines.append(f'{base}_sum{{ReplicaId="{rid(i)}"}} {s}')
+            lines.append(f'{base}_count{{ReplicaId="{rid(i)}"}} {c}')
             # An empty histogram still needs a +Inf bucket for parser sanity.
-            lines.append(f'{base}_bucket{{ReplicaId="r{i}",le="+Inf"}} {c}')
+            lines.append(f'{base}_bucket{{ReplicaId="{rid(i)}",le="+Inf"}} {c}')
 
     emit_gauge("ray_vllm_num_requests_running", running)
     emit_gauge("ray_vllm_num_requests_waiting", waiting)
@@ -256,6 +265,75 @@ def test_scraper_with_no_urls_is_noop():
     scraper = VLLMMetricsScraper(urls=[])
     out = asyncio.run(scraper.sample())
     assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_merges_across_nodes_and_aggregates_correctly():
+    # Two nodes, each running two replicas with disjoint ReplicaId labels.
+    # Node A → r0, r1.  Node B → r2, r3.  Merged set should have 4 entries
+    # per metric with no collisions.
+    urls = ["http://nodeA/metrics", "http://nodeB/metrics"]
+    scraper = VLLMMetricsScraper(urls=urls)
+
+    node_a = _snapshot(
+        running=4,
+        waiting=2,
+        kv=0.6,  # split across r0, r1 → 0.3 each
+        prefix_q=100,
+        prefix_h=80,
+        prompt_toks=1000,
+        gen_toks=500,
+        ttft_sum=2.0,
+        ttft_count=10,
+        itl_sum=1.0,
+        itl_count=200,
+    )
+    node_b = _snapshot(
+        running=6,
+        waiting=4,
+        kv=0.8,  # split across r2, r3 → 0.4 each
+        prefix_q=200,
+        prefix_h=140,
+        prompt_toks=3000,
+        gen_toks=1500,
+        ttft_sum=4.0,
+        ttft_count=20,
+        itl_sum=3.0,
+        itl_count=300,
+        replica_id_offset=2,
+    )
+    url_to_text = {urls[0]: node_a, urls[1]: node_b}
+
+    async def fake_fetch_one(_client, url):
+        return url_to_text[url]
+
+    with patch.object(scraper, "_fetch_one", fake_fetch_one):
+        parsed = await scraper._fetch_all()
+
+    # Merge sanity: each metric appears once per replica per node → 4 entries.
+    running_entries = [v for (n, _l), v in parsed.items() if n == "ray_vllm_num_requests_running"]
+    kv_entries = [v for (n, _l), v in parsed.items() if n == "ray_vllm_kv_cache_usage_perc"]
+    assert len(running_entries) == 4
+    assert len(kv_entries) == 4
+    # ReplicaId labels should span all four ids with no collision.
+    running_rids = {
+        dict(labels)["ReplicaId"] for (n, labels), _ in parsed.items() if n == "ray_vllm_num_requests_running"
+    }
+    assert running_rids == {"r0", "r1", "r2", "r3"}
+
+    # Sum aggregation reduces correctly across both nodes.
+    sums = aggregate(
+        parsed,
+        ["ray_vllm_num_requests_running", "ray_vllm_prompt_tokens_total", "ray_vllm_prefix_cache_hits_total"],
+        how="sum",
+    )
+    assert sums["ray_vllm_num_requests_running"] == pytest.approx(4 + 6)
+    assert sums["ray_vllm_prompt_tokens_total"] == pytest.approx(1000 + 3000)
+    assert sums["ray_vllm_prefix_cache_hits_total"] == pytest.approx(80 + 140)
+
+    # Mean aggregation: 4 replicas at (0.3, 0.3, 0.4, 0.4) → 0.35.
+    means = aggregate(parsed, ["ray_vllm_kv_cache_usage_perc"], how="mean")
+    assert means["ray_vllm_kv_cache_usage_perc"] == pytest.approx(0.35)
 
 
 def test_discover_ray_metrics_urls_filters_dead_and_missing(monkeypatch):

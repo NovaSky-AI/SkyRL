@@ -298,10 +298,7 @@ generator:
   enforce_eager: true
   fully_sharded_loras: false
   # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
-  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger so engine
-  # metrics flow into Ray's per-node metrics agent. Also enables a small subset of 
-  # derived metrics in wandb under the `vllm/` prefix (throughput, KV-cache usage, 
-  # prefix-cache hit rate, average TTFT/TPOT).
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
   enable_ray_prometheus_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024

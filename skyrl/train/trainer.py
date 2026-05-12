@@ -367,6 +367,8 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.aclose()
         self.tracker.finish()
         logger.info("Training done!")
 
