@@ -97,7 +97,7 @@ class VLLMServerActor(ServerActorProtocol):
         colocated_training: bool = False,
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
-        enable_ray_prometheus_stats: bool = False,
+        enable_ray_prometheus_stats: bool = True,
     ):
         """
         Initialize the vLLM server actor.

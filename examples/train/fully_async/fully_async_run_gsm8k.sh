@@ -76,5 +76,4 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
-  generator.inference_engine.enable_ray_prometheus_stats=true \
   $@
