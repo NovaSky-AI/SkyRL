@@ -592,13 +592,17 @@ class RayPPOTrainer:
         self.dispatch.init_weight_sync_state(self.inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
-    def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(
+        self, generator_output: GeneratorOutput, uids: List[str], is_training: bool = True
+    ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training
 
         Args:
             generator_output (GeneratorOutput): Generated rollouts and associated data.
             uids (List[str]): List of prompt-unique identifiers for each generator ouput in the same
                 order as `generator_output`. Used to identify which prompt each generated rollout belongs to.
+            is_training (bool): Whether this batch is for training (strict batch size) or evaluation
+                (allows partial batches). Defaults to True for backward compatibility.
         Returns:
             training_input (TrainingInputBatch): Padded batch of tensors for training. It preserves the
                 order of `generator_output` and hence `uids`.
@@ -680,11 +684,21 @@ class RayPPOTrainer:
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
         is_stepwise = self.cfg.generator.step_wise_trajectories
         training_input.metadata["policy_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
-            uids, self.cfg.trainer.policy_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+            uids,
+            self.cfg.trainer.policy_mini_batch_size,
+            train_batch_size,
+            is_stepwise,
+            n_samples_per_prompt,
+            is_training=is_training,
         )
         if self.cfg.trainer.critic.model.path is not None:
             training_input.metadata["critic_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
-                uids, self.cfg.trainer.critic_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
+                uids,
+                self.cfg.trainer.critic_mini_batch_size,
+                train_batch_size,
+                is_stepwise,
+                n_samples_per_prompt,
+                is_training=is_training,
             )
 
         # 5. Record metadata and metrics.
