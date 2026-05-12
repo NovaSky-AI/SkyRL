@@ -135,18 +135,40 @@ class SkyRLTrainInferenceForwardingClient:
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
+            if future is None:
+                # The future row was deleted (manual cleanup, stale-session
+                # GC, etc.) between asample handler scheduling us and our
+                # arrival here. Nothing to write back; the retrieve_future
+                # poller will time out on the caller's side.
+                logger.warning(
+                    "FutureDB row %s missing on completion write — skipping (request was likely cancelled)",
+                    request_id,
+                )
+                return
             future.result_data = result_data
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        """Forward once; on connection error, refresh the cached URL and retry once."""
+        """Forward once; on transport-level failure, refresh URL and retry once.
+
+        Catches httpx.RequestError (the umbrella for ConnectError, ReadError,
+        RemoteProtocolError, TimeoutException, PoolTimeout, etc.) so any
+        network-level failure triggers a single URL refresh + retry. RuntimeError
+        (HTTP 4xx/5xx from vLLM) is NOT retried — that's a real upstream error
+        that should surface to the caller.
+        """
         try:
             proxy_url = await self._resolve_proxy_url()
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
-            logger.warning("Connection error to %s: %s — refreshing proxy URL", self._cached_proxy_url, e)
+        except httpx.RequestError as e:
+            logger.warning(
+                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
+                self._cached_proxy_url,
+                type(e).__name__,
+                e,
+            )
             proxy_url = await self._resolve_proxy_url(force_refresh=True)
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
 
@@ -195,7 +217,17 @@ class SkyRLTrainInferenceForwardingClient:
         if response.status_code >= 400:
             # Surface vLLM's body verbatim (e.g. 404 for unknown LoRA name).
             raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            # vLLM-router or any intermediate proxy may return HTML on
+            # transient errors (502 Bad Gateway etc.) even with a 2xx
+            # status. Surface the raw body so the failure mode is
+            # diagnosable from the FutureDB error_data alone.
+            raise RuntimeError(
+                f"vLLM /v1/completions returned non-JSON ({response.status_code}, "
+                f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
+            ) from e
 
         sequences = []
         for choice in result.get("choices", []):
