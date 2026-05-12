@@ -354,7 +354,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         enable_log_requests = kwargs.pop("enable_log_requests", False)
         max_log_len = kwargs.pop("max_log_len", None)
 
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
+        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, kv_cache_metrics=True, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
         stat_loggers = None
