@@ -215,11 +215,6 @@ no-build-isolation-package = [
     "transformer-engine-torch",
     "transformer-engine",
     "nv-grouped-gemm",
-    # causal-conv1d and mamba-ssm need to compile against torch 2.11 (no
-    # upstream wheels yet); building with isolation would pin a different
-    # torch in the build env than the runtime.
-    "causal-conv1d",
-    "mamba-ssm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
@@ -235,10 +230,6 @@ override-dependencies = [
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
-# causal-conv1d / mamba-ssm need torch + ninja in the build env (we run them
-# with build isolation disabled but uv still uses extra-build-dependencies).
-causal-conv1d = [{requirement = "torch", match-runtime = true}, "ninja", "packaging", "wheel", "setuptools"]
-mamba-ssm = [{requirement = "torch", match-runtime = true}, "ninja", "packaging", "wheel", "setuptools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
