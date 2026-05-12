@@ -47,7 +47,23 @@ jobs:
           activate-environment: true
       - name: Install dependencies
         run: uv pip install anyscale==0.24.79 typer==0.9.0
+      - name: Check GPU test credentials
+        id: gpu_test_credentials
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+        run: |
+          if [[ -n "${ANYSCALE_CLI_TOKEN}" ]]; then
+            echo "can_run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "can_run=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Skip GPU tests for PRs without Anyscale credentials
+        if: steps.gpu_test_credentials.outputs.can_run != 'true'
+        run: |
+          echo "Skipping SkyRL GPU tests because ANYSCALE_CLI_TOKEN is unavailable."
+          echo "This commonly happens on fork PRs where GitHub Actions does not expose repository secrets."
       - name: GPU tests
+        if: steps.gpu_test_credentials.outputs.can_run == 'true'
         env:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
