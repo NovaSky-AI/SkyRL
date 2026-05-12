@@ -57,9 +57,7 @@ class SkyRLTrainInferenceForwardingClient:
             if force_refresh or self._cached_proxy_url is None:
                 url = await self._read_proxy_url_from_db()
                 if url is None:
-                    raise RuntimeError(
-                        "inference engine not ready: no proxy URL published to EngineStateDB"
-                    )
+                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
                 self._cached_proxy_url = url
             return self._cached_proxy_url
 
