@@ -115,6 +115,9 @@ outputs/
 # Local artifacts
 tinker.db
 
+# Local launcher with hardcoded credentials — never commit
+scripts/start-overnight.sh
+
 # Alembic - don't track pycache
 tx/tinker/alembic/__pycache__/
 

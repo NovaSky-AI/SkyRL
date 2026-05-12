@@ -1,5 +1,8 @@
 # Task Generation GRPO Training via SkyPilot - Qwen3.5-35B-A3B (MoE, Multi-Node)
-# Usage: sky launch tasks/task-gen-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Usage: bash scripts/fleet-launch.sh --require OPENROUTER_API_KEY -- \
+#          tasks/task-gen-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key> --env OPENROUTER_API_KEY=<key>
+#   (Task-gen rollouts call OpenRouter for the evaluator model, so OPENROUTER_API_KEY is required.
+#    fleet-launch.sh runs scripts/fleet-preflight.sh first; using `sky launch` directly skips that safety net.)
 #
 # MoE: 35B total, 3B active (256 experts, 9 active/token). GatedDeltaNet architecture.
 # Multi-node (2-node default, 16 GPUs total): TP=2, 8 inference engines.

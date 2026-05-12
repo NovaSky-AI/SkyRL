@@ -14,12 +14,12 @@ YAML="tasks/task-gen-grpo-qwen3_5-9b.yaml"
 TARGET_STEPS=40
 BATCH_SIZE=12
 
-# Required env vars
-: "${FLEET_API_KEY:?set FLEET_API_KEY}"
-: "${WANDB_API_KEY:?set WANDB_API_KEY}"
-: "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}"
-: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
-: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
+# Pre-launch validation: check creds + cloud auth once, before the per-env loop,
+# so we don't fire off N `sky launch`es and discover halfway through that
+# OPENROUTER_API_KEY was unset. fleet-preflight.sh enforces presence + liveness
+# of FLEET/WANDB/AWS by default; --require adds the task-gen-only requirements.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+bash "$SCRIPT_DIR/fleet-preflight.sh" --require OPENROUTER_API_KEY
 
 # Seed counts per env from v55 dataset (after EVAL_RATIO=0.05 split)
 get_seeds() {

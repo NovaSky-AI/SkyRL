@@ -1,5 +1,6 @@
 # Fleet VL/CUA GRPO Training via SkyPilot - Qwen3.5-9B (Vision-Language)
-# Usage: sky launch tasks/openenv-fleet-grpo-vl.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Usage: bash scripts/fleet-launch.sh tasks/openenv-fleet-grpo-vl.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#   (fleet-launch.sh runs scripts/fleet-preflight.sh first; using `sky launch` directly skips that safety net.)
 #
 # VL (Vision-Language) training for browser_use environments with screenshots.
 # Based on working config from SkyRL PR #288 (feat/vl-support-clean).
