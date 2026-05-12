@@ -163,7 +163,9 @@ class TestWeightSyncPauseFlush:
         dispatch._inference_engine_client = AsyncMock()
         dispatch._inference_engine_client.pause_generation = AsyncMock(side_effect=lambda: call_order.append("pause"))
         dispatch._inference_engine_client.resume_generation = AsyncMock(side_effect=lambda: call_order.append("resume"))
-        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=lambda _: call_order.append("broadcast"))
+        dispatch._broadcast_to_inference_engines = MagicMock(
+            side_effect=lambda *args, **kwargs: call_order.append("broadcast")
+        )
         dispatch._prepare_for_weight_sync = MagicMock()
         dispatch._finish_weight_sync = MagicMock()
 

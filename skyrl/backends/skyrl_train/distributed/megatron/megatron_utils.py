@@ -102,7 +102,7 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
 
     for model in models:
         for layer in model.decoder.layers:
-            if hasattr(layer.mlp, "router"):
+            if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
                 if getattr(layer.mlp.router, "bias", None) is not None:

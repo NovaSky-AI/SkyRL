@@ -4,6 +4,7 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 
 import typing
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Annotated, List, Optional
 
 import pytest
@@ -12,7 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
-    _resolve_dataclass_type,
+    _resolve_class_type,
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
@@ -34,11 +35,16 @@ class _SimpleConfig(BaseConfig):
     a: int = 0
 
 
+class SimpleEnum(Enum):
+    A = "a"
+
+
 @dataclass
 class _NestedConfig(BaseConfig):
     b: int = 1
     c: Annotated[_SimpleConfig, "test"] = field(default_factory=_SimpleConfig)
     d: Optional[_SimpleConfig] = None
+    e: Optional[SimpleEnum] = SimpleEnum.A
 
 
 def test_build_nested_dataclass():
@@ -78,6 +84,12 @@ def test_build_config_from_dict_config():
     assert cfg.b == 1
     assert cfg.c.a == 2
 
+    cfg = OmegaConf.create({"b": 1, "c": {"a": 2}, "e": "a"})
+    cfg = _NestedConfig.from_dict_config(cfg)
+    assert cfg.b == 1
+    assert cfg.c.a == 2
+    assert isinstance(cfg.e, SimpleEnum)
+
 
 def test_build_config_from_dict_config_invalid_config():
     cfg = OmegaConf.create({"path": "path/to/model"})
@@ -86,10 +98,11 @@ def test_build_config_from_dict_config_invalid_config():
 
 
 def test_dtype_resolution():
-    assert not _resolve_dataclass_type(typing.Optional[int])
-    assert _resolve_dataclass_type(typing.Optional[_SimpleConfig]) is _SimpleConfig
-    assert _resolve_dataclass_type(typing.Union[None, _SimpleConfig]) is _SimpleConfig
-    assert _resolve_dataclass_type(typing.Annotated[_SimpleConfig, "test"]) is _SimpleConfig
+    assert not _resolve_class_type(typing.Optional[int])
+    assert _resolve_class_type(typing.Optional[_SimpleConfig]) is _SimpleConfig
+    assert _resolve_class_type(typing.Union[None, _SimpleConfig]) is _SimpleConfig
+    assert _resolve_class_type(typing.Annotated[_SimpleConfig, "test"]) is _SimpleConfig
+    assert _resolve_class_type(Optional[SimpleEnum]) is SimpleEnum
 
 
 def test_cli_overrides():

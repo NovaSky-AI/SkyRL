@@ -11,6 +11,7 @@ import os
 import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
 import yaml
@@ -60,6 +61,16 @@ class SkyRLLoraConfig(BaseConfig):
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
+
+    max_loras: int = 1
+    """Maximum number of LoRA adapters that can be active concurrently in a
+    single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
+    multi-tenant LoRA serving via ``RemoteInferenceClient.load_lora_adapter``."""
+
+    max_cpu_loras: Optional[int] = None
+    """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
+    ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
+    >= ``max_loras`` if explicitly set."""
 
 
 @dataclass
@@ -639,11 +650,28 @@ class TrainerConfig(BaseConfig):
     rope_theta: Optional[float] = None
     log_example_interval: int = 1
     """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
+    logprobs_chunk_size: Optional[int] = 1024
+    """Chunk size along the sequence dimension when computing log-probs from logits.
+    This lowers peak GPU memory at the cost of ~2x wall-clock time.
+    ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
+    See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
+
+        if self.logprobs_chunk_size is not None and (
+            not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
+        ):
+            raise ValueError(
+                f"logprobs_chunk_size must be a positive integer or None, got {self.logprobs_chunk_size!r}."
+            )
+        if self.logprobs_chunk_size is None and self.strategy != "megatron":
+            raise ValueError(
+                "logprobs_chunk_size=None (no chunking) is only supported with the Megatron backend. "
+                f"Set a positive integer for strategy={self.strategy!r}."
+            )
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
@@ -658,11 +686,11 @@ def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
         raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
 
 
-def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
-    """Extract the concrete dataclass type from a type annotation.
+def _resolve_class_type(type_annotation: Any) -> Optional[Type]:
+    """Extract the concrete non-plain class type from a type annotation.
 
     Handles plain types, Optional[T], Union[T, None], and Annotated[T, ...].
-    Returns None if no dataclass type can be resolved.
+    Returns None if no dataclass or Enum type can be resolved.
     """
     origin = typing.get_origin(type_annotation)
 
@@ -671,16 +699,18 @@ def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
         for arg in typing.get_args(type_annotation):
             if arg is type(None):
                 continue
-            resolved = _resolve_dataclass_type(arg)
+            resolved = _resolve_class_type(arg)
             if resolved is not None:
                 return resolved
         return None
 
     if origin is Annotated:
-        return _resolve_dataclass_type(typing.get_args(type_annotation)[0])
+        return _resolve_class_type(typing.get_args(type_annotation)[0])
 
     # Plain class check
-    if isinstance(type_annotation, type) and dataclasses.is_dataclass(type_annotation):
+    if isinstance(type_annotation, type) and (
+        dataclasses.is_dataclass(type_annotation) or issubclass(type_annotation, Enum)
+    ):
         return type_annotation
 
     return None
@@ -709,9 +739,14 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
         if f.name not in d:
             continue
         value = d[f.name]
-        nested_cls = _resolve_dataclass_type(f.type)
-        if nested_cls is not None and isinstance(value, dict):
-            kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+        nested_cls = _resolve_class_type(f.type)
+        if nested_cls is not None:
+            if isinstance(value, dict) and dataclasses.is_dataclass(nested_cls):
+                kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+            elif issubclass(nested_cls, Enum):
+                kwargs[f.name] = nested_cls(value)
+            else:
+                kwargs[f.name] = value
         else:
             # Primitives, None, lists, raw dicts, already-constructed objects
             kwargs[f.name] = value
@@ -786,7 +821,11 @@ class SkyRLTrainConfig(BaseConfig):
             ValueError: If an argument uses the unsupported '+' prefix.
         """
         if isinstance(args, dict):
-            args = [f"{k}={v}" for k, v in args.items()]
+            # OmegaConf's CLI parser only treats "null" as None; Python's
+            # None stringifies to "None" which is parsed as the literal
+            # string. Map None -> "null" so JSON-style overrides survive
+            # the round-trip through OmegaConf.from_cli below.
+            args = [f"{k}=null" if v is None else f"{k}={v}" for k, v in args.items()]
 
         from skyrl.train.config.legacy import (
             is_legacy_config,

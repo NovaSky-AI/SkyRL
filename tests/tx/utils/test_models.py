@@ -34,6 +34,10 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
     base_config.intermediate_size = 128
     base_config.num_attention_heads = 2
     base_config.num_key_value_heads = 2
+    # transformers >=5.4 validates len(layer_types) == num_hidden_layers.
+    layer_types = getattr(base_config, "layer_types", None)
+    if layer_types is not None:
+        base_config.layer_types = list(layer_types[: base_config.num_hidden_layers])
 
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 

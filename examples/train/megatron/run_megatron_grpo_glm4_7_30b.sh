@@ -57,6 +57,8 @@ MOE_ROUTER_EXPERT_BIAS=true
 OPTIMIZER_CPU_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
+export _SKYRL_USE_NEW_INFERENCE=0
+
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

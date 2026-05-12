@@ -80,6 +80,7 @@ class HFModelWrapper(nn.Module):
         model_config_kwargs: dict = {},
         meta_init: bool = False,
         language_model_only: bool = False,
+        logprobs_chunk_size: int = 1024,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -218,6 +219,8 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
+        self.logprobs_chunk_size = logprobs_chunk_size
+
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
         # Credits: https://www.tylerromero.com/posts/2025-02-selective-log-softmax/#efficient-solution
         self.chunked_entropy_from_logits_fn = (
@@ -351,7 +354,10 @@ class HFModelWrapper(nn.Module):
                 entropy_mask = attention_mask_fwd
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
+                logits_BSV,
+                requires_grad=entropy_requires_grad,
+                attention_mask=entropy_mask,
+                chunk_size=self.logprobs_chunk_size,
             )
 
             if self.sequence_parallel_size > 1:

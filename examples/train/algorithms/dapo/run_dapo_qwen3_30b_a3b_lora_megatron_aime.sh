@@ -18,8 +18,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
-# use token mean loss reduction
-LOSS_REDUCTION="token_mean"
+LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py

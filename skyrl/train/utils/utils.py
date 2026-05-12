@@ -198,13 +198,6 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
-    if cfg.trainer.flash_attn:
-        import flash_attn
-
-        version = flash_attn.__version__
-        if version > "2.8.1":
-            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
-
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
@@ -612,8 +605,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
-    # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-    # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+    # NOTE (erictang000): This should no longer be required since this has been removed in vllm
+    # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
+    # that previously ran successfully, so keeping this to maintain backwards compatibility.
     if cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
@@ -650,6 +644,18 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+        if os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"):
+            logger.info(
+                f"Exporting `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to ray runtime env: {os.environ['VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS']}"
+            )
+            env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
+
+        if os.environ.get("RAY_CGRAPH_get_timeout"):
+            logger.info(
+                f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
+            )
+            env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []

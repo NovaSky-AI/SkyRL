@@ -28,6 +28,8 @@ MEGATRON_CP=1
 NUM_INFERENCE_ENGINES=8
 INFERENCE_TP=1
 
+export _SKYRL_USE_NEW_INFERENCE=0
+
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

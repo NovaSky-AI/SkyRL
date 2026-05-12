@@ -38,7 +38,32 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        super().__init__(**(config if isinstance(config, dict) else config.__dict__))
+        # Preserve the source config's attribute_map (e.g. Qwen3MoeConfig's
+        # num_experts -> num_local_experts alias) — transformers v5.4 made
+        # PreTrainedConfig a @strict @dataclass and stopped propagating it.
+        if not isinstance(config, dict) and type(config).attribute_map:
+            self.attribute_map = type(config).attribute_map
+
+        # Must be set before super().__init__: its @strict validators call
+        # self.get_text_config, which reads these attributes.
+        self.max_lora_adapters = max_lora_adapters
+        self.max_lora_rank = max_lora_rank
+        self.shard_attention_heads = shard_attention_heads
+        self.loss_chunk_size = loss_chunk_size
+        self.gradient_checkpointing = gradient_checkpointing
+        self.mhc_expansion_rate = mhc_expansion_rate
+
+        # super().__init__ setattrs every key from config_dict, which would
+        # silently overwrite the attributes set above on any overlap.
+        config_dict = config if isinstance(config, dict) else config.__dict__
+        overlap = sorted(self.__dict__.keys() & config_dict.keys())
+        if overlap:
+            raise NotImplementedError(
+                f"config {config} carries keys {overlap} that conflict with"
+                f" {type(self).__name__}'s own keyword arguments."
+            )
+
+        super().__init__(**config_dict)
 
         # In transformers v5, rope_parameters may not contain rope_theta
         # even when it exists as a top-level config attribute (e.g. DeepSeek v3).
@@ -50,13 +75,6 @@ class ModelConfig(PretrainedConfig):
                 rope_params["rope_theta"] = rope_theta
         if rope_params:
             self.rope_parameters = rope_params
-
-        self.max_lora_adapters = max_lora_adapters
-        self.max_lora_rank = max_lora_rank
-        self.shard_attention_heads = shard_attention_heads
-        self.loss_chunk_size = loss_chunk_size
-        self.gradient_checkpointing = gradient_checkpointing
-        self.mhc_expansion_rate = mhc_expansion_rate
 
     def get_config(self) -> PretrainedConfig:
         """Return `text_config` when present, otherwise return this config."""

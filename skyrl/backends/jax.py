@@ -20,6 +20,7 @@ Usage:
     uv run -m skyrl.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
+import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from flax import nnx
 from flax.training import checkpoints
 from jax.experimental import multihost_utils
 from pydantic import BaseModel, Field, TypeAdapter
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.renderer import render_model_input
@@ -111,6 +112,22 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     num_processes: int | None = Field(
         default=None,
         description="Total number of processes in the multi-node cluster",
+    )
+    # RayJaxBackend configuration
+    use_ray: bool = Field(
+        default=False,
+        description="Use Ray to schedule JAX workers",
+    )
+
+    ray_actor_options: dict = Field(
+        default_factory=dict,
+        description="Options to pass to Ray actors (e.g., resources, num_cpus)",
+        json_schema_extra={"argparse_type": json.loads},
+    )
+    ray_pg_bundles: list = Field(
+        default_factory=list,
+        description="Bundles for the Ray placement group (e.g., [{'CPU': 1}] * num_processes)",
+        json_schema_extra={"argparse_type": json.loads},
     )
 
 
@@ -203,7 +220,7 @@ class JaxBackendImpl(AbstractBackend):
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
+        base_config = AutoConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=config.max_lora_adapters,
