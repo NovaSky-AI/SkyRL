@@ -111,7 +111,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="dapo-async-repro" \
+  trainer.project_name="dapo-async-demo" \
   trainer.run_name="$RUN_NAME" \
   trainer.export_path="$HOME/exports/$RUN_NAME" \
   trainer.hf_save_interval=$EVAL_CKPT_INTERVAL \
