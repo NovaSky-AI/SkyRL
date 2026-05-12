@@ -40,7 +40,10 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
-from skyrl.tinker.extra import ExternalInferenceClient, SkyRLTrainInferenceForwardingClient
+from skyrl.tinker.extra import (
+    ExternalInferenceClient,
+    SkyRLTrainInferenceForwardingClient,
+)
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
