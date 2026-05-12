@@ -5,6 +5,7 @@ import io
 import os
 import tarfile
 import tempfile
+from typing import Callable
 
 import ray
 import torch
@@ -138,11 +139,12 @@ class SkyRLTrainBackend(AbstractBackend):
         self._server_groups: list = []
         self._inference_router = None
 
-        # Database URL for publishing inference endpoint to EngineStateDB.
-        # Set by the engine via set_engine_database_url() if available; the
-        # backend silently no-ops _publish_engine_state when None (e.g. when
-        # constructed outside a Tinker engine in unit tests).
-        self._engine_database_url: str | None = None
+        # Optional hook invoked on inference-engine state changes (after
+        # _create_new_inference_client, on delete_model teardown). The host
+        # (e.g. the Tinker engine subprocess) wires the persistence side via
+        # set_inference_state_publisher. None when running outside a host
+        # that needs to be notified (unit tests, non-Tinker uses).
+        self._inference_state_publisher: Callable[[str | None], None] | None = None
 
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
@@ -331,56 +333,28 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.generator.inference_engine,
         )
 
-    def set_engine_database_url(self, database_url: str) -> None:
-        """Wire the engine's database URL so we can publish inference state.
+    def set_inference_state_publisher(self, publisher: Callable[[str | None], None]) -> None:
+        """Wire a callback invoked when the inference proxy URL changes.
 
-        Called by the Tinker engine after backend construction. When set,
-        ``_publish_engine_state`` writes a singleton row to ``EngineStateDB``
-        each time the inference engine is built or torn down. The API
-        process reads that row to decide whether to forward sample requests
-        directly to vLLM (the async sample routing path).
+        Called by the host (e.g. the Tinker engine subprocess) after backend
+        construction. The callback receives the current proxy URL after a
+        new inference engine is brought up, or ``None`` on teardown. The
+        backend has no opinion on what the callback does — typical use is
+        to persist the URL somewhere the API process can read.
         """
-        self._engine_database_url = database_url
+        self._inference_state_publisher = publisher
 
-    def _publish_engine_state(self, *, proxy_url: str | None) -> None:
-        """Upsert the singleton row in EngineStateDB.
+    def _publish_inference_state(self, proxy_url: str | None) -> None:
+        """Invoke the publisher if set; best-effort (failure must not raise).
 
-        Idempotent. Safe to call repeatedly. ``proxy_url=None`` signals that
-        no vLLM is currently up (post-teardown) — the API process will fall
-        back to the engine's synchronous sample path.
-
-        Best-effort: on any DB error we log and return rather than raise.
         Callers rely on local state being reset regardless of publish outcome.
         """
-        if self._engine_database_url is None:
-            # Backend not wired to a Tinker engine (unit tests, non-Tinker uses).
+        if self._inference_state_publisher is None:
             return
-
-        from datetime import datetime, timezone
-
-        from sqlmodel import Session, SQLModel, create_engine
-
-        from skyrl.tinker.db_models import EngineStateDB, enable_sqlite_wal
-
         try:
-            db_engine = create_engine(self._engine_database_url, echo=False)
-            enable_sqlite_wal(db_engine)
-            # The API process creates the schema, but in unit tests the backend
-            # may run without an API. Make sure the table exists before writing.
-            SQLModel.metadata.create_all(db_engine, tables=[EngineStateDB.__table__])
-            try:
-                with Session(db_engine) as session:
-                    row = session.get(EngineStateDB, 1)
-                    if row is None:
-                        row = EngineStateDB(singleton_id=1)
-                    row.inference_proxy_url = proxy_url
-                    row.updated_at = datetime.now(timezone.utc)
-                    session.add(row)
-                    session.commit()
-            finally:
-                db_engine.dispose()
+            self._inference_state_publisher(proxy_url)
         except Exception as e:
-            logger.warning(f"Failed to publish engine state (proxy_url={proxy_url!r}): {e}")
+            logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
 
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
@@ -400,7 +374,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Publish inference endpoint so the API can forward samples directly
         # (only meaningful in non-colocated mode; the API gates on this).
-        self._publish_engine_state(proxy_url=server_setup.proxy_url)
+        self._publish_inference_state(server_setup.proxy_url)
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -557,11 +531,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
-        # Local state is fully reset above. Tell the API there is no
-        # inference engine to forward to last — _publish_engine_state is
-        # best-effort, so a DB failure here won't leave the controller
-        # half-torn-down. Next _create_new_inference_client repopulates.
-        self._publish_engine_state(proxy_url=None)
+        # Local state is fully reset above. Notify the host last so a
+        # publisher failure can't leave the controller half-torn-down.
+        # Next _create_new_inference_client repopulates.
+        self._publish_inference_state(None)
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:
