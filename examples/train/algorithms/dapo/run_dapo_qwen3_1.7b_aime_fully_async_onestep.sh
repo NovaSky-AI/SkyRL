@@ -6,7 +6,7 @@ set -x
 # bash examples/train/algorithms/dapo/run_dapo_qwen3_1.7b_aime_fully_async_onestep.sh
 
 MODEL_NAME="Qwen/Qwen3-1.7B-Base"
-DATA_DIR="/mnt/cluster_storage/data/dapo"
+DATA_DIR="$DATA_DIR/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=1
