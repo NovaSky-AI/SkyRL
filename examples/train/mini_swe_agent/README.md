@@ -21,18 +21,20 @@ The Mini-SWE-Agent integration implements a custom `MiniSweAgentGenerator` that 
 
 We launch a Ray task per trajectory to scale this across all nodes in the cluster.
 
+For training correctness, this integration now uses SkyRL's step-wise trajectory format with exact prompt/completion token IDs and rollout logprobs captured from the HTTP `/chat/completions` responses. This avoids reconstructing assistant tokens from message text after the fact.
+
 ### 1) Prepare the dataset
 
 We use [SWE-Gym](https://huggingface.co/SWE-Gym), specifically the subset from [SumanthRH/SWE-Gym-Subset](https://huggingface.co/datasets/SumanthRH/SWE-Gym-Subset).
 
 Execute the following command:
 ```bash
-uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset # or modify to your desired path
+uv run --isolated examples/train/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset # or modify to your desired path
 ```
 
 ### 2) Configure environment backend
 
-**Prerequisites**: Install the required environment backend. By default, we use [Podman](https://podman.io/docs). This can be modified in `examples/mini_swe_agent/swebench.yaml`.
+**Prerequisites**: Install the required environment backend. By default, we use [Podman](https://podman.io/docs). This can be modified in `examples/train/mini_swe_agent/swebench.yaml`.
 
 ### 3) Launch training
 
@@ -40,17 +42,18 @@ We provide example scripts for different model sizes:
 
 **Qwen3-8B** (requires 1x 8xH100 node):
 ```bash
-bash examples/mini_swe_agent/run_mini_swe_8B.sh
+bash examples/train/mini_swe_agent/run_mini_swe_8B.sh
 ```
 
 **Qwen3-Coder-30B** (requires 2x 8xH100 nodes):
 ```bash
-bash examples/mini_swe_agent/run_mini_swe_30B.sh
+bash examples/train/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
 Make sure to update the `DATA_DIR` variable in the bash script if you saved the data to a custom path.
 
 All training parameters can be modified in the run scripts, such as model choice, GRPO group size, or training batch size.
+The provided scripts already enable `generator.step_wise_trajectories=true` and `generator.batched=false`, which are required for exact-token Mini-SWE training.
 
 ## Troubleshooting
 
@@ -73,7 +76,7 @@ For issues with SkyRL or the Mini-SWE-Agent integration, please [open an Issue](
 
 ## Configuration
 
-Beyond the configuration for SkyRL in the training script, the task-specific configuration file is `examples/mini_swe_agent/swebench.yaml`, which controls:
+Beyond the configuration for SkyRL in the training script, the task-specific configuration file is `examples/train/mini_swe_agent/swebench.yaml`, which controls:
 - Environment backend settings
 - Step limits for agent execution
 - Tool configurations for Mini-SWE-Agent
