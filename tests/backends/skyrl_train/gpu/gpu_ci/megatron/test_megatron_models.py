@@ -33,6 +33,14 @@ N_SAMPLES_PER_PROMPT = 4
 MAX_GENERATE_LENGTH = 128
 
 
+# vLLM's Triton MLA decode kernel (the only MLA backend on sm < 9.0) fails
+# to compile for glm-4's MLA shape; FLASH_ATTN_MLA / FLASHMLA need Hopper.
+_skip_mla_on_pre_hopper = pytest.mark.skipif(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9,
+    reason="no working MLA backend for glm-4 on pre-Hopper GPUs",
+)
+
+
 def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
@@ -159,7 +167,20 @@ async def construct_training_input_from_generator_output(generator_output, token
     [
         pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_tp2_ep2"),
         pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_pp2_cp2"),
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/glm-4.7-flash-tiny-random", 1e-1, 2e-2, id="glm-4.7-flash_tp2_ep2"),
+        pytest.param(
+            2,
+            1,
+            1,
+            2,
+            1,
+            2,
+            4,
+            "eatang/glm-4.7-flash-tiny-random",
+            1e-1,
+            2e-2,
+            id="glm-4.7-flash_tp2_ep2",
+            marks=_skip_mla_on_pre_hopper,
+        ),
         pytest.param(
             2,
             1,

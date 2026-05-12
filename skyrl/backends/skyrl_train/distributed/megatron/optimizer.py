@@ -32,12 +32,15 @@ from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 def init_megatron_optim_config(
     optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
 ) -> OptimizerConfig:
+    adam_betas = getattr(optim_config, "adam_betas", (0.9, 0.999))
     optim_args = {
         "optimizer": getattr(optim_config, "optimizer", "adam"),
         "lr": getattr(optim_config, "lr", 1e-6),
         "min_lr": getattr(optim_config, "min_lr", 0.0),
         "clip_grad": getattr(optim_config, "max_grad_norm", 1.0),
         "weight_decay": getattr(optim_config, "weight_decay", 1e-2),
+        "adam_beta1": float(adam_betas[0]),
+        "adam_beta2": float(adam_betas[1]),
         "bf16": True,
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,

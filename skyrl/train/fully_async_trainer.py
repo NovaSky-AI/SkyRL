@@ -450,7 +450,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         with Timer("save_hf_model", self.all_timings):
                             await asyncio.to_thread(self.save_models)
 
-                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
+                timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
+                if self._vllm_metrics_scraper is not None:
+                    timing_payload.update(await self._vllm_metrics_scraper.sample())
+                self.tracker.log(timing_payload, step=self.global_step)
                 self.all_timings = {}
                 self.global_step += 1
 
@@ -503,6 +506,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
 
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.aclose()
         self.tracker.finish()
         logger.info("Training done!")
 

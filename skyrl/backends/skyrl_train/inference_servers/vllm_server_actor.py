@@ -97,6 +97,7 @@ class VLLMServerActor(ServerActorProtocol):
         colocated_training: bool = False,
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
+        enable_ray_prometheus_stats: bool = True,
     ):
         """
         Initialize the vLLM server actor.
@@ -123,6 +124,10 @@ class VLLMServerActor(ServerActorProtocol):
                 ``"mp"`` backend. Pre-computed by ServerGroup from the
                 per-server placement group. Only used when
                 ``distributed_executor_backend="mp"`` and TP*PP > 1.
+            enable_ray_prometheus_stats: If True, route vLLM engine metrics
+                through ``RayPrometheusStatLogger`` so they land in Ray's
+                per-node metrics agent (and thus Anyscale's hosted Prometheus +
+                Grafana).
         """
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
 
@@ -134,6 +139,7 @@ class VLLMServerActor(ServerActorProtocol):
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
         self._use_mp_backend = distributed_executor_backend == "mp"
+        self._enable_ray_prometheus_stats = enable_ray_prometheus_stats
 
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
@@ -318,9 +324,18 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Initialize the engine (this loads the model - takes time)
         engine_args = AsyncEngineArgs.from_cli_args(self._cli_args)
+
+        stat_loggers = None
+        if self._enable_ray_prometheus_stats:
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM engine metrics")
+            stat_loggers = [RayPrometheusStatLogger]
+
         self._engine = AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
+            stat_loggers=stat_loggers,
         )
         logger.info(f"Engine initialized on {self._ip}:{self._port}, adding custom endpoints...")
 
@@ -344,6 +359,9 @@ class VLLMServerActor(ServerActorProtocol):
             access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
         )
         server = uvicorn.Server(config)
+        # vllm's engine_error_handler reads app.state.server to call
+        # terminate_if_errored; normally wired up by vllm's own launcher.
+        app.state.server = server
         await server.serve(sockets=[sock])
 
     def _add_custom_endpoints(self, app) -> None:

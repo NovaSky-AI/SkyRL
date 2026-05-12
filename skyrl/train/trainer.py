@@ -81,6 +81,7 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
 class RayPPOTrainer:
@@ -117,6 +118,10 @@ class RayPPOTrainer:
         self.all_metrics = {}
         self.all_timings = {}
         self.global_step = 0
+
+        self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
+            VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
+        )
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -336,6 +341,8 @@ class RayPPOTrainer:
                     **self.all_metrics,
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
+                if self._vllm_metrics_scraper is not None:
+                    log_payload.update(await self._vllm_metrics_scraper.sample())
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 self.all_timings = {}
@@ -360,6 +367,8 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.aclose()
         self.tracker.finish()
         logger.info("Training done!")
 

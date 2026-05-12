@@ -473,7 +473,7 @@ class InferenceEngineConfig(BaseConfig):
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
     but this may affect convergence for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
-    enable_ray_prometheus_stats: bool = False
+    enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
     max_num_seqs: int = 1024

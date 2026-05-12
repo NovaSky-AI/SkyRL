@@ -360,7 +360,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         enable_log_requests = kwargs.pop("enable_log_requests", False)
         max_log_len = kwargs.pop("max_log_len", None)
 
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
+        engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, kv_cache_metrics=True, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
         stat_loggers = None
@@ -391,7 +391,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         chat_template = openai_kwargs.pop("chat_template", None)
 
-        from vllm.plugins.io_processors import get_io_processor
         from vllm.renderers import renderer_from_config
 
         model_registry = OpenAIModelRegistry(
@@ -399,15 +398,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             base_model_paths=base_model_paths,
         )
         renderer = renderer_from_config(engine.vllm_config)
-        io_processor = get_io_processor(
-            engine.vllm_config,
-            renderer,
-            engine.model_config.io_processor_plugin,
-        )
         openai_serving_render = OpenAIServingRender(
             model_config=engine.model_config,
             renderer=renderer,
-            io_processor=io_processor,
             model_registry=model_registry,
             request_logger=request_logger,
             chat_template=chat_template,

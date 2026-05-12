@@ -100,6 +100,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         ),
         language_model_only=ie_cfg.language_model_only,
         mm_processor_cache_gb=0,
+        kv_cache_metrics=True,
     )
     for key, value in overrides.items():
         setattr(args, key, value)

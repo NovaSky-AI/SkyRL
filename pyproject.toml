@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=5.0.0,<=5.3.0",
+    "transformers>=5.6.1,<=5.8.0",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -102,36 +102,38 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.19.0; sys_platform == 'linux'",
+    "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.10.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.11.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
 megatron = [
     "skyrl[skyrl-train]",
-    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.19.0; sys_platform == 'linux'",
+    "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl; sys_platform == 'linux'",
-    "torch==2.10.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.11.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -188,7 +190,8 @@ required-environments = [
 ]
 
 constraint-dependencies = [
-    "flashinfer-jit-cache==0.6.6",
+    "flashinfer-jit-cache==0.6.8.post1",
+    "flashinfer-cubin==0.6.8.post1",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -217,8 +220,8 @@ no-build-isolation-package = [
 # unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
-    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "transformers>=5.0.0,<=5.3.0; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
+    "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
@@ -237,6 +240,11 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
@@ -250,16 +258,35 @@ name = "flashinfer-cu128"
 url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 
+[[tool.uv.index]]
+name = "flashinfer-cu129"
+url = "https://flashinfer.ai/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "vllm-cu129"
+url = "https://wheels.vllm.ai/0.20.2/cu129"
+explicit = true
+
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
-# flashinfer wheels are only available from the custom cu128 index
+# Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-mamba-ssm = { url = "https://github.com/state-spaces/mamba/releases/download/v2.3.1/mamba_ssm-2.3.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-# TODO (aaron): Once PyTorch 2.10 is officially supported (stable PyPI torch + matching
-# flash-attn wheels), drop the custom wheel URL
-flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-# Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
+# vllm 0.20.2's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
+# links libcudart.so.12, which torch+cu128 supplies.
+vllm = [
+    { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
+]
+# torch-2.11 wheels for these three aren't published upstream; built locally
+# on erictang000 forks (cu128 / cxx11abiTRUE / py3.12). flash-attn has its
+# +cu12torch2.11cxx11abiTRUE local-version stripped from METADATA — PEP 440
+# treats 2.8.3+local > 2.8.3, so TE's get_attention_backend (max_version=
+# "2.8.3") rejected it and silently fell back to broken unfused attention.
+flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
+# Pinned to cu128: flashrl extra needs torch 2.7, only on cu128.
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },

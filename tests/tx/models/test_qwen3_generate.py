@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
-from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.tinker import types
 from skyrl.tx.models.configs import Qwen3Config
@@ -45,7 +45,7 @@ def test_qwen3_generate():
     # Generate with our implementation (batched with right-padding)
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        base_config = PretrainedConfig.from_pretrained(model_name)
+        base_config = AutoConfig.from_pretrained(model_name)
         config = Qwen3Config(base_config, max_lora_adapters=2, max_lora_rank=32, shard_attention_heads=True)
 
         mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
@@ -131,7 +131,7 @@ def test_qwen3_generate_speed():
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
     inputs = [

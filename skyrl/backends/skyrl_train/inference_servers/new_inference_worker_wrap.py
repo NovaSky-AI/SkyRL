@@ -69,12 +69,13 @@ class NewInferenceWorkerWrap:
             )
 
         if is_checkpoint_format:
+            from vllm.config import set_current_vllm_config
             from vllm.model_executor.model_loader.reload import (
                 initialize_layerwise_reload,
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 initialize_layerwise_reload(model)
 
         self._skyrl_is_checkpoint_format = is_checkpoint_format
@@ -132,8 +133,13 @@ class NewInferenceWorkerWrap:
             weights.append((name, packed_tensor[offset : offset + size].view(*shape)))
             offset += size
 
+        # process_weights_after_loading reads get_current_vllm_config() (e.g.
+        # flashinfer_cutlass_moe needs the compilation config to build kernels),
+        # and vllm only sets that context around init_device / load_model.
+        from vllm.config import set_current_vllm_config
+
         model = self.model_runner.model
-        with torch.device(self.device):
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
             else:
@@ -157,12 +163,13 @@ class NewInferenceWorkerWrap:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         if self._skyrl_is_checkpoint_format:
+            from vllm.config import set_current_vllm_config
             from vllm.model_executor.model_loader.reload import (
                 finalize_layerwise_reload,
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
 
         self._skyrl_weight_update_active = False

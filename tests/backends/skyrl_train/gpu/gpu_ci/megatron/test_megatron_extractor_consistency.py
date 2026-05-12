@@ -86,15 +86,18 @@ def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 4
     cfg.trainer.placement.ref_num_gpus_per_node = 4
     cfg.trainer.ref.megatron_config.tensor_model_parallel_size = 2
-    # Pipeline parallelism halves per-rank parameter storage by sharding
-    # transformer layers across 2 stages. Combined with tp=2 and ep=2, this
-    # yields ~8.75 B params per rank for the 35B-A3B MoE model under the L4 24 GB budget.
     cfg.trainer.ref.megatron_config.pipeline_model_parallel_size = 2 if is_moe else 1
     cfg.trainer.ref.megatron_config.expert_model_parallel_size = 2 if is_moe else 1
     cfg.trainer.ref.megatron_config.expert_tensor_parallel_size = 1
     if cfg.trainer.ref.megatron_config.transformer_config_kwargs is None:
         cfg.trainer.ref.megatron_config.transformer_config_kwargs = dict()
     cfg.trainer.ref.megatron_config.transformer_config_kwargs["fp8"] = "e4m3"
+    # Cap MoE layers to fit the L4 24 GB budget; parameter iteration order
+    # (the only thing this test checks) is preserved with any num_layers > 0.
+    # MTP layers hit an attention-mask-type assertion in this ref-only setup.
+    if is_moe:
+        cfg.trainer.ref.megatron_config.transformer_config_kwargs["num_layers"] = 2
+        cfg.trainer.ref.megatron_config.transformer_config_kwargs["mtp_num_layers"] = 0
     if is_moe:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
     validate_cfg(cfg)

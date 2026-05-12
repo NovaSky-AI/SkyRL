@@ -112,7 +112,7 @@ def create_ray_wrapped_inference_engines(
     engine_init_kwargs: Dict[str, Any] = {},
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
-    enable_ray_prometheus_stats: bool = False,
+    enable_ray_prometheus_stats: bool = True,
     enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",

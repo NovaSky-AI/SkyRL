@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
-from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
     DeepseekV3MoE as HFDeepseekV3MoE,
 )
@@ -40,7 +40,7 @@ def test_deepseekv3(tp: int):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
-        base_config = PretrainedConfig.from_pretrained(model_name)
+        base_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         config = DeepseekV3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
         # EP axis required for MoE expert sharding
         mesh = jax.make_mesh((1, 1, tp), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
@@ -87,7 +87,7 @@ def test_deepseekv3_moe_layer(ep: int, tp: int):
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     config = DeepseekV3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
 
     # Initial deepseek layers don't have MoE
@@ -136,7 +136,7 @@ def test_deepseekv3_moe_layer_lora(ep: int, tp: int):
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, attn_implementation="eager", use_safetensors=True, torch_dtype=torch.float32
     )
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     config = DeepseekV3Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
     hf_moe_layer = hf_model.model.layers[1].mlp
@@ -211,7 +211,7 @@ def test_deepseekv3_gradient_checkpointing():
     that gradient checkpointing works correctly with heterogeneous layer types.
     """
     model_name = "yujiepan/deepseek-v3-tiny-random"
-    base_config = PretrainedConfig.from_pretrained(model_name)
+    base_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 
     batch_size, seq_len = 2, 8
     mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
