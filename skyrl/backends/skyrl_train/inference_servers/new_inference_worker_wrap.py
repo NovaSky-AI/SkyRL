@@ -45,7 +45,10 @@ import torch
 # --worker-extension-cls before model init, so the import-time patch is
 # correctly ordered.
 try:
-    from vllm.model_executor.model_loader.reload.meta import SKIP_TENSORS as _VLLM_SKIP_TENSORS
+    from vllm.model_executor.model_loader.reload.meta import (
+        SKIP_TENSORS as _VLLM_SKIP_TENSORS,
+    )
+
     _VLLM_SKIP_TENSORS.add("conv_weights")
 except ImportError:
     pass

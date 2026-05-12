@@ -233,7 +233,9 @@ async def construct_training_input_from_generator_output(generator_output, token
         # picks up sampling-path noise on top of any true model difference. The
         # hard-correctness signal is megatron_threshold (5e-2). 5e-1 still flags
         # the conv_weights aliasing-corruption regression (which produced 1.4+).
-        pytest.param(1, 1, 1, 8, 1, 4, 8, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 5e-1, 5e-2, id="nemotron3-nano_tp4_ep8"),
+        pytest.param(
+            1, 1, 1, 8, 1, 4, 8, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 5e-1, 5e-2, id="nemotron3-nano_tp4_ep8"
+        ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
@@ -258,6 +260,7 @@ async def test_logprobs_matching_roundtrip(
         # Debug: optionally bypass bucketing in MegatronWeightExtractor to test
         # whether the post-sync NaN reproduces without bucketed export.
         import os as _os
+
         if _os.environ.get("SKYRL_NEMOTRON_DISABLE_BUCKETING") == "1":
             cfg.generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB = 1024.0
 
