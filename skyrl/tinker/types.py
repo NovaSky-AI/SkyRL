@@ -75,6 +75,7 @@ class LoraConfig(BaseModel):
 class CreateModelInput(BaseModel):
     lora_config: LoraConfig
     model_role: str = "policy"
+    seed_was_provided: bool = True
 
 
 class CreateModelOutput(BaseModel):

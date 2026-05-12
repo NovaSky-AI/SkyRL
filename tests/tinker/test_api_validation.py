@@ -2,8 +2,12 @@ import base64
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import SQLModel, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import api, types
+from skyrl.tinker.db_models import FutureDB, ModelDB, SessionDB
 
 _B64_PNG = base64.b64encode(b"\x89PNG").decode()
 
@@ -25,6 +29,94 @@ def test_forward_backward_input_accepts_ppo_threshold_keys():
         loss_fn_config={"clip_low_threshold": 0.9, "clip_high_threshold": 1.1},
     )
     assert req.loss_fn_config == {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}
+
+
+def test_lora_config_accepts_tinker_train_flags():
+    cfg = api.LoRAConfig(rank=8, seed=123, train_attn=False, train_mlp=True, train_unembed=True)
+
+    assert cfg.seed == 123
+    assert cfg.train_attn is False
+    assert cfg.train_mlp is True
+    assert cfg.train_unembed is True
+
+
+def test_api_lora_config_defaults_match_tinker_sdk():
+    api_cfg = api.LoRAConfig(rank=8)
+
+    assert api_cfg.train_attn is True
+    assert api_cfg.train_mlp is True
+    assert api_cfg.train_unembed is True
+
+
+def test_lora_config_rejects_rank_with_no_train_targets():
+    with pytest.raises(ValidationError, match="At least one"):
+        api.LoRAConfig(rank=8, train_attn=False, train_mlp=False, train_unembed=False)
+
+
+def test_weights_info_response_accepts_lora_train_flags():
+    response = api.WeightsInfoResponse(
+        base_model="base",
+        is_lora=True,
+        lora_rank=8,
+        train_attn=False,
+        train_mlp=True,
+        train_unembed=True,
+    )
+
+    assert response.train_attn is False
+    assert response.train_mlp is True
+    assert response.train_unembed is True
+
+
+@pytest.mark.asyncio
+async def test_create_model_persists_lora_flags_and_seed_provenance():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with AsyncSession(engine) as session:
+            session.add(SessionDB(session_id="session", sdk_version="test"))
+            await session.commit()
+
+            response = await api.create_model(
+                api.CreateModelRequest(
+                    session_id="session",
+                    base_model="base",
+                    lora_config=api.LoRAConfig(
+                        rank=8,
+                        train_attn=False,
+                        train_mlp=True,
+                        train_unembed=True,
+                    ),
+                ),
+                session,
+            )
+
+            assert response.lora_config is not None
+            response_lora_config = response.lora_config
+            assert response_lora_config == api.LoRAConfig(
+                rank=8,
+                seed=response_lora_config.seed,
+                train_attn=False,
+                train_mlp=True,
+                train_unembed=True,
+            )
+            assert response_lora_config.seed is not None
+
+            future = (await session.exec(select(FutureDB))).one()
+            queued_input = types.CreateModelInput.model_validate(future.request_data)
+            assert queued_input.seed_was_provided is False
+            assert queued_input.lora_config.seed == response_lora_config.seed
+            assert queued_input.lora_config.train_attn is False
+            assert queued_input.lora_config.train_mlp is True
+            assert queued_input.lora_config.train_unembed is True
+
+            model = (await session.exec(select(ModelDB))).one()
+            stored_lora = types.LoraConfig.model_validate(model.lora_config)
+            assert stored_lora == queued_input.lora_config
+    finally:
+        await engine.dispose()
 
 
 def test_forward_backward_input_accepts_ppo_value_clip():

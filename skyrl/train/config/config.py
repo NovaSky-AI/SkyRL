@@ -56,8 +56,8 @@ class SkyRLLoraConfig(BaseConfig):
     alpha: int = 16
     dropout: float = 0.0
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
-    target_modules: str = "all-linear"
-    exclude_modules: Optional[str] = None
+    target_modules: str | List[str] = "all-linear"
+    exclude_modules: Optional[str | List[str]] = None
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""

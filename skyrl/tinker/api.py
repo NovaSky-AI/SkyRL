@@ -244,6 +244,15 @@ class LoRAConfig(BaseModel):
     seed: int | None = Field(
         default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
     )
+    train_unembed: bool = True
+    train_mlp: bool = True
+    train_attn: bool = True
+
+    @model_validator(mode="after")
+    def validate_train_targets(self) -> "LoRAConfig":
+        if self.rank > 0 and not (self.train_attn or self.train_mlp or self.train_unembed):
+            raise ValueError("At least one of train_attn, train_mlp, or train_unembed must be true for LoRA rank > 0")
+        return self
 
 
 class CreateModelRequest(BaseModel):
@@ -281,6 +290,16 @@ class ModelInfoResponse(BaseModel):
     model_id: str
     status: str
     model_data: ModelData
+
+
+def _to_api_lora_config(lora_config: types.LoraConfig) -> LoRAConfig:
+    return LoRAConfig(
+        rank=lora_config.rank,
+        seed=lora_config.seed,
+        train_unembed=lora_config.train_unembed,
+        train_mlp=lora_config.train_mlp,
+        train_attn=lora_config.train_attn,
+    )
 
 
 class Checkpoint(BaseModel):
@@ -677,6 +696,9 @@ class WeightsInfoResponse(BaseModel):
     base_model: str
     is_lora: bool
     lora_rank: int | None = None
+    train_unembed: bool | None = None
+    train_mlp: bool | None = None
+    train_attn: bool | None = None
 
 
 class ClientConfigResponse(BaseModel):
@@ -757,13 +779,25 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
     # Generate a random seed if not provided
-    seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
-    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
+    seed_was_provided = request.lora_config.seed is not None
+    seed = request.lora_config.seed if seed_was_provided else random.randint(0, 2**31 - 1)
+    lora_config = types.LoraConfig(
+        rank=request.lora_config.rank,
+        alpha=32.0,
+        seed=seed,
+        train_unembed=request.lora_config.train_unembed,
+        train_mlp=request.lora_config.train_mlp,
+        train_attn=request.lora_config.train_attn,
+    )
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=types.CreateModelInput(lora_config=lora_config, model_role=request.model_role),
+        request_data=types.CreateModelInput(
+            lora_config=lora_config,
+            model_role=request.model_role,
+            seed_was_provided=seed_was_provided,
+        ),
     )
 
     model_db = ModelDB(
@@ -781,7 +815,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     return CreateModelResponse(
         model_id=model_id,
         base_model=request.base_model,
-        lora_config=request.lora_config,
+        lora_config=_to_api_lora_config(lora_config),
         status="created",
         request_id=str(request_id),
     )
@@ -823,7 +857,7 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
-        base_model=model.base_model, lora_config=LoRAConfig(rank=lora_config.rank), model_name=model.base_model
+        base_model=model.base_model, lora_config=_to_api_lora_config(lora_config), model_name=model.base_model
     )
 
     return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)
@@ -1295,6 +1329,9 @@ async def get_weights_info(request: WeightsInfoRequest, req: Request, session: A
         base_model=model.base_model,
         is_lora=is_lora,
         lora_rank=lora_config.rank,
+        train_unembed=lora_config.train_unembed if is_lora else None,
+        train_mlp=lora_config.train_mlp if is_lora else None,
+        train_attn=lora_config.train_attn if is_lora else None,
     )
 
 

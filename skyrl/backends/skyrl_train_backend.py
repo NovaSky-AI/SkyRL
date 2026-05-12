@@ -28,6 +28,10 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train_lora import (
+    resolve_skyrl_train_lora_config,
+    skyrl_train_lora_signature,
+)
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
@@ -98,8 +102,18 @@ def _build_skyrl_train_config(
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:
+        cfg.trainer.seed = int(lora_config.seed)
+        lora_type = cfg.trainer.policy.megatron_config.lora_config.lora_type
+        resolved_lora = resolve_skyrl_train_lora_config(
+            lora_config,
+            strategy=cfg.trainer.strategy,
+            lora_type=lora_type,
+            pipeline_parallel_size=cfg.trainer.policy.megatron_config.pipeline_model_parallel_size,
+        )
         cfg.trainer.policy.model.lora.rank = lora_config.rank
         cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
+        cfg.trainer.policy.model.lora.target_modules = resolved_lora.target_modules
+        cfg.trainer.policy.model.lora.exclude_modules = resolved_lora.exclude_modules
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
@@ -133,6 +147,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
+        self._base_lora_seed: int | None = None
 
         # New inference infrastructure
         self._server_groups: list = []
@@ -287,8 +302,18 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        cfg.trainer.critic.model.lora.rank = lora_config.rank
-        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        if lora_config is not None and lora_config.rank > 0:
+            cfg.trainer.seed = int(lora_config.seed)
+            resolved_lora = resolve_skyrl_train_lora_config(
+                lora_config,
+                strategy=cfg.trainer.strategy,
+                lora_type=cfg.trainer.policy.megatron_config.lora_config.lora_type,
+                pipeline_parallel_size=cfg.trainer.policy.megatron_config.pipeline_model_parallel_size,
+            )
+            cfg.trainer.critic.model.lora.rank = lora_config.rank
+            cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+            cfg.trainer.critic.model.lora.target_modules = resolved_lora.target_modules
+            cfg.trainer.critic.model.lora.exclude_modules = resolved_lora.exclude_modules
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
@@ -356,14 +381,28 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engines_initialized = True
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
-        # Tinker's public LoraConfig only exposes rank + alpha (plus
-        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
-        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
-        # AdapterStore additionally verifies parallel-state equality via
-        # its own LoraSignature.
-        return (int(lora_config.rank), int(lora_config.alpha))
+        if self._cfg is not None:
+            strategy = self._cfg.trainer.strategy
+            lora_type = self._cfg.trainer.policy.megatron_config.lora_config.lora_type
+            pipeline_parallel_size = self._cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+        else:
+            strategy = self.config.strategy
+            lora_type = "lora"
+            pipeline_parallel_size = 1
+        return skyrl_train_lora_signature(
+            lora_config,
+            strategy=strategy,
+            lora_type=lora_type,
+            pipeline_parallel_size=pipeline_parallel_size,
+        )
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+    def create_model(
+        self,
+        model_id: str,
+        lora_config: types.LoraConfig,
+        model_role: str = "policy",
+        seed_was_provided: bool = True,
+    ) -> None:
         if model_id in self._model_ids_to_role:
             raise ValueError(f"Model '{model_id}' already exists")
 
@@ -389,10 +428,17 @@ class SkyRLTrainBackend(AbstractBackend):
             if new_signature != self._base_lora_signature:
                 raise ValueError(
                     f"LoRA signature mismatch for model '{model_id}': "
-                    f"got (rank, alpha)={new_signature}, "
+                    f"got {new_signature}, "
                     f"first adapter registered with {self._base_lora_signature}. "
-                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
-                    "adapters; target_modules is fixed server-side."
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical "
+                    "(rank, alpha, target_modules, exclude_modules, lora_type) across all adapters."
+                )
+            if seed_was_provided and self._base_lora_seed is not None and int(lora_config.seed) != self._base_lora_seed:
+                raise ValueError(
+                    f"LoRA seed mismatch for model '{model_id}': got seed={lora_config.seed}, "
+                    f"first adapter registered with seed={self._base_lora_seed}. "
+                    "SkyRLTrainBackend additional adapters are initialized from the first pristine adapter, "
+                    "so explicit seeds must match."
                 )
             self._dispatch.register_adapter("policy", model_id)
             self._model_ids_to_role[model_id] = model_role
@@ -402,7 +448,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # First-time setup OR critic creation (existing path).
         if model_role == "policy":
-            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+            self._cfg = _build_skyrl_train_config(
+                self.base_model,
+                self.config,
+                lora_config,
+            )
 
             if not ray.is_initialized():
                 logger.info("Initializing Ray with runtime environment")
@@ -425,6 +475,7 @@ class SkyRLTrainBackend(AbstractBackend):
             self._build_policy(PolicyWorker, model_id=model_id)
             if is_lora:
                 self._base_lora_signature = self._lora_signature_from(lora_config)
+                self._base_lora_seed = int(lora_config.seed)
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
@@ -496,6 +547,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
+        self._base_lora_seed = None
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:
