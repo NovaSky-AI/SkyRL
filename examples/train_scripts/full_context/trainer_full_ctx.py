@@ -1,6 +1,8 @@
-from skyrl.train.trainer import RayPPOTrainer
-from loguru import logger
 import random
+
+from loguru import logger
+
+from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import Timer
 
 
@@ -13,6 +15,8 @@ class FullCtxTrainer(RayPPOTrainer):
 
     This helps catch OOM issues early before running full training.
     """
+
+    requires_prompt_batch_alignment = False
 
     async def train(self):
         """Run a few training steps with max sequence length."""

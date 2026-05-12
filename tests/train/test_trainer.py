@@ -10,12 +10,14 @@ import torch
 from jaxtyping import Float, Integer
 from pytest import approx
 
+from examples.train_scripts.full_context.trainer_full_ctx import FullCtxTrainer
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils.utils import validate_batch_sizes
+from skyrl.train.utils.utils import get_batch_alignment_info, validate_batch_sizes
 from tests.train.util import example_dummy_config
 
 
@@ -60,6 +62,38 @@ def dummy_tokenizer():
 @pytest.fixture
 def dummy_generator():
     return MagicMock()
+
+
+def _make_batch_alignment_config(
+    train_batch_size=2,
+    policy_dp=6,
+    ref_dp=6,
+    critic_dp=1,
+    include_ref=True,
+    include_critic=False,
+    n_samples_per_prompt=4,
+) -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.train_batch_size = train_batch_size
+    cfg.trainer.policy_mini_batch_size = train_batch_size
+    cfg.trainer.critic_mini_batch_size = train_batch_size
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.placement.policy_num_nodes = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = policy_dp
+    cfg.trainer.placement.ref_num_nodes = 1
+    cfg.trainer.placement.ref_num_gpus_per_node = ref_dp
+    cfg.trainer.placement.critic_num_nodes = 1
+    cfg.trainer.placement.critic_num_gpus_per_node = critic_dp
+    cfg.trainer.policy.sequence_parallel_size = 1
+    cfg.trainer.ref.sequence_parallel_size = 1
+    cfg.trainer.critic.sequence_parallel_size = 1
+    cfg.trainer.critic.model.path = "critic" if include_critic else None
+    cfg.trainer.algorithm.use_kl_loss = include_ref
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg.generator.n_samples_per_prompt = n_samples_per_prompt
+    return cfg
 
 
 def _get_test_data(trainer: RayPPOTrainer):
@@ -621,3 +655,148 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_batch_alignment_info_matches_issue_1609_repro():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=2,
+        policy_dp=6,
+        ref_dp=6,
+        include_ref=True,
+        include_critic=False,
+        n_samples_per_prompt=4,
+    )
+
+    alignment_info = get_batch_alignment_info(cfg)
+
+    assert alignment_info.policy_dp_size == 6
+    assert alignment_info.critic_dp_size is None
+    assert alignment_info.ref_dp_size == 6
+    assert alignment_info.lcm_dp_size == 6
+    assert alignment_info.prompt_alignment_stride == 3
+
+    # The existing effective-size validation is necessary but not enough:
+    # train_batch_size * n_samples_per_prompt is 8, which satisfies lcm_dp_size 6.
+    validate_batch_sizes(cfg)
+
+
+def test_validate_batch_sizes_lcm_includes_critic_dp():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=5,
+        policy_dp=2,
+        critic_dp=3,
+        include_ref=False,
+        include_critic=True,
+        n_samples_per_prompt=1,
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"critic_dp_size=3.*lcm_dp_size=6",
+    ):
+        validate_batch_sizes(cfg)
+
+
+def test_ray_trainer_prompt_batch_alignment_rejects_issue_1609():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=2,
+        policy_dp=6,
+        ref_dp=6,
+        include_ref=True,
+        include_critic=False,
+        n_samples_per_prompt=4,
+    )
+
+    with pytest.raises(ValueError, match="prompt DP alignment stride 3"):
+        RayPPOTrainer(
+            cfg=cfg,
+            tracker=None,
+            tokenizer=None,
+            train_dataset=DummyDataset(),
+            eval_dataset=None,
+            inference_engine_client=None,
+            generator=MagicMock(),
+        )
+
+
+def test_ray_trainer_prompt_batch_alignment_allows_issue_1609_workaround():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=3,
+        policy_dp=6,
+        ref_dp=6,
+        include_ref=True,
+        include_critic=False,
+        n_samples_per_prompt=4,
+    )
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=None,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+
+    trainer._validate_prompt_batch_alignment(cfg.trainer.train_batch_size)
+
+
+def test_ray_trainer_prompt_batch_alignment_rejects_silent_non_empty_truncation():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=5,
+        policy_dp=6,
+        ref_dp=6,
+        include_ref=True,
+        include_critic=False,
+        n_samples_per_prompt=4,
+    )
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=None,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+
+    with pytest.raises(ValueError, match="would keep 3 prompts"):
+        trainer._validate_prompt_batch_alignment(cfg.trainer.train_batch_size)
+
+
+def test_non_truncating_trainers_do_not_require_sync_prompt_alignment():
+    assert RayPPOTrainer.requires_prompt_batch_alignment is True
+    assert FullyAsyncRayPPOTrainer.requires_prompt_batch_alignment is False
+    assert FullCtxTrainer.requires_prompt_batch_alignment is False
+
+
+def test_remove_tail_data_rejects_truncation():
+    cfg = _make_batch_alignment_config(
+        train_batch_size=3,
+        policy_dp=6,
+        ref_dp=6,
+        include_ref=True,
+        include_critic=False,
+        n_samples_per_prompt=4,
+    )
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=None,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 6
+
+    with pytest.raises(ValueError, match="would keep 0 prompts"):
+        trainer._remove_tail_data(["p0", "p1"])
+    with pytest.raises(ValueError, match="would keep 3 prompts"):
+        trainer._remove_tail_data(["p0", "p1", "p2", "p3", "p4"])
+    with pytest.raises(ValueError, match="Prompt batch size 0"):
+        trainer._remove_tail_data([])
+
+    assert trainer._remove_tail_data(["p0", "p1", "p2"]) == ["p0", "p1", "p2"]

@@ -262,6 +262,7 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+    requires_prompt_batch_alignment = False
 
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.

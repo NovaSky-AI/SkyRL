@@ -6,8 +6,10 @@ import os
 import socket
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import ray
 import torch
@@ -55,6 +57,80 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
+@dataclass(frozen=True)
+class BatchAlignmentInfo:
+    policy_dp_size: int
+    critic_dp_size: Optional[int]
+    ref_dp_size: Optional[int]
+    lcm_dp_size: int
+    prompt_alignment_stride: int
+
+
+def _use_ref_model(cfg: SkyRLTrainConfig) -> bool:
+    return cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+
+
+def _model_world_size(num_nodes: int, num_gpus_per_node: int) -> int:
+    return num_nodes * num_gpus_per_node
+
+
+def _fsdp_style_dp_size(world_size: int, sequence_parallel_size: int) -> int:
+    return world_size // sequence_parallel_size
+
+
+def _megatron_dp_size(world_size: int, megatron_config, model_name: str) -> int:
+    pp = megatron_config.pipeline_model_parallel_size
+    cp = megatron_config.context_parallel_size
+    tp = megatron_config.tensor_model_parallel_size
+    parallel_size = pp * cp * tp
+    assert world_size % parallel_size == 0, (
+        f"{model_name}_world_size {world_size} should be divisible by (pp * cp * tp) {parallel_size}. "
+        "This ensures that the data parallel size is an integer."
+    )
+    return world_size // parallel_size
+
+
+def _policy_or_ref_dp_size(cfg: SkyRLTrainConfig, model_cfg, world_size: int, model_name: str) -> int:
+    if cfg.trainer.strategy == "megatron":
+        return _megatron_dp_size(world_size, model_cfg.megatron_config, model_name)
+    return _fsdp_style_dp_size(world_size, model_cfg.sequence_parallel_size)
+
+
+def get_batch_alignment_info(cfg: SkyRLTrainConfig) -> BatchAlignmentInfo:
+    policy_world_size = _model_world_size(
+        cfg.trainer.placement.policy_num_nodes, cfg.trainer.placement.policy_num_gpus_per_node
+    )
+    policy_dp_size = _policy_or_ref_dp_size(cfg, cfg.trainer.policy, policy_world_size, "policy")
+
+    lcm_dp_size = policy_dp_size
+
+    critic_dp_size = None
+    if cfg.trainer.critic.model.path is not None:
+        critic_world_size = _model_world_size(
+            cfg.trainer.placement.critic_num_nodes, cfg.trainer.placement.critic_num_gpus_per_node
+        )
+        # Megatron critic is rejected by validate_megatron_cfg; keep the existing critic batch math here.
+        critic_dp_size = _fsdp_style_dp_size(critic_world_size, cfg.trainer.critic.sequence_parallel_size)
+        lcm_dp_size = math.lcm(lcm_dp_size, critic_dp_size)
+
+    ref_dp_size = None
+    if _use_ref_model(cfg):
+        ref_world_size = _model_world_size(
+            cfg.trainer.placement.ref_num_nodes, cfg.trainer.placement.ref_num_gpus_per_node
+        )
+        ref_dp_size = _policy_or_ref_dp_size(cfg, cfg.trainer.ref, ref_world_size, "ref")
+        lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
+
+    prompt_alignment_stride = lcm_dp_size // math.gcd(lcm_dp_size, cfg.generator.n_samples_per_prompt)
+    return BatchAlignmentInfo(
+        policy_dp_size=policy_dp_size,
+        critic_dp_size=critic_dp_size,
+        ref_dp_size=ref_dp_size,
+        lcm_dp_size=lcm_dp_size,
+        prompt_alignment_stride=prompt_alignment_stride,
+    )
+
+
 def validate_batch_sizes(cfg: SkyRLTrainConfig):
     """
     Validate configured batch sizes.
@@ -78,20 +154,8 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     assert cfg.trainer.micro_train_batch_size_per_gpu > 0, "micro_train_batch_size_per_gpu must be greater than 0"
     assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, "micro_forward_batch_size_per_gpu must be greater than 0"
 
-    # Validate policy mini batch size
-    policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
-
-    if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
-    else:
-        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+    alignment_info = get_batch_alignment_info(cfg)
+    policy_dp_size = alignment_info.policy_dp_size
 
     assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
@@ -128,11 +192,9 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
         f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
     )
 
-    # Validate critic mini batch size
-    critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
-    critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
-
     if cfg.trainer.critic.model.path is not None:
+        critic_dp_size = alignment_info.critic_dp_size
+        assert critic_dp_size is not None
         assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
             f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
             f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
@@ -163,30 +225,15 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
             f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
         )
 
-    # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
-    lcm_dp_size = policy_dp_size
-
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
-    if use_ref_model:
-        ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        if cfg.trainer.strategy == "megatron":
-            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
-            cp = cfg.trainer.ref.megatron_config.context_parallel_size
-            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            assert ref_world_size % (pp * cp * tp) == 0, (
-                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-                "This ensures that the data parallel size is an integer."
-            )
-            ref_dp_size = ref_world_size // (pp * cp * tp)
-        else:
-            ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
-        lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
+    # Validate training batch size is larger than the least common multiple of the DP sizes of enabled models.
+    lcm_dp_size = alignment_info.lcm_dp_size
 
     assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
         f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) "
         f"should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
-        f"policy_dp_size={policy_dp_size}, "
-        f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
+        f"policy_dp_size={alignment_info.policy_dp_size}, "
+        f"critic_dp_size={alignment_info.critic_dp_size}, "
+        f"ref_dp_size={alignment_info.ref_dp_size}, "
         f"lcm_dp_size={lcm_dp_size}"
     )
 
