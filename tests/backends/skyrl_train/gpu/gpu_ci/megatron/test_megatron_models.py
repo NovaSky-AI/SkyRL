@@ -356,12 +356,8 @@ async def test_logprobs_matching_roundtrip(
             logprobs_t_valid = logprobs_t[response_mask.bool()]
             logprobs_t_2_valid = logprobs_t_2[response_mask_2.bool()]
 
-            # Pre- and post-sync are two independent sampled generations, so
-            # their lengths can differ — small numerical drifts (BF16, all-reduce
-            # ordering, etc.) amplify through autoregressive sampling. The sound
-            # correctness signal is the Megatron-vs-vLLM diff above (computed on
-            # a fixed input). Here we just guard against gross divergence by
-            # truncating to the shorter sequence and checking magnitudes.
+            # Pre- and post-sync are two independent sampled generations
+            # so truncate to the shorter sequence for the magnitude check.
             if logprobs_t_valid.shape[0] != logprobs_t_2_valid.shape[0]:
                 min_len = min(logprobs_t_valid.shape[0], logprobs_t_2_valid.shape[0])
                 print(
