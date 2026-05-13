@@ -478,59 +478,6 @@ class MegatronWorker:
         )
         return model
 
-    def _megatron_inference_forward(self, data: TrainingInputBatch, *, output_key: str = "logprobs") -> WorkerOutput:
-        """Megatron-specific inference forward: pass the full mini batch through
-        ``MegatronModelWrapper.forward``.
-
-        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` is a per-sample
-        list of dicts (each entry holds the full ``T_response`` row under
-        ``output_key``).  Concatenation across DP ranks happens in the dispatcher.
-        """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
-        # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
-        micro_batches = data.chunk(micro_bsz)
-
-        # Build micro-batch dicts expected by policy.forward_mini_batch
-        micro_dicts = []
-        device = torch.cuda.current_device()
-        for micro in micro_batches:
-            micro.to(device)
-            sequences = micro["sequences"]
-            attention_mask = micro["attention_mask"]
-            num_actions = micro.metadata["response_length"]
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = micro.get("rollout_expert_indices")
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-            micro_dicts.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": num_actions,
-                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                }
-            )
-
-        self.model.eval()
-        seq_len = micro_dicts[0]["sequences"].shape[1]
-        mbs = micro_dicts[0]["sequences"].shape[0]
-        with torch.no_grad():
-            log_probs = self.model.forward(
-                micro_batches=micro_dicts,
-                seq_len=seq_len,
-                micro_batch_size=mbs,
-                temperature=self.cfg.algorithm.temperature,
-            )
-
-        log_probs = log_probs.to("cpu")
-        clear_router_replay()
-        loss_fn_outputs = [{output_key: log_probs[i].tolist()} for i in range(log_probs.shape[0])]
-        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
-
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -695,10 +642,52 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
           :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus scalar
           ``metrics`` (including ``"loss"``).
         """
-        if loss_fn is None:
-            return self._megatron_inference_forward(data, output_key="logprobs")
-
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        if loss_fn is None:
+            # Megatron inference forward path: pass the full mini batch through
+            # MegatronModelWrapper.forward and emit per-sample logprobs.
+            micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
+            micro_batches = data.chunk(micro_bsz)
+
+            # Build micro-batch dicts expected by policy.forward_mini_batch
+            micro_dicts = []
+            device = torch.cuda.current_device()
+            for micro in micro_batches:
+                micro.to(device)
+                sequences = micro["sequences"]
+                attention_mask = micro["attention_mask"]
+                num_actions = micro.metadata["response_length"]
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 0)
+                rollout_expert_indices = micro.get("rollout_expert_indices")
+                if rollout_expert_indices is not None:
+                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+                micro_dicts.append(
+                    {
+                        "sequences": sequences,
+                        "attention_mask": attention_mask,
+                        "position_ids": position_ids,
+                        "num_actions": num_actions,
+                        "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                    }
+                )
+
+            self.model.eval()
+            seq_len = micro_dicts[0]["sequences"].shape[1]
+            mbs = micro_dicts[0]["sequences"].shape[0]
+            with torch.no_grad():
+                log_probs = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=mbs,
+                    temperature=self.cfg.algorithm.temperature,
+                )
+
+            log_probs = log_probs.to("cpu")
+            clear_router_replay()
+            loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
+            return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
         self.model.eval()
 
@@ -1149,7 +1138,50 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
         per-sample dict with key ``"logprobs"``.
         """
-        return self._megatron_inference_forward(data, output_key="logprobs")
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        # Run in micro batches grouped into a single mini-batch
+        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
+        micro_batches = data.chunk(micro_bsz)
+
+        # Build micro-batch dicts expected by policy.forward_mini_batch
+        micro_dicts = []
+        device = torch.cuda.current_device()
+        for micro in micro_batches:
+            micro.to(device)
+            sequences = micro["sequences"]
+            attention_mask = micro["attention_mask"]
+            num_actions = micro.metadata["response_length"]
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+            micro_dicts.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": num_actions,
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                }
+            )
+
+        self.model.eval()
+        seq_len = micro_dicts[0]["sequences"].shape[1]
+        mbs = micro_dicts[0]["sequences"].shape[0]
+        with torch.no_grad():
+            log_probs = self.model.forward(
+                micro_batches=micro_dicts,
+                seq_len=seq_len,
+                micro_batch_size=mbs,
+                temperature=self.cfg.algorithm.temperature,
+            )
+
+        log_probs = log_probs.to("cpu")
+        clear_router_replay()
+        loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def init_worker_process_group(self):
         """
