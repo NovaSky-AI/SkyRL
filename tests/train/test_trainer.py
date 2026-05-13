@@ -522,7 +522,9 @@ def test_forward_backward_batch_calculations():
     # Mock _forward_backward_micro to track calls
     policy_forward_backward_micro_calls = []
 
-    def mock_policy_forward_backward_micro(experience, microbatch_weight, loss_fn=None, loss_fn_config=None):
+    def mock_policy_forward_backward_micro(
+        experience, microbatch_weight, total_tokens=None, loss_fn=None, loss_fn_config=None
+    ):
         policy_forward_backward_micro_calls.append(experience)
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
 
