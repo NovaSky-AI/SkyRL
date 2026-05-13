@@ -814,7 +814,7 @@ class SkyRLTrainBackend(AbstractBackend):
         model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
         data = self._dispatch.forward(role, batch, model_id=model_id)
 
-        # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
+        # dispatch.forward() returns a plain dict {"output": tensor[batch, max_response_len]}.
         # Trim padding entries from output
         output_tensor = data["output"]
         if pad_size > 0:

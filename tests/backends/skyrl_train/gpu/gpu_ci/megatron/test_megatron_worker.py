@@ -9,7 +9,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    concatenate_dict_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -260,7 +260,7 @@ async def test_megatron_forward(
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_megatron = concatenate_outputs_after_mesh_dispatch(
+    action_log_probs_megatron = concatenate_dict_outputs_after_mesh_dispatch(
         actor_group.actor_infos, all_rank_action_log_probs
     )["output"]
 
@@ -380,9 +380,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_full = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
-        "output"
-    ]
+    action_log_probs_full = concatenate_dict_outputs_after_mesh_dispatch(
+        actor_group.actor_infos, all_rank_action_log_probs
+    )["output"]
 
     ray.shutdown()
     ray_init_for_tests()
@@ -416,9 +416,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_lora = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
-        "output"
-    ]
+    action_log_probs_lora = concatenate_dict_outputs_after_mesh_dispatch(
+        actor_group.actor_infos, all_rank_action_log_probs
+    )["output"]
 
     #### Compare results ####
     # compare just non-padding tokens

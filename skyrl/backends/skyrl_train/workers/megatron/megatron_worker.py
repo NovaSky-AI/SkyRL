@@ -37,7 +37,6 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -478,9 +477,10 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data: TrainingInputBatch):
-        """
-        Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
+    def _megatron_inference_forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        """Megatron-specific inference forward: pass the full mini batch through
+        ``MegatronModelWrapper.forward``. Returns a plain dict (``{"output": tensor}``)
+        so concatenation across DP ranks happens uniformly in the dispatcher.
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -523,10 +523,8 @@ class MegatronWorker:
             )
 
         log_probs = log_probs.to("cpu")
-        output = TrainingOutputBatch({"output": log_probs})
-        output.metadata = data.metadata
         clear_router_replay()
-        return output
+        return {"output": log_probs}
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
@@ -681,17 +679,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ):
+    ) -> Dict[str, Any]:
         """Forward pass.
 
-        - Without ``loss_fn``: delegates to :meth:`MegatronWorker.forward`, returning a
-          ``TrainingOutputBatch`` with ``"output"`` containing logprobs.
+        - Without ``loss_fn``: runs Megatron's pipeline inference and returns a plain
+          dict (``{"output": logprobs}``).
         - With ``loss_fn`` (e.g., ``"cross_entropy"``): runs the SFT loss through Megatron's
           pipeline schedule with ``forward_only=True`` (no backward) and returns a metrics
           dict containing ``"loss"`` and per-sample ``"loss_fn_outputs"``.
         """
         if loss_fn is None:
-            return MegatronWorker.forward(self, data)
+            return self._megatron_inference_forward(data)
 
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -1108,6 +1106,10 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
+
+    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        """Run inference forward pass. Returns ``{"output": log_probs}`` as a plain dict."""
+        return self._megatron_inference_forward(data)
 
     def init_worker_process_group(self):
         """

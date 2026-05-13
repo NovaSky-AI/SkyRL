@@ -16,7 +16,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    concatenate_dict_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
@@ -41,7 +41,6 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
@@ -370,8 +369,8 @@ def get_model_logits_from_actor(actor_group: PPORayActorGroup, input_sequences, 
 
     results_refs = actor_group.async_run_ray_method("mesh", "forward", data)
     results = ray.get(results_refs)
-    ret_databatch: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)
-    logits = ret_databatch["output"]
+    ret_dict = concatenate_dict_outputs_after_mesh_dispatch(actor_group.actor_infos, results)
+    logits = ret_dict["output"]
 
     return logits
 

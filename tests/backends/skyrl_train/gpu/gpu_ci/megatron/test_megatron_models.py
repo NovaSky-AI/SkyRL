@@ -9,7 +9,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    concatenate_dict_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -245,7 +245,7 @@ async def test_logprobs_matching_roundtrip(
 
             refs = policy.async_run_ray_method("mesh", "forward", data=training_input)
             results = ray.get(refs)
-            logprobs_megatron = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, results)["output"]
+            logprobs_megatron = concatenate_dict_outputs_after_mesh_dispatch(policy.actor_infos, results)["output"]
 
             mask = response_mask.bool()
 
