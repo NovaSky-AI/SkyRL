@@ -1503,6 +1503,8 @@ class RemoteInferenceClient:
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
+        state["_lora_pause_events"] = {}
+        state["_lora_events_loop"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -1512,6 +1514,8 @@ class RemoteInferenceClient:
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
+        self._lora_pause_events = {}
+        self._lora_events_loop = None
 
     async def aclose(self):
         if self._session is not None:
