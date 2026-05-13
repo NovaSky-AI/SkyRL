@@ -28,7 +28,7 @@ class TestFSDP2StrategyAlias:
         cfg = SFTConfig()
         cfg.strategy = "fsdp2"
         cfg.model.path = "test/my-model"
-        with pytest.warns(DeprecationWarning, match="fsdp2.*deprecated"):
+        with pytest.warns(DeprecationWarning, match="fsdp2.*has been renamed"):
             validate_sft_cfg(cfg)
         assert cfg.strategy == "fsdp"
 

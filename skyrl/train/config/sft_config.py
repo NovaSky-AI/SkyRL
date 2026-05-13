@@ -184,7 +184,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         import warnings
 
         warnings.warn(
-            "strategy='fsdp2' is deprecated; use 'fsdp' instead.",
+            "strategy='fsdp2' has been renamed to 'fsdp'; use 'fsdp' instead.",
             DeprecationWarning,
             stacklevel=2,
         )

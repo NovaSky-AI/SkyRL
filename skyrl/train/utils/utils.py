@@ -221,7 +221,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         import warnings
 
         warnings.warn(
-            "trainer.strategy='fsdp2' is deprecated; use 'fsdp' instead.",
+            "trainer.strategy='fsdp2' has been renamed to 'fsdp'; use 'fsdp' instead.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -370,10 +370,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in (
-            "fsdp",
-            "megatron",
-        ), "LoRA enabled requires fsdp or megatron training backend"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
