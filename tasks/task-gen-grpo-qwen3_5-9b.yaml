@@ -12,19 +12,25 @@ name: task-gen-grpo-qwen3-5-9b
 resources:
   disk_size: 500
   memory: 800+
-  ports: 6479
   ordered:
-    # RunPod reserved H200s (priority)
+    # RunPod Slurm cluster (reserved H200s, no preemption)
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster
+    # RunPod on-demand (API provisioned)
     - accelerators: H200:8
       cloud: runpod
+      ports: 6479
     # GCP fallback
     - accelerators: H200:8
       cloud: gcp
       use_spot: true
+      ports: 6479
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
     # Other providers
     - accelerators: H200:8
       cloud: lambda
+      ports: 6479
 
 num_nodes: 1
 

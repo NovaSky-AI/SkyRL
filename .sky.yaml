@@ -1,0 +1,9 @@
+slurm:
+  allowed_clusters:
+    - runpod-cluster
+  provision_timeout: 120
+  cluster_configs:
+    runpod-cluster:
+      workdir: /workspace
+      gpu_partition_map:
+        H200: gpu

@@ -13,25 +13,33 @@ name: fleet-task-grpo-qwen3-5-35b
 resources:
   disk_size: 750
   memory: 1500+
-  ports: 6479
   ordered:
-    # RunPod reserved H200s (priority)
+    # RunPod Slurm cluster (reserved H200s, no preemption)
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster
+    # RunPod on-demand (API provisioned)
     - accelerators: H200:8
       cloud: runpod
+      ports: 6479
     # GKE fallback
     - accelerators: H200:8
       cloud: kubernetes
       network_tier: best
       use_spot: true
+      ports: 6479
     - accelerators: H200:8
       cloud: gcp
       use_spot: true
+      ports: 6479
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
     # Other providers
     - accelerators: H200:8
       cloud: lambda
+      ports: 6479
     - accelerators: H200:8
       cloud: nebius
+      ports: 6479
 
 num_nodes: 2
 

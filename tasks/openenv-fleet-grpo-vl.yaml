@@ -14,9 +14,12 @@ name: fleet-vl-grpo-qwen3-5-9b
 
 resources:
   disk_size: 750
-  ports: 6479
   ordered:
-    # RunPod reserved H200s (priority)
+    # RunPod Slurm cluster (reserved H200s, no preemption)
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster
+    # RunPod on-demand (API provisioned)
     - accelerators: H200:8
       cloud: runpod
     # GCP fallback

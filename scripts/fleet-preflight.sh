@@ -106,8 +106,19 @@ echo "[2/4] Google Cloud authentication"
 if [ "$SKIP_GCLOUD" = true ]; then
   record_warn "gcloud checks skipped (--skip-gcloud)"
 elif ! command -v gcloud >/dev/null 2>&1; then
-  record_fail "gcloud CLI not found on PATH"
-  record_hint "install: https://cloud.google.com/sdk/docs/install — or pass --skip-gcloud if not launching to GCP"
+  # If Slurm is a target in the YAML, gcloud is optional (only needed for failover)
+  slurm_target=false
+  for arg in "$@"; do
+    if echo "$arg" | grep -q '\.ya\?ml$' && grep -q 'cloud: slurm' "$arg" 2>/dev/null; then
+      slurm_target=true; break
+    fi
+  done
+  if [ "$slurm_target" = true ]; then
+    record_warn "gcloud CLI not found (optional — Slurm is primary target)"
+  else
+    record_fail "gcloud CLI not found on PATH"
+    record_hint "install: https://cloud.google.com/sdk/docs/install — or pass --skip-gcloud if not launching to GCP"
+  fi
 else
   active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
   if [ -z "$active_account" ]; then
