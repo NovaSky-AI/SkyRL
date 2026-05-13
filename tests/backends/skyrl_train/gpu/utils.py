@@ -16,7 +16,8 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_dict_outputs_after_mesh_dispatch,
+    WorkerOutput,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
@@ -369,8 +370,8 @@ def get_model_logits_from_actor(actor_group: PPORayActorGroup, input_sequences, 
 
     results_refs = actor_group.async_run_ray_method("mesh", "forward", data)
     results = ray.get(results_refs)
-    ret_dict = concatenate_dict_outputs_after_mesh_dispatch(actor_group.actor_infos, results)
-    logits = ret_dict["output"]
+    output = WorkerOutput.cat(actor_group.actor_infos, results)
+    logits = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
     return logits
 

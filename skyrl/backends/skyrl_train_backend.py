@@ -758,17 +758,18 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         # Trim padding entries from loss_fn_outputs
-        if pad_size > 0 and "loss_fn_outputs" in data:
-            data["loss_fn_outputs"] = data["loss_fn_outputs"][:-pad_size]
+        per_sample_outputs = data.loss_fn_outputs
+        if pad_size > 0 and per_sample_outputs:
+            per_sample_outputs = per_sample_outputs[:-pad_size]
 
-        metrics = self._extract_metrics(data)
+        metrics = self._extract_metrics(data.metrics)
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
-            if "loss_fn_outputs" in data:
+            if per_sample_outputs:
                 loss_fn_outputs = []
                 for i in range(start_idx, end_idx):
-                    raw_output = data["loss_fn_outputs"][i]
+                    raw_output = per_sample_outputs[i]
                     formatted_output = {}
                     for key in ("elementwise_loss", "logprobs", "values"):
                         values = list(raw_output.get(key, []))
@@ -782,7 +783,7 @@ class SkyRLTrainBackend(AbstractBackend):
             else:
                 loss_fn_outputs = [{} for _ in range(end_idx - start_idx)]
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar",
+                loss_fn_output_type=data.loss_fn_output_type,
                 loss_fn_outputs=loss_fn_outputs,
                 metrics=metrics,
             )
@@ -814,11 +815,10 @@ class SkyRLTrainBackend(AbstractBackend):
         model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
         data = self._dispatch.forward(role, batch, model_id=model_id)
 
-        # dispatch.forward() returns a plain dict {"output": tensor[batch, max_response_len]}.
-        # Trim padding entries from output
-        output_tensor = data["output"]
-        if pad_size > 0:
-            output_tensor = output_tensor[:-pad_size]
+        # Workers emit per-sample loss_fn_outputs directly. Trim padding entries.
+        per_sample_outputs = data.loss_fn_outputs
+        if pad_size > 0 and per_sample_outputs:
+            per_sample_outputs = per_sample_outputs[:-pad_size]
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
@@ -826,9 +826,12 @@ class SkyRLTrainBackend(AbstractBackend):
             for i in range(start_idx, end_idx):
                 # Use token weights length to determine each example's actual response length
                 valid_len = len(prepared_batch.all_token_weights[i])
-                start = max(output_tensor.shape[1] - valid_len, 0)
-                outputs = output_tensor[i, start:].tolist()
                 output_key = "values" if role == "critic" else "logprobs"
+                raw_values = per_sample_outputs[i].get(output_key, []) if per_sample_outputs else []
+                # The worker emits full T_response rows (right-padded). Right-trim
+                # to each sample's valid length to match the Tinker API contract.
+                start = max(len(raw_values) - valid_len, 0)
+                outputs = list(raw_values[start:])
                 loss_fn_outputs.append(
                     {
                         output_key: {
@@ -839,7 +842,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     }
                 )
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar",
+                loss_fn_output_type=data.loss_fn_output_type,
                 loss_fn_outputs=loss_fn_outputs,
                 metrics={},
             )

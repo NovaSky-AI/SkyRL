@@ -666,13 +666,13 @@ class SFTTrainer:
             # We use the attention_mask response window via collate_sft_batch's loss_mask which
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
-            metrics = self.dispatch.forward(
+            output = self.dispatch.forward(
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
                 loss_fn_config=None,
             )
-            batch_loss = float(metrics.get("loss", float("nan")))
+            batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
             total_tokens += nonpad_tokens
 
@@ -694,10 +694,11 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            metrics = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
+        metrics = output.metrics
         loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
         return {
             "loss": loss_val,

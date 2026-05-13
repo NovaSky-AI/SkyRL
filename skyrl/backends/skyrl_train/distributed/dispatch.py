@@ -1,10 +1,11 @@
 """Defines dispatch and collect logic for distributed training"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Type
 
 import ray
+import torch
 from ray import ObjectRef
 from ray.actor import ActorHandle
 
@@ -274,33 +275,72 @@ def concatenate_outputs_after_mesh_dispatch(
     return TrainingOutputBatch.cat(shards)
 
 
-def concatenate_dict_outputs_after_mesh_dispatch(
-    actor_infos: List[ActorInfo], data_batches: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """Concatenate dict-of-tensor outputs from different ranks after mesh dispatch.
+@dataclass
+class WorkerOutput:
+    """Unified worker output for ``forward`` and ``forward_backward``.
 
-    Plain-dict counterpart of :func:`concatenate_outputs_after_mesh_dispatch`,
-    used now that worker ``forward`` methods return ``Dict[str, Any]`` instead
-    of ``TrainingOutputBatch``. Tensors under the same key are concatenated
-    along dim 0 across DP ranks; non-tensor values are taken from the first
-    DP shard.
+    All worker-side outputs (RL / SFT, inference / loss-with-backward) flow
+    through this dataclass at the dispatch boundary so callers can program
+    against a uniform API.
+
+    Attributes:
+        loss_fn_output_type: Tag describing the schema of each entry in
+            ``loss_fn_outputs`` (e.g. ``"scalar"`` for per-token scalar arrays).
+        loss_fn_outputs: Per-sample list of dicts. Each entry contains keys
+            specific to the worker role (e.g. ``logprobs`` for policy/ref,
+            ``values`` for critic, plus optional ``elementwise_loss`` on the
+            SFT path).
+        metrics: Scalar metrics (loss, lr, response_length, ...). Already
+            all-reduced across DP ranks by the worker.
     """
-    import torch
 
-    assert len(actor_infos) == len(data_batches), "`actor_infos` and `data_batches` must have the same length"
-    dp_rank_to_shard: Dict[int, Dict[str, Any]] = {}
-    for actor_info, data_batch in zip(actor_infos, data_batches):
-        if actor_info.rank.is_collection_dp_rank():
-            dp_rank_to_shard[actor_info.rank.dp] = data_batch
-    shards = [dp_rank_to_shard[i] for i in range(actor_infos[0].rank.dp_size)]
-    if not shards:
-        return {}
+    loss_fn_output_type: str = "scalar"
+    loss_fn_outputs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: Dict[str, Any] = field(default_factory=dict)
 
-    out: Dict[str, Any] = {}
-    for key, value in shards[0].items():
-        if isinstance(value, torch.Tensor):
-            out[key] = torch.cat([shard[key] for shard in shards], dim=0)
-        else:
-            # Non-tensor (e.g. scalar metric) — keep the first shard's value.
-            out[key] = value
-    return out
+    @classmethod
+    def cat(cls, actor_infos: List[ActorInfo], shards: List["WorkerOutput"]) -> "WorkerOutput":
+        """Concatenate per-DP-rank shards in DP-rank order.
+
+        Only collects from collection DP ranks (matches
+        :meth:`MeshRank.is_collection_dp_rank`). ``loss_fn_outputs`` are
+        concatenated; ``metrics`` are taken from the first DP shard (they are
+        already all-reduced across DP within the worker).
+        """
+        assert len(actor_infos) == len(shards), "`actor_infos` and `shards` must have the same length"
+        dp_rank_to_shard: Dict[int, "WorkerOutput"] = {}
+        for ai, s in zip(actor_infos, shards):
+            if ai.rank.is_collection_dp_rank():
+                dp_rank_to_shard[ai.rank.dp] = s
+        if not dp_rank_to_shard:
+            return cls()
+        ordered = [dp_rank_to_shard[i] for i in range(actor_infos[0].rank.dp_size)]
+        return cls(
+            loss_fn_output_type=ordered[0].loss_fn_output_type,
+            loss_fn_outputs=[x for s in ordered for x in s.loss_fn_outputs],
+            metrics=dict(ordered[0].metrics),
+        )
+
+
+def loss_fn_outputs_to_tensor(
+    outputs: List[Dict[str, Any]],
+    key: str = "logprobs",
+    pad_value: float = 0.0,
+    dtype=torch.float32,
+    device=None,
+) -> torch.Tensor:
+    """Re-stack per-sample loss_fn_outputs into a right-padded ``[B, T_max]`` tensor.
+
+    Args:
+        outputs: Per-sample list of dicts (as in :attr:`WorkerOutput.loss_fn_outputs`).
+        key: Field to extract from each dict (e.g. ``"logprobs"`` for policy/ref,
+            ``"values"`` for critic).
+        pad_value: Padding value for right-padding shorter sequences.
+        dtype: Target dtype for the output tensor.
+        device: Optional target device.
+
+    Returns:
+        ``torch.Tensor[B, T_max]`` right-padded with ``pad_value``.
+    """
+    seqs = [torch.tensor(o[key], dtype=dtype, device=device) for o in outputs]
+    return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=pad_value)

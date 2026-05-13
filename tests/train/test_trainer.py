@@ -545,8 +545,7 @@ def test_forward_backward_batch_calculations():
     ), f"PolicyWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(policy_forward_backward_micro_calls)}"
 
     # Verify result structure
-    assert isinstance(result, dict)
-    assert "policy_loss" in result
+    assert "policy_loss" in result.metrics
 
     # Test CriticWorkerBase with same pattern
     critic_worker = create_test_worker(CriticWorkerBase)
@@ -576,8 +575,7 @@ def test_forward_backward_batch_calculations():
     assert critic_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure for critic
-    assert isinstance(result, dict)
-    assert "critic_loss" in result
+    assert "critic_loss" in result.metrics
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

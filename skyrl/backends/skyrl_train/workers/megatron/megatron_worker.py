@@ -18,7 +18,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
+from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
@@ -477,10 +477,13 @@ class MegatronWorker:
         )
         return model
 
-    def _megatron_inference_forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+    def _megatron_inference_forward(self, data: TrainingInputBatch, *, output_key: str = "logprobs") -> WorkerOutput:
         """Megatron-specific inference forward: pass the full mini batch through
-        ``MegatronModelWrapper.forward``. Returns a plain dict (``{"output": tensor}``)
-        so concatenation across DP ranks happens uniformly in the dispatcher.
+        ``MegatronModelWrapper.forward``.
+
+        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` is a per-sample
+        list of dicts (each entry holds the full ``T_response`` row under
+        ``output_key``).  Concatenation across DP ranks happens in the dispatcher.
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -524,7 +527,8 @@ class MegatronWorker:
 
         log_probs = log_probs.to("cpu")
         clear_router_replay()
-        return {"output": log_probs}
+        loss_fn_outputs = [{output_key: log_probs[i].tolist()} for i in range(log_probs.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
@@ -679,17 +683,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> WorkerOutput:
         """Forward pass.
 
-        - Without ``loss_fn``: runs Megatron's pipeline inference and returns a plain
-          dict (``{"output": logprobs}``).
+        - Without ``loss_fn``: runs Megatron's pipeline inference and returns a
+          :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` (``logprobs``
+          key) and empty ``metrics``.
         - With ``loss_fn`` (e.g., ``"cross_entropy"``): runs the SFT loss through Megatron's
-          pipeline schedule with ``forward_only=True`` (no backward) and returns a metrics
-          dict containing ``"loss"`` and per-sample ``"loss_fn_outputs"``.
+          pipeline schedule with ``forward_only=True`` (no backward) and returns a
+          :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus scalar
+          ``metrics`` (including ``"loss"``).
         """
         if loss_fn is None:
-            return self._megatron_inference_forward(data)
+            return self._megatron_inference_forward(data, output_key="logprobs")
 
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -733,7 +739,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_microbatches"] = len(micro_buffer)
 
         if not micro_buffer:
-            return {}
+            return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
         micro_bsz = micro_buffer[0]["sequences"].shape[0]
@@ -768,18 +774,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
-        if all_loss_fn_outputs:
-            status["loss_fn_outputs"] = all_loss_fn_outputs
-
         clear_router_replay()
-        return status
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
     def forward_backward(
         self,
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+    ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -793,7 +796,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn_config: Optional config overrides for the loss function.
 
         Returns:
-            Aggregated metrics dict across all micro batches
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
+            ``metrics`` (all-reduced across DP).
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -839,7 +843,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_microbatches"] = len(micro_buffer)
 
         if not micro_buffer:
-            return {}
+            return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
         micro_bsz = micro_buffer[0]["sequences"].shape[0]
@@ -878,13 +882,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
-        # Add loss_fn_outputs back (not reduced, kept as list)
-        if all_loss_fn_outputs:
-            status["loss_fn_outputs"] = all_loss_fn_outputs
-
         clear_router_replay()
 
-        return status
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
     def optim_step(self) -> Optional[float]:
         """
@@ -1107,9 +1107,13 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
-    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
-        """Run inference forward pass. Returns ``{"output": log_probs}`` as a plain dict."""
-        return self._megatron_inference_forward(data)
+    def forward(self, data: TrainingInputBatch) -> WorkerOutput:
+        """Run inference forward pass.
+
+        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
+        per-sample dict with key ``"logprobs"``.
+        """
+        return self._megatron_inference_forward(data, output_key="logprobs")
 
     def init_worker_process_group(self):
         """

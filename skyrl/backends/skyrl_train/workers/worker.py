@@ -28,6 +28,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     Dispatch,
     DispatchRegistry,
     MeshRank,
+    WorkerOutput,
 )
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.ulysses import (
@@ -390,24 +391,34 @@ class Worker(DistributedTorchRayActor):
 
         torch.distributed.barrier()
 
-    def forward(self, *args, **kwargs) -> Dict[str, Any]:
+    def forward(self, *args, **kwargs) -> WorkerOutput:
         """Run forward pass on the input batch.
 
-        Each worker subclass declares its own concrete signature and return
-        contract; the base class only fixes the convention that the result is a
-        plain ``Dict[str, Any]`` so callers can program against a uniform API.
+        Each worker subclass declares its own concrete signature and returns a
+        :class:`WorkerOutput` so callers can program against a uniform API.
         """
         raise NotImplementedError()
 
-    def _inference_forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
-        """Legacy forward path: run inference in micro batches and return ``{"output": tensor}``.
+    def _inference_forward(self, data: TrainingInputBatch, *, output_key: str = "logprobs") -> WorkerOutput:
+        """Legacy forward path: run inference in micro batches and emit per-sample outputs.
 
         Shared implementation used by RefWorker, CriticWorker, and the
         ``loss_fn is None`` branch of PolicyWorker. Subclasses provide
-        ``_forward_micro_batch`` for the per-micro-batch model call.
+        ``_forward_micro_batch`` for the per-micro-batch model call (returns a
+        ``TrainingOutputBatch`` with ``"output"`` of shape ``[B, T_response]``).
 
-        Returns a plain dict (``{"output": tensor}``) — concatenation across DP
-        ranks happens in the dispatcher, not here.
+        Args:
+            data: Mini-batch input.
+            output_key: Per-sample dict key under which the row tensor is stored
+                in ``loss_fn_outputs`` (``"logprobs"`` for policy/ref,
+                ``"values"`` for critic).
+
+        Returns:
+            :class:`WorkerOutput` with a per-sample ``loss_fn_outputs`` list.
+            Each entry holds one row of the worker's output tensor; downstream
+            (trainer / backend) reassembles into a ``[B, T]`` tensor via
+            :func:`loss_fn_outputs_to_tensor` when a tensor view is needed.
+            Concatenation across DP ranks happens in the dispatcher.
         """
         # run in micro batches of cfg.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
@@ -419,8 +430,9 @@ class Worker(DistributedTorchRayActor):
         output = TrainingOutputBatch.cat(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
-        # Return as a plain dict; the dispatcher concatenates dict shards across DP ranks.
-        return dict(output.items())
+        row_tensor = output["output"]
+        loss_fn_outputs = [{output_key: row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
@@ -712,7 +724,7 @@ class PolicyWorkerBase(Worker):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+    ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -727,7 +739,8 @@ class PolicyWorkerBase(Worker):
                            (e.g., {"clip_low_threshold": 0.9} for PPO)
 
         Returns:
-            Aggregated metrics dict across all micro batches
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
+            ``metrics`` (all-reduced across DP).
         """
         micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
@@ -757,11 +770,7 @@ class PolicyWorkerBase(Worker):
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 
-        # Add back loss_fn_outputs (concatenated across micro-batches)
-        if all_loss_fn_outputs:
-            result["loss_fn_outputs"] = all_loss_fn_outputs
-
-        return result
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
     def _forward_backward_micro(
         self,
@@ -978,19 +987,21 @@ class PolicyWorkerBase(Worker):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> WorkerOutput:
         """Run forward pass.
 
         - When ``loss_fn`` is None: runs inference in micro batches via
-          :meth:`Worker._inference_forward` and returns a plain dict
-          (``{"output": tensor}``).
+          :meth:`Worker._inference_forward` and returns a :class:`WorkerOutput`
+          with per-sample ``loss_fn_outputs`` (``logprobs`` key) and empty
+          ``metrics``.
         - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): runs the loss in ``no_grad`` mode
           (no backward), iterating over micro-batches of ``micro_forward_batch_size_per_gpu``,
-          and returns a metrics dict including ``"loss"`` and per-sample ``"loss_fn_outputs"``.
-          Metrics are all-reduced across the DP group to mirror :meth:`forward_backward`.
+          and returns a :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus
+          ``metrics`` (e.g. ``"loss"``).  Metrics are all-reduced across the DP group
+          to mirror :meth:`forward_backward`.
         """
         if loss_fn is None:
-            return self._inference_forward(data)
+            return self._inference_forward(data, output_key="logprobs")
 
         micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
         all_metrics = defaultdict(list)
@@ -1011,10 +1022,7 @@ class PolicyWorkerBase(Worker):
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 
-        if all_loss_fn_outputs:
-            result["loss_fn_outputs"] = all_loss_fn_outputs
-
-        return result
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
     def _forward_micro_with_loss(
         self,
@@ -1140,7 +1148,7 @@ class CriticWorkerBase(Worker):
         self.critic_loss_fn: Callable = ppo_critic_loss
         self._micro_batches_accumulated = 0
 
-    def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
+    def forward_backward(self, data: TrainingInputBatch) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -1151,7 +1159,8 @@ class CriticWorkerBase(Worker):
             data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
 
         Returns:
-            Aggregated metrics dict across all micro batches
+            :class:`WorkerOutput` with empty ``loss_fn_outputs`` and scalar
+            ``metrics`` (all-reduced across DP).
         """
         micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
@@ -1168,7 +1177,7 @@ class CriticWorkerBase(Worker):
         # all reduce metrics across DP workers
         result = all_reduce_metrics(result, self.strategy)
 
-        return result
+        return WorkerOutput(metrics=result)
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1270,9 +1279,13 @@ class CriticWorkerBase(Worker):
         output.metadata = micro_batch.metadata
         return output
 
-    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
-        """Run inference forward pass. Returns ``{"output": values}`` as a plain dict."""
-        return self._inference_forward(data)
+    def forward(self, data: TrainingInputBatch) -> WorkerOutput:
+        """Run inference forward pass.
+
+        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
+        per-sample dict with key ``"values"``.
+        """
+        return self._inference_forward(data, output_key="values")
 
 
 class RefWorkerBase(Worker):
@@ -1283,9 +1296,13 @@ class RefWorkerBase(Worker):
         self.optimizer = None
         self.scheduler = None
 
-    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
-        """Run inference forward pass. Returns ``{"output": log_probs}`` as a plain dict."""
-        return self._inference_forward(data)
+    def forward(self, data: TrainingInputBatch) -> WorkerOutput:
+        """Run inference forward pass.
+
+        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
+        per-sample dict with key ``"logprobs"``.
+        """
+        return self._inference_forward(data, output_key="logprobs")
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
