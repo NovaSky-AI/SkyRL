@@ -21,6 +21,8 @@ uv run --isolated --extra megatron \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
     dataset_name=allenai/tulu-3-sft-mixture \
     dataset_split="train[:50000]" \
+    eval_dataset_name=allenai/tulu-3-sft-mixture \
+    eval_dataset_split="train[-500:]" \
     messages_key=messages \
     max_length=4096 \
     num_steps=4166 \

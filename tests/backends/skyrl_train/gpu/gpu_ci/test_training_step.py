@@ -309,37 +309,33 @@ async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
         cfg.trainer.placement.policy_num_gpus_per_node = 2
     validate_cfg(cfg)
 
-    try:
-        actor_group = init_worker_with_type(
-            "policy",
-            shared_pg=None,
-            colocate_all=False,
-            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
-        )
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
 
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        batch_size = dp_size * 2  # Ensure multiple samples per DP rank
-        num_actions = 4
-        dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
+    dp_size = actor_group.actor_infos[0].rank.dp_size
+    batch_size = dp_size * 2  # Ensure multiple samples per DP rank
+    num_actions = 4
+    dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
 
-        dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
+    dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
 
-        result = dispatch.forward(
-            "policy",
-            dummy_batch,
-            loss_fn="cross_entropy",
-            loss_fn_config=None,
-        )
+    result = dispatch.forward(
+        "policy",
+        dummy_batch,
+        loss_fn="cross_entropy",
+        loss_fn_config=None,
+    )
 
-        assert isinstance(result, dict)
-        assert "loss" in result
-        assert math.isfinite(result["loss"]) and result["loss"] > 1e-3
-        assert "loss_fn_outputs" in result
-        assert len(result["loss_fn_outputs"]) == batch_size
-        for out in result["loss_fn_outputs"]:
-            assert "logprobs" in out and len(out["logprobs"]) == num_actions
-            assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions
-
-    finally:
-        ray.shutdown()
+    assert isinstance(result, dict)
+    assert "loss" in result
+    assert math.isfinite(result["loss"]) and result["loss"] > 1e-3
+    assert "loss_fn_outputs" in result
+    assert len(result["loss_fn_outputs"]) == batch_size
+    for out in result["loss_fn_outputs"]:
+        assert "logprobs" in out and len(out["logprobs"]) == num_actions
+        assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions
