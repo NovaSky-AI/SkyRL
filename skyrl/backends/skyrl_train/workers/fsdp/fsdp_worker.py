@@ -5,10 +5,6 @@ from typing import TYPE_CHECKING, Optional
 import ray
 import torch
 import torch.distributed
-from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
-from torch.distributed.fsdp.fully_sharded_data_parallel import (
-    FullyShardedDataParallel as FSDP,
-)
 from transformers import AutoConfig
 
 from skyrl.train.utils.trainer_utils import (
@@ -24,7 +20,6 @@ except ImportError:
 
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
-    fsdp_version,
     should_use_meta_init,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -90,15 +85,7 @@ class FSDPWeightExtractor(WeightExtractor):
         Yields:
             WeightChunk objects (one per parameter, or grouped by module)
         """
-        # Configure state_dict type for FSDP v1
-        if fsdp_version(self.model) == 1:
-            FSDP.set_state_dict_type(
-                self.model,
-                state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                state_dict_config=ShardedStateDictConfig(),
-            )
-
-        # Get state dict (handles FSDP sharding)
+        # FSDP2 state_dict returns DTensors directly; no state_dict_type configuration needed.
         params = self.model.state_dict()
 
         if self.weight_prefix:
@@ -127,18 +114,8 @@ class FSDPWeightExtractor(WeightExtractor):
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without materializing full tensors.
 
-        Uses state_dict() to get clean parameter names (FSDP strips the
-        _fsdp_wrapped_module prefix), matching extract_weights behavior.
-        The sharded tensors returned by state_dict() are not gathered;
-        we only read their shape.
+        Reads state_dict() shapes; sharded DTensors are not gathered.
         """
-        if fsdp_version(self.model) == 1:
-            FSDP.set_state_dict_type(
-                self.model,
-                state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                state_dict_config=ShardedStateDictConfig(),
-            )
-
         names = []
         dtype_names = []
         shapes = []
@@ -157,7 +134,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.strategy in ("fsdp", "fsdp2")
+        assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.policy.fsdp_config,
             optimizer_config=self.cfg.policy.optimizer_config,
@@ -338,14 +315,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
-        if self._world_size > 1 and fsdp_version(self.model.model) == 1:
-            self.model.model._handle.reshard(True)
         return output
 
 
 class FSDPCriticWorkerBase(CriticWorkerBase):
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.strategy in ("fsdp", "fsdp2")
+        assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.critic.fsdp_config,
             optimizer_config=self.cfg.critic.optimizer_config,
@@ -405,14 +380,12 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         """
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
-        if self._world_size > 1 and fsdp_version(self.model.model) == 1:
-            self.model.model._handle.reshard(True)
         return output
 
 
 class FSDPRefWorkerBase(RefWorkerBase):
     def init_model(self, model_path):
-        assert self.cfg.strategy in ("fsdp", "fsdp2")
+        assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.ref.fsdp_config,
             fsdp_strategy=self.cfg.strategy,
@@ -455,8 +428,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
         """
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
-        if self._world_size > 1 and fsdp_version(self.model.model) == 1:
-            self.model.model._handle.reshard(True)
         return output
 
 

@@ -536,7 +536,7 @@ async def test_megatron_train(
     ray.shutdown()
     ray_init_for_tests()
 
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
     # between use_sample_packing true/false for FSDP (no diff for megatron)
     # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211

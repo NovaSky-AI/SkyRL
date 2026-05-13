@@ -15,8 +15,6 @@ from loguru import logger
 from packaging import version
 from torch import distributed as dist
 from torch import optim
-from torch.distributed.fsdp import CPUOffload, MixedPrecision
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers.trainer import get_scheduler
 
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
@@ -28,14 +26,9 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     fsdp2_clip_grad_norm_,
     fsdp2_get_full_state_dict,
     fsdp2_load_full_state_dict,
-    fsdp_version,
-    get_fsdp_state_ctx,
-    get_fsdp_wrap_policy,
-    get_sharding_strategy,
-    init_fn,
-    load_fsdp_model_to_gpu,
+    load_fsdp2_model_to_gpu,
     load_fsdp_optimizer,
-    offload_fsdp_model_to_cpu,
+    offload_fsdp2_model_to_cpu,
     offload_fsdp_optimizer,
 )
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
@@ -76,7 +69,7 @@ class FSDPStrategy(DistributedStrategy):
         num_training_steps: Optional[int] = None,
     ) -> None:
         super().__init__()
-        assert fsdp_strategy in ("fsdp", "fsdp2"), f"Unsupported FSDP strategy: {fsdp_strategy}"
+        assert fsdp_strategy == "fsdp", f"Unsupported FSDP strategy: {fsdp_strategy}"
         self.fsdp_config = fsdp_config
         self.optimizer_config = optimizer_config
         self.model_config = model_config
@@ -87,8 +80,8 @@ class FSDPStrategy(DistributedStrategy):
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
 
-        # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
-        self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.cpu_offload
+        # When cpu_offload is off, manually offload weights/optimizer to cpu.
+        self.manual_offload = not self.fsdp_config.cpu_offload
         if self.optimizer_config is not None:
             self.manual_offload_optimizer = self.optimizer_config.offload_after_step and self.manual_offload
         else:
@@ -121,14 +114,14 @@ class FSDPStrategy(DistributedStrategy):
         """
         Offload model weights and optimizer to CPU memory.
 
-        For all cases except fsdp2 with cpu_offload=True, we need to manually offload weights/optimizer to cpu.
+        Only runs when cpu_offload is disabled in the FSDP config; otherwise FSDP2 handles offload natively.
         """
         if isinstance(model, HFModelWrapper):
             model = model.model
 
         if self.manual_offload:
             if offload_model:
-                offload_fsdp_model_to_cpu(model, empty_cache=True)
+                offload_fsdp2_model_to_cpu(model, empty_cache=True)
 
             if optimizer is not None and self.manual_offload_optimizer and offload_optimizer:
                 offload_fsdp_optimizer(optimizer)
@@ -141,10 +134,9 @@ class FSDPStrategy(DistributedStrategy):
         if isinstance(model, HFModelWrapper):
             model = model.model
 
-        # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually backload weights/optimizer to gpu
         if self.manual_offload:
             if backload_model:
-                load_fsdp_model_to_gpu(model)
+                load_fsdp2_model_to_gpu(model)
             if optimizer is not None and self.manual_offload_optimizer and backload_optimizer:
                 load_fsdp_optimizer(optimizer, torch.cuda.current_device())
 
@@ -169,9 +161,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.max_norm > 0:
             # NOTE (sumanthrh): All `grad_norm`s returned here are the original grad norms before clipping.
-            if isinstance(model, FSDP):
-                grad_norm = model.clip_grad_norm_(max_norm=self.max_norm)
-            elif isinstance(model, FSDPModule):
+            if FSDPModule is not None and isinstance(model, FSDPModule):
                 grad_norm = fsdp2_clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
@@ -207,74 +197,31 @@ class FSDPStrategy(DistributedStrategy):
         return ret[0] if len(ret) == 1 else ret
 
     def _fsdp_init_model(self, model, is_train=True, is_wrapped=False):
-        # Initialize FSDP wrapping policy
-        wrap_policy = get_fsdp_wrap_policy(
-            module=model.model if is_wrapped else model,
-            config=getattr(self.fsdp_config, "wrap_policy", None),
-            is_lora=self.is_lora,
-        )
-
         # Setup mixed precision
         mixed_precision_config = getattr(self.fsdp_config, "mixed_precision", None)
         if mixed_precision_config is not None:
             param_dtype = PrecisionType.to_dtype(mixed_precision_config.param_dtype)
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.reduce_dtype)
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.buffer_dtype)
         else:
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
-            buffer_dtype = torch.float32
 
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+        mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True)
 
-        cpu_offload = None
+        cpu_offload = CPUOffloadPolicy(pin_memory=True) if self.fsdp_config.cpu_offload else None
 
-        # sharding strategy
-        fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
-
-        # Wrap model with FSDP
-        if self.fsdp_strategy == "fsdp":
-            # cpu offloading will always be none for models that train with FSDP due to correctness issues with gradient accumulation -
-            # see https://docs.pytorch.org/docs/stable/fsdp.html
-            if not is_train and self.fsdp_config.cpu_offload:
-                cpu_offload = CPUOffload(offload_params=True)
-            fsdp_module = FSDP(
-                model.model if is_wrapped else model,
-                cpu_offload=cpu_offload,
-                param_init_fn=init_fn,
-                use_orig_params=False,
-                auto_wrap_policy=wrap_policy,
-                device_id=torch.cuda.current_device(),
-                sharding_strategy=sharding_strategy,
-                mixed_precision=mixed_precision,
-                sync_module_states=True,
-                device_mesh=self.device_mesh,
-                forward_prefetch=False,
-            )
-        elif self.fsdp_strategy == "fsdp2":
-            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-            mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
-            )
-            if self.fsdp_config.cpu_offload:
-                cpu_offload = CPUOffloadPolicy(pin_memory=True)
-
-            fsdp_kwargs = {
-                "mesh": fsdp_mesh,
-                "mp_policy": mp_policy,
-                "offload_policy": cpu_offload,
-                "reshard_after_forward": self.fsdp_config.reshard_after_forward,
-            }
-            module = model.model if is_wrapped else model
-            full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
-            fsdp_module = module
-        else:
-            raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
-
-        return fsdp_module
+        fsdp_kwargs = {
+            "mesh": self.device_mesh,
+            "mp_policy": mp_policy,
+            "offload_policy": cpu_offload,
+            "reshard_after_forward": self.fsdp_config.reshard_after_forward,
+        }
+        module = model.model if is_wrapped else model
+        full_state = module.state_dict()
+        apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+        fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+        return module
 
     def _fsdp_init_train_model(self, model, optimizer, scheduler):
         """Initialize a model for training with FSDP"""
@@ -320,25 +267,9 @@ class FSDPStrategy(DistributedStrategy):
         return model
 
     def _unwrap_model(self, model) -> nn.Module:
-        """Unwrap model from HFModelWrapper or FSDP"""
-        # Handle HFModelWrapper wrapper
+        """Unwrap model from HFModelWrapper. FSDP2 composable wrapping leaves the underlying module accessible directly."""
         if isinstance(model, HFModelWrapper):
             return self._unwrap_model(model.model)
-
-        # For FSDP2 models, check if the FSDP model itself has the necessary attributes
-        model_type = type(model).__name__
-        if "FSDP" in model_type:
-            has_config = hasattr(model, "config")
-            has_lm_head = hasattr(model, "lm_head")
-            has_generate = hasattr(model, "generate")
-            if has_config and (has_lm_head or has_generate):
-                return model
-
-        # Check for FSDP v1 unwrapping
-        if hasattr(model, "_fsdp_wrapped_module"):
-            return model._fsdp_wrapped_module
-
-        # If no unwrapping needed, return the original model
         return model
 
     def _fix_fsdp_config(self, config):
@@ -411,12 +342,6 @@ class FSDPStrategy(DistributedStrategy):
         """Save model checkpoint for FSDP"""
         import warnings
 
-        from torch.distributed.fsdp import (
-            ShardedOptimStateDictConfig,
-            ShardedStateDictConfig,
-            StateDictType,
-        )
-
         if node_local_rank == 0:
             io.makedirs(ckpt_dir, exist_ok=True)
 
@@ -429,13 +354,6 @@ class FSDPStrategy(DistributedStrategy):
         else:
             save_model = model
 
-        if self.fsdp_strategy not in ("fsdp", "fsdp2"):
-            raise ValueError(f"Unsupported FSDP strategy: {self.fsdp_strategy}")
-
-        # Set up state dict configurations for sharded saving
-        state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
-        optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
-
         # Define paths for saving individual rank files
         rank = self.get_rank()
         world_size = self.world_size
@@ -445,47 +363,45 @@ class FSDPStrategy(DistributedStrategy):
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-            # Save using appropriate FSDP context
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                    # Get and save model state dict
-                    model_state_dict = save_model.state_dict()
-                    self.print(f"[rank-{rank}]: Saving model to {model_path}")
-                    with io.open_file(model_path, "wb") as f:
-                        torch.save(model_state_dict, f)
+                # FSDP2 state_dict returns DTensors directly; no state_dict_type context needed.
+                model_state_dict = save_model.state_dict()
+                self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                with io.open_file(model_path, "wb") as f:
+                    torch.save(model_state_dict, f)
 
-                    # Get and save optimizer state dict if optimizer is provided
-                    optimizer_state_dict = {}
-                    if optimizer is not None:
-                        optimizer_state_dict = optimizer.state_dict()
-                    self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
-                    with io.open_file(optim_path, "wb") as f:
-                        torch.save(optimizer_state_dict, f)
+                # Get and save optimizer state dict if optimizer is provided
+                optimizer_state_dict = {}
+                if optimizer is not None:
+                    optimizer_state_dict = optimizer.state_dict()
+                self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                with io.open_file(optim_path, "wb") as f:
+                    torch.save(optimizer_state_dict, f)
 
-                    # Get scheduler state dict if scheduler is provided
-                    lr_scheduler_state_dict = {}
-                    if scheduler is not None:
-                        lr_scheduler_state_dict = scheduler.state_dict()
+                # Get scheduler state dict if scheduler is provided
+                lr_scheduler_state_dict = {}
+                if scheduler is not None:
+                    lr_scheduler_state_dict = scheduler.state_dict()
 
-                    # Create extra state dict with client state and any additional info
-                    extra_state_dict = {
-                        "lr_scheduler": lr_scheduler_state_dict,
-                        "client_state": client_state,
-                        "tag": tag,
-                        "fsdp_strategy": self.fsdp_strategy,
-                        "world_size": world_size,
-                        "rank": rank,
-                        "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                    }
+                # Create extra state dict with client state and any additional info
+                extra_state_dict = {
+                    "lr_scheduler": lr_scheduler_state_dict,
+                    "client_state": client_state,
+                    "tag": tag,
+                    "fsdp_strategy": self.fsdp_strategy,
+                    "world_size": world_size,
+                    "rank": rank,
+                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                }
 
-                    # Save extra state
-                    self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                    with io.open_file(extra_path, "wb") as f:
-                        torch.save(extra_state_dict, f)
+                # Save extra state
+                self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                with io.open_file(extra_path, "wb") as f:
+                    torch.save(extra_state_dict, f)
 
-                    # Garbage collect temporary buffers from materializing the state dicts
-                    gc.collect()
+                # Garbage collect temporary buffers from materializing the state dicts
+                gc.collect()
 
             if self.is_rank_0():
                 config_save_model = self._unwrap_model(model)
@@ -519,12 +435,6 @@ class FSDPStrategy(DistributedStrategy):
     ):
         """Load model checkpoint for FSDP"""
         import warnings
-
-        from torch.distributed.fsdp import (
-            ShardedOptimStateDictConfig,
-            ShardedStateDictConfig,
-            StateDictType,
-        )
 
         if ckpt_dir is None:
             raise ValueError("ckpt_dir cannot be None")
@@ -573,27 +483,21 @@ class FSDPStrategy(DistributedStrategy):
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
 
-        # Set up state dict configurations for sharded loading
-        state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
-        optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
-
-        # Load using appropriate FSDP context
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with get_fsdp_state_ctx(load_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                # Load model state dict
-                load_model.load_state_dict(model_state_dict, strict=load_module_strict)
-                self.print(f"[rank-{rank}]: Successfully loaded model state dict")
+            # FSDP2: load_state_dict accepts DTensors directly; no state_dict_type context needed.
+            load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+            self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
-                # Load optimizer state dict if optimizer object is provided and loading is requested
-                if optimizer is not None and load_optimizer_states and optimizer_state_dict:
-                    optimizer.load_state_dict(optimizer_state_dict)
-                    self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
+            # Load optimizer state dict if optimizer object is provided and loading is requested
+            if optimizer is not None and load_optimizer_states and optimizer_state_dict:
+                optimizer.load_state_dict(optimizer_state_dict)
+                self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
 
-                # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_lr_scheduler_states:
-                    scheduler.load_state_dict(lr_scheduler_state_dict)
-                    self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
+            # Load scheduler state dict if scheduler object is provided and loading is requested
+            if scheduler is not None and load_lr_scheduler_states:
+                scheduler.load_state_dict(lr_scheduler_state_dict)
+                self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
         if "rng" in extra_state_dict:
@@ -633,25 +537,8 @@ class FSDPStrategy(DistributedStrategy):
         if not hasattr(model_to_save, "config") or not hasattr(model_to_save, "save_pretrained"):
             raise ValueError("Model must be a HuggingFace model with config and save_pretrained method")
 
-        # Step 3: Determine FSDP version and collect full state dict
-        fsdp_ver = fsdp_version(fsdp_model)
-        self.print(f"[rank-{self.get_rank()}]: Detected FSDP version: {fsdp_ver}")
-
-        if fsdp_ver == 2:
-            # Use FSDP2 API - collects on rank 0 only
-            output_state_dict = fsdp2_get_full_state_dict(fsdp_model, cpu_offload=True, rank0_only=True)
-        elif fsdp_ver == 1:
-            from torch.distributed.checkpoint.state_dict import (
-                StateDictOptions,
-                get_model_state_dict,
-            )
-
-            options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False)
-            output_state_dict = get_model_state_dict(fsdp_model, options=options)
-            if not self.is_rank_0():
-                output_state_dict.clear()
-        else:
-            raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
+        # Step 3: Collect full state dict on rank 0 only
+        output_state_dict = fsdp2_get_full_state_dict(fsdp_model, cpu_offload=True, rank0_only=True)
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():

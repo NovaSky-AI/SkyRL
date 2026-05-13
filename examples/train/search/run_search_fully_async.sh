@@ -60,7 +60,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=false \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.placement.policy_num_gpus_per_node=4 \

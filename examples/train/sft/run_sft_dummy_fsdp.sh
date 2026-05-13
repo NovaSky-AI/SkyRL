@@ -14,7 +14,7 @@ set -x
 
 uv run --isolated --extra fsdp \
     python -m skyrl.train.main_sft \
-    strategy=fsdp2 \
+    strategy=fsdp \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
     max_length=2048 \
     num_steps=10 \

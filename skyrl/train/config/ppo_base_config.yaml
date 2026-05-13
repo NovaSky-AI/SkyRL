@@ -23,7 +23,7 @@ trainer:
     ref_num_nodes: 1
     ref_num_gpus_per_node: 1
   sequence_parallel_backend: "ulysses"
-  strategy: fsdp2
+  strategy: fsdp
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -54,7 +54,7 @@ trainer:
       scheduler: "constant_with_warmup"   
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-      reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
+      reshard_after_forward: true # [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
     sequence_parallel_size: 1
     # uses torch compile with logits calculation

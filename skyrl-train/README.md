@@ -24,7 +24,7 @@
 ## Key Features
 The `skyrl-train` package supports:
 - PPO and GRPO
-- Training Backends: FSDP, FSDP2, and [Megatron](https://docs.skyrl.ai/docs/examples/megatron)
+- Training Backends: FSDP and [Megatron](https://docs.skyrl.ai/docs/examples/megatron)
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
 - Ulysses sequence parallelism for long-context training
 - [Colocated or disaggregated](https://docs.skyrl.ai/docs/configuration/placement) training and generation (including on heterogeneous hardware)

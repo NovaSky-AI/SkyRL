@@ -44,14 +44,10 @@ def cfg() -> SkyRLTrainConfig:
     [
         ("policy", "fsdp"),
         ("critic", "fsdp"),
-        ("policy", "fsdp2"),
-        ("critic", "fsdp2"),
     ],
     ids=[
         "fsdp_policy",
         "fsdp_critic",
-        "fsdp2_policy",
-        "fsdp2_critic",
     ],
 )
 async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -159,14 +155,11 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
 @pytest.mark.parametrize(
     ("worker_type", "strategy"),
     [
-        # TODO (erictang000): fsdp 1 manual offloading is broken for single gpu ref worker
         ("ref", "fsdp"),
-        ("ref", "fsdp2"),
         # TODO (erictang000): Add support for reward worker.
     ],
     ids=[
         "fsdp_ref",
-        "fsdp2_ref",
     ],
 )
 async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -250,14 +243,14 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
 @pytest.mark.parametrize(
     ("worker_type", "strategy"),
     [
-        ("policy", "fsdp2"),
-        ("critic", "fsdp2"),
-        ("ref", "fsdp2"),
+        ("policy", "fsdp"),
+        ("critic", "fsdp"),
+        ("ref", "fsdp"),
     ],
     ids=[
-        "fsdp2_policy",
-        "fsdp2_critic",
-        "fsdp2_ref",
+        "fsdp_policy",
+        "fsdp_critic",
+        "fsdp_ref",
     ],
 )
 async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -302,7 +295,6 @@ async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strat
     "strategy",
     [
         "fsdp",
-        "fsdp2",
     ],
 )
 def test_offload_after_ckpt(ray_init_fixture, strategy):

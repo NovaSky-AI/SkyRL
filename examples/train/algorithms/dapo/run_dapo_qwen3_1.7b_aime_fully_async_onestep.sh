@@ -76,7 +76,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=false \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \

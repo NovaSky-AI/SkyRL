@@ -37,13 +37,11 @@ def cfg() -> SkyRLTrainConfig:
     [
         (True, "fsdp", MODEL_NAME),
         (False, "fsdp", MODEL_NAME),
-        (True, "fsdp2", MODEL_NAME),
-        (False, "fsdp2", MODEL_NAME),
         # TODO (erictang000): Add test for MoE model for FSDP backend
         # right now this fails due to token routing issues
-        # (True, "fsdp2", MOE_MODEL_NAME),
+        # (True, "fsdp", MOE_MODEL_NAME),
     ],
-    ids=["packed-fsdp", "unpacked-fsdp", "packed-fsdp2", "unpacked-fsdp2"],
+    ids=["packed-fsdp", "unpacked-fsdp"],
 )
 async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy, model_name):
     """
@@ -103,7 +101,7 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
     tokens, then checks that each output's logprobs length matches exactly.
     """
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
     num_actions = 6
@@ -146,12 +144,10 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("packed", "strategy"),
-    [(True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
+    [(True, "fsdp"), (False, "fsdp")],
     ids=[
         "packed-fsdp",
         "unpacked-fsdp",
-        "packed-fsdp2",
-        "unpacked-fsdp2",
     ],
 )
 async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy):
@@ -194,7 +190,7 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
     Test that set_lr updates the optimizer's learning rate.
     """
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
     try:
@@ -228,8 +224,8 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("strategy"),
-    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
-    ids=["fsdp2", "megatron"],
+    ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp", "megatron"],
 )
 async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     """

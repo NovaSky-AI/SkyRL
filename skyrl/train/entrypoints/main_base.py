@@ -354,7 +354,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+        if self.cfg.trainer.strategy == "fsdp":
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                 CriticWorker,
                 PolicyWorker,

@@ -45,7 +45,7 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.policy.model.path=$STUDENT_MODEL \
   trainer.ref.model.path=$TEACHER_MODEL \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \

@@ -29,7 +29,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     trainer.placement.colocate_all=False \
     trainer.placement.policy_num_gpus_per_node="$NUM_TRAINING_GPUS" \
     trainer.placement.ref_num_gpus_per_node="$NUM_TRAINING_GPUS" \
-    trainer.strategy=fsdp2 \
+    trainer.strategy=fsdp \
     trainer.train_batch_size=64 \
     trainer.policy_mini_batch_size=64 \
     trainer.micro_forward_batch_size_per_gpu=20 \

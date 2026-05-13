@@ -17,7 +17,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-32B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=true \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \

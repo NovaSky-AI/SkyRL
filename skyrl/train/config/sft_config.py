@@ -124,7 +124,7 @@ class SFTConfig(BaseConfig):
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
 
     # ---- SFT-specific flat fields ----
-    strategy: str = "megatron"  # "megatron" or "fsdp2"
+    strategy: str = "megatron"  # "megatron" or "fsdp"
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
     messages_key: str = "messages"  # column name for chat-format datasets
@@ -171,7 +171,7 @@ class SFTConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
-_VALID_STRATEGIES = ("megatron", "fsdp2")
+_VALID_STRATEGIES = ("megatron", "fsdp")
 
 
 def validate_sft_cfg(cfg: SFTConfig) -> None:
@@ -180,6 +180,15 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     Only checks fields that are relevant to SFT training, unlike
     ``validate_cfg`` which includes RL-specific validations.
     """
+    if cfg.strategy == "fsdp2":
+        import warnings
+
+        warnings.warn(
+            "strategy='fsdp2' is deprecated; use 'fsdp' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cfg.strategy = "fsdp"
     if cfg.strategy not in _VALID_STRATEGIES:
         raise ValueError(f"Unknown strategy '{cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
     if cfg.micro_train_batch_size_per_gpu <= 0:
@@ -247,7 +256,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     # Parallelism configs -- direct assignment (same types)
     if sft_cfg.strategy == "megatron":
         cfg.trainer.policy.megatron_config = sft_cfg.megatron_config
-    if sft_cfg.strategy == "fsdp2":
+    if sft_cfg.strategy == "fsdp":
         cfg.trainer.policy.fsdp_config = sft_cfg.fsdp_config
 
     cfg.trainer.policy.sequence_parallel_size = sft_cfg.sequence_parallel_size

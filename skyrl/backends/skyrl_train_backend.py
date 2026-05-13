@@ -50,7 +50,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"
 
 
 class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
@@ -81,9 +81,9 @@ def _build_skyrl_train_config(
     # TrainerConfig.__post_init__ sees the right value during validation —
     # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
     assert overrides.strategy in (
-        "fsdp2",
+        "fsdp",
         "megatron",
-    ), f"Only fsdp2 and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
+    ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
@@ -410,7 +410,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
             self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            if self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     PolicyWorker,
                 )
@@ -430,7 +430,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
             if "policy" not in self._model_ids_to_role.values():
                 raise ValueError("Create a policy model before creating a critic model")
-            if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            if self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     CriticWorker,
                 )
