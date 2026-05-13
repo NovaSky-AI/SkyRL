@@ -399,41 +399,6 @@ class Worker(DistributedTorchRayActor):
         """
         raise NotImplementedError()
 
-    def _inference_forward(self, data: TrainingInputBatch, *, output_key: str = "logprobs") -> WorkerOutput:
-        """Legacy forward path: run inference in micro batches and emit per-sample outputs.
-
-        Shared implementation used by RefWorker, CriticWorker, and the
-        ``loss_fn is None`` branch of PolicyWorker. Subclasses provide
-        ``_forward_micro_batch`` for the per-micro-batch model call (returns a
-        ``TrainingOutputBatch`` with ``"output"`` of shape ``[B, T_response]``).
-
-        Args:
-            data: Mini-batch input.
-            output_key: Per-sample dict key under which the row tensor is stored
-                in ``loss_fn_outputs`` (``"logprobs"`` for policy/ref,
-                ``"values"`` for critic).
-
-        Returns:
-            :class:`WorkerOutput` with a per-sample ``loss_fn_outputs`` list.
-            Each entry holds one row of the worker's output tensor; downstream
-            (trainer / backend) reassembles into a ``[B, T]`` tensor via
-            :func:`loss_fn_outputs_to_tensor` when a tensor view is needed.
-            Concatenation across DP ranks happens in the dispatcher.
-        """
-        # run in micro batches of cfg.micro_forward_batch_size_per_gpu
-        # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
-
-        outputs = []
-        for micro_batch in micro_batches:
-            outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
-        if output.device is not None and output.device != torch.device("cpu"):
-            output = output.to("cpu")
-        row_tensor = output["output"]
-        loss_fn_outputs = [{output_key: row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
-        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
-
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
 
@@ -990,8 +955,8 @@ class PolicyWorkerBase(Worker):
     ) -> WorkerOutput:
         """Run forward pass.
 
-        - When ``loss_fn`` is None: runs inference in micro batches via
-          :meth:`Worker._inference_forward` and returns a :class:`WorkerOutput`
+        - When ``loss_fn`` is None: runs inference in micro batches of
+          ``micro_forward_batch_size_per_gpu`` and returns a :class:`WorkerOutput`
           with per-sample ``loss_fn_outputs`` (``logprobs`` key) and empty
           ``metrics``.
         - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): runs the loss in ``no_grad`` mode
@@ -1001,7 +966,17 @@ class PolicyWorkerBase(Worker):
           to mirror :meth:`forward_backward`.
         """
         if loss_fn is None:
-            return self._inference_forward(data, output_key="logprobs")
+            # Inference forward path: run in micro batches and emit per-sample logprobs.
+            micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+            outputs = []
+            for micro_batch in micro_batches:
+                outputs.append(self._forward_micro_batch(micro_batch))
+            output = TrainingOutputBatch.cat(outputs)
+            if output.device is not None and output.device != torch.device("cpu"):
+                output = output.to("cpu")
+            row_tensor = output["output"]
+            loss_fn_outputs = [{"logprobs": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
+            return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
         micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
         all_metrics = defaultdict(list)
@@ -1285,7 +1260,17 @@ class CriticWorkerBase(Worker):
         Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
         per-sample dict with key ``"values"``.
         """
-        return self._inference_forward(data, output_key="values")
+        # Run in micro batches and emit per-sample values.
+        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+        outputs = []
+        for micro_batch in micro_batches:
+            outputs.append(self._forward_micro_batch(micro_batch))
+        output = TrainingOutputBatch.cat(outputs)
+        if output.device is not None and output.device != torch.device("cpu"):
+            output = output.to("cpu")
+        row_tensor = output["output"]
+        loss_fn_outputs = [{"values": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
 
 class RefWorkerBase(Worker):
@@ -1302,7 +1287,17 @@ class RefWorkerBase(Worker):
         Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
         per-sample dict with key ``"logprobs"``.
         """
-        return self._inference_forward(data, output_key="logprobs")
+        # Run in micro batches and emit per-sample logprobs.
+        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+        outputs = []
+        for micro_batch in micro_batches:
+            outputs.append(self._forward_micro_batch(micro_batch))
+        output = TrainingOutputBatch.cat(outputs)
+        if output.device is not None and output.device != torch.device("cpu"):
+            output = output.to("cpu")
+        row_tensor = output["output"]
+        loss_fn_outputs = [{"logprobs": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
