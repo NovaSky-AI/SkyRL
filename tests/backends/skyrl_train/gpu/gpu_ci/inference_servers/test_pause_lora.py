@@ -274,13 +274,21 @@ async def test_sample_with_retry_recovers_from_abort(
          model emitting tokens until ``max_tokens`` (otherwise it stops at
          the natural EOS after a couple of "Meow!"/"Woof!" tokens, the
          pause fires too late, and the retry path is never exercised — the
-         "tasks already completed before pause" warning below catches this).
+         "tasks already completed before pause" assertion below catches this).
       2. After ~1.5s, pause lora-meow → abort fan-out hits all 4 meow
          requests on the server.
-      3. After another ~1.5s (still paused), resume lora-meow.
-      4. Await all tasks. All 8 should complete with non-abort stop_reason
-         and non-empty tokens. Woof tasks should NEVER have observed an
-         abort (they ran straight through).
+      3. After another ~1.5s (still paused), **await the woof tasks BEFORE
+         resuming meow**. This proves cross-LoRA isolation under the
+         strongest condition: woof requests already in-flight when meow's
+         pause fired must still complete while meow's retry loop is gated.
+         Sister test ``test_pause_lora_does_not_affect_other_lora`` covers
+         the "new woof requests after meow is paused" case; this one covers
+         the harder "in-flight woof requests during meow's abort fan-out"
+         case.
+      4. Resume lora-meow and await the meow tasks. All 4 should complete
+         with non-abort stop_reason and "meow" content (proves the abort/
+         retry boundary preserved accumulated state and used the right LoRA
+         weights on resubmit).
     """
     # See ``_sample_no_eos`` — Tinker SamplingParams doesn't expose
     # ignore_eos, so we widen the Tinker→vLLM map for the duration of the
@@ -358,14 +366,31 @@ async def test_sample_with_retry_recovers_from_abort(
                 "the per-LoRA gate did not engage for lora-meow."
             )
 
+            # Await the woof tasks BEFORE resuming meow. This proves cross-LoRA
+            # isolation under the strongest condition: woof requests that were
+            # already in-flight when pause(lora_name="lora-meow") fired must
+            # still finish even though meow's retry loop is gated. If the
+            # server-side /skyrl/v1/abort_lora_requests endpoint accidentally
+            # aborted other LoRAs' requests, or if the client-side gate
+            # spilled across adapters, woof would block here and time out.
+            woof_results = await asyncio.wait_for(
+                asyncio.gather(*woof_tasks, return_exceptions=False),
+                timeout=60.0,
+            )
+            # Meow tasks must STILL be blocked at this point — finishing the
+            # woof tasks should not have side-effected the meow gate.
+            meow_done_after_woof = sum(1 for t in meow_tasks if t.done())
+            assert meow_done_after_woof == 0, (
+                f"{meow_done_after_woof}/4 meow tasks finished while still paused — "
+                "the gate released without resume_generation being called."
+            )
+
             await client.resume_generation(lora_name="lora-meow")
 
-            results = await asyncio.wait_for(
-                asyncio.gather(*meow_tasks, *woof_tasks, return_exceptions=False),
+            meow_results = await asyncio.wait_for(
+                asyncio.gather(*meow_tasks, return_exceptions=False),
                 timeout=120.0,
             )
-            meow_results = results[:4]
-            woof_results = results[4:]
 
             # All meow tasks complete with a non-abort stop_reason and
             # non-empty token output.

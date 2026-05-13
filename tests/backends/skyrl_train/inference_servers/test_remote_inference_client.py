@@ -1558,6 +1558,69 @@ class TestTargetedLoraPause:
             await client.teardown()
 
     @pytest.mark.asyncio
+    async def test_sample_with_retry_truncates_prompt_logprobs(self, mock_servers):
+        """prompt_logprobs from the final retry must be truncated to original prompt length.
+
+        When a retry fires, the resubmitted request has
+        ``token_ids = original_prompt + accumulated_tokens``. The server
+        computes prompt_logprobs over that extended prompt and the final
+        response carries entries for both the original prompt AND the
+        accumulated tokens. The caller asked for prompt_logprobs of their
+        original prompt only — the extra entries must be stripped before
+        return, otherwise the response shape differs between the
+        no-abort and abort-then-retry paths for the same logical request.
+        """
+        # Script one abort with 5 partial tokens. The retry then falls
+        # through to the default mock path which returns prompt_logprobs
+        # whenever sampling_params['prompt_logprobs'] is set.
+        for url in mock_servers["server_urls"]:
+            await _script_generate(
+                url,
+                [
+                    {"token_ids": [100, 101, 102, 103, 104], "finish_reason": "abort"},
+                ],
+            )
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "base-model",
+                    "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},  # length 3
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 64},
+                    "include_prompt_logprobs": True,
+                }
+            }
+            result = await client.sample_with_retry(request_payload)
+
+            # Final length must be the ORIGINAL prompt length (3), not the
+            # extended prompt length (3 + 5 = 8) that the retry sent.
+            pl = result["prompt_logprobs"]
+            assert pl is not None
+            assert len(pl) == 3, f"expected 3 prompt_logprobs entries, got {len(pl)} (likely missing truncation)"
+            # Values should match a single-shot sample for the same original
+            # prompt (position 0 = no prior context, positions 1-2 follow
+            # the mock's autoregressive logprob formula).
+            assert pl[0] is None
+            assert pl[1] == pytest.approx(-0.5)
+            assert pl[2] == pytest.approx(-1.0)
+
+            # Verify the server actually saw an extended-prompt request on
+            # the retry (otherwise the test isn't proving truncation).
+            all_payloads = []
+            for url in mock_servers["server_urls"]:
+                all_payloads.extend(await _get_generate_payloads(url))
+            assert len(all_payloads) == 2
+            assert len(all_payloads[1]["token_ids"]) == 3 + 5
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
     async def test_sample_with_retry_no_lora_event_no_blocking(self, mock_servers):
         """When the LoRA has never been paused, sample_with_retry must not block."""
         for url in mock_servers["server_urls"]:

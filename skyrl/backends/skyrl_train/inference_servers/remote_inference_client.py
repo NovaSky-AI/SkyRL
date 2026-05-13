@@ -785,8 +785,15 @@ class RemoteInferenceClient:
           ``max_tokens`` decremented by the accumulated length. Repeat until
           a non-abort stop reason or ``max_tokens`` exhausts.
 
-        Only supports ``num_samples == 1`` (matches every current Tinker
-        caller in ``_sample_with_remote_client``).
+        Requires:
+            - ``num_samples == 1`` (matches every current Tinker caller in
+              ``_sample_with_remote_client``).
+            - ``sampling_params["max_tokens"]`` set to a positive int. The
+              retry loop decrements this budget on each iteration so the
+              total generation is bounded; without it we'd over-generate
+              (each retry would use the server's default budget on top of
+              accumulated tokens) and potentially loop forever on persistent
+              aborts.
 
         TRANSIENT: delete this method and revert the multi-LoRA call site
         back to ``sample`` when vLLM ships native per-LoRA pause.
@@ -803,6 +810,11 @@ class RemoteInferenceClient:
 
         sp_template = dict(body.get("sampling_params") or {})
         original_max_tokens = sp_template.get("max_tokens")
+        if not isinstance(original_max_tokens, int) or original_max_tokens <= 0:
+            raise ValueError(
+                "sample_with_retry requires sampling_params['max_tokens'] to be a positive int; "
+                f"got {original_max_tokens!r}"
+            )
 
         accum_tokens: List[int] = []
         accum_logprobs: List[float] = []
@@ -817,12 +829,11 @@ class RemoteInferenceClient:
                 if ev is not None:
                     await ev.wait()
 
-            if original_max_tokens is not None:
-                remaining = original_max_tokens - len(accum_tokens)
-                if remaining <= 0:
-                    stop_reason = "length"
-                    break
-                body["sampling_params"] = {**sp_template, "max_tokens": remaining}
+            remaining = original_max_tokens - len(accum_tokens)
+            if remaining <= 0:
+                stop_reason = "length"
+                break
+            body["sampling_params"] = {**sp_template, "max_tokens": remaining}
 
             cur_token_ids = token_ids + accum_tokens
             final = await self._sample_with_rendered_tokens(
@@ -846,20 +857,29 @@ class RemoteInferenceClient:
             if new_logprobs:
                 accum_logprobs.extend(new_logprobs)
 
-        if final is None:
-            # Only reachable if max_tokens was already 0 before the first
-            # dispatch — degenerate but worth handling.
-            return {
-                "type": "sample",
-                "sequences": [{"tokens": [], "logprobs": None, "stop_reason": "length"}],
-                "prompt_logprobs": None,
-                "topk_prompt_logprobs": None,
-            }
+        # Since we required max_tokens > 0 at entry, the loop must have
+        # dispatched at least once and ``final`` is bound.
+        assert final is not None, "sample_with_retry exited the loop without dispatching"
 
         # Merge accumulators into the final response.
         final["sequences"][0]["tokens"] = accum_tokens
         final["sequences"][0]["logprobs"] = accum_logprobs if accum_logprobs else None
         final["sequences"][0]["stop_reason"] = stop_reason
+
+        # When a retry fires, we resubmit with ``cur_token_ids = original_prompt +
+        # accum_tokens`` so the server computes prompt_logprobs over that
+        # extended prompt. The final response's prompt_logprobs therefore has
+        # entries for the accumulated tokens too — but the caller asked about
+        # the original prompt only. Truncate back to ``len(token_ids)``
+        # (the rendered original prompt length, never reassigned across
+        # retries). For positions in the original prompt the autoregressive
+        # logprobs are identical regardless of what follows in the prompt,
+        # so this is a lossless truncation.
+        if final.get("prompt_logprobs") is not None:
+            final["prompt_logprobs"] = final["prompt_logprobs"][: len(token_ids)]
+        if final.get("topk_prompt_logprobs") is not None:
+            final["topk_prompt_logprobs"] = final["topk_prompt_logprobs"][: len(token_ids)]
+
         return final
 
     async def chat_completion(
