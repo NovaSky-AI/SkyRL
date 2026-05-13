@@ -79,17 +79,14 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         print_mem("memory after forward_backward + optim_step", memory)
 
         for result in results:
-            assert isinstance(result, dict), "Result should be a dictionary of training stats"
-            assert "policy_loss" in result
-            assert "loss_metrics/clip_ratio" in result
-            assert "policy_entropy" in result
-            assert "loss_fn_outputs" in result, "RL path should return loss_fn_outputs"
-            loss_fn_outputs = result.pop("loss_fn_outputs")
-            assert isinstance(loss_fn_outputs, list)
-            for output in loss_fn_outputs:
+            assert "policy_loss" in result.metrics
+            assert "loss_metrics/clip_ratio" in result.metrics
+            assert "policy_entropy" in result.metrics
+            assert result.loss_fn_outputs, "RL path should return loss_fn_outputs"
+            for output in result.loss_fn_outputs:
                 assert "logprobs" in output, "Each output should have logprobs"
                 assert isinstance(output["logprobs"], list)
-            for k, v in result.items():
+            for k, v in result.metrics.items():
                 assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     finally:
@@ -133,8 +130,8 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
         # Collect all loss_fn_outputs across DP ranks (returned in rank order)
         all_outputs = []
         for result in results:
-            assert "loss_fn_outputs" in result
-            all_outputs.extend(result["loss_fn_outputs"])
+            assert result.loss_fn_outputs
+            all_outputs.extend(result.loss_fn_outputs)
 
         assert len(all_outputs) == batch_size
         for i, output in enumerate(all_outputs):
@@ -181,10 +178,9 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:
-            assert isinstance(result, dict), "Result should be a dictionary of training stats"
-            assert "critic_loss" in result
-            assert "values_mean" in result
-            for k, v in result.items():
+            assert "critic_loss" in result.metrics
+            assert "values_mean" in result.metrics
+            for k, v in result.metrics.items():
                 assert isinstance(v, float), f"{k} should be a float"
 
     finally:
@@ -270,12 +266,10 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
         # Each DP rank returns its chunk's results
         all_loss_fn_outputs = []
         for result in results:
-            assert isinstance(result, dict)
-            assert "loss" in result
-            assert "loss_fn_outputs" in result, "SFT path should return loss_fn_outputs"
+            assert "loss" in result.metrics
+            assert result.loss_fn_outputs, "SFT path should return loss_fn_outputs"
 
-            loss_fn_outputs = result["loss_fn_outputs"]
-            assert isinstance(loss_fn_outputs, list)
+            loss_fn_outputs = result.loss_fn_outputs
             assert len(loss_fn_outputs) == samples_per_rank, f"Expected {samples_per_rank} outputs per rank"
             all_loss_fn_outputs.extend(loss_fn_outputs)
 
@@ -332,12 +326,10 @@ async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
             loss_fn_config=None,
         )
 
-        assert isinstance(result, dict)
-        assert "loss" in result
-        assert math.isfinite(result["loss"]) and result["loss"] > 1e-3
-        assert "loss_fn_outputs" in result
-        assert len(result["loss_fn_outputs"]) == batch_size
-        for out in result["loss_fn_outputs"]:
+        assert "loss" in result.metrics
+        assert math.isfinite(result.metrics["loss"]) and result.metrics["loss"] > 1e-3
+        assert len(result.loss_fn_outputs) == batch_size
+        for out in result.loss_fn_outputs:
             assert "logprobs" in out and len(out["logprobs"]) == num_actions
             assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions
 

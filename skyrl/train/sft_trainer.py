@@ -615,10 +615,11 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            metrics = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
+        metrics = output.metrics
         loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
         return {
             "loss": loss_val,

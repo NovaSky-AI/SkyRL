@@ -9,7 +9,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_dict_outputs_after_mesh_dispatch,
+    WorkerOutput,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -260,9 +261,8 @@ async def test_megatron_forward(
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_megatron = concatenate_dict_outputs_after_mesh_dispatch(
-        actor_group.actor_infos, all_rank_action_log_probs
-    )["output"]
+    megatron_output = WorkerOutput.cat(actor_group.actor_infos, all_rank_action_log_probs)
+    action_log_probs_megatron = loss_fn_outputs_to_tensor(megatron_output.loss_fn_outputs, key="logprobs")
 
     ray.shutdown()
     ray_init_for_tests()
@@ -382,9 +382,8 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_full = concatenate_dict_outputs_after_mesh_dispatch(
-        actor_group.actor_infos, all_rank_action_log_probs
-    )["output"]
+    full_output = WorkerOutput.cat(actor_group.actor_infos, all_rank_action_log_probs)
+    action_log_probs_full = loss_fn_outputs_to_tensor(full_output.loss_fn_outputs, key="logprobs")
 
     ray.shutdown()
     ray_init_for_tests()
@@ -418,9 +417,8 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    action_log_probs_lora = concatenate_dict_outputs_after_mesh_dispatch(
-        actor_group.actor_infos, all_rank_action_log_probs
-    )["output"]
+    lora_output = WorkerOutput.cat(actor_group.actor_infos, all_rank_action_log_probs)
+    action_log_probs_lora = loss_fn_outputs_to_tensor(lora_output.loss_fn_outputs, key="logprobs")
 
     #### Compare results ####
     # compare just non-padding tokens

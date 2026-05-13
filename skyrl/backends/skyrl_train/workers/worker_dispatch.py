@@ -16,7 +16,7 @@ from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
-    concatenate_dict_outputs_after_mesh_dispatch,
+    WorkerOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -198,15 +198,17 @@ class WorkerDispatch:
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Run inference forward pass. Only loads model (not optimizer).
+    ) -> WorkerOutput:
+        """Run forward pass. Only loads model (not optimizer).
 
-        Always returns a ``dict``:
-        - When ``loss_fn`` is None (RL/inference path): returns ``{"output": Tensor[batch, max_response_len]}``
-          where ``Tensor`` is the concatenated output across DP ranks (e.g., logprobs for policy/ref,
-          values for critic).
-        - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): returns a metrics dict containing at
-          minimum ``"loss"`` and ``"loss_fn_outputs"`` (per-sample list aggregated across DP ranks).
+        Returns a :class:`WorkerOutput` aggregated across DP ranks:
+
+        - When ``loss_fn`` is None (RL/inference path): ``loss_fn_outputs`` is a
+          per-sample list of dicts (one entry per batch item) keyed by
+          ``logprobs`` (policy/ref) or ``values`` (critic); ``metrics`` is empty.
+        - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): ``loss_fn_outputs``
+          carries per-sample arrays (e.g. ``logprobs`` / ``elementwise_loss``)
+          and ``metrics`` contains scalar metrics like ``"loss"``.
 
         Args:
             model: Model identifier ("policy", "critic", or "ref")
@@ -229,21 +231,7 @@ class WorkerDispatch:
         refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
         results = ray.get(refs)
 
-        if loss_fn is not None:
-            # Forward-with-loss path: each DP rank returns a dict of metrics + per-sample loss_fn_outputs.
-            # Concatenate loss_fn_outputs across DP ranks (rank order); scalar metrics are already all-reduced.
-            all_loss_fn_outputs = []
-            for status in results:
-                if status and "loss_fn_outputs" in status:
-                    all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
-            result = results[0] if results else {}
-            if all_loss_fn_outputs:
-                result["loss_fn_outputs"] = all_loss_fn_outputs
-            return result
-
-        # Inference path (no loss_fn): worker returns a plain dict (``{"output": tensor}``) per DP
-        # rank; concatenate the tensors across DP to reconstruct the full batch.
-        return concatenate_dict_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
     def stage_data(
         self,
@@ -275,7 +263,7 @@ class WorkerDispatch:
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
-    ) -> Dict[str, float]:
+    ) -> WorkerOutput:
         """Run forward/backward pass. Needs model + optimizer.
 
         Args:
@@ -290,7 +278,8 @@ class WorkerDispatch:
                      LoRA adapter is swapped in before the forward/backward.
 
         Returns:
-            Dictionary of training metrics
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` aggregated
+            across DP ranks plus scalar ``metrics`` (already all-reduced).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
@@ -307,18 +296,7 @@ class WorkerDispatch:
 
         self._save_memory_snapshot(model, "forward_backward")
 
-        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
-        # Concatenate them in rank order to get the full batch's outputs.
-        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
-        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
-            all_loss_fn_outputs = []
-            for status in statuses:
-                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
-            result = statuses[0]
-            result["loss_fn_outputs"] = all_loss_fn_outputs
-            return result
-
-        return statuses[0]
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
 
     def forward_backward_from_staged(
         self,
@@ -327,7 +305,7 @@ class WorkerDispatch:
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
-    ) -> Dict[str, float]:
+    ) -> WorkerOutput:
         """
         Run forward/backward pass using pre-staged per-DP chunks.
 
@@ -339,7 +317,8 @@ class WorkerDispatch:
             chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_data``)
 
         Returns:
-            Aggregated metrics dict from training
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` aggregated
+            across DP ranks plus scalar ``metrics`` (already all-reduced).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
@@ -360,7 +339,7 @@ class WorkerDispatch:
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
-        return statuses[0]
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
 
     def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
