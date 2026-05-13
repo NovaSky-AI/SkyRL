@@ -911,16 +911,15 @@ class SFTTrainer:
                     self.save_hf_model()
                 log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
-            self.tracker.log(log_dict, step=self.global_step, commit=True)
-
-            if self.global_step % 5 == 0:
-                logger.info(
-                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
-                )
-
             # Periodic eval. The worker's forward() sets the model to eval() under
             # no_grad; subsequent train_step calls re-enter train() inside
             # forward_backward, so we don't need to manually toggle modes here.
+            # NOTE: run eval BEFORE the train log so eval/* metrics are merged
+            # into the same log_dict and committed in a single tracker.log() call.
+            # Committing train metrics first advances wandb's internal step to
+            # N+1, which would cause a subsequent eval log at step N to be
+            # rejected ("step N < current step N+1").
+            eval_metrics = None
             if (
                 eval_tokenized is not None
                 and self.sft_cfg.eval_steps > 0
@@ -929,13 +928,21 @@ class SFTTrainer:
                 with Timer("eval", all_timings):
                     eval_metrics = self.run_eval(eval_tokenized)
                 if eval_metrics:
-                    eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
-                    eval_log["timing/eval"] = all_timings["eval"]
-                    self.tracker.log(eval_log, step=self.global_step, commit=True)
-                    logger.info(
-                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                        f"over {eval_metrics.get('eval_num_batches', 0)} batches"
-                    )
+                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                    log_dict["timing/eval"] = all_timings["eval"]
+
+            self.tracker.log(log_dict, step=self.global_step, commit=True)
+
+            if self.global_step % 5 == 0:
+                logger.info(
+                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
+                )
+
+            if eval_metrics:
+                logger.info(
+                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                    f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                )
 
             # Check for epoch boundary and reshuffle
             epoch = (self.global_step * batch_size) // len(tokenized)
@@ -967,10 +974,16 @@ class SFTTrainer:
                 self.save_hf_model()
 
         # Final eval pass (skip if the last step already ran eval).
+        # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
+        # advanced wandb's internal step counter to num_steps+1. Logging the
+        # final eval at step=num_steps would be rejected by wandb with
+        # "step N < current step N+1". We log the final eval at num_steps+1
+        # (one past the last committed train step) in a single combined
+        # tracker.log() call, preserving wandb step ordering.
         if eval_tokenized is not None:
             already_ran = self.sft_cfg.eval_steps > 0 and num_steps % self.sft_cfg.eval_steps == 0
             if not already_ran:
-                self.global_step = num_steps
+                self.global_step = num_steps + 1
                 eval_timings: dict[str, float] = {}
                 with Timer("eval", eval_timings):
                     eval_metrics = self.run_eval(eval_tokenized)
