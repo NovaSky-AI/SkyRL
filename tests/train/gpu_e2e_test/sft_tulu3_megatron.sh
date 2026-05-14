@@ -3,8 +3,6 @@
 #
 # Runs ``examples/train/sft/run_sft_megatron_tulu3_50k.sh`` with shorter
 # overrides (100 steps, train[:2000]) and asserts:
-#   * Process exits 0.
-#   * "SFT training complete!" appears in stdout.
 #   * Via ``check_sft_trend.py`` (sourcing the run's history from wandb):
 #       - The run completed all expected steps.
 #       - No NaN/inf in the ``train/loss`` history.
