@@ -17,21 +17,24 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 We recommend adding the following configs in order to your training runs to help address off-policy drift:
 
 ```yaml
-# For dense models, we recommend trying basic TIS correction first
-trainer.algorithm.off_policy_correction.tis_ratio_type="token"
-trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
+# For dense models, we recommend starting with geometric sequence masking. This zeros out the per-sequence
+# loss when the geometric mean of token-wise importance-sampling ratios falls outside [geo_mask_low, geo_mask_high].
+# For MoE models, you may need a wider range.
+trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
+trainer.algorithm.off_policy_correction.geo_mask_low=0.99
+trainer.algorithm.off_policy_correction.geo_mask_high=1.01
 
 # for MoE models, enabling router replay (R3) to fix the source of train/infer mismatch is recommended 
 trainer.policy.megatron_config.moe_enable_routing_replay=True
 generator.inference_engine.enable_return_routed_experts=True
 generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
 
-# The following masking strategies can additionally help mitigate off policy drift, especially from sources other than train/infer mismatch
-# geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
-trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
-trainer.algorithm.off_policy_correction.geo_mask_high=1.01
-trainer.algorithm.off_policy_correction.geo_mask_low=0.99
+# TIS (Truncated Importance Sampling) remains supported and may be useful for certain workloads
+# (e.g., when you want to retain all sequences but down-weight off-policy contributions) — see below for configuration.
+trainer.algorithm.off_policy_correction.tis_ratio_type="token"
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
 
+# The following masking strategies can additionally help mitigate off policy drift, especially from sources other than train/infer mismatch
 # token masking (icepop): tune token_mask_is_threshold_low/high
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
@@ -40,6 +43,8 @@ trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
 ```
+
+Note: the bundled `fully_async` example scripts under `examples/` use geometric sequence masking by default.
 
 # Setup
 For common RL objectives (i.e. PPO/GRPO variants), we typically seek to optimize a token-wise objective of the form:
