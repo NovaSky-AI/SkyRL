@@ -1,6 +1,6 @@
 import io
 import os
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 import ray
 import torch
@@ -22,6 +22,7 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
+from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
@@ -332,7 +333,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn=None,
         loss_fn_config=None,
-    ) -> Dict[str, Any]:
+    ) -> WorkerOutput:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
@@ -399,7 +400,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
     def forward(
         self,
         data: TrainingInputBatch,
-    ) -> Dict[str, Any]:
+    ) -> WorkerOutput:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
@@ -449,7 +450,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
     def forward(
         self,
         data: TrainingInputBatch,
-    ) -> Dict[str, Any]:
+    ) -> WorkerOutput:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.

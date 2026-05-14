@@ -325,6 +325,12 @@ async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
         loss_fn_config=None,
     )
 
+    # NOTE: The loss-fn forward path is no-grad: ``_forward_micro_with_loss``
+    # wraps the model call in ``torch.no_grad()`` (worker.py), so policy
+    # parameters accrue no ``.grad`` from this call. We don't assert that
+    # directly here because parameters live inside the Ray actors and reaching
+    # in adds a remote round-trip with no extra signal — the contract is
+    # enforced at the implementation site.
     assert "loss" in result.metrics
     assert math.isfinite(result.metrics["loss"]) and result.metrics["loss"] > 1e-3
     assert len(result.loss_fn_outputs) == batch_size

@@ -313,11 +313,15 @@ class WorkerOutput:
             if ai.rank.is_collection_dp_rank():
                 dp_rank_to_shard[ai.rank.dp] = s
         if not dp_rank_to_shard:
+            # Unreachable in practice: any actor group has at least one collection
+            # DP rank. Default ``loss_fn_output_type="scalar"`` is fine here.
             return cls()
         ordered = [dp_rank_to_shard[i] for i in range(actor_infos[0].rank.dp_size)]
         return cls(
             loss_fn_output_type=ordered[0].loss_fn_output_type,
             loss_fn_outputs=[x for s in ordered for x in s.loss_fn_outputs],
+            # metrics are already all-reduced across DP within each worker, so
+            # taking rank 0's dict (rather than re-aggregating) is correct.
             metrics=dict(ordered[0].metrics),
         )
 
