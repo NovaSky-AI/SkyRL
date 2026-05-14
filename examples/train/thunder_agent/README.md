@@ -6,6 +6,11 @@ Train Qwen3-32B on R2EGym with ThunderAgent-accelerated rollout scheduling.
 
 **3.01× wall-clock speedup** over the no-TA baseline (8.84 h vs 26.58 h for 40 training steps / 10 epochs).
 
+> **Scope.** This example uses SkyRL + Harbor integration but with MiniSWEAgent
+> rather than Terminus 2, and therefore is not token-in-token-out. The same
+> ThunderAgent setup should extend to Terminus 2 under Harbor, or to other
+> token-level agent harnesses, with minimal changes.
+
 ---
 
 ## Hardware
