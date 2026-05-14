@@ -691,7 +691,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.model.eval()
 
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
         all_metrics = defaultdict(list)
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
