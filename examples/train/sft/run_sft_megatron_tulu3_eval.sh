@@ -7,8 +7,8 @@ set -x
 # Based on run_sft_megatron_tulu3_30k.sh, with the new eval_dataset_* plumbing:
 # - Train slice: train[:30000] of allenai/tulu-3-sft-mixture
 # - Eval slice:  train[-500:] (last 500 examples; held-out from training)
-# - eval_steps=50  -> eval fires at steps 50, 100, 150, 200 (+final)
-# - eval_batch_size=16  (small enough to not blow up runtime)
+# - eval_interval=50  -> eval fires at steps 50, 100, 150, 200 (+final)
+# - eval iterates in chunks of `micro_train_batch_size_per_gpu * dp_size` per dispatch
 # - logger=wandb so eval_loss is plotted alongside train loss
 #
 # num_steps=200 keeps the run bounded (~few minutes per eval cadence) while
@@ -48,8 +48,7 @@ uv run --isolated --extra megatron \
     messages_key=messages \
     eval_dataset_name=allenai/tulu-3-sft-mixture \
     eval_dataset_split="train[-500:]" \
-    eval_steps=50 \
-    eval_batch_size=16 \
+    eval_interval=50 \
     max_length=4096 \
     num_steps=200 \
     batch_size=24 \
