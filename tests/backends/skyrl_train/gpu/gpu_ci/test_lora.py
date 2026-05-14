@@ -71,8 +71,6 @@ def get_test_actor_config(
     [
         pytest.param(False, "nccl", "fsdp", 2, True),
         pytest.param(True, "nccl", "fsdp", 2, True),
-        pytest.param(False, "nccl", "fsdp2", 2, True),
-        pytest.param(True, "nccl", "fsdp2", 2, True),
         pytest.param(False, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
         pytest.param(True, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
         pytest.param(False, "nccl", "megatron", 2, False, marks=pytest.mark.megatron),
@@ -81,8 +79,6 @@ def get_test_actor_config(
     ids=[
         "no_colocate_nccl_fsdp",
         "colocate_nccl_fsdp",
-        "no_colocate_nccl_fsdp2",
-        "colocate_nccl_fsdp2",
         "no_colocate_nccl_megatron_merged",
         "colocate_nccl_megatron_merged",
         "no_colocate_nccl_megatron_adapter",

@@ -10,11 +10,10 @@ In SkyRL, you can switch between different training backends with minimal change
 
 Currently, we support the following training backends:
 
-- FSDP
-- FSDP2
+- FSDP (PyTorch's composable `fully_shard` / FSDP2 API)
 - Megatron
 
-To switch to a different backend, simply set the `trainer.strategy` parameter to the desired backend. We use the `fsdp2` backend by default.
+To switch to a different backend, simply set the `trainer.strategy` parameter to the desired backend. We use the `fsdp` backend by default.
 
 ## Prerequisites
 
@@ -34,17 +33,17 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
 
 ```
 
-### FSDP and FSDP2
+### FSDP
 
-To switch to FSDP or FSDP2, set the `trainer.strategy` parameter to `fsdp` or `fsdp2` respectively.
+To use FSDP, set the `trainer.strategy` parameter to `fsdp` (this is the default).
 
 ```bash
-# bash examples/train/training_backends/fsdp/run_fsdp2.sh (or just)
-bash examples/train/gsm8k/run_gsm8k.sh trainer.strategy=fsdp2
+# bash examples/train/training_backends/fsdp/run_fsdp.sh (or just)
+bash examples/train/gsm8k/run_gsm8k.sh trainer.strategy=fsdp
 
 ```
 
-Additionally, you can tune [FSDP specific configurations](https://pytorch.org/docs/stable/fsdp.html) as shown below:
+Additionally, you can tune [FSDP specific configurations](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html) as shown below:
 
 ```bash
 # enable offloading of model parameters to CPU during the forward pass for the ref model
@@ -53,9 +52,6 @@ trainer.ref.fsdp_config.cpu_offload=true \
 ```
 
 Note that `cpu_offload` is distinct from worker state offloading with model colocation. You can find details on this, as well as the full set of FSDP configurations at [fsdp-configurations](#fsdp-configurations).
-
-    `cpu_offload` cannot be enabled for the policy or critic model with FSDP1, since gradient accumulation outside `no_sync` mode is not supported with CPU offloading. 
-    See the limitations section in [FSDP docs](https://docs.pytorch.org/docs/stable/fsdp.html) for more details.
 
 ### Megatron
 

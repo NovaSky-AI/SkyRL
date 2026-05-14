@@ -282,8 +282,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 "body": text,
             }
 
-    async def pause_generation(self) -> None:
+    async def pause_generation(self, lora_name: Optional[str] = None) -> None:
         """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
+        if lora_name is not None:
+            raise NotImplementedError("targeted pause is HTTP-only")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.url}/pause",
@@ -293,8 +295,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 if resp.status != 200:
                     raise RuntimeError(f"Failed to pause generation: {result.get('error', result)}")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
         """Resume generation after a keep-mode pause."""
+        if lora_name is not None:
+            raise NotImplementedError("targeted pause is HTTP-only")
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.url}/resume") as resp:
                 result = await resp.json()

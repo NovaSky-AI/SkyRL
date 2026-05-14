@@ -64,7 +64,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `strategy` | `megatron` | Backend: `megatron` or `fsdp2` |
+| `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
 | `dataset_name` | `yahma/alpaca-cleaned` | HuggingFace dataset name |
 | `dataset_split` | `train[:100]` | Dataset split/slice |

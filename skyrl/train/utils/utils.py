@@ -217,6 +217,16 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
 def validate_cfg(cfg: SkyRLTrainConfig):
+    if cfg.trainer.strategy == "fsdp2":
+        import warnings
+
+        warnings.warn(
+            "trainer.strategy='fsdp2' has been renamed to 'fsdp'; use 'fsdp' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cfg.trainer.strategy = "fsdp"
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -239,14 +249,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
-
-    if cfg.trainer.strategy in ("fsdp", "fsdp2"):
-        assert not (
-            cfg.trainer.policy.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
-        ), "fwd pass cpu offloading is not supported for FSDP1 policy worker, use FSDP2 instead"
-        assert not (
-            cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
-        ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
     if cfg.trainer.policy.language_model_only:
         assert (
@@ -366,14 +368,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             )
 
     if cfg.trainer.policy.model.lora.rank > 0:
-        # LoRA enabled
-        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in (
-            "fsdp",
-            "fsdp2",
-            "megatron",
-        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:

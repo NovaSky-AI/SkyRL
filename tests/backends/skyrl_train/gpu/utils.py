@@ -146,7 +146,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
 
 
 def import_worker(strategy: str, worker_type: str):
-    if strategy in ("fsdp", "fsdp2"):
+    if strategy == "fsdp":
         module_path = "skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker"
     elif strategy == "megatron":
         module_path = "skyrl.backends.skyrl_train.workers.megatron.megatron_worker"

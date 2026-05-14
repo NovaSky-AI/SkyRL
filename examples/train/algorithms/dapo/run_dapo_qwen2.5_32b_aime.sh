@@ -71,7 +71,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.policy.sequence_parallel_size=$SEQUENCE_PARALLEL_SIZE \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \

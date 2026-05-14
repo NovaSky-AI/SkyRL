@@ -420,6 +420,28 @@ class VLLMServerActor(ServerActorProtocol):
                 "lora_int_id": lora_int_id,
             }
 
+        # TRANSIENT: Per-LoRA targeted abort for multi-tenant weight sync.
+        # When proper per-LoRA pause lands in vLLM, delete this endpoint and
+        # route pause_generation(lora_name=...) through the native API.
+        @app.post("/skyrl/v1/abort_lora_requests")
+        async def _abort_lora_requests(request: Request):
+            """Abort all in-flight requests targeting a given LoRA adapter.
+
+            Iterates ``engine.output_processor.request_states`` (keyed by internal
+            request IDs) and aborts those whose ``lora_name`` matches. Other
+            adapters' requests are untouched.
+            """
+            body = await request.json()
+            lora_name = body.get("lora_name")
+            if not lora_name:
+                raise HTTPException(status_code=400, detail="'lora_name' required")
+            op = engine.output_processor
+            # request_states is keyed by *internal* IDs; pass internal=True to abort().
+            ids = [rid for rid, st in op.request_states.items() if st.lora_name == lora_name]
+            if ids:
+                await engine.abort(ids, internal=True)
+            return {"status": "ok", "aborted": ids, "count": len(ids)}
+
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
         # endpoint /inference/v1/generate does not support returning routed expert IDs.
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side

@@ -31,11 +31,7 @@ Generates complete trajectories and computes their rewards. The Generator encomp
 
 ### InferenceEngine
 
-Executes inference on the policy model to produce model outputs (i.e., the RL agent's actions). Typically, multiple InferenceEngines are deployed to process prompts in parallel.
-
-- [Base InferenceEngine interface](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/inference_engines/base.py)
-- [InferenceEngineClient to manage multiple engines](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/inference_engines/inference_engine_client.py)
-- [vLLM backend](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl/backends/skyrl_train/inference_engines/vllm)
+Executes inference on the policy model to produce model outputs (i.e., the RL agent's actions). Typically, multiple InferenceEngines are deployed to process prompts in parallel. For more details, refer to the [inference architecture page](./inference_architecture).
 
 ### Environment
 

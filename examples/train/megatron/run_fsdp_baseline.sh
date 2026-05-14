@@ -47,7 +47,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_fsdp1_4gpus" \
+  trainer.run_name="gsm8k_fsdp_4gpus" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_fsdp_ckpt" \
   $@

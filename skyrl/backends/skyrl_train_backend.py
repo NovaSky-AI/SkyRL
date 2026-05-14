@@ -5,6 +5,7 @@ import io
 import os
 import tarfile
 import tempfile
+from typing import Callable
 
 import ray
 import torch
@@ -50,7 +51,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"
 
 
 class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
@@ -81,9 +82,9 @@ def _build_skyrl_train_config(
     # TrainerConfig.__post_init__ sees the right value during validation —
     # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
     assert overrides.strategy in (
-        "fsdp2",
+        "fsdp",
         "megatron",
-    ), f"Only fsdp2 and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
+    ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
@@ -137,6 +138,13 @@ class SkyRLTrainBackend(AbstractBackend):
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
+
+        # Optional hook invoked on inference-engine state changes (after
+        # _create_new_inference_client, on delete_model teardown). The host
+        # (e.g. the Tinker engine subprocess) wires the persistence side via
+        # set_inference_state_publisher. None when running outside a host
+        # that needs to be notified (unit tests, non-Tinker uses).
+        self._inference_state_publisher: Callable[[str | None], None] | None = None
 
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
@@ -325,6 +333,29 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.generator.inference_engine,
         )
 
+    def set_inference_state_publisher(self, publisher: Callable[[str | None], None]) -> None:
+        """Wire a callback invoked when the inference proxy URL changes.
+
+        Called by the host (e.g. the Tinker engine subprocess) after backend
+        construction. The callback receives the current proxy URL after a
+        new inference engine is brought up, or ``None`` on teardown. The
+        backend has no opinion on what the callback does — typical use is
+        to persist the URL somewhere the API process can read.
+        """
+        self._inference_state_publisher = publisher
+
+    def _publish_inference_state(self, proxy_url: str | None) -> None:
+        """Invoke the publisher if set; best-effort (failure must not raise).
+
+        Callers rely on local state being reset regardless of publish outcome.
+        """
+        if self._inference_state_publisher is None:
+            return
+        try:
+            self._inference_state_publisher(proxy_url)
+        except Exception as e:
+            logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
+
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
         from skyrl.backends.skyrl_train.inference_servers.setup import (
@@ -340,6 +371,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_router = server_setup.router
         self._server_groups = server_setup.server_groups
         self._inference_engine_client = client
+
+        # Publish inference endpoint so the API can forward samples directly
+        # (only meaningful in non-colocated mode; the API gates on this).
+        self._publish_inference_state(server_setup.proxy_url)
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -410,7 +445,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
             self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            if self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     PolicyWorker,
                 )
@@ -430,7 +465,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
             if "policy" not in self._model_ids_to_role.values():
                 raise ValueError("Create a policy model before creating a critic model")
-            if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            if self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     CriticWorker,
                 )
@@ -496,6 +531,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
+        # Local state is fully reset above. Notify the host last so a
+        # publisher failure can't leave the controller half-torn-down.
+        # Next _create_new_inference_client repopulates.
+        self._publish_inference_state(None)
         logger.info(f"Successfully deleted model {model_id}")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:
@@ -964,6 +1003,18 @@ class SkyRLTrainBackend(AbstractBackend):
             for mid in prepared_batch.all_model_ids
         ]
 
+        # Multi-LoRA training shares one inference engine across multiple
+        # tenants. When *one* tenant's weights are being swapped, we abort
+        # only that LoRA's in-flight requests (via pause_generation(lora_name=...))
+        # and rely on sample_with_retry to accumulate partial tokens and
+        # resubmit when resume_generation is called. Other tenants are
+        # unaffected. FFT / single-tenant uses the single-shot path.
+        # TRANSIENT: drop the branch when vLLM ships native per-LoRA pause.
+        is_multi_lora = self._base_lora_signature is not None
+        sample_fn = (
+            self._inference_engine_client.sample_with_retry if is_multi_lora else self._inference_engine_client.sample
+        )
+
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_model_inputs)):
@@ -978,7 +1029,7 @@ class SkyRLTrainBackend(AbstractBackend):
                         "sampling_params": sampling_params.model_dump(),
                     }
                 }
-                tasks.append(self._inference_engine_client.sample(request_payload))
+                tasks.append(sample_fn(request_payload))
 
             try:
                 return await asyncio.gather(*tasks, return_exceptions=True)

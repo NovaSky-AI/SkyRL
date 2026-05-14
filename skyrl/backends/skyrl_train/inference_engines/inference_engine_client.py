@@ -366,21 +366,29 @@ class InferenceEngineClient(InferenceEngineInterface):
     # ----------------------------
     # Generation pause and resume
     # ----------------------------
-    async def pause_generation(self) -> None:
+    async def pause_generation(self, lora_name: Optional[str] = None) -> None:
         """
         Pauses generation for all engines using vLLM's native keep mode.
 
         In-flight requests are frozen (not aborted) and will resume from where they left off
         when `resume_generation()` is called. New requests are blocked until resume.
+
+        ``lora_name`` is accepted for interface parity with the HTTP path but
+        targeted (per-LoRA) pause is HTTP-only; passing a non-None value
+        raises ``NotImplementedError``.
         """
+        if lora_name is not None:
+            raise NotImplementedError("targeted pause is HTTP-only")
         await self._run_on_all_engines("pause_generation")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
         """
         Resumes generation for all engines after a keep-mode pause.
 
         Frozen in-flight requests continue from where they left off, and new requests are unblocked.
         """
+        if lora_name is not None:
+            raise NotImplementedError("targeted pause is HTTP-only")
         await self._run_on_all_engines("resume_generation")
 
     # ----------------------------
