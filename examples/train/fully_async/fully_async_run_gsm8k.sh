@@ -27,10 +27,11 @@ set -x
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
-TIS_TYPE=token
-TIS_IMP_RATIO_CAP=2.0
+SEQUENCE_MASK_METRIC=geometric
+GEO_MASK_HIGH=1.01
+GEO_MASK_LOW=0.99
 
-RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -38,8 +39,9 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
-  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
+  trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
+  trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \

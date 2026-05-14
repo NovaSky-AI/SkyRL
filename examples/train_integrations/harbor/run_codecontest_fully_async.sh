@@ -47,9 +47,10 @@ APPLY_OVERLONG_FILTERING=true
 # modifications.
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 
-# TIS corrections
-TIS_TYPE=token
-TIS_IMP_RATIO_CAP=2.0
+# Off-policy correction via geometric sequence masking
+SEQUENCE_MASK_METRIC=geometric
+GEO_MASK_HIGH=1.01
+GEO_MASK_LOW=0.99
 
 # -------------------------
 # Fully-async knobs.
@@ -87,8 +88,9 @@ _SKYRL_USE_NEW_INFERENCE=0 uv run --isolated --extra fsdp --extra harbor -m exam
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
-  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
-  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
+  trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
+  trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=1 \

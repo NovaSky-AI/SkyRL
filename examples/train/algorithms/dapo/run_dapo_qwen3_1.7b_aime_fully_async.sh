@@ -44,18 +44,20 @@ LR=1e-6
 : "${MINI_BATCH_SIZE:=32}"
 : "${EVAL_CKPT_INTERVAL:=80}"
 
-RUN_NAME=dapo_qwen3_1.7b_base-async-TIS_2.0-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen
+SEQUENCE_MASK_METRIC=geometric
+GEO_MASK_HIGH=1.01
+GEO_MASK_LOW=0.99
 
-USE_TIS=true
-TIS_IMP_RATIO_CAP=2.0
+RUN_NAME=dapo_qwen3_1.7b_base-async-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen
 
 uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully_async \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
+  trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
+  trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
