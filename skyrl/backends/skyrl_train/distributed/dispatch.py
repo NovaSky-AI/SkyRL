@@ -275,7 +275,7 @@ def concatenate_outputs_after_mesh_dispatch(
     return TrainingOutputBatch.cat(shards)
 
 
-@dataclass
+@dataclass(frozen=True)
 class WorkerOutput:
     """Unified worker output for ``forward`` and ``forward_backward``.
 
