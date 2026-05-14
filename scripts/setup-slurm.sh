@@ -25,7 +25,7 @@ mkdir -p ~/.slurm
 cat > ~/.slurm/config <<'EOF'
 Host runpod-cluster
     HostName 31.24.80.22
-    Port 14460
+    Port 10714
     User root
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking no
