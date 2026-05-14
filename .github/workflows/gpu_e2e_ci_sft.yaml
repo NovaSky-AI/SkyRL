@@ -2,7 +2,7 @@ name: SkyRL-GPU-E2E-CI-SFT
 
 on:
   schedule:
-    - cron: '5 8 * * *'   # Every day at 08:05 UTC (~00:05 PST / ~01:05 PDT)
+    - cron: '30 8 * * *'   # Every day at 08:30 UTC (~00:30 PST / ~01:30 PDT)
   workflow_dispatch:
 
 permissions:
