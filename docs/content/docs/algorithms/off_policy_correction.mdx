@@ -17,9 +17,8 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 We recommend adding the following configs in order to your training runs to help address off-policy drift:
 
 ```yaml
-# For dense models, we recommend starting with geometric sequence masking. This zeros out the per-sequence
+# We recommend starting with geometric sequence masking. This zeros out the per-sequence
 # loss when the geometric mean of token-wise importance-sampling ratios falls outside [geo_mask_low, geo_mask_high].
-# For MoE models, you may need a wider range.
 trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
 trainer.algorithm.off_policy_correction.geo_mask_low=0.99
 trainer.algorithm.off_policy_correction.geo_mask_high=1.01
@@ -29,8 +28,7 @@ trainer.policy.megatron_config.moe_enable_routing_replay=True
 generator.inference_engine.enable_return_routed_experts=True
 generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
 
-# TIS (Truncated Importance Sampling) remains supported and may be useful for certain workloads
-# (e.g., when you want to retain all sequences but down-weight off-policy contributions) — see below for configuration.
+# TIS (Truncated Importance Sampling) applies logprob corrections on a per-token basis
 trainer.algorithm.off_policy_correction.tis_ratio_type="token"
 trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
 
