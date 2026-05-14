@@ -637,8 +637,10 @@ class SFTTrainer:
         """
         num_eval = len(eval_tokenized)
         if num_eval == 0:
-            logger.warning("Eval dataset is empty; skipping eval")
-            return {}
+            raise ValueError(
+                "Eval dataset is empty. Provide a non-empty eval split or disable eval "
+                "by setting eval_dataset_name=None."
+            )
 
         # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
         # and removes the need for a separate `eval_batch_size` knob.
@@ -649,11 +651,12 @@ class SFTTrainer:
         # to training. Eval datasets are typically large enough that this is a no-op.
         num_full_batches = num_eval // eval_chunk_size
         if num_full_batches == 0:
-            logger.warning(
-                f"Eval dataset has {num_eval} examples, which is less than "
-                f"micro_train_batch_size_per_gpu * dp_size = {eval_chunk_size}; skipping eval"
+            raise ValueError(
+                f"Eval dataset has {num_eval} examples, which is less than the eval batch size "
+                f"of {eval_chunk_size} (micro_train_batch_size_per_gpu="
+                f"{self.sft_cfg.micro_train_batch_size_per_gpu} * dp_size={dp_size}). "
+                f"Use a larger eval split or reduce micro_train_batch_size_per_gpu."
             )
-            return {}
 
         total_loss_weighted = 0.0
         total_tokens = 0
