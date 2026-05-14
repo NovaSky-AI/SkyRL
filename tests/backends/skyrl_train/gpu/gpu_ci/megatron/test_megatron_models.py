@@ -226,9 +226,7 @@ async def _vllm_teacher_forced_response_logprobs(
         # Response positions = last len(response_ids) entries
         return per_token[-len(response_ids) :] if response_ids else []
 
-    all_response_lps = await asyncio.gather(
-        *[_score_one(p, r) for p, r in zip(prompts, responses)]
-    )
+    all_response_lps = await asyncio.gather(*[_score_one(p, r) for p, r in zip(prompts, responses)])
 
     out = torch.zeros(len(prompts), max_response_len, dtype=torch.float)
     for i, lps in enumerate(all_response_lps):
@@ -285,7 +283,17 @@ async def construct_training_input_from_generator_output(generator_output, token
         ),
         pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/nemotron3-moe-tiny-random", 2e-1, 1e-1, id="nemotron3-moe_tp2_ep2"),
         pytest.param(
-            1, 1, 1, 8, 1, 4, 8, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 5e-1, 5e-2, id="nemotron3-nano_tp4_ep8",
+            1,
+            1,
+            1,
+            8,
+            1,
+            4,
+            8,
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            5e-1,
+            5e-2,
+            id="nemotron3-nano_tp4_ep8",
             marks=pytest.mark.skip(reason="skip full size nemotron3-nano test until we migrate to h100 CI"),
         ),
     ],
@@ -391,7 +399,7 @@ async def test_logprobs_matching_roundtrip(
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
 
-            # score the same pre-sync (prompt + response) tokens with the post-sync vLLM weights 
+            # score the same pre-sync (prompt + response) tokens with the post-sync vLLM weights
             # since generation can be non-deterministic even with temperature=0.0.
             logprobs_t_2 = await _vllm_teacher_forced_response_logprobs(
                 client,

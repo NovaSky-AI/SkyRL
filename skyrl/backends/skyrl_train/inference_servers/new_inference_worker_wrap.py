@@ -44,7 +44,8 @@ import torch
 # model construction; this module is imported by vLLM via
 # --worker-extension-cls before model init, so the import-time patch is
 # correctly ordered.
-# Remove this pending https://github.com/vllm-project/vllm/pull/42481
+# Remove this pending https://github.com/vllm-project/vllm/pull/42481 which should
+# be included in vLLM 0.21.0
 try:
     from vllm.model_executor.model_loader.reload.meta import (
         SKIP_TENSORS as _VLLM_SKIP_TENSORS,
