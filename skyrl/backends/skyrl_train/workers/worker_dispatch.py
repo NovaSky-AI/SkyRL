@@ -16,7 +16,7 @@ from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
-    concatenate_outputs_after_mesh_dispatch,
+    concatenate_dict_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -241,10 +241,9 @@ class WorkerDispatch:
                 result["loss_fn_outputs"] = all_loss_fn_outputs
             return result
 
-        # Inference path (no loss_fn): worker returns TrainingOutputBatch per DP rank; concatenate
-        # across DP and unwrap into a plain dict so the API is uniformly ``dict``.
-        output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
-        return dict(output.items())
+        # Inference path (no loss_fn): worker returns a plain dict (``{"output": tensor}``) per DP
+        # rank; concatenate the tensors across DP to reconstruct the full batch.
+        return concatenate_dict_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
 
     def stage_data(
         self,

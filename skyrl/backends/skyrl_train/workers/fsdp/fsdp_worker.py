@@ -1,6 +1,6 @@
 import io
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
 import torch
@@ -32,7 +32,6 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
@@ -333,7 +332,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn=None,
         loss_fn_config=None,
-    ):
+    ) -> Dict[str, Any]:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
@@ -400,7 +399,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
     def forward(
         self,
         data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
+    ) -> Dict[str, Any]:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
@@ -450,7 +449,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
     def forward(
         self,
         data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
+    ) -> Dict[str, Any]:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.

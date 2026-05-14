@@ -272,3 +272,35 @@ def concatenate_outputs_after_mesh_dispatch(
     for i in range(actor_infos[0].rank.dp_size):
         shards.append(dp_rank_to_shard[i])
     return TrainingOutputBatch.cat(shards)
+
+
+def concatenate_dict_outputs_after_mesh_dispatch(
+    actor_infos: List[ActorInfo], data_batches: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Concatenate dict-of-tensor outputs from different ranks after mesh dispatch.
+
+    Plain-dict counterpart of :func:`concatenate_outputs_after_mesh_dispatch`,
+    used now that worker ``forward`` methods return ``Dict[str, Any]`` instead
+    of ``TrainingOutputBatch``. Tensors under the same key are concatenated
+    along dim 0 across DP ranks; non-tensor values are taken from the first
+    DP shard.
+    """
+    import torch
+
+    assert len(actor_infos) == len(data_batches), "`actor_infos` and `data_batches` must have the same length"
+    dp_rank_to_shard: Dict[int, Dict[str, Any]] = {}
+    for actor_info, data_batch in zip(actor_infos, data_batches):
+        if actor_info.rank.is_collection_dp_rank():
+            dp_rank_to_shard[actor_info.rank.dp] = data_batch
+    shards = [dp_rank_to_shard[i] for i in range(actor_infos[0].rank.dp_size)]
+    if not shards:
+        return {}
+
+    out: Dict[str, Any] = {}
+    for key, value in shards[0].items():
+        if isinstance(value, torch.Tensor):
+            out[key] = torch.cat([shard[key] for shard in shards], dim=0)
+        else:
+            # Non-tensor (e.g. scalar metric) — keep the first shard's value.
+            out[key] = value
+    return out

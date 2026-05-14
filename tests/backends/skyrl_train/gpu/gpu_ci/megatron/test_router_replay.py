@@ -9,7 +9,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    concatenate_dict_outputs_after_mesh_dispatch,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -246,7 +246,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
 
             refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
             results = ray.get(refs)
-            outputs = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
+            outputs = concatenate_dict_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
 
             for actor in actor_group._actor_handlers:
                 ray.kill(actor)

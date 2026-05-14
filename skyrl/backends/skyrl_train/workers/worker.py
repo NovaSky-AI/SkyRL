@@ -390,10 +390,24 @@ class Worker(DistributedTorchRayActor):
 
         torch.distributed.barrier()
 
-    def forward(self, data: TrainingInputBatch) -> TrainingOutputBatch:
-        """Run forward pass on the input batch in inference mode.
+    def forward(self, *args, **kwargs) -> Dict[str, Any]:
+        """Run forward pass on the input batch.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.micro_forward_batch_size_per_gpu`.
+        Each worker subclass declares its own concrete signature and return
+        contract; the base class only fixes the convention that the result is a
+        plain ``Dict[str, Any]`` so callers can program against a uniform API.
+        """
+        raise NotImplementedError()
+
+    def _inference_forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        """Legacy forward path: run inference in micro batches and return ``{"output": tensor}``.
+
+        Shared implementation used by RefWorker, CriticWorker, and the
+        ``loss_fn is None`` branch of PolicyWorker. Subclasses provide
+        ``_forward_micro_batch`` for the per-micro-batch model call.
+
+        Returns a plain dict (``{"output": tensor}``) — concatenation across DP
+        ranks happens in the dispatcher, not here.
         """
         # run in micro batches of cfg.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
@@ -405,7 +419,8 @@ class Worker(DistributedTorchRayActor):
         output = TrainingOutputBatch.cat(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
-        return output
+        # Return as a plain dict; the dispatcher concatenates dict shards across DP ranks.
+        return dict(output.items())
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
@@ -963,18 +978,19 @@ class PolicyWorkerBase(Worker):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Union[TrainingOutputBatch, Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Run forward pass.
 
-        - When ``loss_fn`` is None: behaves like :meth:`Worker.forward` and returns a
-          ``TrainingOutputBatch`` with ``"output"`` containing the logprobs.
+        - When ``loss_fn`` is None: runs inference in micro batches via
+          :meth:`Worker._inference_forward` and returns a plain dict
+          (``{"output": tensor}``).
         - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): runs the loss in ``no_grad`` mode
           (no backward), iterating over micro-batches of ``micro_forward_batch_size_per_gpu``,
           and returns a metrics dict including ``"loss"`` and per-sample ``"loss_fn_outputs"``.
           Metrics are all-reduced across the DP group to mirror :meth:`forward_backward`.
         """
         if loss_fn is None:
-            return super().forward(data)
+            return self._inference_forward(data)
 
         micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
         all_metrics = defaultdict(list)
@@ -1254,6 +1270,10 @@ class CriticWorkerBase(Worker):
         output.metadata = micro_batch.metadata
         return output
 
+    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        """Run inference forward pass. Returns ``{"output": values}`` as a plain dict."""
+        return self._inference_forward(data)
+
 
 class RefWorkerBase(Worker):
     def __init__(self, **kwargs):
@@ -1262,6 +1282,10 @@ class RefWorkerBase(Worker):
         # Ref does not train. Expose ``None`` defaults so inherited methods (e.g. offload_to_cpu) work.
         self.optimizer = None
         self.scheduler = None
+
+    def forward(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        """Run inference forward pass. Returns ``{"output": log_probs}`` as a plain dict."""
+        return self._inference_forward(data)
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
