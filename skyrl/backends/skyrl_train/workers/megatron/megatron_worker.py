@@ -270,6 +270,7 @@ class MegatronWeightExtractor(WeightExtractor):
 
             for name, tensor in hf_params_generator:
                 tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+
                 yield WeightChunk(
                     names=[name],
                     dtypes=[str(dtype)],

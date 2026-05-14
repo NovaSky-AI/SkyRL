@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 import torch
-from huggingface_hub import file_exists, hf_hub_download
+from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoConfig,
@@ -46,13 +46,15 @@ torch.set_default_dtype(torch.bfloat16)
 model = AutoModelForCausalLM.from_config(config)
 torch.set_default_dtype(torch.float32)
 
-if file_exists(filename="generation_config.json", repo_id=source_model_id, repo_type="model"):
+try:
     model.generation_config = GenerationConfig.from_pretrained(
         source_model_id,
         trust_remote_code=True,
     )
     model.generation_config.do_sample = True
     print(model.generation_config)
+except OSError:
+    print("no generation_config.json available; using model default")
 
 model = model.cpu()
 set_seed(42)
@@ -60,6 +62,21 @@ with torch.no_grad():
     for name, p in sorted(model.named_parameters()):
         torch.nn.init.normal_(p, 0, 0.1)
         print(name, p.shape)
+
+# Scale lm_head ~7x so the random model produces confident pre-sync logprobs
+# (~-2 to -3 nats instead of uniform -log(vocab) ≈ -11.8). The round-trip
+# correctness check in test_logprobs_matching_roundtrip uses a teacher-forced
+# post-sync forward over the SAME pre-sync tokens; a corrupted post-sync model
+# (e.g. the vLLM conv_weights aliasing regression) drives the per-token logprob
+# of those tokens back toward -11.8, giving a large pre/post diff. Without
+# this scaling the pre-sync model is already near uniform, so corruption is
+# invisible. The clean-run pre/post diff stays ~0.16 (parity only).
+LM_HEAD_SCALE = 7.0
+with torch.no_grad():
+    for name, p in model.named_parameters():
+        if name.startswith("lm_head."):
+            p.mul_(LM_HEAD_SCALE)
+            print(f"scaled {name} by {LM_HEAD_SCALE}")
 
 for i, block_type in enumerate(config.layers_block_type):
     if block_type == "moe":
