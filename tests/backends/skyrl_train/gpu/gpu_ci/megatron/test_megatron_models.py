@@ -240,13 +240,6 @@ async def test_logprobs_matching_roundtrip(
         cfg.generator.batched = False
         cfg.generator.max_turns = 1
 
-        # Debug: optionally bypass bucketing in MegatronWeightExtractor to test
-        # whether the post-sync NaN reproduces without bucketed export.
-        import os as _os
-
-        if _os.environ.get("SKYRL_NEMOTRON_DISABLE_BUCKETING") == "1":
-            cfg.generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB = 1024.0
-
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
 
