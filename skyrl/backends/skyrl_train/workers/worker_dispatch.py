@@ -114,6 +114,10 @@ class WorkerDispatch:
             dp_size = math.lcm(dp_size, self._actor_groups["ref"].actor_infos[0].rank.dp_size)
         return dp_size
 
+    def dp_size(self, model: str) -> int:
+        """Return the data-parallel size for ``model`` (e.g. "policy")."""
+        return self._actor_groups[model].actor_infos[0].rank.dp_size
+
     def _should_manage_offload(self, model: str) -> bool:
         """Check if we need to manage offload for this model."""
         if self.colocate_all:

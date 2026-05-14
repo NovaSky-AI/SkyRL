@@ -642,7 +642,7 @@ class SFTTrainer:
 
         # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
         # and removes the need for a separate `eval_batch_size` knob.
-        dp_size = self.dispatch._actor_groups["policy"].actor_infos[0].rank.dp_size
+        dp_size = self.dispatch.dp_size("policy")
         eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
 
         # Drop a trailing partial batch to keep DP/microbatch divisibility identical
@@ -916,6 +916,13 @@ class SFTTrainer:
                 log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
             eval_metrics = None
+            # Eval fires at step N where N % eval_interval == 0 and N > 0.
+            # The first iteration of this loop runs as global_step=1 (the
+            # initial increment happens before this block on resume), so a
+            # baseline eval at step 0 is not currently produced by the
+            # training loop. If a step-0 baseline is needed, it would have to
+            # be evaluated before entering the training loop and logged
+            # separately.
             if (
                 eval_tokenized is not None
                 and self.sft_cfg.eval_interval > 0
@@ -975,20 +982,23 @@ class SFTTrainer:
         # final eval at step=num_steps would be rejected by wandb with
         # "step N < current step N+1". We log the final eval at num_steps+1
         # (one past the last committed train step) in a single combined
-        # tracker.log() call, preserving wandb step ordering.
+        # tracker.log() call, preserving wandb step ordering. We use a local
+        # ``final_eval_step`` rather than mutating ``self.global_step``: the
+        # bump is purely a wandb-step accounting concern, not real trainer
+        # state.
         if eval_tokenized is not None:
             already_ran = self.sft_cfg.eval_interval > 0 and num_steps % self.sft_cfg.eval_interval == 0
             if not already_ran:
-                self.global_step = num_steps + 1
+                final_eval_step = num_steps + 1
                 eval_timings: dict[str, float] = {}
                 with Timer("eval", eval_timings):
                     eval_metrics = self.run_eval(eval_tokenized)
                 if eval_metrics:
                     eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
                     eval_log["timing/eval"] = eval_timings["eval"]
-                    self.tracker.log(eval_log, step=self.global_step, commit=True)
+                    self.tracker.log(eval_log, step=final_eval_step, commit=True)
                     logger.info(
-                        f"Final eval at step {self.global_step}: "
+                        f"Final eval at step {final_eval_step}: "
                         f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
                         f"over {eval_metrics.get('eval_num_batches', 0)} batches"
                     )
