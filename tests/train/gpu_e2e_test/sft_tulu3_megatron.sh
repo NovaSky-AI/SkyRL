@@ -54,18 +54,6 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
   resume_from="" \
   2>&1 | tee "$LOG_FILE"
 
-# `set -o pipefail` ensures the failure of the training command propagates
-# through the `tee` pipeline, so by the time we get here the training run
-# itself succeeded (exit code 0).
-
-# ---- Completion marker (stdout-side, cheap sanity check) ----
-# Confirms the trainer reached its final print before exiting. The wandb-side
-# completion/trend/nan-inf assertions follow.
-if ! grep -q "SFT training complete!" "$LOG_FILE"; then
-  echo "FAIL: 'SFT training complete!' not found in $LOG_FILE"
-  exit 1
-fi
-echo "PASS: 'SFT training complete!' marker found."
 
 # ---- Wandb-side assertions ----
 # Pulls the run's logged ``train/loss`` history and asserts:
