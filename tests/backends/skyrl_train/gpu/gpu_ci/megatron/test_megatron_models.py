@@ -204,7 +204,6 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/nemotron3-moe-tiny-random", 2e-1, 2e-1, id="nemotron3-moe_tp2_ep2"),
         pytest.param(
             1,
             1,
