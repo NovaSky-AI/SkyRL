@@ -13,8 +13,9 @@
 # the project-level .sky.yaml, so these MUST be in ~/.sky/config.yaml.
 set -euo pipefail
 
-if [ ! -f ~/.ssh/runpod_key ]; then
-  echo "ERROR: ~/.ssh/runpod_key not found. Ask the team for the RunPod SSH key."
+if [ ! -f ~/.ssh/id_ed25519 ]; then
+  echo "ERROR: ~/.ssh/id_ed25519 not found. Generate one with: ssh-keygen -t ed25519"
+  echo "Then add the public key in RunPod console > Settings > SSH Keys."
   exit 1
 fi
 
@@ -24,9 +25,9 @@ mkdir -p ~/.slurm
 cat > ~/.slurm/config <<'EOF'
 Host runpod-cluster
     HostName 31.24.80.22
-    Port 16198
+    Port 14460
     User root
-    IdentityFile ~/.ssh/runpod_key
+    IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking no
 EOF
 
