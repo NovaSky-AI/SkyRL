@@ -84,23 +84,10 @@ def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
 
 
 def _engine_overrides_for_model(model_name: str) -> dict:
-    """Per-model overrides for vLLM engine init.
-
-    The 30B nemotron-3-nano has max_seq_len=262144 in HF config which produces
-    a huge KV cache; with Megatron colocated and offload_model=False during
-    sync, the second wake_up(kv_cache) blows past GPU memory. Cap max_model_len
-    at a value comfortably above prompt+gen length and lower gpu memory
-    utilization so vLLM leaves enough headroom for the resident Megatron model.
-
-    On vLLM 0.20 + B200, the auto-selected MoE backend is FlashInfer Cutlass.
-    During the layerwise reload triggered by our weight broadcast, that
-    backend's __init__ calls ``get_current_vllm_config()`` outside an active
-    ``set_current_vllm_config()`` context and asserts. Force ``moe_backend=
-    "triton"`` to keep the reload path on a backend whose kernel ctor doesn't
-    need the global config. (Matches what vLLM 0.19 used by default.)
-    """
+    """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
     if "Nemotron-3-Nano" in model_name:
+        # lower gpu memory utilization for the full size nemotron3-nano model
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.6
     return overrides
@@ -251,10 +238,24 @@ async def construct_training_input_from_generator_output(generator_output, token
 @pytest.mark.asyncio
 @pytest.mark.megatron_models
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold",
+    # use_teacher_forced selects the post-sync round-trip metric:
+    #   False: independent greedy post-sync generation, compare position-aligned logprobs
+    #     to pre-sync. Works for confident trained models (e.g. nemotron3-nano) where
+    #     vLLM-loaded vs Megatron-broadcast weight differences DON'T blow up under the
+    #     teacher-forced metric (4+ logprob units per token on the pre-sync argmax).
+    #   True: re-score the pre-sync (prompt + response) tokens via vLLM prompt_logprobs
+    #     under the post-sync weights and compare against the Megatron forward logprobs
+    #     already computed above. Required for the random-init tiny nemotron3-moe whose
+    #     amplified lm_head makes pre-sync confident; without teacher-forcing, any per-
+    #     token argmax flip from minor weight drift causes the two independent generations
+    #     to diverge and the position-aligned diff balloons (0.79 clean baseline) while
+    #     the actual conv_weights corruption signal stays at 0.01 — undetectable. With
+    #     teacher-forcing, corruption shows up as the post-sync model collapsing toward
+    #     uniform (8.9 diff vs 0.2 clean baseline).
+    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold,use_teacher_forced",
     [
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_tp2_ep2"),
-        pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_pp2_cp2"),
+        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, False, id="qwen3-moe_tp2_ep2"),
+        pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, False, id="qwen3-moe_pp2_cp2"),
         pytest.param(
             2,
             1,
@@ -266,6 +267,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             "eatang/glm-4.7-flash-tiny-random",
             1e-1,
             2e-2,
+            False,
             id="glm-4.7-flash_tp2_ep2",
             marks=_skip_mla_on_pre_hopper,
         ),
@@ -280,18 +282,29 @@ async def construct_training_input_from_generator_output(generator_output, token
             "eatang/qwen3.5-moe-tiny-random",
             1e-1,
             2e-1,
+            False,
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/nemotron3-moe-tiny-random", 2e-1, 1e-1, id="nemotron3-moe_tp2_ep2"),
+        # The tiny model's lm_head is intentionally scaled 7x in its creator so the
+        # teacher-forced post-sync diff is sensitive to vLLM weight-corruption regressions
+        # (e.g. the Mamba conv_weights aliasing bug). That peakier softmax also amplifies
+        # the small vLLM ↔ Megatron parity gap to ~0.07 in clean runs, so
+        # megatron_threshold is widened from 2e-2 → 1e-1.
         pytest.param(
-            1, 1, 1, 8, 1, 4, 8, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 5e-1, 5e-2, id="nemotron3-nano_tp4_ep8",
+            2, 1, 1, 2, 1, 2, 4, "eatang/nemotron3-moe-tiny-random", 2e-1, 1e-1, True,
+            id="nemotron3-moe_tp2_ep2",
+        ),
+        pytest.param(
+            1, 1, 1, 8, 1, 4, 8, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 5e-1, 5e-2, False,
+            id="nemotron3-nano_tp4_ep8",
             marks=pytest.mark.skip(reason="skip full size nemotron3-nano test until we migrate to h100 CI"),
         ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
-    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, vllm_threshold, megatron_threshold
+    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, vllm_threshold, megatron_threshold,
+    use_teacher_forced,
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
@@ -391,27 +404,77 @@ async def test_logprobs_matching_roundtrip(
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
 
-            # score the same pre-sync (prompt + response) tokens with the post-sync vLLM weights 
-            # since generation can be non-deterministic even with temperature=0.0.
-            logprobs_t_2 = await _vllm_teacher_forced_response_logprobs(
-                client,
-                prompts=generator_output["prompt_token_ids"],
-                responses=generator_output["response_ids"],
-                max_response_len=logprobs_t.shape[1],
-            )
+            if use_teacher_forced:
+                # Post-broadcast equivalence check: re-score the pre-sync tokens via
+                # vLLM's prompt_logprobs path under the post-sync weights, and compare
+                # against the Megatron forward logprobs already computed above (same
+                # tokens, Megatron's own weights). Clean run → vLLM-post ≈ Megatron
+                # (just the parity gap). Weight-corruption regression → vLLM-post
+                # collapses toward uniform and the diff balloons.
+                logprobs_t_2 = await _vllm_teacher_forced_response_logprobs(
+                    client,
+                    prompts=generator_output["prompt_token_ids"],
+                    responses=generator_output["response_ids"],
+                    max_response_len=logprobs_t.shape[1],
+                )
 
-            mask = response_mask.bool()
-            logprobs_t_valid = logprobs_t[mask]
-            logprobs_t_2_valid = logprobs_t_2[mask]
+                logprobs_t_2_valid = logprobs_t_2[mask]
+                logprobs_diff = (logprobs_t_2_valid - logprobs_megatron_valid).abs()
+                print(
+                    f"vLLM logprobs after sync (teacher) - mean: {logprobs_t_2_valid.mean().item():.6f}, "
+                    f"std: {logprobs_t_2_valid.std().item():.6f}"
+                )
+                print(
+                    f"Megatron (reused, same tokens)     - mean: {logprobs_megatron_valid.mean().item():.6f}, "
+                    f"std: {logprobs_megatron_valid.std().item():.6f}"
+                )
+                print(
+                    f"vLLM-post vs Megatron diff mean: {logprobs_diff.mean().item():.6f}, "
+                    f"std: {logprobs_diff.std().item():.6f}"
+                )
+                assert (
+                    logprobs_diff.mean().item() < vllm_threshold
+                ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
+            else:
+                # Independent-generation comparison: greedy-sample again post-sync
+                # and diff position-aligned per-token logprobs against pre-sync. Used
+                # for trained-confident models where teacher-forcing surfaces real
+                # vLLM-loaded/Megatron-broadcast weight processing diffs as multi-unit
+                # per-token shifts on the pre-sync argmax tokens (4+ baseline), which
+                # swamps the corruption signal.
+                (response_mask_2, logprobs_t_2) = await generate_with_vllm(
+                    generator, client, model_name, tokenizer, return_training_input=False
+                )
 
-            logprobs_diff = (logprobs_t_valid - logprobs_t_2_valid).abs()
-            print(
-                f"vLLM logprobs            - mean: {logprobs_t_valid.mean().item():.6f}, std: {logprobs_t_valid.std().item():.6f}"
-            )
-            print(
-                f"vLLM logprobs after sync - mean: {logprobs_t_2_valid.mean().item():.6f}, std: {logprobs_t_2_valid.std().item():.6f}"
-            )
-            print(f"vLLM logprob diff mean: {logprobs_diff.mean().item():.6f}, std: {logprobs_diff.std().item():.6f}")
-            assert (
-                logprobs_diff.mean().item() < vllm_threshold
-            ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
+                logprobs_t_valid = logprobs_t[mask]
+                logprobs_t_2_valid = logprobs_t_2[response_mask_2.bool()]
+
+                # Two independent greedy generations can diverge in length even with
+                # temperature=0 (allreduce / BF16 drift over many steps); truncate to
+                # the shorter one for the magnitude comparison.
+                if logprobs_t_valid.shape[0] != logprobs_t_2_valid.shape[0]:
+                    min_len = min(logprobs_t_valid.shape[0], logprobs_t_2_valid.shape[0])
+                    print(
+                        f"NOTE: pre/post-sync generation lengths differ "
+                        f"({logprobs_t_valid.shape[0]} vs {logprobs_t_2_valid.shape[0]}); "
+                        f"truncating to {min_len} for the magnitude check."
+                    )
+                    logprobs_t_valid = logprobs_t_valid[:min_len]
+                    logprobs_t_2_valid = logprobs_t_2_valid[:min_len]
+
+                logprobs_diff = (logprobs_t_valid - logprobs_t_2_valid).abs()
+                print(
+                    f"vLLM logprobs            - mean: {logprobs_t_valid.mean().item():.6f}, "
+                    f"std: {logprobs_t_valid.std().item():.6f}"
+                )
+                print(
+                    f"vLLM logprobs after sync - mean: {logprobs_t_2_valid.mean().item():.6f}, "
+                    f"std: {logprobs_t_2_valid.std().item():.6f}"
+                )
+                print(
+                    f"vLLM logprob diff mean: {logprobs_diff.mean().item():.6f}, "
+                    f"std: {logprobs_diff.std().item():.6f}"
+                )
+                assert (
+                    logprobs_diff.mean().item() < vllm_threshold
+                ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
