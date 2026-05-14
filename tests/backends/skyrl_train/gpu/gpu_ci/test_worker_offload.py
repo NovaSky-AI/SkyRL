@@ -145,11 +145,14 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         results_backload = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
+        # `forward_backward` returns a WorkerOutput per actor (frozen dataclass);
+        # compare scalar `metrics` and per-sample `loss_fn_outputs` directly.
         for i, result in enumerate(results):
             result_backload = results_backload[i]
-            for k, v in result.items():
-                assert k in result_backload
-                assert v == result_backload[k], f"Results mismatch for {k}: {v} != {result_backload[k]}"
+            for k, v in result.metrics.items():
+                assert k in result_backload.metrics
+                assert v == result_backload.metrics[k], f"Metrics mismatch for {k}: {v} != {result_backload.metrics[k]}"
+            assert result.loss_fn_outputs == result_backload.loss_fn_outputs, "loss_fn_outputs mismatch after backload"
 
     finally:
         ray.shutdown()  # Clean up Ray resources after the test
