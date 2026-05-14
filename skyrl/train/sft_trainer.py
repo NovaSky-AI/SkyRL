@@ -32,7 +32,10 @@ from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -615,7 +618,7 @@ class SFTTrainer:
     # Training
     # ------------------------------------------------------------------ #
 
-    def run_eval(self, eval_tokenized: list) -> dict:
+    def run_eval(self, eval_tokenized: list) -> tuple[dict, int]:
         """Compute eval loss over the full eval dataset.
 
         Iterates the eval dataset in chunks of ``micro_train_batch_size_per_gpu * dp_size``
@@ -633,7 +636,9 @@ class SFTTrainer:
                 :meth:`load_eval_dataset`).
 
         Returns:
-            Dict with ``eval_loss`` and ``eval_num_batches``.
+            ``(metrics, num_eval_batches)`` where ``metrics`` contains
+            ``eval_loss`` and ``num_eval_batches`` is bookkeeping for
+            stdout logging (not a wandb metric).
         """
         num_eval = len(eval_tokenized)
         if num_eval == 0:
@@ -647,27 +652,36 @@ class SFTTrainer:
         dp_size = self.dispatch.dp_size("policy")
         eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
 
-        # Drop a trailing partial batch to keep DP/microbatch divisibility identical
-        # to training. Eval datasets are typically large enough that this is a no-op.
-        num_full_batches = num_eval // eval_chunk_size
-        if num_full_batches == 0:
-            raise ValueError(
-                f"Eval dataset has {num_eval} examples, which is less than the eval batch size "
-                f"of {eval_chunk_size} (micro_train_batch_size_per_gpu="
-                f"{self.sft_cfg.micro_train_batch_size_per_gpu} * dp_size={dp_size}). "
-                f"Use a larger eval split or reduce micro_train_batch_size_per_gpu."
-            )
+        # Pad a trailing partial batch up to ``eval_chunk_size`` via
+        # ``pad_training_input_batch`` (which zeros ``loss_mask`` on padded rows).
+        # Padded rows contribute 0 to the cross-entropy numerator, and the
+        # pre-padding ``total_nonpad`` scaling in ``collate_batch`` excludes
+        # them from the denominator, so the reported ``eval_loss`` is the
+        # per-real-token mean over the full (non-padded) eval set.
+        num_eval_batches = ceil(num_eval / eval_chunk_size)
 
         total_loss_weighted = 0.0
         total_tokens = 0
-        for batch_idx in range(num_full_batches):
+        for batch_idx in range(num_eval_batches):
             start = batch_idx * eval_chunk_size
-            end = start + eval_chunk_size
+            end = min(start + eval_chunk_size, num_eval)
             batch_examples = eval_tokenized[start:end]
             batch = self.collate_batch(batch_examples, batch_size=eval_chunk_size)
+            # Pad the last (possibly-short) chunk so every dispatch sees exactly
+            # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
+            # ``loss_mask`` for padding rows; with ``pad_size=0`` it is a no-op.
+            pad_rows = eval_chunk_size - len(batch_examples)
+            if pad_rows > 0:
+                logger.info(
+                    f"Padding final eval batch by {pad_rows} rows "
+                    f"({len(batch_examples)} real -> {eval_chunk_size} total); "
+                    f"padded rows are masked out of the loss."
+                )
+                batch = pad_training_input_batch(batch, pad_rows)
             # Count non-pad response tokens (from the unscaled mask, recovered from the batch)
             # We use the attention_mask response window via collate_sft_batch's loss_mask which
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
+            # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
             output = self.dispatch.forward(
                 "policy",
@@ -680,10 +694,7 @@ class SFTTrainer:
             total_tokens += nonpad_tokens
 
         eval_loss = total_loss_weighted / max(total_tokens, 1)
-        return {
-            "eval_loss": eval_loss,
-            "eval_num_batches": num_full_batches,
-        }
+        return {"eval_loss": eval_loss}, num_eval_batches
 
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.
@@ -824,12 +835,12 @@ class SFTTrainer:
         # Wandb's step counter starts at 0; the training loop's first commit
         # advances it to >=1, so step=0 here does not conflict with later steps.
         if self.sft_cfg.eval_before_train and eval_tokenized is not None:
-            eval_metrics = self.run_eval(eval_tokenized)
+            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
             self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
             logger.info(
                 f"Baseline eval before training: "
                 f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                f"over {num_eval_batches} batches"
             )
 
         batch_size = self.sft_cfg.batch_size
@@ -931,6 +942,7 @@ class SFTTrainer:
                 log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
             eval_metrics = None
+            num_eval_batches: int | None = None
             # Eval fires at step N where N % eval_interval == 0 and N > 0.
             # The first iteration of this loop runs as global_step=1 (the
             # initial increment happens before this block on resume), so a
@@ -944,7 +956,7 @@ class SFTTrainer:
                 and self.global_step % self.sft_cfg.eval_interval == 0
             ):
                 with Timer("eval", all_timings):
-                    eval_metrics = self.run_eval(eval_tokenized)
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
                 if eval_metrics:
                     log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                     log_dict["timing/eval"] = all_timings["eval"]
@@ -959,7 +971,7 @@ class SFTTrainer:
             if eval_metrics:
                 logger.info(
                     f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                    f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                    f"over {num_eval_batches} batches"
                 )
 
             # Check for epoch boundary and reshuffle
@@ -1007,7 +1019,7 @@ class SFTTrainer:
                 final_eval_step = num_steps + 1
                 eval_timings: dict[str, float] = {}
                 with Timer("eval", eval_timings):
-                    eval_metrics = self.run_eval(eval_tokenized)
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
                 if eval_metrics:
                     eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
                     eval_log["timing/eval"] = eval_timings["eval"]
@@ -1015,7 +1027,7 @@ class SFTTrainer:
                     logger.info(
                         f"Final eval at step {final_eval_step}: "
                         f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                        f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+                        f"over {num_eval_batches} batches"
                     )
 
         logger.info("SFT training complete!")
