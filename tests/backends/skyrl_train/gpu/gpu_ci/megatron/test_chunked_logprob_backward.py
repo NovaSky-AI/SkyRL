@@ -19,9 +19,7 @@ from skyrl.train.utils.utils import get_free_port
 def tp_group():
     """Single-rank TP process group used by both autograd functions.
 
-    Uses gloo because the all_reduce calls inside ``_compute_distributed_log_softmax``
-    are no-ops with world_size=1, and a NCCL single-rank communicator is fragile
-    in some environments. The collective semantics are identical at TP=1.
+    Uses gloo distributed backend for simplicity because the world size is 1.
     """
     if not dist.is_initialized():
         os.environ["MASTER_ADDR"] = "localhost"
