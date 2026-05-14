@@ -513,22 +513,21 @@ async def test_megatron_train(
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         # Get learning rate from worker
         lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+        # `forward_backward` returns WorkerOutput (frozen); mutate the `metrics` dict in place.
         for i, result in enumerate(results_megatron):
-            result["policy_lr"] = lr_results[i]
+            result.metrics["policy_lr"] = lr_results[i]
 
     memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
     memory = memory[0]
     print_mem("memory after training step", memory)
 
     for result in results_megatron:
-        assert isinstance(result, dict), "Result should be a dictionary of training stats"
-        assert "policy_loss" in result
-        assert "policy_lr" in result
-        assert "loss_metrics/clip_ratio" in result
-        assert "policy_entropy" in result
-        for k, v in result.items():
-            if k == "loss_fn_outputs":
-                continue
+        assert isinstance(result, WorkerOutput), "Result should be a WorkerOutput of training stats"
+        assert "policy_loss" in result.metrics
+        assert "policy_lr" in result.metrics
+        assert "loss_metrics/clip_ratio" in result.metrics
+        assert "policy_entropy" in result.metrics
+        for k, v in result.metrics.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -559,8 +558,9 @@ async def test_megatron_train(
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     # Get learning rate from worker
     lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    # `forward_backward` returns WorkerOutput (frozen); mutate the `metrics` dict in place.
     for i, result in enumerate(results_fsdp):
-        result["policy_lr"] = lr_results[i]
+        result.metrics["policy_lr"] = lr_results[i]
 
     print("megatron results: ", results_megatron[0])
     print("\n\n")
@@ -587,8 +587,8 @@ async def test_megatron_train(
                 # because the logits for padding tokens are all 0 for the non-sample packing case in megatron
                 # the entropy calculation is different (fsdp has random logits for padding tokens)
                 continue
-            assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 4e-1, f"diff in {k} is too large!"
+            assert isinstance(result.metrics[k], (int, float)), f"{k} should be an int or float"
+            assert abs(result.metrics[k] - results_megatron[i].metrics[k]) < 4e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio
@@ -637,22 +637,21 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     results_megatron = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    # `forward_backward` returns WorkerOutput (frozen); mutate the `metrics` dict in place.
     for i, result in enumerate(results_megatron):
-        result["policy_lr"] = lr_results[i]
+        result.metrics["policy_lr"] = lr_results[i]
 
     memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
     memory = memory[0]
     print_mem("memory after training step", memory)
 
     for result in results_megatron:
-        assert isinstance(result, dict), "Result should be a dictionary of training stats"
-        assert "policy_loss" in result
-        assert "policy_lr" in result
-        assert "loss_metrics/clip_ratio" in result
-        assert "policy_entropy" in result
-        for k, v in result.items():
-            if k == "loss_fn_outputs":
-                continue
+        assert isinstance(result, WorkerOutput), "Result should be a WorkerOutput of training stats"
+        assert "policy_loss" in result.metrics
+        assert "policy_lr" in result.metrics
+        assert "loss_metrics/clip_ratio" in result.metrics
+        assert "policy_entropy" in result.metrics
+        for k, v in result.metrics.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -684,8 +683,9 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     results_megatron_dp = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     lr_results_dp = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    # `forward_backward` returns WorkerOutput (frozen); mutate the `metrics` dict in place.
     for i, result in enumerate(results_megatron_dp):
-        result["policy_lr"] = lr_results_dp[i]
+        result.metrics["policy_lr"] = lr_results_dp[i]
 
     print("megatron results: ", results_megatron)
     print("\n\n")
@@ -700,8 +700,8 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     ]
     for i, result in enumerate(results_megatron_dp):
         for k in keys_to_compare:
-            assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 1.5e-1, f"diff in {k} is too large!"
+            assert isinstance(result.metrics[k], (int, float)), f"{k} should be an int or float"
+            assert abs(result.metrics[k] - results_megatron[i].metrics[k]) < 1.5e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio
@@ -810,8 +810,11 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     results_backload = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
+    # `forward_backward` returns a WorkerOutput per actor (frozen dataclass);
+    # compare scalar `metrics` and per-sample `loss_fn_outputs` directly.
     for i, result in enumerate(results):
         result_backload = results_backload[i]
-        for k, v in result.items():
-            assert k in result_backload
-            assert v == result_backload[k], f"Results mismatch for {k}: {v} != {result_backload[k]}"
+        for k, v in result.metrics.items():
+            assert k in result_backload.metrics
+            assert v == result_backload.metrics[k], f"Metrics mismatch for {k}: {v} != {result_backload.metrics[k]}"
+        assert result.loss_fn_outputs == result_backload.loss_fn_outputs, "loss_fn_outputs mismatch after backload"
