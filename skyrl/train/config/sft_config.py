@@ -138,6 +138,8 @@ class SFTConfig(BaseConfig):
     eval_interval: int = 0
     """Run eval every N training steps. Eval also runs once at the end of training
     when an eval dataset is configured. ``0`` disables periodic eval."""
+    eval_before_train: bool = False
+    """If True, run a baseline eval pass before training begins (logged at step 0)."""
     max_length: Optional[int] = None
     """Maximum length of tokenized sequences. If specified, all sequences will be truncated to this value
     By default, no truncation is performed"""
@@ -222,6 +224,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
     if cfg.eval_interval > 0 and not cfg.eval_dataset_name:
         raise ValueError("eval_interval > 0 requires eval_dataset_name to be set")
+    if cfg.eval_before_train and cfg.eval_dataset_name is None:
+        raise ValueError("eval_before_train=True requires eval_dataset_name to be set")
 
     #  checks for megatron
     if cfg.strategy == "megatron":

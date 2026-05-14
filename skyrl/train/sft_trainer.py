@@ -820,6 +820,18 @@ class SFTTrainer:
         if eval_tokenized is not None:
             logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
 
+        # Baseline eval before training begins (logged at step 0).
+        # Wandb's step counter starts at 0; the training loop's first commit
+        # advances it to >=1, so step=0 here does not conflict with later steps.
+        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+            eval_metrics = self.run_eval(eval_tokenized)
+            self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
+            logger.info(
+                f"Baseline eval before training: "
+                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"over {eval_metrics.get('eval_num_batches', 0)} batches"
+            )
+
         batch_size = self.sft_cfg.batch_size
 
         # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
