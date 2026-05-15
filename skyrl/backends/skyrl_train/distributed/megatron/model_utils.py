@@ -251,7 +251,7 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
             flat_chosen = flat_idx.masked_select(valid_mask.reshape(-1)) + chunk_masked_target.masked_select(valid_mask)
 
             # `neg` is zero-copy; the subsequent mul_ writes in place.
-            grad_input = softmax_output.neg()
+            grad_input = softmax_output.neg_()
             grad_input.mul_(chunk_grad_output.unsqueeze(-1))
 
             grad_output_selected = chunk_grad_output.masked_select(valid_mask)
