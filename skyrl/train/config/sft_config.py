@@ -128,6 +128,13 @@ class SFTConfig(BaseConfig):
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
     messages_key: str = "messages"  # column name for chat-format datasets
+    tools_key: str = "tools"
+    """Column name holding per-row tool/function schemas for tool-calling datasets
+    (e.g. APIGen-MT, xLAM, ToolACE). May be a list[dict] or a JSON-encoded string.
+    Ignored if the column is absent from the dataset."""
+    system_key: str = "system"
+    """Column name holding a per-row system prompt to prepend when ``messages``
+    does not already start with a system turn. Ignored if absent."""
 
     # ---- Evaluation dataset ----
     eval_dataset_name: Optional[str] = None

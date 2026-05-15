@@ -602,8 +602,9 @@ def get_response_ids_and_loss_mask_from_messages(
         # 3. Set loss mask and rollout logprobs.
         # Regardless of the message role, each message is responsible for adding its own generation
         # prompt, and we apply the correct masking.
-        if cur_message["role"] == "user":
-            # 3.1. For user messages, it is simply zeros
+        if cur_message["role"] in ("user", "tool"):
+            # 3.1. For user / tool (observation) messages, it is simply zeros.
+            # Tool turns carry environment output, never assistant generation.
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
@@ -661,7 +662,7 @@ def get_response_ids_and_loss_mask_from_messages(
 
             assistant_msg_idx += 1
         else:
-            raise ValueError(f"Expected message role to be 'user' or 'assistant', got {cur_message['role']}")
+            raise ValueError(f"Expected message role to be 'user', 'assistant', or 'tool', got {cur_message['role']}")
 
         assert len(loss_mask) == len(response_ids)
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
