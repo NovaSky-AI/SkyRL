@@ -15,7 +15,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.critic.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=4 \
   trainer.placement.ref_num_gpus_per_node=4 \
   trainer.placement.critic_num_gpus_per_node=4 \

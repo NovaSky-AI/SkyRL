@@ -36,7 +36,7 @@ uv run --isolated --extra fsdp --with openreward \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.policy.model.path="$MODEL" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \

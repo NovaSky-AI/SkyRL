@@ -4,6 +4,7 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/distributed/test
 
 from typing import List
 
+import pytest
 import ray
 import torch
 from ray import ObjectRef
@@ -16,6 +17,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshRank,
     PassThroughDispatch,
     concatenate_outputs_after_mesh_dispatch,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.dataset.preprocess import compute_prompt_mini_batch_boundaries
@@ -119,6 +121,53 @@ def test_pass_through_dispatch():
     actor_group = RayActorGroup(num_actors)
     ret = actor_group.pass_through_dispatch(1, 2)
     assert ret == [None] * num_actors
+
+
+def test_loss_fn_outputs_to_tensor_basic():
+    """Default key="logprobs", default pad_value=0.0: pads to [B, T_max]."""
+    outputs = [
+        {"logprobs": [1.0, 2.0]},
+        {"logprobs": [3.0, 4.0, 5.0]},
+        {"logprobs": [6.0]},
+    ]
+    tensor = loss_fn_outputs_to_tensor(outputs)
+    expected = torch.tensor(
+        [
+            [1.0, 2.0, 0.0],
+            [3.0, 4.0, 5.0],
+            [6.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    assert tensor.shape == (3, 3)
+    assert tensor.dtype == torch.float32
+    assert torch.equal(tensor, expected)
+
+
+def test_loss_fn_outputs_to_tensor_custom_key_and_pad():
+    """Custom key="values" and pad_value=-1.0 propagate correctly."""
+    outputs = [
+        {"values": [0.5]},
+        {"values": [0.1, 0.2, 0.3, 0.4]},
+        {"values": [0.7, 0.8]},
+    ]
+    tensor = loss_fn_outputs_to_tensor(outputs, key="values", pad_value=-1.0)
+    expected = torch.tensor(
+        [
+            [0.5, -1.0, -1.0, -1.0],
+            [0.1, 0.2, 0.3, 0.4],
+            [0.7, 0.8, -1.0, -1.0],
+        ],
+        dtype=torch.float32,
+    )
+    assert tensor.shape == (3, 4)
+    assert torch.equal(tensor, expected)
+
+
+def test_loss_fn_outputs_to_tensor_empty():
+    """Empty input list raises RuntimeError from torch.nn.utils.rnn.pad_sequence."""
+    with pytest.raises(RuntimeError, match="empty list of sequences"):
+        loss_fn_outputs_to_tensor([])
 
 
 def test_dispatch_registry():

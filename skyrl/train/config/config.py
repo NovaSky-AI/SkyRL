@@ -600,7 +600,7 @@ class EnvironmentConfig(BaseConfig):
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     sequence_parallel_backend: str = "ulysses"
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     ref: RefConfig = field(default_factory=RefConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)

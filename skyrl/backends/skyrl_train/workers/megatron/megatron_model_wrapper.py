@@ -201,6 +201,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        forward_only: bool = False,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -216,6 +217,9 @@ class MegatronModelWrapper:
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
+            forward_only: If True, run the forward pass without backward (no gradients).
+                          Useful for evaluation / loss-only inference paths (e.g., SFT
+                          ``forward(loss_fn=...)`` codepath).
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -289,24 +293,32 @@ class MegatronModelWrapper:
                     if loss_mask is not None:
                         elementwise_loss = elementwise_loss * loss_mask
 
-                # Build per-sequence loss_fn_outputs
+                # Build per-sequence loss_fn_outputs.
+                # Compute valid_lens vectorized on GPU, then move tensors to CPU
+                # exactly once before iterating in Python — avoids ~3N GPU->CPU
+                # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
                 batch_size = action_log_probs.shape[0]
+                seq_len = action_log_probs.shape[1]
+                if action_mask is not None:
+                    valid_lens_t = action_mask.sum(dim=-1).long()
+                elif loss_mask is not None:
+                    valid_lens_t = loss_mask.sum(dim=-1).long()
+                else:
+                    valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
+
+                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
+                action_log_probs_cpu = action_log_probs.detach().cpu()
+                elementwise_loss_cpu = elementwise_loss.detach().cpu()
+                valid_lens = valid_lens_t.cpu().tolist()
+
                 loss_fn_outputs = []
                 for i in range(batch_size):
-                    if action_mask is not None:
-                        valid_len = int(action_mask[i].sum().item())
-                    elif loss_mask is not None:
-                        valid_len = int(loss_mask[i].sum().item())
-                    else:
-                        valid_len = action_log_probs.shape[1]
-
+                    valid_len = valid_lens[i]
                     loss_fn_outputs.append(
                         {
-                            "logprobs": (
-                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
-                            ),
+                            "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
                             "elementwise_loss": (
-                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                                elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
                             ),
                         }
                     )
@@ -468,7 +480,7 @@ class MegatronModelWrapper:
             num_microbatches=len(micro_batches),
             seq_length=seq_len,
             micro_batch_size=micro_batch_size,
-            forward_only=False,
+            forward_only=forward_only,
         )
 
         # broadcast metrics to all pp ranks

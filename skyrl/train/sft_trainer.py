@@ -32,7 +32,10 @@ from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -467,6 +470,12 @@ class SFTTrainer:
         """Load and tokenize the training dataset."""
         return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
 
+    def load_eval_dataset(self) -> Optional[list]:
+        """Load and tokenize the eval dataset, or return ``None`` if not configured."""
+        if not self.sft_cfg.eval_dataset_name:
+            return None
+        return self._load_and_tokenize(self.sft_cfg.eval_dataset_name, self.sft_cfg.eval_dataset_split)
+
     def _log_dataset_stats(self, tokenized: list) -> None:
         """Log tokenized sequence length statistics over the training set.
 
@@ -498,7 +507,7 @@ class SFTTrainer:
             f"total={sum(lengths)}, mean={mean_len:.1f}, median={q50}, q25={q25}, q75={q75}, min={min_len}, max={max_len}"
         )
 
-    def collate_batch(self, examples: list) -> TrainingInputBatch:
+    def collate_batch(self, examples: list, batch_size: int) -> TrainingInputBatch:
         """Collate examples into a TrainingInputBatch with loss normalization.
 
         Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
@@ -510,6 +519,12 @@ class SFTTrainer:
         (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
         accumulation so that the effective gradient equals
         ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
+
+        Args:
+            examples: Tokenized examples to collate.
+            batch_size: Global batch dimension used in the loss-mask scaling
+                factor. Required; the train path passes ``sft_cfg.batch_size``
+                and the eval path passes its per-dispatch chunk size.
         """
         batch = collate_sft_batch(examples, self.tokenizer)
         # Loss normalization: divide by non-pad token count (not padded seq length)
@@ -517,7 +532,7 @@ class SFTTrainer:
         # by number of micro batches, but aggregate otherwise
         micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
         total_nonpad = max(batch["loss_mask"].sum().item(), 1)
-        batch["loss_mask"] = batch["loss_mask"].float() * (self.sft_cfg.batch_size / (micro_batch_size * total_nonpad))
+        batch["loss_mask"] = batch["loss_mask"].float() * (batch_size / (micro_batch_size * total_nonpad))
         return batch
 
     # ------------------------------------------------------------------ #
@@ -603,6 +618,84 @@ class SFTTrainer:
     # Training
     # ------------------------------------------------------------------ #
 
+    def run_eval(self, eval_tokenized: list) -> tuple[dict, int]:
+        """Compute eval loss over the full eval dataset.
+
+        Iterates the eval dataset in chunks of ``micro_train_batch_size_per_gpu * dp_size``
+        (i.e. exactly one micro-batch per DP rank per dispatch call), calls
+        :meth:`WorkerDispatch.forward` with ``loss_fn="cross_entropy"`` (which
+        runs the model in ``eval()`` mode under ``no_grad``), and aggregates the
+        per-batch losses into a token-weighted mean.
+
+        The aggregated loss is a token-weighted mean of the per-batch losses,
+        which are themselves per-non-pad-token means within each batch. This
+        yields the true per-non-pad-token mean across the eval dataset.
+
+        Args:
+            eval_tokenized: Pre-tokenized eval dataset (output of
+                :meth:`load_eval_dataset`).
+
+        Returns:
+            ``(metrics, num_eval_batches)`` where ``metrics`` contains
+            ``eval_loss`` and ``num_eval_batches`` is bookkeeping for
+            stdout logging (not a wandb metric).
+        """
+        num_eval = len(eval_tokenized)
+        if num_eval == 0:
+            raise ValueError(
+                "Eval dataset is empty. Provide a non-empty eval split or disable eval "
+                "by setting eval_dataset_name=None."
+            )
+
+        # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
+        # and removes the need for a separate `eval_batch_size` knob.
+        dp_size = self.dispatch.dp_size("policy")
+        eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
+
+        # Pad a trailing partial batch up to ``eval_chunk_size`` via
+        # ``pad_training_input_batch`` (which zeros ``loss_mask`` on padded rows).
+        # Padded rows contribute 0 to the cross-entropy numerator, and the
+        # pre-padding ``total_nonpad`` scaling in ``collate_batch`` excludes
+        # them from the denominator, so the reported ``eval_loss`` is the
+        # per-real-token mean over the full (non-padded) eval set.
+        num_eval_batches = ceil(num_eval / eval_chunk_size)
+
+        total_loss_weighted = 0.0
+        total_tokens = 0
+        for batch_idx in range(num_eval_batches):
+            start = batch_idx * eval_chunk_size
+            end = min(start + eval_chunk_size, num_eval)
+            batch_examples = eval_tokenized[start:end]
+            batch = self.collate_batch(batch_examples, batch_size=eval_chunk_size)
+            # Pad the last (possibly-short) chunk so every dispatch sees exactly
+            # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
+            # ``loss_mask`` for padding rows; with ``pad_size=0`` it is a no-op.
+            pad_rows = eval_chunk_size - len(batch_examples)
+            if pad_rows > 0:
+                logger.info(
+                    f"Padding final eval batch by {pad_rows} rows "
+                    f"({len(batch_examples)} real -> {eval_chunk_size} total); "
+                    f"padded rows are masked out of the loss."
+                )
+                batch = pad_training_input_batch(batch, pad_rows)
+            # Count non-pad response tokens (from the unscaled mask, recovered from the batch)
+            # We use the attention_mask response window via collate_sft_batch's loss_mask which
+            # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
+            # Padded rows have loss_mask=0 so they are excluded here.
+            nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            output = self.dispatch.forward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                loss_fn_config=None,
+            )
+            batch_loss = float(output.metrics.get("loss", float("nan")))
+            total_loss_weighted += batch_loss * nonpad_tokens
+            total_tokens += nonpad_tokens
+
+        eval_loss = total_loss_weighted / max(total_tokens, 1)
+        return {"eval_loss": eval_loss}, num_eval_batches
+
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.
 
@@ -615,10 +708,11 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            metrics = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
+        metrics = output.metrics
         loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
         return {
             "loss": loss_val,
@@ -731,6 +825,24 @@ class SFTTrainer:
         # Log tokenized sequence length statistics (once, before training loop)
         self._log_dataset_stats(tokenized)
 
+        # Load eval dataset (if configured). We load once up-front so the
+        # tokenization cost is amortized across all eval invocations.
+        eval_tokenized = self.load_eval_dataset()
+        if eval_tokenized is not None:
+            logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
+
+        # Baseline eval before training begins (logged at step 0).
+        # Wandb's step counter starts at 0; the training loop's first commit
+        # advances it to >=1, so step=0 here does not conflict with later steps.
+        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+            self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
+            logger.info(
+                f"Baseline eval before training: "
+                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"over {num_eval_batches} batches"
+            )
+
         batch_size = self.sft_cfg.batch_size
 
         # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
@@ -789,7 +901,7 @@ class SFTTrainer:
                         batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
                     else:
                         batch_examples = tokenized[start_idx:end_idx]
-                    batch = self.collate_batch(batch_examples)
+                    batch = self.collate_batch(batch_examples, batch_size=batch_size)
 
                 # Training step
                 step_result = self.train_step(batch, self.global_step)
@@ -829,11 +941,37 @@ class SFTTrainer:
                     self.save_hf_model()
                 log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
+            eval_metrics = None
+            num_eval_batches: int | None = None
+            # Eval fires at step N where N % eval_interval == 0 and N > 0.
+            # The first iteration of this loop runs as global_step=1 (the
+            # initial increment happens before this block on resume), so a
+            # baseline eval at step 0 is not currently produced by the
+            # training loop. If a step-0 baseline is needed, it would have to
+            # be evaluated before entering the training loop and logged
+            # separately.
+            if (
+                eval_tokenized is not None
+                and self.sft_cfg.eval_interval > 0
+                and self.global_step % self.sft_cfg.eval_interval == 0
+            ):
+                with Timer("eval", all_timings):
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                    log_dict["timing/eval"] = all_timings["eval"]
+
             self.tracker.log(log_dict, step=self.global_step, commit=True)
 
             if self.global_step % 5 == 0:
                 logger.info(
                     f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
+                )
+
+            if eval_metrics:
+                logger.info(
+                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                    f"over {num_eval_batches} batches"
                 )
 
             # Check for epoch boundary and reshuffle
@@ -864,6 +1002,33 @@ class SFTTrainer:
                 self.global_step = final_step
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
+
+        # Final eval pass (skip if the last step already ran eval).
+        # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
+        # advanced wandb's internal step counter to num_steps+1. Logging the
+        # final eval at step=num_steps would be rejected by wandb with
+        # "step N < current step N+1". We log the final eval at num_steps+1
+        # (one past the last committed train step) in a single combined
+        # tracker.log() call, preserving wandb step ordering. We use a local
+        # ``final_eval_step`` rather than mutating ``self.global_step``: the
+        # bump is purely a wandb-step accounting concern, not real trainer
+        # state.
+        if eval_tokenized is not None:
+            already_ran = self.sft_cfg.eval_interval > 0 and num_steps % self.sft_cfg.eval_interval == 0
+            if not already_ran:
+                final_eval_step = num_steps + 1
+                eval_timings: dict[str, float] = {}
+                with Timer("eval", eval_timings):
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                    eval_log["timing/eval"] = eval_timings["eval"]
+                    self.tracker.log(eval_log, step=final_eval_step, commit=True)
+                    logger.info(
+                        f"Final eval at step {final_eval_step}: "
+                        f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {num_eval_batches} batches"
+                    )
 
         logger.info("SFT training complete!")
 

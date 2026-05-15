@@ -16,7 +16,7 @@ set -x
 
 uv run --isolated --extra fsdp \
     python -m skyrl.train.main_sft \
-    strategy=fsdp2 \
+    strategy=fsdp \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
     model.lora.rank=32 \
     model.lora.alpha=16 \

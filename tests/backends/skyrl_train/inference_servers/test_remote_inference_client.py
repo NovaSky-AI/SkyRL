@@ -32,6 +32,16 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.last_render_model = None
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
+    # Scripted-response support for testing sample_with_retry. Tests can
+    # POST to /test/script_generate with a list of partial choice payloads
+    # (each merged into the next /inference/v1/generate response) so the
+    # retry loop can be driven through abort → stop transitions.
+    app.state.generate_script: List[Dict] = []
+    app.state.generate_payloads: List[Dict] = []
+    # Tracks the last per-LoRA abort call made to this server, for
+    # /skyrl/v1/abort_lora_requests.
+    app.state.last_abort_lora_name = None
+    app.state.abort_lora_call_count = 0
 
     @app.get("/health")
     async def health():
@@ -79,6 +89,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         sp = body.get("sampling_params", {})
         input_token_ids = body.get("token_ids", [])
         app.state.last_generate_model = body.get("model")
+        # Record incoming payload for sample_with_retry tests to inspect.
+        app.state.generate_payloads.append(body)
         n = sp.get("n", 1)
         # If logprobs is explicitly set (sample path), use n for num_choices.
         # Otherwise (generate path), use len(token_ids) for per-prompt responses.
@@ -86,6 +98,24 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             num_choices = n
         else:
             num_choices = 1
+
+        # Scripted response path: tests can pre-load a list of choice
+        # overrides into app.state.generate_script. Each call pops the
+        # front entry and merges it into the default choice. The list is
+        # drained in FIFO order; once empty we fall back to the default
+        # "stop" response below.
+        if app.state.generate_script:
+            override = app.state.generate_script.pop(0)
+            default_choice = {
+                "request_id": "dummy",
+                "token_ids": override.get("token_ids", []),
+                "finish_reason": override.get("finish_reason", "stop"),
+                "logprobs": override.get(
+                    "logprobs",
+                    {"content": [{"logprob": -0.1 * (i + 1)} for i in range(len(override.get("token_ids", [])))]},
+                ),
+            }
+            return {"choices": [default_choice for _ in range(num_choices)]}
 
         response: dict = {
             "choices": [
@@ -210,6 +240,35 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/resume")
     async def resume():
         return {"status": "resumed", "server_id": server_id}
+
+    @app.post("/skyrl/v1/abort_lora_requests")
+    async def abort_lora_requests(request: Request):
+        body = await request.json()
+        lora_name = body.get("lora_name")
+        if not lora_name:
+            return JSONResponse(status_code=400, content={"error": "'lora_name' required"})
+        app.state.last_abort_lora_name = lora_name
+        app.state.abort_lora_call_count += 1
+        return {"status": "ok", "aborted": [], "count": 0, "server_id": server_id}
+
+    @app.post("/test/script_generate")
+    async def script_generate(request: Request):
+        """Test helper: pre-load scripted responses for /inference/v1/generate."""
+        body = await request.json()
+        app.state.generate_script = list(body.get("script", []))
+        app.state.generate_payloads = []
+        return {"status": "ok"}
+
+    @app.get("/test/abort_lora_state")
+    async def abort_lora_state():
+        return {
+            "last_abort_lora_name": app.state.last_abort_lora_name,
+            "abort_lora_call_count": app.state.abort_lora_call_count,
+        }
+
+    @app.get("/test/generate_payloads")
+    async def get_generate_payloads():
+        return {"payloads": app.state.generate_payloads}
 
     @app.get("/is_paused")
     async def is_paused():
@@ -1243,5 +1302,347 @@ class TestExplicitModelRequired:
             }
             with pytest.raises(ValueError, match="LoRA is enabled"):
                 await client.sample(request_payload)
+        finally:
+            await client.teardown()
+
+
+# ---------------------------------------------------------------------------
+# Targeted (per-LoRA) pause + sample_with_retry tests.
+# TRANSIENT: delete this section when vLLM ships native per-LoRA pause and
+# the sample_with_retry / per-LoRA gate are removed.
+# ---------------------------------------------------------------------------
+
+
+async def _script_generate(server_url: str, script: List[Dict]) -> None:
+    """Helper: pre-load scripted /inference/v1/generate responses on one server."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{server_url}/test/script_generate", json={"script": script}) as resp:
+            assert resp.status == 200
+
+
+async def _get_generate_payloads(server_url: str) -> List[Dict]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{server_url}/test/generate_payloads") as resp:
+            data = await resp.json()
+            return data["payloads"]
+
+
+async def _get_abort_lora_state(server_url: str) -> Dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{server_url}/test/abort_lora_state") as resp:
+            return await resp.json()
+
+
+class TestTargetedLoraPause:
+    """Tests for pause_generation(lora_name=...) and sample_with_retry."""
+
+    @pytest.mark.asyncio
+    async def test_pause_generation_with_lora_name_fans_out_abort(self, mock_servers, monkeypatch):
+        """pause_generation(lora_name=X) clears the event and fans out abort to all servers."""
+        # Shorten the grace period so this test runs quickly.
+        monkeypatch.setattr(
+            "skyrl.backends.skyrl_train.inference_servers.remote_inference_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS",
+            0,
+        )
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            result = await client.pause_generation(lora_name="lora-A")
+            assert len(result) == 2  # fanned out to both servers
+            for url, resp in result.items():
+                assert resp["status"] == 200
+                assert resp["body"]["status"] == "ok"
+                assert resp["body"]["server_id"] in (0, 1)
+            # Both servers should have observed the abort call.
+            for url in mock_servers["server_urls"]:
+                state = await _get_abort_lora_state(url)
+                assert state["last_abort_lora_name"] == "lora-A"
+                assert state["abort_lora_call_count"] >= 1
+            # Event is now CLEAR (paused). resume_generation should re-open it.
+            ev = client._lora_pause_events["lora-A"]
+            assert not ev.is_set()
+            await client.resume_generation(lora_name="lora-A")
+            assert ev.is_set()
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_pause_generation_without_lora_uses_keep_mode(self, mock_servers):
+        """pause_generation() (no lora_name) preserves the global keep-mode path."""
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            result = await client.pause_generation()
+            assert len(result) == 2
+            for url, resp in result.items():
+                assert resp["status"] == 200
+                # The mock /pause echoes back the mode query param.
+                assert resp["body"]["mode"] == "keep"
+            # No per-LoRA event should have been created.
+            assert client._lora_pause_events == {}
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_accumulates_on_abort(self, mock_servers):
+        """abort-then-stop: tokens are accumulated, max_tokens decremented, final stop_reason='stop'."""
+        # Script the first response as abort with 5 tokens, second as stop with 4 tokens.
+        # The mock has only one /inference/v1/generate endpoint shared by both servers,
+        # so we script both servers identically — the second call may hit either server
+        # (random load balancing) but both will produce the same scripted "stop" response.
+        for url in mock_servers["server_urls"]:
+            await _script_generate(
+                url,
+                [
+                    {
+                        "token_ids": [100, 101, 102, 103, 104],
+                        "finish_reason": "abort",
+                        "logprobs": {"content": [{"logprob": -0.1 * i} for i in range(1, 6)]},
+                    },
+                    {
+                        "token_ids": [200, 201, 202, 203],
+                        "finish_reason": "stop",
+                        "logprobs": {"content": [{"logprob": -0.2 * i} for i in range(1, 5)]},
+                    },
+                ],
+            )
+
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-A",
+                    "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 16, "temperature": 0.7},
+                }
+            }
+            result = await client.sample_with_retry(request_payload)
+
+            seq = result["sequences"][0]
+            assert seq["tokens"] == [100, 101, 102, 103, 104, 200, 201, 202, 203]
+            assert seq["stop_reason"] == "stop"
+            assert seq["logprobs"] is not None
+            assert len(seq["logprobs"]) == 9
+
+            # Verify retry math: second call's token_ids = original + accumulated,
+            # max_tokens reduced by len(accumulated). Inspect both servers since
+            # routing is random.
+            all_payloads = []
+            for url in mock_servers["server_urls"]:
+                all_payloads.extend(await _get_generate_payloads(url))
+            assert len(all_payloads) == 2
+            assert all_payloads[0]["token_ids"] == [10, 20, 30]
+            assert all_payloads[0]["sampling_params"]["max_tokens"] == 16
+            assert all_payloads[1]["token_ids"] == [10, 20, 30, 100, 101, 102, 103, 104]
+            assert all_payloads[1]["sampling_params"]["max_tokens"] == 16 - 5
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_no_abort_single_shot(self, mock_servers):
+        """When no abort happens, sample_with_retry behaves like a single sample()."""
+        # Clear any scripts left from prior tests.
+        for url in mock_servers["server_urls"]:
+            await _script_generate(url, [])
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-A",
+                    "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 16},
+                }
+            }
+            result = await client.sample_with_retry(request_payload)
+            seq = result["sequences"][0]
+            # Default mock returns tokens [0, 1, 2] with stop.
+            assert seq["tokens"] == [0, 1, 2]
+            assert seq["stop_reason"] == "stop"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_blocks_until_resume(self, mock_servers, monkeypatch):
+        """While pause_generation(lora_name=X) is active, sample_with_retry for X blocks."""
+        # Shorten grace so the test does not stall on the pause helper.
+        monkeypatch.setattr(
+            "skyrl.backends.skyrl_train.inference_servers.remote_inference_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS",
+            0,
+        )
+        # Script every call as abort so the retry loop is bound entirely by the gate.
+        # We only need the gate test, so any abort/stop sequence works once unpaused.
+        for url in mock_servers["server_urls"]:
+            await _script_generate(
+                url,
+                [
+                    {"token_ids": [1, 2, 3], "finish_reason": "abort"},
+                    {"token_ids": [4, 5], "finish_reason": "stop"},
+                ],
+            )
+
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            # Pause first so the event is created and CLEAR before the sample starts.
+            await client.pause_generation(lora_name="lora-A")
+
+            request_payload = {
+                "json": {
+                    "model": "lora-A",
+                    "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 16},
+                }
+            }
+            sample_task = asyncio.create_task(client.sample_with_retry(request_payload))
+
+            # Give the sample loop time to reach the .wait() on the event.
+            await asyncio.sleep(0.1)
+            assert not sample_task.done(), "sample_with_retry should block while paused"
+
+            # Resume → sample_with_retry continues, completes via scripted stop.
+            await client.resume_generation(lora_name="lora-A")
+            result = await asyncio.wait_for(sample_task, timeout=5.0)
+            seq = result["sequences"][0]
+            # First scripted response is abort with 3 tokens, second is stop with 2.
+            assert seq["tokens"] == [1, 2, 3, 4, 5]
+            assert seq["stop_reason"] == "stop"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_rejects_n_gt_one(self, mock_servers):
+        """sample_with_retry only supports num_samples=1."""
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-A",
+                    "prompt": {"chunks": [{"tokens": [1]}]},
+                    "num_samples": 2,
+                    "sampling_params": {"max_tokens": 8},
+                }
+            }
+            with pytest.raises(ValueError, match="num_samples=1"):
+                await client.sample_with_retry(request_payload)
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_truncates_prompt_logprobs(self, mock_servers):
+        """prompt_logprobs from the final retry must be truncated to original prompt length.
+
+        When a retry fires, the resubmitted request has
+        ``token_ids = original_prompt + accumulated_tokens``. The server
+        computes prompt_logprobs over that extended prompt and the final
+        response carries entries for both the original prompt AND the
+        accumulated tokens. The caller asked for prompt_logprobs of their
+        original prompt only — the extra entries must be stripped before
+        return, otherwise the response shape differs between the
+        no-abort and abort-then-retry paths for the same logical request.
+        """
+        # Script one abort with 5 partial tokens. The retry then falls
+        # through to the default mock path which returns prompt_logprobs
+        # whenever sampling_params['prompt_logprobs'] is set.
+        for url in mock_servers["server_urls"]:
+            await _script_generate(
+                url,
+                [
+                    {"token_ids": [100, 101, 102, 103, 104], "finish_reason": "abort"},
+                ],
+            )
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "base-model",
+                    "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},  # length 3
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 64},
+                    "include_prompt_logprobs": True,
+                }
+            }
+            result = await client.sample_with_retry(request_payload)
+
+            # Final length must be the ORIGINAL prompt length (3), not the
+            # extended prompt length (3 + 5 = 8) that the retry sent.
+            pl = result["prompt_logprobs"]
+            assert pl is not None
+            assert len(pl) == 3, f"expected 3 prompt_logprobs entries, got {len(pl)} (likely missing truncation)"
+            # Values should match a single-shot sample for the same original
+            # prompt (position 0 = no prior context, positions 1-2 follow
+            # the mock's autoregressive logprob formula).
+            assert pl[0] is None
+            assert pl[1] == pytest.approx(-0.5)
+            assert pl[2] == pytest.approx(-1.0)
+
+            # Verify the server actually saw an extended-prompt request on
+            # the retry (otherwise the test isn't proving truncation).
+            all_payloads = []
+            for url in mock_servers["server_urls"]:
+                all_payloads.extend(await _get_generate_payloads(url))
+            assert len(all_payloads) == 2
+            assert len(all_payloads[1]["token_ids"]) == 3 + 5
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_retry_no_lora_event_no_blocking(self, mock_servers):
+        """When the LoRA has never been paused, sample_with_retry must not block."""
+        for url in mock_servers["server_urls"]:
+            await _script_generate(url, [])  # default mock returns "stop"
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "unpaused-lora",
+                    "prompt": {"chunks": [{"tokens": [1]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 8},
+                }
+            }
+            # Should complete promptly with no event ever created for "unpaused-lora".
+            result = await asyncio.wait_for(client.sample_with_retry(request_payload), timeout=2.0)
+            assert result["sequences"][0]["stop_reason"] == "stop"
+            assert "unpaused-lora" not in client._lora_pause_events
         finally:
             await client.teardown()

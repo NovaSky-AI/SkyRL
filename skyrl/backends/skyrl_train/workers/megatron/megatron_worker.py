@@ -19,7 +19,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
+from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
@@ -38,7 +38,6 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -479,56 +478,6 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data: TrainingInputBatch):
-        """
-        Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
-        """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
-        # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
-        micro_batches = data.chunk(micro_bsz)
-
-        # Build micro-batch dicts expected by policy.forward_mini_batch
-        micro_dicts = []
-        device = torch.cuda.current_device()
-        for micro in micro_batches:
-            micro.to(device)
-            sequences = micro["sequences"]
-            attention_mask = micro["attention_mask"]
-            num_actions = micro.metadata["response_length"]
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = micro.get("rollout_expert_indices")
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-            micro_dicts.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": num_actions,
-                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                }
-            )
-
-        self.model.eval()
-        seq_len = micro_dicts[0]["sequences"].shape[1]
-        mbs = micro_dicts[0]["sequences"].shape[0]
-        with torch.no_grad():
-            log_probs = self.model.forward(
-                micro_batches=micro_dicts,
-                seq_len=seq_len,
-                micro_batch_size=mbs,
-                temperature=self.cfg.algorithm.temperature,
-            )
-
-        log_probs = log_probs.to("cpu")
-        output = TrainingOutputBatch({"output": log_probs})
-        output.metadata = data.metadata
-        clear_router_replay()
-        return output
-
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -677,12 +626,153 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
+    def forward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> WorkerOutput:
+        """Forward pass.
+
+        - Without ``loss_fn``: runs Megatron's pipeline inference and returns a
+          :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` (``logprobs``
+          key) and empty ``metrics``.
+        - With ``loss_fn`` (e.g., ``"cross_entropy"``): runs the SFT loss through Megatron's
+          pipeline schedule with ``forward_only=True`` (no backward) and returns a
+          :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus scalar
+          ``metrics`` (including ``"loss"``).
+        """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        if loss_fn is None:
+            # Megatron inference forward path: pass the full mini batch through
+            # MegatronModelWrapper.forward and emit per-sample logprobs.
+            micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
+            micro_batches = data.chunk(micro_bsz)
+
+            # Build micro-batch dicts expected by policy.forward_mini_batch
+            micro_dicts = []
+            device = torch.cuda.current_device()
+            for micro in micro_batches:
+                micro.to(device)
+                sequences = micro["sequences"]
+                attention_mask = micro["attention_mask"]
+                num_actions = micro.metadata["response_length"]
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 0)
+                rollout_expert_indices = micro.get("rollout_expert_indices")
+                if rollout_expert_indices is not None:
+                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+                micro_dicts.append(
+                    {
+                        "sequences": sequences,
+                        "attention_mask": attention_mask,
+                        "position_ids": position_ids,
+                        "num_actions": num_actions,
+                        "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                    }
+                )
+
+            self.model.eval()
+            seq_len = micro_dicts[0]["sequences"].shape[1]
+            mbs = micro_dicts[0]["sequences"].shape[0]
+            with torch.no_grad():
+                log_probs = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=mbs,
+                    temperature=self.cfg.algorithm.temperature,
+                )
+
+            log_probs = log_probs.to("cpu")
+            clear_router_replay()
+            loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
+            return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
+
+        self.model.eval()
+
+        micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
+        all_metrics = defaultdict(list)
+        all_loss_fn_outputs: List[Dict[str, Any]] = []
+
+        # Move data to GPU
+        data.to(torch.cuda.current_device())
+
+        # Build micro-batch dicts expected by forward_backward_mini_batch
+        micro_buffer = []
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            micro_buffer.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                }
+            )
+
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
+
+        if not micro_buffer:
+            return WorkerOutput()
+
+        seq_len = micro_buffer[0]["sequences"].shape[1]
+        micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        with torch.no_grad():
+            metrics_list = self.model.forward_backward_mini_batch(
+                micro_batches=micro_buffer,
+                seq_len=seq_len,
+                micro_batch_size=micro_bsz,
+                temperature=self.cfg.algorithm.temperature,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                forward_only=True,
+            )
+
+        if self.empty_cuda_cache:
+            torch.cuda.empty_cache()
+
+        # Aggregate metrics across micro-batches
+        for metrics in metrics_list:
+            if metrics is None:
+                continue
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
+
+        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
+        sum_loss_metrics = resolved_loss_name != "cross_entropy"
+
+        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        group = mpu.get_data_parallel_group(with_context_parallel=False)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+
+        clear_router_replay()
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
+
     def forward_backward(
         self,
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+    ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -696,7 +786,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn_config: Optional config overrides for the loss function.
 
         Returns:
-            Aggregated metrics dict across all micro batches
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
+            ``metrics`` (all-reduced across DP).
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -742,7 +833,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_microbatches"] = len(micro_buffer)
 
         if not micro_buffer:
-            return {}
+            return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
         micro_bsz = micro_buffer[0]["sequences"].shape[0]
@@ -781,13 +872,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
-        # Add loss_fn_outputs back (not reduced, kept as list)
-        if all_loss_fn_outputs:
-            status["loss_fn_outputs"] = all_loss_fn_outputs
-
         clear_router_replay()
 
-        return status
+        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
     def optim_step(self) -> Optional[float]:
         """
@@ -1044,6 +1131,57 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
+
+    def forward(self, data: TrainingInputBatch) -> WorkerOutput:
+        """Run inference forward pass.
+
+        Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
+        per-sample dict with key ``"logprobs"``.
+        """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        # Run in micro batches grouped into a single mini-batch
+        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
+        micro_batches = data.chunk(micro_bsz)
+
+        # Build micro-batch dicts expected by policy.forward_mini_batch
+        micro_dicts = []
+        device = torch.cuda.current_device()
+        for micro in micro_batches:
+            micro.to(device)
+            sequences = micro["sequences"]
+            attention_mask = micro["attention_mask"]
+            num_actions = micro.metadata["response_length"]
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+            micro_dicts.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": num_actions,
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                }
+            )
+
+        self.model.eval()
+        seq_len = micro_dicts[0]["sequences"].shape[1]
+        mbs = micro_dicts[0]["sequences"].shape[0]
+        with torch.no_grad():
+            log_probs = self.model.forward(
+                micro_batches=micro_dicts,
+                seq_len=seq_len,
+                micro_batch_size=mbs,
+                temperature=self.cfg.algorithm.temperature,
+            )
+
+        log_probs = log_probs.to("cpu")
+        clear_router_replay()
+        loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
+        return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def init_worker_process_group(self):
         """

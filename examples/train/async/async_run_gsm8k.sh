@@ -14,7 +14,7 @@ uv run --isolated --extra fsdp -m examples.train.async.main_async \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=4 \
   trainer.placement.ref_num_gpus_per_node=4 \
   generator.inference_engine.num_engines=4 \

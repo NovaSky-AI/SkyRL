@@ -152,8 +152,8 @@ def main() -> None:
     if not cfg.generator.inference_engine.run_engines_locally:
         raise ValueError("FlashRL only supports colocated training.")
 
-    if cfg.trainer.strategy not in ("fsdp", "fsdp2"):
-        raise ValueError(f"FlashRL only supports fsdp/fsdp2 strategy, got: {cfg.trainer.strategy}")
+    if cfg.trainer.strategy != "fsdp":
+        raise ValueError(f"FlashRL only supports fsdp strategy, got: {cfg.trainer.strategy}")
 
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))

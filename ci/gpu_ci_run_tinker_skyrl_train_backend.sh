@@ -8,4 +8,4 @@ export CI=true
 # v1 single-tenant sample guard, per-adapter Adam step isolation, and
 # delete-then-train continuity.
 uv run --directory . --isolated --extra tinker --extra megatron --with pytest --with pytest-timeout \
-    pytest -s --timeout=600 tests/tinker/skyrl_train/test_multi_lora_megatron.py
+    pytest -s --timeout=600 tests/tinker/skyrl_train/

@@ -356,7 +356,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
     trainer.sft_cfg = cfg
     trainer.tokenizer = tokenizer
 
-    batch = trainer.collate_batch(examples)
+    batch = trainer.collate_batch(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 2 + 4 + 1 + 3  # = 10
     expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
@@ -388,7 +388,7 @@ def test_loss_norm_all_nonpad(tokenizer):
     trainer.sft_cfg = cfg
     trainer.tokenizer = tokenizer
 
-    batch = trainer.collate_batch(examples)
+    batch = trainer.collate_batch(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 4  # 2 + 2
     expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)

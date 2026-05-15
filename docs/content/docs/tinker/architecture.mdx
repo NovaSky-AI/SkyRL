@@ -10,7 +10,7 @@ The integration is organized in three high-level layers:
 
 1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests, stores them in a database, and returns future IDs for async polling
 2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
-3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP2/Megatron training, and vLLM inference
+3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP/Megatron training, and vLLM inference
 
 <div style={{width: "80%", margin: "0 auto"}}>
 ![SkyRL + Tinker Architecture](/images/tinker/skyrl_tinker_arch_big.png)
@@ -40,7 +40,7 @@ SkyRL-Train Backend
 RayPPOTrainer.dispatch
     │  Distributes work across Ray workers
     ▼
-GPU Workers (FSDP2 or Megatron)
+GPU Workers (FSDP or Megatron)
     │  Execute forward/backward/optim
     ▼
 Results aggregated → DB updated → Client polls future
@@ -48,7 +48,7 @@ Results aggregated → DB updated → Client polls future
 
 ### `forward_backward()`
 
-Calls `trainer.dispatch.forward_backward("policy", batch, loss_fn=loss_fn)` which distributes computation across FSDP2/Megatron workers. The dispatch returns:
+Calls `trainer.dispatch.forward_backward("policy", batch, loss_fn=loss_fn)` which distributes computation across FSDP/Megatron workers. The dispatch returns:
 
 - `loss_fn_outputs`: Per-example dicts containing `logprobs` and `elementwise_loss`
 - Aggregate metrics: `loss`, `policy_loss`, `policy_entropy`, `response_length`

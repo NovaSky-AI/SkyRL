@@ -8,7 +8,7 @@ The Tinker integration is under active development. This page documents current 
 
 ### Multi-tenant LoRA: Megatron only
 
-Multi-tenant LoRA training and sampling are supported on the **Megatron** backend with vLLM serving per-tenant adapters by name. See [Multi-tenancy](./multi_tenancy) for the operator contract and SL/RL quickstarts. **FSDP2** support is pending, and full-parameter fine-tuning remains single-tenant on both backends — calling `create_model` with `lora_rank=0` while another model exists returns an error.
+Multi-tenant LoRA training and sampling are supported on the **Megatron** backend with vLLM serving per-tenant adapters by name. See [Multi-tenancy](./multi_tenancy) for the operator contract and SL/RL quickstarts. **FSDP** support is pending, and full-parameter fine-tuning remains single-tenant on both backends — calling `create_model` with `lora_rank=0` while another model exists returns an error.
 
 All adapters registered against one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
 

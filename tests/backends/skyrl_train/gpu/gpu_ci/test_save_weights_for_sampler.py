@@ -47,12 +47,12 @@ def get_test_config() -> SkyRLTrainConfig:
 @pytest.mark.parametrize(
     ("colocate_all", "strategy"),
     [
-        pytest.param(False, "fsdp2"),
-        pytest.param(True, "fsdp2"),
+        pytest.param(False, "fsdp"),
+        pytest.param(True, "fsdp"),
     ],
     ids=[
-        "no_colocate_fsdp2",
-        "colocate_fsdp2",
+        "no_colocate_fsdp",
+        "colocate_fsdp",
     ],
 )
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture
     """
     cfg = get_test_config()
     cfg.trainer.placement.colocate_all = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
 
     # Initialize inference engine (uses 1 GPU)
     async with InferenceEngineState.create(
