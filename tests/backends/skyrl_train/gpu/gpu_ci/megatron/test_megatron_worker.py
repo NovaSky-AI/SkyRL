@@ -587,8 +587,8 @@ async def test_megatron_train(
                 # because the logits for padding tokens are all 0 for the non-sample packing case in megatron
                 # the entropy calculation is different (fsdp has random logits for padding tokens)
                 continue
-            assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 5e-1, f"diff in {k} is too large!"
+            assert isinstance(result.metrics[k], (int, float)), f"{k} should be an int or float"
+            assert abs(result.metrics[k] - results_megatron[i].metrics[k]) < 5e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio
