@@ -32,7 +32,7 @@ SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
 GEO_MASK_LOW=0.99
 
-RUN_NAME=gsm8k-fully-async-qwen3-0.6B_merge_lora_${MERGE_LORA}_no_pause
+RUN_NAME=gsm8k-fully-async-qwen3-0.6B_lora_${LORA_RANK}_${LORA_ALPHA}
 
 uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
