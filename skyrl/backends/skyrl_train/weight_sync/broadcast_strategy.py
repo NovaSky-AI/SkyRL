@@ -185,13 +185,29 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             for chunk in chunks:
                 yield from zip(chunk.names, chunk.tensors)
 
+        # Route via the skyrl wrap (start_weight_update + update_weights_nccl
+        # + finish_weight_update) rather than vLLM's native /update_weights so
+        # the receive is wrapped with set_current_vllm_config. Matches how
+        # CUDA IPC already routes through skyrl's wrap.
+        # TODO: switch back to update_named_weights once the upstream vLLM
+        # patch lands (vllm-project/vllm weight-sync-fix).
+        # https://github.com/vllm-project/vllm/pull/42577
+        if torch.distributed.get_rank() == 0:
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+        # Barrier so non-rank-0 ranks don't enter the all-gather inside
+        # weight_iterator() while rank 0 is still in the start_weight_update
+        # HTTP roundtrip (which for a large model can take minutes while vLLM
+        # moves layers to meta + sets up layerwise reload). Without this the
+        # all-gather on rank 1 hits the 600 s NCCL collective timeout.
+        torch.distributed.barrier()
+
         if torch.distributed.get_rank() == 0:
             from vllm.distributed.weight_transfer.nccl_engine import (
                 NCCLWeightTransferEngine,
             )
 
             update_info = {**weight_metadata, "packed": True}
-            update_task = asyncio.create_task(self._inference_client.update_named_weights(update_info))
+            update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
 
             # Run in thread so the HTTP update_task can progress concurrently
             await asyncio.to_thread(
@@ -200,6 +216,8 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 trainer_args={"group": self._model_update_group, "packed": True},
             )
             await update_task
+
+            await self._inference_client.finish_weight_update()
         else:
             # Non-rank-0 still needs to participate in the all-gather
             for _ in weight_iterator():

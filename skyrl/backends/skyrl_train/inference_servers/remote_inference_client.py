@@ -1286,7 +1286,7 @@ class RemoteInferenceClient:
 
         Calls the NewInferenceWorkerWrap.start_weight_update method on all
         workers. For checkpoint-format weights this initializes layerwise
-        reload. Must be called before any update_weights_chunk calls.
+        reload. Must be called before any update_weights_ipc calls.
 
         Args:
             is_checkpoint_format: True if weights are in checkpoint format
@@ -1303,14 +1303,14 @@ class RemoteInferenceClient:
             },
         )
 
-    async def update_weights_chunk(
+    async def update_weights_ipc(
         self,
         update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         Send a single weight chunk via /collective_rpc.
 
-        Calls NewInferenceWorkerWrap.update_weights_chunk on all workers.
+        Calls NewInferenceWorkerWrap.update_weights_ipc on all workers.
         Can be called multiple times between start_weight_update and
         finish_weight_update.
 
@@ -1324,7 +1324,36 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/collective_rpc",
             {
-                "method": "update_weights_chunk",
+                "method": "update_weights_ipc",
+                "kwargs": {"update_info": update_info},
+            },
+        )
+
+    async def update_weights_nccl(
+        self,
+        update_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Send batched weight update via /collective_rpc to the broadcast receiver.
+
+        Calls NewInferenceWorkerWrap.update_weights_nccl on all workers,
+        which routes weight_transfer_engine.receive_weights through the
+        set_current_vllm_config wrap. Used by the broadcast (NCCL) sender as
+        a temporary substitute for vLLM's native /update_weights endpoint
+        until the upstream patch (vllm-project/vllm weight-sync-fix) lands.
+
+        Args:
+            update_info: Dict with backend-specific update info (names,
+                dtype_names, shapes, packed flag, etc.) — same shape vLLM's
+                native /update_weights expects.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "update_weights_nccl",
                 "kwargs": {"update_info": update_info},
             },
         )

@@ -72,6 +72,18 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # sample packing not yet supported for GDN
         # https://github.com/NVIDIA/Megatron-LM/pull/2644
         cfg.trainer.use_sample_packing = False
+    # Large MoE models: AdamW's fp32 optimizer state (~6x model) is the
+    # dominant per-rank GPU cost during Megatron init.
+    # use_precision_aware_optimizer keeps it in bf16 (halves it), and
+    # optimizer_cpu_offload moves it off GPU entirely. Without these the
+    # optimizer state alone OOMs the H100 on 4 GPUs.
+    is_large_moe = "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()
+    if is_large_moe:
+        if cfg.trainer.policy.megatron_config.optimizer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {}
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["use_precision_aware_optimizer"] = True
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_cpu_offload"] = True
+        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1.0
     validate_cfg(cfg)
     return cfg
 
@@ -90,6 +102,10 @@ def _engine_overrides_for_model(model_name: str) -> dict:
     if "Nemotron-3-Nano" in model_name:
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.6
+    # Large MoE: Megatron policy init also needs room alongside vLLM on the
+    # same GPU, so lower vLLM's pool footprint.
+    if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
+        overrides["gpu_memory_utilization"] = 0.5
     return overrides
 
 
@@ -219,6 +235,24 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="nemotron3-nano_tp4_ep8",
             marks=pytest.mark.skip(reason="skip full size nemotron3-nano test until we migrate to h100 CI"),
         ),
+        # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:
+        # TP=4 EP=4 ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs
+        # (colocated). Thresholds mirror the GLM-4.7-Flash entry; tune as
+        # we find what the actual logprob diffs look like.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "Qwen/Qwen3.5-35B-A3B",
+            3e-1,
+            5e-2,
+            id="qwen3.5-35b-a3b_h100_tp4_ep4",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
@@ -250,7 +284,7 @@ async def test_logprobs_matching_roundtrip(
             use_local=True,
             colocate_all=True,
             backend="vllm",
-            sleep_level=1,
+            sleep_level=2,  # full sleep — this test explicitly syncs weights
             gpu_memory_utilization=engine_overrides["gpu_memory_utilization"],
             engine_init_kwargs=engine_overrides["engine_init_kwargs"],
         ) as engines:
