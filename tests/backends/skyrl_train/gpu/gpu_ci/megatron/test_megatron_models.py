@@ -77,7 +77,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # use_precision_aware_optimizer keeps it in bf16 (halves it), and
     # optimizer_cpu_offload moves it off GPU entirely. Without these the
     # optimizer state alone OOMs the H100 on 4 GPUs.
-    is_large_moe = "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()
+    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
+        "nemotron-3-nano" in model_name.lower()
+    )
     if is_large_moe:
         if cfg.trainer.policy.megatron_config.optimizer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {}
@@ -101,7 +103,9 @@ def _engine_overrides_for_model(model_name: str) -> dict:
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
     if "Nemotron-3-Nano" in model_name:
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
-        overrides["gpu_memory_utilization"] = 0.6
+        # Megatron policy init also needs room alongside vLLM on the same
+        # GPU, so lower vLLM's pool footprint.
+        overrides["gpu_memory_utilization"] = 0.5
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
     if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
@@ -221,19 +225,24 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
+        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=1 EP=4
+        # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
+        # AdamW optimizer state is offloaded to CPU via the heuristic in
+        # get_test_actor_config (see is_large_moe), and vLLM gmu is lowered
+        # to 0.5 so the policy shard + vLLM pool fit on each H100.
         pytest.param(
             1,
             1,
             1,
-            8,
+            4,
             1,
             4,
-            8,
+            4,
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
             5e-1,
             5e-2,
-            id="nemotron3-nano_tp4_ep8",
-            marks=pytest.mark.skip(reason="skip full size nemotron3-nano test until we migrate to h100 CI"),
+            id="nemotron3-nano_tp1_ep4_h100",
+            marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:
         # TP=4 EP=4 ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs

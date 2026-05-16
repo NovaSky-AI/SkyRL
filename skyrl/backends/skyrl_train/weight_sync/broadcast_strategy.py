@@ -193,18 +193,11 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         # patch lands (vllm-project/vllm weight-sync-fix).
         # https://github.com/vllm-project/vllm/pull/42577
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
-        # Barrier so non-rank-0 ranks don't enter the all-gather inside
-        # weight_iterator() while rank 0 is still in the start_weight_update
-        # HTTP roundtrip (which for a large model can take minutes while vLLM
-        # moves layers to meta + sets up layerwise reload). Without this the
-        # all-gather on rank 1 hits the 600 s NCCL collective timeout.
-        torch.distributed.barrier()
-
-        if torch.distributed.get_rank() == 0:
             from vllm.distributed.weight_transfer.nccl_engine import (
                 NCCLWeightTransferEngine,
             )
+
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
 
             update_info = {**weight_metadata, "packed": True}
             update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
