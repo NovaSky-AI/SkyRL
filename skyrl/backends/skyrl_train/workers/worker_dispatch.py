@@ -539,8 +539,11 @@ class WorkerDispatch:
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
-            if model_id is not None:
-                # multi-tenant + lora case - no need to pause
+            if (
+                self.cfg.trainer.policy.model.lora.rank > 0
+                and not self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
+            ):
+                # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
                 self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                 self._finish_weight_sync()
             else:

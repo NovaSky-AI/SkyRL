@@ -25,13 +25,14 @@ set -x
 # LoRA configuration
 LORA_RANK=64
 LORA_ALPHA=64
-MERGE_LORA=true
+MERGE_LORA=false
+LR=1e-5
 
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
 GEO_MASK_LOW=0.99
 
-RUN_NAME=gsm8k-fully-async-qwen3-0.6B_merge_lora_${MERGE_LORA}
+RUN_NAME=gsm8k-fully-async-qwen3-0.6B_merge_lora_${MERGE_LORA}_no_pause
 
 uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -65,7 +66,7 @@ uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_asyn
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
-  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.policy.optimizer_config.lr=${LR} \
   trainer.algorithm.use_kl_loss=true \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
