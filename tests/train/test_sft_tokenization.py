@@ -4,6 +4,7 @@ CPU tests for SFT tokenization and collation helpers.
 uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_tokenization.py -v
 """
 
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -591,13 +592,21 @@ def _tool_call_messages():
     ]
 
 
-def test_chat_tool_calling_apigen_shape(tokenizer):
-    """APIGen-MT-style row with stringified tool_calls and a separate `system` /
-    `tools` column tokenizes end-to-end without raising and produces a
-    non-empty loss mask covering the assistant turns."""
+@pytest.mark.parametrize(
+    "tools_value",
+    [
+        _TOOLS_SCHEMA,
+        json.dumps(_TOOLS_SCHEMA),
+    ],
+    ids=["list", "json-string"],
+)
+def test_chat_tool_calling_apigen_shape(tokenizer, tools_value):
+    """APIGen-MT-style row with stringified tool_calls and a separate
+    ``system``/``tools`` column tokenizes end-to-end. ``tools`` is accepted as
+    either a list[dict] (parquet-typed) or a JSON-encoded string."""
     example = {
         "messages": _tool_call_messages(),
-        "tools": _TOOLS_SCHEMA,  # already a list; coerce_tools must accept this
+        "tools": tools_value,
         "system": "You are a weather assistant.",
     }
     result = tokenize_chat_example(
@@ -608,44 +617,23 @@ def test_chat_tool_calling_apigen_shape(tokenizer):
     assert result is not None
     assert result["num_actions"] > 0
     assert sum(result["loss_mask"]) > 0
-    # The tools schema and system prompt must round-trip into the rendered text.
     decoded = tokenizer.decode(result["input_ids"])
     assert "get_weather" in decoded
     assert "You are a weather assistant." in decoded
-    # The tool-call turn should render as <tool_call>...</tool_call> for Qwen.
     assert "<tool_call>" in decoded
     assert "<tool_response>" in decoded
 
 
-def test_chat_tool_calling_tools_as_json_string(tokenizer):
-    """`tools` shipped as a JSON-encoded string (parquet-string column) is
-    accepted and forwarded to ``apply_chat_template``."""
-    import json
-
-    example = {
-        "messages": _tool_call_messages(),
-        "tools": json.dumps(_TOOLS_SCHEMA),
-        "system": "You are a weather assistant.",
-    }
-    result = tokenize_chat_example(
-        example,
-        tokenizer,
-        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-    )
-    assert result is not None
-    assert "get_weather" in tokenizer.decode(result["input_ids"])
-
-
 def test_chat_tool_calling_no_tools_column(tokenizer):
-    """A chat dataset without a `tools` column still tokenizes when
-    `tools_key` points at a missing key (caller passes empty string)."""
+    """A chat dataset without a ``tools`` or ``system`` column still tokenizes
+    when ``tools_key``/``system_key`` are explicitly disabled."""
     example = {"messages": _tool_call_messages()}
     result = tokenize_chat_example(
         example,
         tokenizer,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        tools_key="",
-        system_key="",
+        tools_key=None,
+        system_key=None,
     )
     assert result is not None
     assert result["num_actions"] > 0
@@ -719,33 +707,9 @@ def test_chat_tool_calling_tool_turn_masked(tokenizer):
 
 
 # ---------------------------------------------------------------------------
-# _normalize_chat_messages preservation
-#
-# Templates for thinking models (Qwen3 / Nemotron-3) emit
-#   <think>{{ message.reasoning_content }}</think>
-# branches that read fields beyond ``role`` / ``content`` / ``tool_calls``.
-# Datasets sometimes attach other extras (``name``, ``tool_call_id``, custom
-# metadata). Silently dropping them turns thinking-model SFT into vanilla SFT
-# with no warning. Pin the preservation behaviour.
+# _normalize_chat_messages: preserve fields like ``reasoning_content`` so
+# thinking-model templates (Qwen3, Nemotron-3) keep working.
 # ---------------------------------------------------------------------------
-
-
-def test_normalize_preserves_reasoning_content_on_assistant():
-    msgs = [
-        {"role": "user", "content": "Q?"},
-        {
-            "role": "assistant",
-            "content": "[ANSWER]A[/ANSWER]",
-            "reasoning_content": "step 1\nstep 2",
-        },
-    ]
-    out = _normalize_chat_messages(msgs)
-    # User message survives unchanged.
-    assert out[0] == {"role": "user", "content": "Q?"}
-    # Assistant keeps reasoning_content alongside role/content.
-    assert out[1]["role"] == "assistant"
-    assert out[1]["content"] == "[ANSWER]A[/ANSWER]"
-    assert out[1]["reasoning_content"] == "step 1\nstep 2"
 
 
 def test_normalize_preserves_unknown_extras_on_all_roles():
@@ -775,9 +739,8 @@ def test_normalize_preserves_unknown_extras_on_all_roles():
 
 
 def test_normalize_drops_placeholder_tool_calls_but_keeps_extras():
-    """Placeholder ``tool_calls="[]"`` must still be normalized away (the
-    original bug that crashes Qwen2.5's template), even when other extras
-    are present on the same message."""
+    """Placeholder ``tool_calls="[]"`` is dropped on assistant messages even
+    when other extras are present on the same row."""
     msgs = [
         {
             "role": "assistant",
@@ -792,8 +755,8 @@ def test_normalize_drops_placeholder_tool_calls_but_keeps_extras():
 
 
 def test_normalize_strips_tool_calls_off_non_assistant_roles():
-    """Some datasets sloppily attach ``tool_calls`` to user/system/tool rows.
-    We strip those (they'd fight the template) while keeping other extras."""
+    """``tool_calls`` on user/tool/system rows is stripped (would fight the
+    template) while other extras survive."""
     msgs = [
         {"role": "user", "content": "u", "tool_calls": "[]", "name": "alice"},
         {"role": "tool", "content": "t", "tool_calls": "[]", "tool_call_id": "c0"},

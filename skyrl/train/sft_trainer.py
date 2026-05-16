@@ -20,6 +20,7 @@ Or as a CLI entrypoint::
     python -m skyrl.train.main_sft strategy=megatron model.path=Qwen/Qwen3-0.6B
 """
 
+import functools
 import json
 import os
 import random
@@ -66,21 +67,33 @@ from skyrl.utils.tok import get_tokenizer
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=512)
+def _parse_tools_str(tools: str) -> Optional[tuple]:
+    """Parse a JSON-encoded tools string. Cached because tool-calling datasets
+    typically share one schema across thousands of rows (e.g. APIGen's airline
+    domain), and `apply_chat_template` re-tokenizes the schema on every row."""
+    tools = tools.strip()
+    if not tools:
+        return None
+    parsed = json.loads(tools)
+    if not parsed:
+        return None
+    # Return a tuple so the cache stores an immutable value; caller re-lists it.
+    return tuple(parsed)
+
+
 def _coerce_tools(tools: Any) -> Optional[list]:
     """Coerce a dataset's ``tools`` field into a list[dict] for ``apply_chat_template``.
 
-    Tool-calling datasets ship the schema list in different shapes:
-    ``list[dict]`` (parquet-typed), JSON-encoded ``str``, or absent. The HF chat
-    templates (Qwen, Llama 3.1+, Hermes, etc.) all expect ``list[dict]``. Returns
-    ``None`` when there are no tools, so the caller can omit the kwarg entirely.
+    Tool-calling datasets ship the schema list as ``list[dict]`` (parquet-typed),
+    JSON-encoded ``str``, or absent. HF chat templates expect ``list[dict]``;
+    returns ``None`` when there are no tools so the caller can omit the kwarg.
     """
     if tools is None:
         return None
     if isinstance(tools, str):
-        tools = tools.strip()
-        if not tools:
-            return None
-        tools = json.loads(tools)
+        cached = _parse_tools_str(tools)
+        return list(cached) if cached else None
     if isinstance(tools, list):
         return tools or None
     raise TypeError(f"Unsupported `tools` type: {type(tools).__name__}")
@@ -115,67 +128,42 @@ def _normalize_tool_call_payload(tc: Any) -> Optional[list]:
     for call in tc:
         if not isinstance(call, dict):
             raise TypeError(f"tool call entry must be a dict, got {type(call).__name__}")
-        # Already in OpenAI shape.
-        if "function" in call and isinstance(call["function"], dict):
-            fn = call["function"]
-        else:
-            fn = call
-        name = fn.get("name")
+        fn = call["function"] if isinstance(call.get("function"), dict) else call
         arguments = fn.get("arguments", {})
-        # Some datasets store arguments as a JSON string; normalize to a dict so
-        # the chat template can json.dumps it consistently.
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                pass  # keep as string if it isn't JSON
-        out.append({"type": "function", "function": {"name": name, "arguments": arguments}})
+                pass
+        out.append({"type": "function", "function": {"name": fn.get("name"), "arguments": arguments}})
     return out
 
 
-# Fields we know how to normalize. Anything else on the message is forwarded
-# untouched so model-specific chat templates can read it (e.g. Qwen3 /
-# Nemotron-3 templates emit ``<think>{{ message.reasoning_content }}</think>``
-# blocks; DeepSeek-R1 keys off other fields). Dropping these silently turns
-# thinking-model SFT into vanilla SFT with no warning.
+# Fields we explicitly normalize; everything else on the message is forwarded
+# so model-specific templates can read e.g. ``reasoning_content`` (Qwen3,
+# Nemotron-3 thinking models) or ``tool_call_id``.
 _NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
 
 
 def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """Return messages in a shape that HF chat templates accept.
 
-    Normalizes ``content`` (None -> ""), drops empty/placeholder ``tool_calls``,
-    promotes string-encoded ``tool_calls`` into the OpenAI list-of-dicts form,
-    and preserves any other fields on the message verbatim so chat templates
-    that read e.g. ``reasoning_content``, ``name``, or ``tool_call_id`` see
-    them. Tool-result turns (``role == "tool"``) are passed through unchanged
-    so the template can render them as ``<tool_response>``-style observations.
+    Normalizes ``content`` (``None`` → ``""``), promotes string-encoded
+    ``tool_calls`` on assistant turns into the OpenAI list-of-dicts form,
+    drops empty/placeholder ``tool_calls`` on every role, and preserves any
+    other fields on the message verbatim.
     """
     out = []
     for msg in messages:
         role = msg["role"]
-        content = msg.get("content", "") or ""
-        # Carry forward any extra fields unchanged so model-specific templates
-        # can still read them. Most importantly ``reasoning_content`` for
-        # thinking models (Qwen3, Nemotron-3): dropping it would silently turn
-        # thinking-model SFT into a non-thinking trace.
-        extras = {k: v for k, v in msg.items() if k not in _NORMALIZED_KEYS}
+        new_msg = {k: v for k, v in msg.items() if k not in _NORMALIZED_KEYS}
+        new_msg["role"] = role
+        new_msg["content"] = msg.get("content", "") or ""
         if role == "assistant":
             tool_calls = _normalize_tool_call_payload(msg.get("tool_calls"))
-            new_msg: dict = {"role": "assistant", "content": content, **extras}
             if tool_calls:
                 new_msg["tool_calls"] = tool_calls
-            out.append(new_msg)
-        elif role == "tool":
-            # ``tool`` rows shouldn't have ``tool_calls``; strip if present so
-            # we don't accidentally forward a placeholder that fights the
-            # template.
-            extras.pop("tool_calls", None)
-            new_msg = {"role": "tool", "content": content, **extras}
-            out.append(new_msg)
-        else:
-            extras.pop("tool_calls", None)
-            out.append({"role": role, "content": content, **extras})
+        out.append(new_msg)
     return out
 
 
@@ -220,8 +208,8 @@ def tokenize_chat_example(
     max_length: Optional[int] = None,
     messages_key: str = "messages",
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
-    tools_key: str = "tools",
-    system_key: str = "system",
+    tools_key: Optional[str] = "tools",
+    system_key: Optional[str] = "system",
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a chat-format example with configurable loss targets.
@@ -241,10 +229,10 @@ def tokenize_chat_example(
         max_length: Maximum sequence length (truncation boundary).
         messages_key: Key in *example* that holds the messages list.
         train_on_what: Which tokens to compute loss on.
-        tools_key: Optional key in *example* whose value is the per-row tool
-            schema list (or JSON-encoded string thereof). Ignored if absent.
-        system_key: Optional key in *example* whose value is a system prompt
-            string. Ignored if absent or empty.
+        tools_key: Key in *example* whose value is the per-row tool schema list
+            (or JSON-encoded string thereof). ``None`` disables the lookup.
+        system_key: Key in *example* whose value is a system prompt string.
+            ``None`` disables the lookup.
         **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``
             (e.g. ``enable_thinking``).
 
@@ -262,30 +250,23 @@ def tokenize_chat_example(
         )
     messages = list(example[messages_key])
 
-    # Tool-calling datasets sometimes end the row with a trailing ``tool``
-    # observation that has no follow-up assistant response. Trim those so the
-    # conversation ends on an assistant turn (the SFT target). Trailing
-    # ``user`` turns still cause the row to be dropped, matching the existing
-    # contract that an unanswered user prompt is an incomplete example.
+    # Trim trailing tool observations with no follow-up assistant response
+    # (common in APIGen-MT). Trailing user turns still drop the row.
     while messages and messages[-1]["role"] == "tool":
         messages.pop()
 
-    # Validate: last message must be from assistant
     if not messages or messages[-1]["role"] != "assistant":
         return None
 
-    # Normalize tool-calling shapes (string-encoded tool_calls, tool turns).
     messages = _normalize_chat_messages(messages)
 
-    # Prepend system prompt from a separate column if present and not already there.
     system_prompt = example.get(system_key) if system_key else None
     if system_prompt and messages[0].get("role") != "system":
         messages = [{"role": "system", "content": system_prompt}] + messages
 
-    # Forward per-row tool schemas to apply_chat_template via tokenizer_kwargs.
+    # Per-row schemas yield to an explicit caller-provided ``tools`` kwarg.
     tools = _coerce_tools(example.get(tools_key)) if tools_key else None
     if tools is not None:
-        # Don't clobber an explicit caller-provided value.
         tokenizer_kwargs = {"tools": tools, **tokenizer_kwargs}
 
     if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
@@ -592,8 +573,8 @@ class SFTTrainer:
             # Chat format. Tool-calling datasets often ship a per-row ``tools``
             # column (function schemas) and ``system`` column (domain policy)
             # alongside ``messages``; thread those through when present.
-            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else ""
-            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else ""
+            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
             tokenized = [
                 tokenize_chat_example(
                     ex,
