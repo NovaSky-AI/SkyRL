@@ -539,14 +539,16 @@ class WorkerDispatch:
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
-            # Non-colocated: pause generation to prevent in-flight requests from
-            # reading partially-updated weights during the NCCL broadcast. For
-            # multi-LoRA (model_id is set), pause only that LoRA's requests so
-            # the other tenants keep running. For FFT (model_id is None), fall
-            # back to the global keep-mode pause.
-            await self._inference_engine_client.pause_generation(lora_name=model_id)
-            try:
+            if model_id is not None:
+                # multi-tenant + lora case - no need to pause
                 self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                 self._finish_weight_sync()
-            finally:
-                await self._inference_engine_client.resume_generation(lora_name=model_id)
+            else:
+                # Non-colocated single tenant: pause generation to prevent in-flight requests from
+                # reading partially-updated weights during the NCCL broadcast.
+                await self._inference_engine_client.pause_generation(lora_name=model_id)
+                try:
+                    self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                    self._finish_weight_sync()
+                finally:
+                    await self._inference_engine_client.resume_generation(lora_name=model_id)
