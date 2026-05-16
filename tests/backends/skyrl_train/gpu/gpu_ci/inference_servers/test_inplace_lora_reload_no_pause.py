@@ -7,9 +7,7 @@ without any ``pause_generation`` / ``resume_generation`` call — vLLM is
 expected to swap LoRA tensors under in-flight requests without aborting
 or corrupting them, and without disturbing other adapters' generations.
 
-The production sync path delivers updated tensors via
-``update_named_weights(LoraLoadRequest)`` on top of an NCCL broadcast.
-For an integration test we approximate that by reloading the adapter
+This test approximates weight sync by reloading adapters
 from a different on-disk snapshot path with ``load_lora_adapter`` — the
 end state on the engine (LoRA tensors for ``lora_name`` replaced
 in-place, same ``lora_int_id``) is identical, and that is the surface
