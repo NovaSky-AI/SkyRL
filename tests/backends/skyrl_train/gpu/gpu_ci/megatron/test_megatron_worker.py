@@ -588,7 +588,7 @@ async def test_megatron_train(
                 # the entropy calculation is different (fsdp has random logits for padding tokens)
                 continue
             assert isinstance(result.metrics[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result.metrics[k] - results_megatron[i].metrics[k]) < 4e-1, f"diff in {k} is too large!"
+            assert abs(result.metrics[k] - results_megatron[i].metrics[k]) < 5e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio

@@ -79,13 +79,6 @@ from skyrl.env_vars import (
 
 _DATA_PLANE_RETRIES = 30
 
-# Grace period between setting the per-LoRA pause gate and asking the server
-# to abort that LoRA's in-flight requests. Gives requests that the client
-# has already sent (but vLLM hasn't yet admitted to its scheduler) time to
-# land, so the abort fan-out catches them. Mirrors the pre-removal
-# ABORT_GENERATION_GRACE_PERIOD_SECONDS in inference_engine_client.py.
-ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
-
 SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 """Default LoRA adapter name used for single-LoRA training inside SkyRL."""
 
@@ -231,13 +224,6 @@ class RemoteInferenceClient:
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
-    # Per-LoRA pause gates for targeted (multi-tenant) pause/resume. Convention:
-    # event SET = open (running), CLEAR = paused (waiters block on .wait()).
-    # Like the semaphores above, these are event-loop-bound — recreate when the
-    # running loop changes. Read only by sample_with_retry().
-    # TRANSIENT: delete with sample_with_retry() when vLLM ships native per-LoRA pause.
-    _lora_pause_events: Dict[str, asyncio.Event] = field(default_factory=dict, repr=False)
-    _lora_events_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -274,27 +260,6 @@ class RemoteInferenceClient:
                 self._detok_sem = None
             self._sem_loop = current_loop
         return self._gen_sem, self._detok_sem
-
-    def _get_lora_pause_event(self, lora_name: str) -> asyncio.Event:
-        """Return the per-LoRA pause event for the current running loop.
-
-        Events are bound to the loop they're first awaited on (Python 3.10+);
-        if the running loop has changed since the events were created, wipe
-        the dict and recreate. Mirrors ``_get_semaphores`` above.
-
-        TRANSIENT: delete with ``sample_with_retry`` when vLLM ships native
-        per-LoRA pause.
-        """
-        loop = asyncio.get_running_loop()
-        if self._lora_events_loop is not loop:
-            self._lora_pause_events = {}
-            self._lora_events_loop = loop
-        ev = self._lora_pause_events.get(lora_name)
-        if ev is None:
-            ev = asyncio.Event()
-            ev.set()  # SET = open (not paused)
-            self._lora_pause_events[lora_name] = ev
-        return ev
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the aiohttp session."""
@@ -641,35 +606,8 @@ class RemoteInferenceClient:
         body["model"] = model
 
         prompt = body.get("prompt", {})
-
-        # Render prompt: flatten text tokens and, if images are present,
-        # call the render endpoint to get placeholder tokens + features.
-        token_ids, mm_features = await self._render_for_sample(prompt, session_id, model=model)
-
-        return await self._sample_with_rendered_tokens(
-            token_ids=token_ids,
-            mm_features=mm_features,
-            body=body,
-            session_id=session_id,
-            model=model,
-        )
-
-    async def _sample_with_rendered_tokens(
-        self,
-        token_ids: List[int],
-        mm_features: Optional[MultiModalFeatures],
-        body: Dict[str, Any],
-        session_id: Optional[str],
-        model: str,
-    ) -> SampleResponse:
-        """Dispatch a single rendered sample request to /inference/v1/generate.
-
-        Shared between ``sample`` (one shot) and ``sample_with_retry`` (loops
-        on this method with accumulating ``token_ids`` and decremented
-        ``max_tokens``). No retry, no LoRA gating; those live in the caller.
-        """
         num_samples = body.get("num_samples", 1)
-        tinker_params = body.get("sampling_params", {}) or {}
+        tinker_params = body.get("sampling_params", {})
 
         # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
         # SamplingClient.sample() uses "include_prompt_logprobs".
@@ -680,6 +618,10 @@ class RemoteInferenceClient:
         prompt_logprobs_sp = None
         if include_prompt_logprobs:
             prompt_logprobs_sp = topk_prompt_logprobs_k if topk_prompt_logprobs_k > 0 else 0
+
+        # Render prompt: flatten text tokens and, if images are present,
+        # call the render endpoint to get placeholder tokens + features.
+        token_ids, mm_features = await self._render_for_sample(prompt, session_id, model=model)
 
         # Map Tinker SamplingParams → vLLM format
         sampling_params: Dict[str, Any] = {
@@ -765,122 +707,6 @@ class RemoteInferenceClient:
             "prompt_logprobs": result_prompt_logprobs,
             "topk_prompt_logprobs": result_topk_prompt_logprobs,
         }
-
-    async def sample_with_retry(
-        self,
-        request_payload: SampleRequestPayload,
-    ) -> SampleResponse:
-        """Sample with abort-and-retry, gated on a per-LoRA pause event.
-
-        Used by the multi-tenant LoRA training path so that pausing one
-        LoRA's generation (to swap weights) doesn't freeze unrelated LoRAs.
-
-        Flow:
-        - Render the prompt once.
-        - Dispatch ``_sample_with_rendered_tokens``.
-        - If the returned ``stop_reason == "abort"``, accumulate the partial
-          tokens, ``await`` the per-LoRA pause event (so we don't busy-loop
-          while the trainer is still loading new weights), then resubmit
-          with ``token_ids = original_prompt + accumulated`` and
-          ``max_tokens`` decremented by the accumulated length. Repeat until
-          a non-abort stop reason or ``max_tokens`` exhausts.
-
-        Requires:
-            - ``num_samples == 1`` (matches every current Tinker caller in
-              ``_sample_with_remote_client``).
-            - ``sampling_params["max_tokens"]`` set to a positive int. The
-              retry loop decrements this budget on each iteration so the
-              total generation is bounded; without it we'd over-generate
-              (each retry would use the server's default budget on top of
-              accumulated tokens) and potentially loop forever on persistent
-              aborts.
-
-        TRANSIENT: delete this method and revert the multi-LoRA call site
-        back to ``sample`` when vLLM ships native per-LoRA pause.
-        """
-        session_id, body = _extract_session_id_and_body(request_payload)
-        model = self._resolve_model(body.get("model"), "sample_with_retry")
-        body["model"] = model
-
-        if body.get("num_samples", 1) != 1:
-            raise ValueError("sample_with_retry only supports num_samples=1")
-
-        # Render the prompt once; the retry loop only re-dispatches.
-        token_ids, mm_features = await self._render_for_sample(body.get("prompt", {}), session_id, model=model)
-
-        sp_template = dict(body.get("sampling_params") or {})
-        original_max_tokens = sp_template.get("max_tokens")
-        if not isinstance(original_max_tokens, int) or original_max_tokens <= 0:
-            raise ValueError(
-                "sample_with_retry requires sampling_params['max_tokens'] to be a positive int; "
-                f"got {original_max_tokens!r}"
-            )
-
-        accum_tokens: List[int] = []
-        accum_logprobs: List[float] = []
-        final: Optional[SampleResponse] = None
-        stop_reason: Optional[str] = "abort"
-
-        while stop_reason == "abort":
-            # Wait if this LoRA is paused. No-op if no event has been
-            # created yet (i.e. the LoRA was never paused for this loop).
-            if self._lora_events_loop is asyncio.get_running_loop():
-                ev = self._lora_pause_events.get(model)
-                if ev is not None:
-                    await ev.wait()
-
-            remaining = original_max_tokens - len(accum_tokens)
-            if remaining <= 0:
-                stop_reason = "length"
-                break
-            body["sampling_params"] = {**sp_template, "max_tokens": remaining}
-
-            cur_token_ids = token_ids + accum_tokens
-            final = await self._sample_with_rendered_tokens(
-                token_ids=cur_token_ids,
-                mm_features=mm_features,
-                body=body,
-                session_id=session_id,
-                model=model,
-            )
-            seq = final["sequences"][0]
-            stop_reason = seq.get("stop_reason") or "abort"
-
-            new_tokens = seq.get("tokens") or []
-            if not new_tokens and stop_reason == "abort":
-                # Aborted with no progress (e.g. the abort fan-out caught
-                # this request before it generated anything). Just retry.
-                continue
-
-            accum_tokens.extend(new_tokens)
-            new_logprobs = seq.get("logprobs")
-            if new_logprobs:
-                accum_logprobs.extend(new_logprobs)
-
-        # Since we required max_tokens > 0 at entry, the loop must have
-        # dispatched at least once and ``final`` is bound.
-        assert final is not None, "sample_with_retry exited the loop without dispatching"
-
-        # Merge accumulators into the final response.
-        final["sequences"][0]["tokens"] = accum_tokens
-        final["sequences"][0]["logprobs"] = accum_logprobs if accum_logprobs else None
-        final["sequences"][0]["stop_reason"] = stop_reason
-
-        # When a retry fires, we resubmit with ``cur_token_ids = original_prompt +
-        # accum_tokens`` so the server computes prompt_logprobs over that
-        # extended prompt. The final response's prompt_logprobs therefore has
-        # entries for the accumulated tokens too — but the caller asked about
-        # the original prompt only. Truncate back to ``len(token_ids)``
-        # (the rendered original prompt length, never reassigned across
-        # retries). For positions in the original prompt the autoregressive
-        # logprobs are identical regardless of what follows in the prompt,
-        # so this is a lossless truncation.
-        if final.get("prompt_logprobs") is not None:
-            final["prompt_logprobs"] = final["prompt_logprobs"][: len(token_ids)]
-        if final.get("topk_prompt_logprobs") is not None:
-            final["topk_prompt_logprobs"] = final["topk_prompt_logprobs"][: len(token_ids)]
-
-        return final
 
     async def chat_completion(
         self,
@@ -1132,40 +958,13 @@ class RemoteInferenceClient:
         """Resume generation on all backends."""
         return await self._call_all_servers("/resume")
 
-    async def pause_generation(
-        self,
-        lora_name: Optional[str] = None,
-        clear_cache: bool = False,
-    ) -> Dict[str, Any]:
-        """Pause generation, optionally targeting a single LoRA adapter.
+    async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
+        """Pause using keep mode - compatibility with InferenceEngineClient interface."""
+        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
-        When ``lora_name`` is None, pauses everything via vLLM's keep-mode
-        pause (existing behavior). When ``lora_name`` is provided, only
-        in-flight requests for that LoRA are aborted; other adapters keep
-        running. Client-side, ``sample_with_retry`` callers for that LoRA
-        block on the per-LoRA event until ``resume_generation`` is called.
-
-        TRANSIENT: the ``lora_name`` branch should be deleted when vLLM
-        ships native per-LoRA pause.
-        """
-        if lora_name is None:
-            return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
-        # Block new/retrying sample_with_retry calls for this LoRA, then give
-        # in-flight client→server requests a moment to enter the scheduler so
-        # the abort fan-out catches them.
-        self._get_lora_pause_event(lora_name).clear()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
-        return await self._call_all_servers(
-            "/skyrl/v1/abort_lora_requests",
-            json={"lora_name": lora_name},
-        )
-
-    async def resume_generation(self, lora_name: Optional[str] = None) -> Dict[str, Any]:
-        """Resume generation. ``lora_name`` must match the prior pause call."""
-        if lora_name is None:
-            return await self.resume()
-        self._get_lora_pause_event(lora_name).set()
-        return {"status": "ok"}
+    async def resume_generation(self) -> Dict[str, Any]:
+        """Resume after pause - compatibility with InferenceEngineClient interface."""
+        return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -1503,8 +1302,6 @@ class RemoteInferenceClient:
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
-        state["_lora_pause_events"] = {}
-        state["_lora_events_loop"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -1514,8 +1311,6 @@ class RemoteInferenceClient:
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
-        self._lora_pause_events = {}
-        self._lora_events_loop = None
 
     async def aclose(self):
         if self._session is not None:
