@@ -165,22 +165,13 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def pause_generation(self, lora_name: Optional[str] = None) -> None:
-        """Pause generation, freezing in-flight requests so they can be resumed later.
-
-        When ``lora_name`` is None (default), pauses all generation globally
-        (vLLM keep-mode pause). When ``lora_name`` is provided, only requests
-        targeting that specific LoRA adapter are paused (HTTP path only).
-        """
+    async def pause_generation(self) -> None:
+        """Pause generation, freezing in-flight requests so they can be resumed later."""
         raise NotImplementedError
 
     @abstractmethod
-    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
-        """Resume generation after a pause, continuing any frozen in-flight requests.
-
-        ``lora_name`` must match the value used in the corresponding
-        ``pause_generation`` call.
-        """
+    async def resume_generation(self) -> None:
+        """Resume generation after a pause, continuing any frozen in-flight requests."""
         raise NotImplementedError
 
     @abstractmethod
