@@ -539,9 +539,10 @@ class WorkerDispatch:
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
-            if (
-                self.cfg.trainer.policy.model.lora.rank > 0
-                and not self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
+            strategy = self.cfg.trainer.strategy
+            is_lora = self.cfg.trainer.policy.model.lora.rank > 0
+            if is_lora and not (
+                strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
                 self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
@@ -549,9 +550,9 @@ class WorkerDispatch:
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
-                await self._inference_engine_client.pause_generation(lora_name=model_id)
+                await self._inference_engine_client.pause_generation()
                 try:
                     self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                     self._finish_weight_sync()
                 finally:
-                    await self._inference_engine_client.resume_generation(lora_name=model_id)
+                    await self._inference_engine_client.resume_generation()
