@@ -133,33 +133,49 @@ def _normalize_tool_call_payload(tc: Any) -> Optional[list]:
     return out
 
 
+# Fields we know how to normalize. Anything else on the message is forwarded
+# untouched so model-specific chat templates can read it (e.g. Qwen3 /
+# Nemotron-3 templates emit ``<think>{{ message.reasoning_content }}</think>``
+# blocks; DeepSeek-R1 keys off other fields). Dropping these silently turns
+# thinking-model SFT into vanilla SFT with no warning.
+_NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
+
+
 def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """Return messages in a shape that HF chat templates accept.
 
-    Drops dataset-specific extras (e.g. ``thinking``, empty ``tool_calls``) and
-    promotes string-encoded ``tool_calls`` into the OpenAI list-of-dicts form.
-    Tool-result turns (``role == "tool"``) are passed through unchanged so the
-    template can render them as ``<tool_response>``-style observations.
+    Normalizes ``content`` (None -> ""), drops empty/placeholder ``tool_calls``,
+    promotes string-encoded ``tool_calls`` into the OpenAI list-of-dicts form,
+    and preserves any other fields on the message verbatim so chat templates
+    that read e.g. ``reasoning_content``, ``name``, or ``tool_call_id`` see
+    them. Tool-result turns (``role == "tool"``) are passed through unchanged
+    so the template can render them as ``<tool_response>``-style observations.
     """
     out = []
     for msg in messages:
         role = msg["role"]
         content = msg.get("content", "") or ""
+        # Carry forward any extra fields unchanged so model-specific templates
+        # can still read them. Most importantly ``reasoning_content`` for
+        # thinking models (Qwen3, Nemotron-3): dropping it would silently turn
+        # thinking-model SFT into a non-thinking trace.
+        extras = {k: v for k, v in msg.items() if k not in _NORMALIZED_KEYS}
         if role == "assistant":
             tool_calls = _normalize_tool_call_payload(msg.get("tool_calls"))
-            new_msg: dict = {"role": "assistant", "content": content}
+            new_msg: dict = {"role": "assistant", "content": content, **extras}
             if tool_calls:
                 new_msg["tool_calls"] = tool_calls
             out.append(new_msg)
         elif role == "tool":
-            new_msg = {"role": "tool", "content": content}
-            # Some templates key off ``name``/``tool_call_id`` if present.
-            for key in ("name", "tool_call_id"):
-                if msg.get(key):
-                    new_msg[key] = msg[key]
+            # ``tool`` rows shouldn't have ``tool_calls``; strip if present so
+            # we don't accidentally forward a placeholder that fights the
+            # template.
+            extras.pop("tool_calls", None)
+            new_msg = {"role": "tool", "content": content, **extras}
             out.append(new_msg)
         else:
-            out.append({"role": role, "content": content})
+            extras.pop("tool_calls", None)
+            out.append({"role": role, "content": content, **extras})
     return out
 
 

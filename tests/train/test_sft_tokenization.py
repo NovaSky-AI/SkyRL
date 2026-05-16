@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 from skyrl.train.config.sft_config import TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
 from skyrl.train.sft_trainer import (
+    _normalize_chat_messages,
     collate_sft_batch,
     tokenize_chat_example,
     tokenize_sft_example,
@@ -715,3 +716,90 @@ def test_chat_tool_calling_tool_turn_masked(tokenizer):
     for k in range(found, close):
         if k >= action_start:
             assert result["loss_mask"][k - action_start] == 0, f"tool-response position {k} must be masked to 0"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_chat_messages preservation
+#
+# Templates for thinking models (Qwen3 / Nemotron-3) emit
+#   <think>{{ message.reasoning_content }}</think>
+# branches that read fields beyond ``role`` / ``content`` / ``tool_calls``.
+# Datasets sometimes attach other extras (``name``, ``tool_call_id``, custom
+# metadata). Silently dropping them turns thinking-model SFT into vanilla SFT
+# with no warning. Pin the preservation behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_preserves_reasoning_content_on_assistant():
+    msgs = [
+        {"role": "user", "content": "Q?"},
+        {
+            "role": "assistant",
+            "content": "[ANSWER]A[/ANSWER]",
+            "reasoning_content": "step 1\nstep 2",
+        },
+    ]
+    out = _normalize_chat_messages(msgs)
+    # User message survives unchanged.
+    assert out[0] == {"role": "user", "content": "Q?"}
+    # Assistant keeps reasoning_content alongside role/content.
+    assert out[1]["role"] == "assistant"
+    assert out[1]["content"] == "[ANSWER]A[/ANSWER]"
+    assert out[1]["reasoning_content"] == "step 1\nstep 2"
+
+
+def test_normalize_preserves_unknown_extras_on_all_roles():
+    msgs = [
+        {"role": "system", "content": "sys", "metadata": {"k": 1}},
+        {"role": "user", "content": "u", "name": "alice"},
+        {
+            "role": "assistant",
+            "content": "a",
+            "reasoning_content": "thought",
+            "custom_field": "x",
+        },
+        {
+            "role": "tool",
+            "content": '{"result": 42}',
+            "name": "calculator",
+            "tool_call_id": "call_0",
+        },
+    ]
+    out = _normalize_chat_messages(msgs)
+    assert out[0]["metadata"] == {"k": 1}
+    assert out[1]["name"] == "alice"
+    assert out[2]["reasoning_content"] == "thought"
+    assert out[2]["custom_field"] == "x"
+    assert out[3]["name"] == "calculator"
+    assert out[3]["tool_call_id"] == "call_0"
+
+
+def test_normalize_drops_placeholder_tool_calls_but_keeps_extras():
+    """Placeholder ``tool_calls="[]"`` must still be normalized away (the
+    original bug that crashes Qwen2.5's template), even when other extras
+    are present on the same message."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": "thinking...",
+            "tool_calls": "[]",
+        },
+    ]
+    out = _normalize_chat_messages(msgs)
+    assert "tool_calls" not in out[0]
+    assert out[0]["reasoning_content"] == "thinking..."
+
+
+def test_normalize_strips_tool_calls_off_non_assistant_roles():
+    """Some datasets sloppily attach ``tool_calls`` to user/system/tool rows.
+    We strip those (they'd fight the template) while keeping other extras."""
+    msgs = [
+        {"role": "user", "content": "u", "tool_calls": "[]", "name": "alice"},
+        {"role": "tool", "content": "t", "tool_calls": "[]", "tool_call_id": "c0"},
+    ]
+    out = _normalize_chat_messages(msgs)
+    assert "tool_calls" not in out[0]
+    assert out[0]["name"] == "alice"
+    assert "tool_calls" not in out[1]
+    assert out[1]["tool_call_id"] == "c0"
