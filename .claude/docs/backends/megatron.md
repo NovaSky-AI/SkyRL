@@ -11,7 +11,7 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
 
 ## Parallelism Strategies
 
-Reference: https://docs.nvidia.com/nemo/megatron-bridge/latest/skills/perf-techniques/parallelism-strategies/SKILL.html
+For picking TP/PP/EP/CP/SP sizes, invoke the `parallelism-strategies` skill.
 
 Key strategies:
 - **Tensor Parallelism (TP)**: Splits layers across GPUs within an NVLink domain. Use TP ≤ GPUs per node. Applicable for non-MoE linear layers.
