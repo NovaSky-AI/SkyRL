@@ -17,7 +17,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
-from skyrl.train.utils.utils import validate_cfg
+from skyrl.train.utils.utils import validate_cfg, validate_generator_cfg
 from tests.train.util import example_dummy_config
 
 
@@ -215,6 +215,32 @@ def test_cross_field_defaults():
     )  # same as `generator.sampling_params.max_generate_length`
     assert cfg.generator.rope_scaling == cfg.trainer.rope_scaling
     assert cfg.generator.rope_theta == cfg.trainer.rope_theta
+
+
+class TestGeneratorMaxModelLenValidation:
+    """Tests for generator/vLLM context window validation."""
+
+    def test_validate_generator_cfg_rejects_prompt_over_max_model_len(self):
+        cfg = example_dummy_config()
+        cfg.generator.inference_engine.engine_init_kwargs["max_model_len"] = cfg.trainer.max_prompt_length - 1
+
+        with pytest.raises(ValueError, match="trainer.max_prompt_length"):
+            validate_generator_cfg(cfg)
+
+    def test_validate_generator_cfg_rejects_input_over_max_model_len(self):
+        cfg = example_dummy_config()
+        cfg.generator.max_turns = 2
+        cfg.generator.max_input_length = cfg.trainer.max_prompt_length + 1
+        cfg.generator.inference_engine.engine_init_kwargs["max_model_len"] = cfg.trainer.max_prompt_length
+
+        with pytest.raises(ValueError, match="generator.max_input_length"):
+            validate_generator_cfg(cfg)
+
+    def test_validate_generator_cfg_allows_prompt_plus_generation_over_max_model_len(self):
+        cfg = example_dummy_config()
+        cfg.generator.inference_engine.engine_init_kwargs["max_model_len"] = cfg.trainer.max_prompt_length
+
+        validate_generator_cfg(cfg)
 
 
 class TestMaxSeqLenValidation:

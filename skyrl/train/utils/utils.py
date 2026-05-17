@@ -417,6 +417,45 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
+    max_model_len = ie_cfg.engine_init_kwargs.get("max_model_len")
+    if max_model_len is not None:
+        try:
+            max_model_len = int(max_model_len)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "`generator.inference_engine.engine_init_kwargs.max_model_len` must be an integer "
+                f"when set, got {max_model_len!r}"
+            ) from exc
+        if max_model_len <= 0:
+            raise ValueError(
+                "`generator.inference_engine.engine_init_kwargs.max_model_len` must be positive "
+                f"when set, got {max_model_len}"
+            )
+        if cfg.trainer.max_prompt_length > max_model_len:
+            raise ValueError(
+                "`trainer.max_prompt_length` cannot exceed "
+                "`generator.inference_engine.engine_init_kwargs.max_model_len`: "
+                f"{cfg.trainer.max_prompt_length} > {max_model_len}"
+            )
+        if cfg.generator.max_input_length > max_model_len:
+            raise ValueError(
+                "`generator.max_input_length` cannot exceed "
+                "`generator.inference_engine.engine_init_kwargs.max_model_len`: "
+                f"{cfg.generator.max_input_length} > {max_model_len}"
+            )
+        if cfg.trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length > max_model_len:
+            logger.warning(
+                "`trainer.max_prompt_length + generator.sampling_params.max_generate_length` exceeds "
+                "`generator.inference_engine.engine_init_kwargs.max_model_len`. Multi-turn generation will "
+                "cap each request's `max_tokens` to fit the remaining model context window."
+            )
+        if cfg.trainer.max_prompt_length + cfg.generator.eval_sampling_params.max_generate_length > max_model_len:
+            logger.warning(
+                "`trainer.max_prompt_length + generator.eval_sampling_params.max_generate_length` exceeds "
+                "`generator.inference_engine.engine_init_kwargs.max_model_len`. Evaluation generation will "
+                "cap each request's `max_tokens` to fit the remaining model context window."
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (

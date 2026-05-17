@@ -424,6 +424,9 @@ class FullyAsyncConfig(BaseConfig):
 @dataclass
 class SamplingParams(BaseConfig):
     max_generate_length: int = 1024
+    """Trajectory-level assistant/generated-token budget. In multi-turn generators,
+    environment observation tokens are loss-masked and do not count against this budget.
+    The vLLM request field is ``max_tokens`` and may be reduced per turn to fit context."""
     repetition_penalty: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
@@ -496,7 +499,9 @@ class InferenceEngineConfig(BaseConfig):
     """When True, pass ``language_model_only=True`` to the vLLM engine so that
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
-    """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
+    """Pass-through kwargs for the vLLM engine. Names must match the engine's args. If
+    ``max_model_len`` is set, rollout requests are capped so input tokens plus per-request
+    generated tokens fit within that window."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None
@@ -528,7 +533,8 @@ class GeneratorConfig(BaseConfig):
     batched: bool = False
     max_turns: int = 1
     max_input_length: Optional[int] = None
-    """Max generator input length for multi-turn conversations. For single-turn, set equal to ``max_prompt_length``."""
+    """Max input/context length allowed before each generation turn. For single-turn, set
+    equal to ``max_prompt_length``. Distinct from ``sampling_params.max_generate_length``."""
     chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
     chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Kwargs passed to ``tokenizer.apply_chat_template``."""

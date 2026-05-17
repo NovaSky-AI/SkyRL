@@ -127,6 +127,24 @@ def _make_mock_llm(tokenizer, response_text: str):
     return AsyncMock(side_effect=mock_generate)
 
 
+def _make_budget_capturing_mock_llm(tokenizer, response_text: str, requested_max_tokens: list[int]):
+    """Create an AsyncMock that captures per-turn max_tokens for VLM generation."""
+
+    async def mock_generate(input_batch, model=None):
+        requested_max_tokens.append(input_batch["sampling_params"]["max_tokens"])
+        num_prompts = len(input_batch["prompt_token_ids"])
+        text_with_eos = response_text + tokenizer.eos_token
+        ids = tokenizer.encode(text_with_eos, add_special_tokens=False)
+        return {
+            "responses": [response_text] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [ids] * num_prompts,
+        }
+
+    return AsyncMock(side_effect=mock_generate)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -247,3 +265,36 @@ async def test_vlm_obs_tokens_match_expected(mock_decode):
         assert (
             obs_text in decoded
         ), f"Obs segment {seg_idx}: expected '{obs_text}' in decoded obs tokens, got '{decoded}'"
+
+
+@pytest.mark.asyncio
+@patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
+async def test_vlm_caps_each_request_to_remaining_generate_budget(mock_decode):
+    """VLM observation tokens should not consume the assistant generation budget."""
+    mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    response_text = "b"
+    response_ids = tokenizer.encode(response_text + tokenizer.eos_token, add_special_tokens=False)
+    max_generate_length = len(response_ids) * 2
+    requested_max_tokens = []
+
+    generator = _build_vlm_generator(tokenizer)
+    generator.generator_cfg.sampling_params.max_generate_length = max_generate_length
+    generator.inference_engine_client.render_chat_completion = _make_mock_renderer(tokenizer)
+    generator.inference_engine_client.generate = _make_budget_capturing_mock_llm(
+        tokenizer, response_text, requested_max_tokens
+    )
+
+    prompt = [[{"role": "user", "content": "a"}]]
+    input_batch: GeneratorInput = {
+        "prompts": prompt,
+        "env_extras": [{"answer": "4"}],
+        "env_classes": ["cpu_vlm_test_env"],
+    }
+
+    output: GeneratorOutput = await generator.generate(input_batch, disable_tqdm=True)
+
+    assert requested_max_tokens == [max_generate_length, max_generate_length - len(response_ids)]
+    assert sum(output["loss_masks"][0]) == max_generate_length
+    assert output["stop_reasons"][0] == "length"
