@@ -22,7 +22,6 @@ uv run --isolated --extra megatron --env-file .env.test -m skyrl.train.entrypoin
 ## Config
 
 - Configurations are implemented as dataclass. CLI parsing is via OmegaConf.
-- Legacy config: `skyrl/train/config/ppo_base_config.yaml` (ignore).
 - Pass overrides as `key=value` args on the command line. Unlike Hydra, we do not support `+` overrides for new keys
 - Main config object: `SkyRLTrainConfig` in `skyrl/train/config/`.
 

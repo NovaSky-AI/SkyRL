@@ -13,7 +13,7 @@ Default backend (`trainer.strategy=fsdp`). Uses PyTorch FSDP2 for distributed tr
 - `trainer.fsdp_config.cpu_offload=true` offloads optimizer states to CPU.
 - Also available for reference model: `ref.fsdp_config.cpu_offload=true`.
 - Useful when GPU memory is low but adds overhead.
-- NOT to be confused with `offload_after_step`: This is for colocated training where training state is offloaded to CPU after a training step is complete, so that the inference workers can be loaded on the same GPUs
+- NOT to be confused with `offload_after_step`: This is for colocated training where training state is offloaded to CPU after a training step is complete, so that the inference workers can be loaded on the same GPUs.
 
 ## Sharding
 

@@ -32,7 +32,7 @@ Sometimes, you might see the following logs from the raylet:
 
 **What this means**
 
-In Ray, all tasks and actors are run in a "worker process" . Each worker process has to register with Ray's centralized Global Control Service. Code inside the actor class' `__init__` method is run after registration. In our case, we use the uv + ray integration, and thus startup includes starting the worker process with the uv run command (exact same command used to launch the entrypoint).
+In Ray, all tasks and actors are run in a "worker process". Each worker process has to register with Ray's centralized Global Control Service. Code inside the actor class' `__init__` method is run after registration. In our case, we use the uv + ray integration, and thus startup includes starting the worker process with the uv run command (exact same command used to launch the entrypoint).
 
 The error message is referring to worker process not starting up within timeout. This can be due to
 
@@ -49,4 +49,4 @@ One of the most common issues during training is unexplained memory leaks that l
 ps -eo pid,comm,rss --sort=-rss | awk 'NR==1{print $0} NR>1{printf "%-8s %-20s %.2f GB\n", $1, $2, $3/1024/1024}' | head
 ```
 
-One common anti-pattern that causes memory leaks: Using `os.fork` with Ray. If your custom environment uses `fork` to spawn multiple processes, it can leak to unexplained behaviour because of it’s interaction with ray. Ray uses sockets to communicate with other Ray-related processes and using `fork` is not a good idea in this case. If you’re seeing a memory leak, check out which of the processes are using the most memory with the above command, and if the processes are doing the same thing , then it is likely an issue with `fork` + ray (although not always). See: docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html for more details.
+One common anti-pattern that causes memory leaks: Using `os.fork` with Ray. If your custom environment uses `fork` to spawn multiple processes, it can leak to unexplained behaviour because of its interaction with Ray. Ray uses sockets to communicate with other Ray-related processes and using `fork` is not a good idea in this case. If you’re seeing a memory leak, check out which of the processes are using the most memory with the above command, and if the processes are doing the same thing , then it is likely an issue with `fork` + Ray (although not always). See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html for more details.

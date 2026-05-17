@@ -7,7 +7,7 @@ Start off any modification or debugging with SkyRL using this file as the primar
 **Follow existing patterns in the code**: Make sure to understand existing patterns in the codebase. Writing a new test? Study existing tests to understand common patterns for init/ teardown as well as helper functions used. For example: 
 - For creating a tokenizer, use `skyrl.utils.tok.get_tokenizer` helper instead of manual init. 
 - Use `InferenceEngineState` helper in tests for managing inference engine state instead of manual init of `VLLMRouter` and `VLLMServerGroup`
-- Use the `ray_init_fixture` for cleaning up state between tests for GPU based tests. If possible, use `class_scoped_ray_init_fixture` or `module_scoped_ray_init_fixture` to avoid repeated init/ teardown.
+- Use the `ray_init_fixture` for cleaning up state between tests for GPU-based tests. If possible, use `class_scoped_ray_init_fixture` or `module_scoped_ray_init_fixture` to avoid repeated init/ teardown.
 
 **Small iteration cycles**: As much as possible, keep iteration cycles small. For new code or configurations, figure out the smallest possible test unit and iterate on that. For all tests, it's helpful to use the smallest possible model(s) or smallest model in the desired model family (Ex: `Qwen/Qwen3-0.6B` for Qwen 3) with the smallest number of GPUs.
   - Is this a configuration change? Ensure relevant existing CPU tests can pass. Add new tests if needed
