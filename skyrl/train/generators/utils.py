@@ -19,6 +19,8 @@ from skyrl.train.generators.base import (
 )
 from skyrl_gym.metrics import aggregate_for_environment
 
+ROLLOUT_ERROR_STOP_REASON = "rollout_error"
+
 
 def _validate_template_file_path(file_path: str) -> str:
     """
@@ -302,6 +304,14 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
             rollout_metrics[k] = max(values)
         else:
             rollout_metrics[k] = sum(values)
+
+    has_rollout_error_metric = any(
+        "generate/num_rollout_errors" in (go.get("rollout_metrics") or {}) for go in generator_outputs
+    )
+    if result.get("stop_reasons") is not None and has_rollout_error_metric:
+        num_rollout_errors = sum(reason == ROLLOUT_ERROR_STOP_REASON for reason in result["stop_reasons"])
+        rollout_metrics["generate/num_rollout_errors"] = num_rollout_errors
+        rollout_metrics["generate/rollout_error_rate"] = num_rollout_errors / len(result["stop_reasons"])
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts

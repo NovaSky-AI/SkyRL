@@ -9,6 +9,7 @@ import pytest
 
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
+    ROLLOUT_ERROR_STOP_REASON,
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
     merge_stepwise_output,
@@ -85,6 +86,38 @@ def test_generator_output_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+def test_generator_output_concatenation_recomputes_rollout_error_rate():
+    generator_output_1: GeneratorOutput = {
+        "prompt_token_ids": [[1], [2]],
+        "response_ids": [[1], [2]],
+        "rewards": [[0.0], [1.0]],
+        "loss_masks": [[0], [1]],
+        "stop_reasons": [ROLLOUT_ERROR_STOP_REASON, "stop"],
+        "rollout_logprobs": None,
+        "rollout_metrics": {
+            "generate/num_rollout_errors": 1,
+            "generate/rollout_error_rate": 0.5,
+        },
+    }
+    generator_output_2: GeneratorOutput = {
+        "prompt_token_ids": [[3], [4], [5]],
+        "response_ids": [[3], [4], [5]],
+        "rewards": [[0.0], [0.0], [1.0]],
+        "loss_masks": [[0], [0], [1]],
+        "stop_reasons": [ROLLOUT_ERROR_STOP_REASON, ROLLOUT_ERROR_STOP_REASON, "stop"],
+        "rollout_logprobs": None,
+        "rollout_metrics": {
+            "generate/num_rollout_errors": 2,
+            "generate/rollout_error_rate": 2 / 3,
+        },
+    }
+
+    concatenated_output = concatenate_generator_outputs([generator_output_1, generator_output_2])
+
+    assert concatenated_output["rollout_metrics"]["generate/num_rollout_errors"] == 3
+    assert concatenated_output["rollout_metrics"]["generate/rollout_error_rate"] == 3 / 5
 
 
 def test_get_metrics_from_generator_output():

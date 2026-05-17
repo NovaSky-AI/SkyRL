@@ -2,6 +2,7 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator.py
 """
 
+import asyncio
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,8 +13,14 @@ from skyrl.train.generators.base import (
     ConversationType,
     GeneratorInput,
     GeneratorOutput,
+    TrajectoryID,
 )
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.skyrl_gym_generator import (
+    ROLLOUT_ERROR_STOP_REASON,
+    SkyRLGymGenerator,
+    StepWiseOutput,
+    TrajectoryOutput,
+)
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
@@ -433,6 +440,217 @@ async def test_generate_interface_compliance(
 
         # This should not raise an error even with None env_extras
         assert validate_generator_input(input_batch_with_none), "Input with None env_extras should be valid"
+
+
+def _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer) -> SkyRLGymGenerator:
+    generator_cfg.batched = False
+    generator_cfg.max_input_length = 512
+    generator_cfg.chat_template.source = "name"
+    generator_cfg.chat_template.name_or_path = None
+    return SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+
+def _generator_input(num_prompts: int, env_class: str, trajectory_ids=None) -> GeneratorInput:
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": f"prompt {i}"}] for i in range(num_prompts)],
+        "env_extras": [{"idx": i} for i in range(num_prompts)],
+        "env_classes": [env_class for _ in range(num_prompts)],
+    }
+    if trajectory_ids is not None:
+        input_batch["trajectory_ids"] = trajectory_ids
+    return input_batch
+
+
+def _successful_rollout(
+    response_ids: List[int] | None = None,
+    rollout_logprobs: List[float] | None = None,
+) -> TrajectoryOutput:
+    response_ids = response_ids or [11, 12]
+    return TrajectoryOutput(
+        response_ids=response_ids,
+        reward=[0.0] * (len(response_ids) - 1) + [1.0],
+        stop_reason="stop",
+        loss_mask=[1] * len(response_ids),
+        prompt_ids=[101, 102],
+        rollout_logprobs=rollout_logprobs,
+        env_metrics={"ok": 1.0},
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_raises_rollout_exception_by_default(mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg):
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def failing_agent_loop(*args, **kwargs):
+        raise RuntimeError("rollout failed")
+
+    generator.agent_loop = failing_agent_loop
+
+    with pytest.raises(RuntimeError, match="rollout failed"):
+        await generator.generate(_generator_input(1, mock_env_cfg.env_class))
+
+
+@pytest.mark.asyncio
+async def test_generate_skip_failed_rollouts_substitutes_placeholder(
+    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.skip_failed_rollouts = True
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "prompt 1":
+            raise RuntimeError("rollout failed")
+        return _successful_rollout()
+
+    generator.agent_loop = agent_loop
+
+    output = await generator.generate(_generator_input(2, mock_env_cfg.env_class))
+
+    assert output["response_ids"] == [[11, 12], [mock_tokenizer.eos_token_id]]
+    assert output["rewards"] == [[0.0, 1.0], [0.0]]
+    assert output["loss_masks"] == [[1, 1], [0]]
+    assert output["stop_reasons"] == ["stop", ROLLOUT_ERROR_STOP_REASON]
+    assert output["prompt_token_ids"] == [[101, 102], [mock_tokenizer.eos_token_id]]
+    assert output["rollout_metrics"]["generate/num_rollout_errors"] == 1
+    assert output["rollout_metrics"]["generate/rollout_error_rate"] == 0.5
+    assert validate_generator_output(output)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_skip_failed_rollouts_closes_env_after_rollout_failure(
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.skip_failed_rollouts = True
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+    env = MagicMock()
+    env.init.side_effect = RuntimeError("init failed")
+    env.close.return_value = None
+    mock_make.return_value = env
+
+    output = await generator.generate(_generator_input(1, mock_env_cfg.env_class))
+
+    env.close.assert_called_once()
+    assert output["response_ids"] == [[mock_tokenizer.eos_token_id]]
+    assert output["rewards"] == [[0.0]]
+    assert output["loss_masks"] == [[0]]
+    assert output["stop_reasons"] == [ROLLOUT_ERROR_STOP_REASON]
+    assert output["rollout_metrics"]["generate/num_rollout_errors"] == 1
+    assert output["rollout_metrics"]["generate/rollout_error_rate"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_generate_skip_failed_rollouts_includes_placeholder_logprobs(
+    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.skip_failed_rollouts = True
+    generator_cfg.sampling_params.logprobs = 1
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "prompt 1":
+            raise RuntimeError("rollout failed")
+        return _successful_rollout(rollout_logprobs=[-0.1, -0.2])
+
+    generator.agent_loop = agent_loop
+
+    output = await generator.generate(_generator_input(2, mock_env_cfg.env_class))
+
+    assert output["rollout_logprobs"] == [[-0.1, -0.2], [0.0]]
+    assert output["response_ids"][1] == [mock_tokenizer.eos_token_id]
+    assert output["loss_masks"][1] == [0]
+    assert validate_generator_output(output)
+
+
+@pytest.mark.asyncio
+async def test_generate_skip_failed_rollouts_step_wise_placeholder(
+    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.skip_failed_rollouts = True
+    generator_cfg.step_wise_trajectories = True
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+    trajectory_ids = [
+        TrajectoryID(instance_id="sample-a", repetition_id=0),
+        TrajectoryID(instance_id="sample-b", repetition_id=0),
+    ]
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "prompt 1":
+            raise RuntimeError("rollout failed")
+        return StepWiseOutput(step_outputs=[_successful_rollout(response_ids=[21])])
+
+    generator.agent_loop = agent_loop
+
+    output = await generator.generate(_generator_input(2, mock_env_cfg.env_class, trajectory_ids=trajectory_ids))
+
+    assert output["response_ids"] == [[21], [mock_tokenizer.eos_token_id]]
+    assert output["rewards"] == [[1.0], [0.0]]
+    assert output["loss_masks"] == [[1], [0]]
+    assert output["stop_reasons"] == ["stop", ROLLOUT_ERROR_STOP_REASON]
+    assert output["trajectory_ids"] == trajectory_ids
+    assert output["is_last_step"] == [True, True]
+    assert validate_generator_output(output)
+
+
+@pytest.mark.asyncio
+async def test_generate_skip_failed_rollouts_preserves_cancellation(
+    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.skip_failed_rollouts = True
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def cancelled_agent_loop(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    generator.agent_loop = cancelled_agent_loop
+
+    with pytest.raises(asyncio.CancelledError):
+        await generator.generate(_generator_input(1, mock_env_cfg.env_class))
+
+
+@pytest.mark.asyncio
+async def test_generate_skip_failed_rollouts_all_failed_batch(mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg):
+    generator_cfg.skip_failed_rollouts = True
+    generator = _make_test_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def failing_agent_loop(*args, **kwargs):
+        raise RuntimeError("rollout failed")
+
+    generator.agent_loop = failing_agent_loop
+
+    output = await generator.generate(_generator_input(2, mock_env_cfg.env_class))
+
+    assert output["response_ids"] == [
+        [mock_tokenizer.eos_token_id],
+        [mock_tokenizer.eos_token_id],
+    ]
+    assert output["rewards"] == [[0.0], [0.0]]
+    assert output["loss_masks"] == [[0], [0]]
+    assert output["stop_reasons"] == [
+        ROLLOUT_ERROR_STOP_REASON,
+        ROLLOUT_ERROR_STOP_REASON,
+    ]
+    assert output["rollout_metrics"]["generate/num_rollout_errors"] == 2
+    assert output["rollout_metrics"]["generate/rollout_error_rate"] == 1.0
+    assert validate_generator_output(output)
+
+
+def test_skip_failed_rollouts_rejects_batched_mode(mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg):
+    generator_cfg.skip_failed_rollouts = True
+    generator_cfg.batched = True
+
+    with pytest.raises(ValueError, match="skip_failed_rollouts=True"):
+        SkyRLGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=mock_env_cfg,
+            inference_engine_client=mock_llm,
+            tokenizer=mock_tokenizer,
+        )
 
 
 @pytest.mark.asyncio
