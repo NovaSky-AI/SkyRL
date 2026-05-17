@@ -34,7 +34,7 @@ examples/train/         # Example training scripts per model/backend
 - **Ray orchestration**: Training workers and inference engines run as Ray actors.
 - **Config hierarchy**: `SkyRLTrainConfig` → `TrainerConfig`, `GeneratorConfig`, `DataConfig`, `EnvironmentConfig`. Accessed as `cfg.trainer.*`, `cfg.generator.*`, etc.
 - **CLI**: Config uses OmegaConf + dataclasses — OmegaConf for CLI parsing and merging, loaded into dataclasses for better typing. Pass overrides as `key=value` CLI args.
-- **Backend selection**: `trainer.strategy` chooses backend — `fsdp` (default), `fsdp`, `megatron`, or `jax`.
+- **Backend selection**: `trainer.strategy` chooses backend — `fsdp` (default), `megatron`, or `jax`.
 
 ## Weight Sync
 

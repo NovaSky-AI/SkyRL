@@ -2,6 +2,11 @@
 
 For full details, see `docs/content/docs/getting-started/development.mdx`.
 
+## Pre-commit checklist
+
+- Ensure you've run pre-commit hooks before every commit.
+- Ensure relevant CPU and GPU tests pass.
+- Sign off on every commit with `git commit -s`.
 
 ## Do
 

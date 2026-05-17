@@ -4,9 +4,10 @@ SkyRL is a full-stack reinforcement learning library for training LLMs, designed
 
 ## Critical Rules
 
+- Ask as many clarifying questions as possible, come up with a detailed plan and only then execute. 
 - **Always use `uv run --isolated`** to run commands. Never use bare `python`, `pip`, or `pip install`.
 - **Log output to files**: `<cmd> > /tmp/results_1.log 2>&1` for persistence.
-- Backend extras (`fsdp`, `megatron`, `jax`, `flashrl`) conflict with each other -- never combine them.
+- Backend extras (`fsdp`, `megatron`, `jax`) conflict with each other -- never combine them.
 
 ## Test Commands
 
@@ -37,13 +38,22 @@ When working on these areas, read the corresponding doc first:
 | Area | Read first |
 |------|-----------|
 | Package management, uv, formatting | `.claude/docs/development.md` |
+| Overall guide for modifying or working with SkyRL | `.claude/docs/contributing.md` |
 | Tests, fixtures, CI quirks | `.claude/docs/testing.md` |
 | Project layout, Ray actors, config | `.claude/docs/architecture.md` |
-| Training entrypoints, Hydra configs | `.claude/docs/training.md` |
+| Training entrypoints, configs | `.claude/docs/training.md` |
 | Inference engines, vLLM, PD disagg | `.claude/docs/inference.md` |
 | GitHub Actions, Anyscale CI | `.claude/docs/ci.md` |
-| New model support, tokenizer quirks | `.claude/docs/contributing.md` |
 | Tinker API server | `.claude/docs/tinker.md` |
 | Megatron backend | `.claude/docs/backends/megatron.md` |
 | FSDP backend | `.claude/docs/backends/fsdp.md` |
 | JAX/TPU backend | `.claude/docs/backends/jax.md` |
+| Weight sync (training <-> inference) | `.claude/docs/weight_sync.md` |
+
+
+## Troubleshooting
+
+For troubleshooting training runs with SkyRL:
+
+1. Go through the troubleshooting section in the docs for known errors: `docs/content/docs/troubleshooting/troubleshooting.mdx`
+2. Go through the contributing guide for overall guidelines: `.claude/docs/contributing.md`

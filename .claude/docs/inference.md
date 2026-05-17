@@ -1,5 +1,7 @@
 # Inference
 
+For training-to-inference weight transfer (`WorkerWrap`, broadcast vs. CUDA IPC, lifecycle), see [`weight_sync.md`](weight_sync.md).
+
 ## Architecture
 
 - Key abstractions: `RemoteInferenceClient` , `ServerGroup`, `VLLMServerActor`, `VLLMRouter`

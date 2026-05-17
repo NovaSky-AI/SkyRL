@@ -16,9 +16,13 @@ Start off any modification or debugging with SkyRL using this file as the primar
   - If changing environment code, test out the environment mocking LLM responses
   - If changing training code, test out a single training step with dummy inputs
   - Does this modify a training backend? Ensure relevant unit tests pass. Does this touch training <> inference boundary? Ensure weight sync tests pass. Finally move to E2E tests
-## CPU Tests
   - For E2E training, run only 1 or few steps for a sanity check and ensure metrics and training is as expected first.
 
+## Contribution Checklist
+
+- Go through the development guide: `.claude/docs/development.md`.
+- Ensure you've updated relevant example scripts and documentation for any changes
+- Ensure you've updated `.claude/` files and `CLAUDE.md` for any changes in paths, naming, etc.
 
 ## New Model Support (Megatron)
 
