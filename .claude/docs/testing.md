@@ -1,6 +1,5 @@
 # Testing
 
-## CPU Tests
 
 ```bash
 # Core library tests

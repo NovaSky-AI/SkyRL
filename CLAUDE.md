@@ -43,6 +43,7 @@ When working on these areas, read the corresponding doc first:
 | Inference engines, vLLM, PD disagg | `.claude/docs/inference.md` |
 | GitHub Actions, Anyscale CI | `.claude/docs/ci.md` |
 | New model support, tokenizer quirks | `.claude/docs/contributing.md` |
+| Tinker API server | `.claude/docs/tinker.md` |
 | Megatron backend | `.claude/docs/backends/megatron.md` |
 | FSDP backend | `.claude/docs/backends/fsdp.md` |
 | JAX/TPU backend | `.claude/docs/backends/jax.md` |

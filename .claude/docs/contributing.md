@@ -1,14 +1,23 @@
 # Contributing
 
-**Overall guide**: Always test in components. For different features/ bug fixes, follow the following pattern:
-    - Is this a configuration change? Ensure CPU tests can pass. 
-    - Does this modify inference/ generation? Ensure relevant generation tests pass. Does this touch training <> inference boundary? Ensure weight sync tests pass. Finally move to E2E tests only if needed. A single pass with `main_generate.py` is typically enough for most modifications.
-    - Does this add a new algorithm? Ensure configurations are updated. Add relevant CPU tests. Perform an E2E test for convergence. 
-    - Does this modify a training backend? Ensure relevant unit tests pass. Does this touch training <> inference boundary? Ensure weight sync tests pass. Finally move to E2E tests.
+Start off any modification or debugging with SkyRL using this file as the primary instruction manual. Before coming up with a plan, ensure you have thoroughly gone through the instructions here as well as relevant documentation in `docs/`.
 
-**Follow existing patterns in the code**: Make sure to understand existing patterns in the codebase. For example: 
+**Google Style Guide**: Overall, you should follow Google's Python Style Guide while writing code for the project, unless specifically instructed by the user or by instructions here. 
+
+**Follow existing patterns in the code**: Make sure to understand existing patterns in the codebase. Writing a new test? Study existing tests to understand common patterns for init/ teardown as well as helper functions used. For example: 
 - For creating a tokenizer, use `skyrl.utils.tok.get_tokenizer` helper instead of manual init. 
 - Use `InferenceEngineState` helper in tests for managing inference engine state instead of manual init of `VLLMRouter` and `VLLMServerGroup`
+- Use the `ray_init_fixture` for cleaning up state between tests for GPU based tests. If possible, use `class_scoped_ray_init_fixture` or `module_scoped_ray_init_fixture` to avoid repeated init/ teardown.
+
+**Small iteration cycles**: As much as possible, keep iteration cycles small. For new code or configurations, figure out the smallest possible test unit and iterate on that. For all tests, it's helpful to use the smallest possible model(s) or smallest model in the desired model family (Ex: `Qwen/Qwen3-0.6B` for Qwen 3) with the smallest number of GPUs.
+  - Is this a configuration change? Ensure relevant existing CPU tests can pass. Add new tests if needed
+  - Does this modify inference/ generation? Ensure relevant generation tests pass. Does this touch training <> inference boundary? Ensure relevant weight sync tests pass. Finally move to E2E tests only if needed. A single pass with `main_generate.py` is typically enough for most modifications. Add new tests if needed.
+  - Does this add a new algorithm? Ensure configurations are updated. Add relevant CPU tests. Perform an E2E test for convergence. 
+  - If changing environment code, test out the environment mocking LLM responses
+  - If changing training code, test out a single training step with dummy inputs
+  - Does this modify a training backend? Ensure relevant unit tests pass. Does this touch training <> inference boundary? Ensure weight sync tests pass. Finally move to E2E tests
+## CPU Tests
+  - For E2E training, run only 1 or few steps for a sanity check and ensure metrics and training is as expected first.
 
 ## New Model Support (Megatron)
 
@@ -28,4 +37,90 @@
 ## Anti-patterns
 
 - Using Ray tasks/ actors with `fork` start method  - This leads to undefined behaviour. Use `spawn` start method instead.
-- Passing the full `SkyRLTrainConfig` when only a sub-config is sufficient (example: `InferenceEngineConfig`)
+- Passing the full `SkyRLTrainConfig` as an argument to a method or a class when only a sub-config is sufficient (example: `InferenceEngineConfig`)
+
+
+## Comments
+
+Comments should describe what the code is doing, not what instruction the user provided or what learnings-on-the-journey the agent stumbled into.
+
+Do:
+
+"Uses the start/update/finish lifecycle to enable chunked transfers. Per chunk, all tensors are packed into a single contiguous CUDA buffer (one dtype per chunk, guaranteed by the weight extractor) and one IPC handle is created for the packed buffer per rank."
+
+Don't:
+
+"Uses the start/update/finish lifecycle to enable chunked transfers. Per chunk, all tensors are packed into a single contiguous CUDA buffer (one dtype per chunk, guaranteed by the weight extractor) and one IPC handle is created for the packed buffer per rank. This mirrors the legacy path and avoids the one-handle-per-param ceiling of vLLM's default IPCWeightTransferEngine, which otherwise dominates latency for models with many small parameters."
+
+
+Do:
+
+```python
+def test_freeze_moe_router_two_level_wrap():
+    """
+    Under Megatron's ``bf16=True`` path, chunks are wrapped as
+    ``DDP(Float16Module(GPTModel))``. This tests whether `freeze_moe_router`
+    can handle 2 levels of wrapping.
+    """
+    inner_model = _Model()
+```
+
+Don't:
+
+```python
+def test_freeze_moe_router_two_level_wrap():
+    """Regression: recursive unwrap handles DDP(Float16Module(model)).
+
+    Under Megatron's ``bf16=True`` path, chunks are wrapped as
+    ``DDP(Float16Module(GPTModel))``. Single-level ``.module`` peel leaves
+    ``Float16Module`` (which lacks ``.decoder``) and the helper raises. The
+    worker uses a ``while hasattr(..., "module")`` loop — this test inlines
+    the same loop to guard against regressions.
+    """
+    inner_model = _Model()
+```
+
+
+Do:
+
+```bash
+  # SFT training with Megatron backend for Qwen2.5-1.5B-Instruct on a
+  # tool-calling dataset (Salesforce/APIGen-MT-5k).
+  #
+  # This script runs supervised fine-tuning using the Megatron backend with
+  # pure data parallelism (DP=4) on 4 GPUs.
+  #
+  # Usage:
+  #
+  # export DATA_DIR=$HOME/data/apigen-mt-5k-openai
+  # export WANDB_API_KEY=<your_key_here>
+  # bash examples/train/sft/run_sft_megatron_apigen_mt.sh num_epochs=1 num_steps=<num_steps>
+```
+
+Don't:
+
+```bash
+  # SFT training with Megatron backend for Qwen2.5-1.5B-Instruct on a
+  # tool-calling dataset (Salesforce/APIGen-MT-5k).
+  #
+  # This script runs supervised fine-tuning using the Megatron backend with
+  # pure data parallelism (DP=4) on 4 GPUs. It exercises the tool-calling SFT
+  # path: per-row ``tools`` schemas and ``system`` policy are threaded into
+  # every ``apply_chat_template`` call, ``tool`` observation tokens are
+  # masked to 0, and every assistant turn (including ``tool_calls``)
+  # contributes to the loss via ``train_on_what=all_assistant_messages``.
+  #
+  # APIGen-MT-5k ships in ShareGPT format and contains 5000 rows. The
+  # preprocessing step below converts it to OpenAI messages format and writes
+  # a parquet shard the SFT trainer can load directly.
+  #
+  # Usage:
+  #   bash examples/train/sft/run_sft_megatron_apigen_mt.sh [extra overrides...]
+  #
+  # Example (default: 10-step smoke run on 4 GPUs):
+  #   bash examples/train/sft/run_sft_megatron_apigen_mt.sh
+  #
+  # Example (full epoch over the 5000 rows):
+  #   bash examples/train/sft/run_sft_megatron_apigen_mt.sh num_epochs=1 num_steps=null
+
+```

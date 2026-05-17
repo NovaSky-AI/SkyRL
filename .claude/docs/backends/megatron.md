@@ -4,9 +4,10 @@
 
 SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from git with a pinned rev in `[tool.uv.sources]`.
 
+## Key abstractions
 - `MegatronConfig` in `skyrl/train/config.py`
-- Custom bridges in `skyrl/backends/skyrl_train/workers/megatron/model_bridges.py` (e.g., `GLM47FlashBridge`).
 - `MegatronWorker` in `skyrl/backends/skyrl_train/workers/megatron/megatron_worker.py`.
+- Custom bridges in `skyrl/backends/skyrl_train/workers/megatron/model_bridges.py` (e.g., `GLM47FlashBridge`).
 
 ## Parallelism Strategies
 
@@ -25,4 +26,4 @@ Note: Sequence parallelism is auto-enabled when `tensor_model_parallel_size > 1`
 
 ## Test Requirements
 
-Megatron GPU tests need: `NVTE_FLASH_ATTN=0 NVTE_FUSED_ATTN=0`
+Megatron GPU tests need: `NVTE_FLASH_ATTN=0`

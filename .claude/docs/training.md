@@ -31,4 +31,4 @@ uv run --isolated --extra megatron --env-file .env.test -m skyrl.train.entrypoin
 Located in `examples/train/<task>/`:
 - `examples/train/gsm8k/` — GSM8K math training
 - `examples/train/text_to_sql/` — SQL training
-- Each has a `run_*.sh` script with preconfigured Hydra overrides.
+- Each has a `run_*.sh` script with preconfigured overrides.

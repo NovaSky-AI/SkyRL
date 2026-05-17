@@ -1,5 +1,8 @@
 # Architecture
 
+- Refer to `docs/content/docs/getting-started/overview.mdx` for a detailed system overview of SkyRL's training backend (non-Jax). 
+- Refer to `docs/content/docs/tinker/architecture.mdx` for an overview of SkyRL's tinker API server implementation.
+
 ## Project Structure
 
 ```
@@ -28,13 +31,10 @@ examples/train/         # Example training scripts per model/backend
 
 ## Key Patterns
 
-- Refer to `docs/content/docs/getting-started/overview.mdx` for a detailed system overview of SkyRL's training backend (non-Jax). 
-- Refer to `docs/content/docs/tinker/architecture.mdx` for an overview of SkyRL's tinker API server implementation.
-
 - **Ray orchestration**: Training workers and inference engines run as Ray actors.
 - **Config hierarchy**: `SkyRLTrainConfig` → `TrainerConfig`, `GeneratorConfig`, `DataConfig`, `EnvironmentConfig`. Accessed as `cfg.trainer.*`, `cfg.generator.*`, etc.
-- **CLI**: Config uses Hydra/OmegaConf — Hydra for YAML config composition, OmegaConf for CLI parsing and merging. Pass overrides as `key=value` CLI args.
-- **Backend selection**: `trainer.strategy` chooses backend — `fsdp2` (default), `fsdp`, `megatron`, or `jax`.
+- **CLI**: Config uses OmegaConf + dataclasses — OmegaConf for CLI parsing and merging, loaded into dataclasses for better typing. Pass overrides as `key=value` CLI args.
+- **Backend selection**: `trainer.strategy` chooses backend — `fsdp` (default), `fsdp`, `megatron`, or `jax`.
 
 ## Weight Sync
 
