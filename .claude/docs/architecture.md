@@ -44,4 +44,4 @@ Training weights are synced to inference engines via:
 
 ## Environments
 
-Defined in `skyrl-gym/skyrl_gym/envs/`. Each env extends `BaseTextEnv` with `step()` (and typically a `_get_reward()` helper). Available: gsm8k, aime, lcb, search, searchcode, sql.
+Defined in `skyrl-gym/skyrl_gym/envs/`. Each env extends `BaseTextEnv` with `step()` (and typically a `_get_reward()` helper).

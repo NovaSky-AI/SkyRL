@@ -4,7 +4,6 @@ SkyRL is a full-stack reinforcement learning library for training LLMs, designed
 
 ## Critical Rules
 
-- Ask as many clarifying questions as possible, come up with a detailed plan and only then execute. 
 - **Always use `uv run --isolated`** to run commands. Never use bare `python`, `pip`, or `pip install`.
 - **Log output to files**: `<cmd> > /tmp/results_1.log 2>&1` for persistence.
 - Backend extras (`fsdp`, `megatron`, `jax`) conflict with each other -- never combine them.
@@ -48,7 +47,7 @@ When working on these areas, read the corresponding doc first:
 | Megatron backend | `.claude/docs/backends/megatron.md` |
 | FSDP backend | `.claude/docs/backends/fsdp.md` |
 | JAX/TPU backend | `.claude/docs/backends/jax.md` |
-| Weight sync (training <-> inference) | `.claude/docs/weight_sync.md` |
+| Weight sync | `.claude/docs/weight_sync.md` |
 
 
 ## Troubleshooting

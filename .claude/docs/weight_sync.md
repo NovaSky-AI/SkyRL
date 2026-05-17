@@ -19,7 +19,7 @@ skyrl/backends/skyrl_train/weight_sync/
 
 vLLM worker-extension classes (loaded via `--worker-extension-cls`):
 
-- `skyrl/backends/skyrl_train/inference_servers/vllm_worker.py` — `WorkerWrap`. **Legacy path.** Single-shot `load_weights(request)`.
+- `skyrl/backends/skyrl_train/inference_servers/vllm_worker.py` — `WorkerWrap`. **Legacy path.**  One or more calls to `load_weights(request)`.
 - `skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. **New path** (`_SKYRL_USE_NEW_INFERENCE=1`, default). Three-phase chunked lifecycle.
 
 ## Transfer Strategies
@@ -33,15 +33,13 @@ vLLM worker-extension classes (loaded via `--worker-extension-cls`):
 
 **Legacy path** (`WorkerWrap`):
 1. `init_weight_update_communicator(init_info)` — once per session. Constructs the receiver.
-2. `load_weights(request)` — per sync. Iterates `receive_weights(request)`, builds the full `(name, tensor)` list, calls `model_runner.reload_weights(weights_iterator=...)` under `set_current_vllm_config(self.vllm_config)`.
+2. `load_weights(request)` — per sync. Receives weights using strategy-specific weight receiver and loads weights into vLLM.
 3. `teardown_weight_receiver()` — on shutdown.
 
 **New path** (`NewInferenceWorkerWrap`):
 1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
 2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
 3. `finish_weight_update()` — runs `finalize_layerwise_reload` (quantization repacking, attention weight postprocessing).
-
-All three new-path methods wrap vLLM calls in `with set_current_vllm_config(self.vllm_config), torch.device(self.device):` because `process_weights_after_loading` reads `get_current_vllm_config()` (e.g. flashinfer_cutlass_moe needs the compilation config to build kernels). Forgetting this breaks unquantized MoE on FlashInfer backends. See `https://github.com/vllm-project/vllm/issues/42821`.
 
 ## Convention: vLLM imports
 
@@ -71,7 +69,7 @@ The CPU tests do **not** import `WorkerWrap` or `NewInferenceWorkerWrap`. Any ch
 
 ## vLLM version coupling
 
-`vllm` is pinned in `pyproject.toml`. Weight-sync code paths are tightly coupled to vLLM internals (`model_runner.reload_weights`, `initialize_layerwise_reload`, `SKIP_TENSORS`, `set_current_vllm_config`). When bumping the pin, re-verify the GPU weight-sync tests for both the legacy and new paths.
+`vllm` is pinned in `pyproject.toml`. Weight-sync code paths are tightly coupled to vLLM internals (`model_runner.load_weights`, `initialize_layerwise_reload`, `SKIP_TENSORS`). When bumping the pin, re-verify the GPU weight-sync tests for both the legacy and new paths.
 
 ## Gotchas
 

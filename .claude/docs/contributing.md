@@ -1,6 +1,6 @@
 # Contributing
 
-Start off any modification or debugging with SkyRL using this file as the primary instruction manual. Before coming up with a plan, ensure you have thoroughly gone through the instructions here as well as relevant documentation in `docs/`.
+Start off any modification or debugging with SkyRL using this file as the primary instruction manual. Before coming up with a plan, ensure you have thoroughly gone through the instructions here as well as relevant documentation in `docs/`. (Ex: for understanding configuration, go through `docs/content/docs/configuration/config.mdx`)
 
 **Google Style Guide**: Overall, you should follow Google's Python Style Guide while writing code for the project, unless specifically instructed by the user or by instructions here. 
 
