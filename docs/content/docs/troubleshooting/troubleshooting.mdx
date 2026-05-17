@@ -32,15 +32,14 @@ Sometimes, you might see the following logs from the raylet:
 
 **What this means**
 
-In Ray, all tasks and actors are run in a "worker process" . Each worker process has to register with Ray's centralized Global Control Service. Code inside the actor class' __init__ method is run after registration. In our case, we use the uv + ray integration, and thus startup includes starting the worker process with the uv run command (exact same command used to launch the entrypoint).
+In Ray, all tasks and actors are run in a "worker process" . Each worker process has to register with Ray's centralized Global Control Service. Code inside the actor class' `__init__` method is run after registration. In our case, we use the uv + ray integration, and thus startup includes starting the worker process with the uv run command (exact same command used to launch the entrypoint).
 
 The error message is referring to worker process not starting up within timeout. This can be due to
 
 1. Incorrect startup command : maybe the path to an env file passed to uv run --env-file <env_file> .. is incorrect, or not available on the worker node, etc
-Fix: Correct the startup command so that it is valid when run inside the working directory on the head as well as worker nodes.
+   - Fix: Correct the startup command so that it is valid when run inside the working directory on the head as well as worker nodes.
 2. Slow startup : Your run can hang even if you simply exceed Ray's timeout limit for worker startup. This can happen with a cold-start run - the first SkyRL run in your cluster when `uv` has to download all the dependencies and populate its cache.
-
-Fix: Increase the registration timeout for Ray workers with `RAY_worker_register_timeout_seconds` (say 600). This should be set before the ray cluster is launched with ray start. The ideal fix is to bake this large value in the container. 
+   - Fix: Increase the registration timeout for Ray workers with `RAY_worker_register_timeout_seconds` (say 600). This should be set before the ray cluster is launched with ray start. The ideal fix is to bake this large value in the container. 
 
 ## Memory leaks during training with code that uses `multiprocessing`
 
