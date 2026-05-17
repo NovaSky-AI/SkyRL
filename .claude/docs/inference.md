@@ -10,7 +10,7 @@
 
 ## vLLM Router
 
-- `VLLMRouter` in `skyrl/backends/skyrl_train/inference_servers/vllm_router.py` wraps a child process running the `vllm-router` binary.
+- `VLLMRouter` in `skyrl/backends/skyrl_train/inference_servers/vllm_router.py` wraps a child process running `vllm-router`. 
 
 ## PD Disaggregation
 
