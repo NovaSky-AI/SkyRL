@@ -373,7 +373,7 @@ algorithm:
   # this adds training batch level normalization to advantages
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
-  policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
+  policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "gmpo", "sapo", "clip_cov", "kl_cov", "cispo" or customizable with PolicyLossRegistry
   loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
   grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
   zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
@@ -485,15 +485,17 @@ algorithm:
   - `regular`: Vanilla PPO loss with token-level importance sampling
   - `dual_clip`: Dual clip PPO loss proposed in [this paper](https://arxiv.org/pdf/1912.09729)
   - `gspo`: [Group Sequence Policy Optimization](https://arxiv.org/abs/2507.18071) with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
+  - `gmpo`: [Geometric-Mean Policy Optimization](https://arxiv.org/abs/2507.20673), a sequence-level objective intended to be used with `loss_reduction="sequence_mean"` and typically paired with `advantage_estimator="grpo"`.
   - `clip_cov`: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on [this paper](https://arxiv.org/abs/2505.22617).
   - `kl_cov`: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on [this paper](https://arxiv.org/abs/2505.22617).
   - `cispo`: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in [MiniMax-M1](https://arxiv.org/abs/2506.13585).
+  - `sapo`: Soft Adaptive Policy Optimization (SAPO) as proposed in [this paper](https://arxiv.org/pdf/2511.20347).
   - Custom policy losses can be registered with the `PolicyLossRegistry`
 
 - `algorithm.loss_reduction`: Type of loss reduction to use. Options include:
 
   - `token_mean`: computes average loss over all valid tokens in the batch. Used in [DAPO](https://dapo-sia.github.io/).
-  - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch.
+  - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch. This is the required reduction mode for `gmpo`.
   - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). `algorithm.max_seq_len` must be set explicitly for this mode because multi-turn/token budgets are workload-dependent.
 
 - `algorithm.grpo_norm_by_std`: Whether to normalize advantages by the standard deviation in GRPO. This is set to `false` in [Dr. GRPO](https://arxiv.org/abs/2503.20783).
