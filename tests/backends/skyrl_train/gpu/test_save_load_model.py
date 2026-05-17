@@ -5,7 +5,7 @@ For FSDP and FSDP2, run with:
 uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/test_save_load_model.py -m "not megatron"
 
 For Megatron, run with:
-uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/test_save_load_model.py -m "megatron"
+uv run --isolated --extra dev --extra megatron -- pytest tests/backends/skyrl_train/gpu/test_save_load_model.py -m "megatron"
 """
 
 import json
@@ -55,7 +55,7 @@ def run_one_training_step(
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
-    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    # Unified interface for all strategies (megatron, fsdp)
     batch = megatron_batch if strategy == "megatron" else data
     assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
     ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
@@ -66,7 +66,6 @@ def run_one_training_step(
     "strategy",
     [
         "fsdp",
-        "fsdp2",
         pytest.param("megatron", marks=pytest.mark.megatron),
     ],
 )
@@ -94,7 +93,7 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         # Prepare training input and run one training step
         dp_size = actor_group_1.actor_infos[0].rank.dp_size
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+            from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
                 get_test_training_batch,
             )
 

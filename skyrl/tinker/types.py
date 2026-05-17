@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
-from pydantic import Base64Bytes, BaseModel, Discriminator
+from pydantic import Base64Bytes, BaseModel, Discriminator, Field
 
 
 class RequestType(str, Enum):
@@ -74,6 +74,7 @@ class LoraConfig(BaseModel):
 
 class CreateModelInput(BaseModel):
     lora_config: LoraConfig
+    model_role: str = "policy"
 
 
 class CreateModelOutput(BaseModel):
@@ -128,9 +129,14 @@ class MultiModalPlaceholder(BaseModel):
     length: int  # Length of the placeholder tokens
 
 
+class MultiModalKwargs(TypedDict):
+    pixel_values: Any | None
+    image_grid_thw: Any | None
+
+
 class RenderedModelInput(BaseModel):
     prompt_ids: list[int]
-    multi_modal_kwargs: dict[str, bytes] | None = None
+    multi_modal_kwargs: MultiModalKwargs | None = None
     multi_modal_placeholders: list[MultiModalPlaceholder] | None = None
 
 
@@ -143,6 +149,8 @@ class LossFnInputs(BaseModel):
     weights: TensorData
     advantages: TensorData
     logprobs: TensorData
+    values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
+    returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
 
 
 class Datum(BaseModel):
@@ -152,7 +160,7 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
     loss_fn_config: dict[str, float] | None = None
 
 
@@ -264,6 +272,8 @@ class PreparedModelPassBatch(BaseModel):
     all_token_weights: list[list[float]]
     all_sampling_logprobs: list[list[float]]
     all_advantages: list[list[float]]
+    all_values: list[list[float]]
+    all_returns: list[list[float]]
 
     # Per-example scalars
     all_model_ids: list[str]
@@ -294,7 +304,16 @@ class PreparedSampleBatch(BaseModel):
     request_batch_slices: list[tuple[str, str, int, int, bool]]
 
 
-# Loss function type mappings (used for validation and backend dispatch)
+# All accepted loss functions across backends.
+SUPPORTED_LOSS_FNS = {
+    "cross_entropy",
+    "importance_sampling",
+    "ppo",
+    "cispo",
+    "ppo_critic",
+}
+
+# Loss function type mappings used by the JAX backend dispatch path.
 LOSS_TYPES = {
     "cross_entropy": 0,
     "importance_sampling": 1,

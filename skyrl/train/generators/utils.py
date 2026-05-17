@@ -147,26 +147,33 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemp
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) -> List[int]:
+def get_generation_prompt_ids(tokenizer, tokenizer_kwargs: Optional[dict] = None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
 
     Args:
         tokenizer: HuggingFace tokenizer with chat_template support.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``). If None, uses defaults.
+                          ``enable_thinking`` is not supported here; use
+                          ``encode_messages_subset`` instead.
 
     Returns:
         List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
+    assert "enable_thinking" not in (
+        tokenizer_kwargs or {}
+    ), "enable_thinking is not supported in get_generation_prompt_ids; use encode_messages_subset instead"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
     empty_user = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, chat_template=chat_template
+        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, **kwargs
     )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": ""}],
         add_generation_prompt=True,
         tokenize=True,
         return_dict=False,
-        chat_template=chat_template,
+        **kwargs,
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -225,12 +232,25 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     )
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
+def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
+    """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
+    flat = []
+    for go in generator_outputs:
+        flat.extend(go[key])
+    return flat
+
+
+def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
-    Concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
 
     We only aggregate rollout metrics the can deduced by responses and rewards, but not
     those that use `env_metrics` or `env_classes`.
+
+    Args:
+        generator_outputs: Per-batch generator outputs to concatenate.
+        step_wise: If True, validate step-wise specific fields on the concatenated result
+            (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -238,34 +258,50 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         raise ValueError(
             "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
         )
+    first = generator_outputs[0]
     result: GeneratorOutput = {
-        "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
-        "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
-        "rewards": sum([output["rewards"] for output in generator_outputs], []),
-        "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
+        "response_ids": _flatten_field(generator_outputs, "response_ids"),
+        "rewards": _flatten_field(generator_outputs, "rewards"),
+        "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": (
-            sum([output["stop_reasons"] for output in generator_outputs], [])
-            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
-            else None
+            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
         ),
         "rollout_logprobs": (
-            sum([output["rollout_logprobs"] for output in generator_outputs], [])
-            if generator_outputs[0]["rollout_logprobs"] is not None
-            else None
+            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
     }
 
     # propagate additional keys with list values as-is
-    additional_keys = [
-        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
-    ]
+    additional_keys = [key for key in first if key not in result and isinstance(first[key], list)]
     if len(additional_keys):
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
-        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+        result[key] = _flatten_field(generator_outputs, key)
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+    )
+
+    # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
+    # computes basic stats (response length, reward); generators may add custom keys, which we
+    # aggregate by inferring from the key name. TODO(Charlie): hacky, to be removed soon.
+    extra_keys: dict = {}
+    for go in generator_outputs:
+        per_group = go.get("rollout_metrics") or {}
+        for k, v in per_group.items():
+            if k not in rollout_metrics and isinstance(v, (int, float)):
+                extra_keys.setdefault(k, []).append(v)
+    for k, values in extra_keys.items():
+        if "avg" in k or "mean" in k:
+            rollout_metrics[k] = sum(values) / len(values)
+        elif "min" in k:
+            rollout_metrics[k] = min(values)
+        elif "max" in k:
+            rollout_metrics[k] = max(values)
+        else:
+            rollout_metrics[k] = sum(values)
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -273,7 +309,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     from skyrl.train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result)
+    validate_generator_output(num_prompts, result, step_wise=step_wise)
 
     return result
 
@@ -308,6 +344,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    loss_masks: Optional[List[List[int]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -317,6 +354,7 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
+        loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
 
     Returns:
         Dictionary of aggregated metrics
@@ -347,6 +385,17 @@ def get_rollout_metrics(
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if loss_masks is not None:
+        assistant_tokens_arr = np.array([sum(mask) for mask in loss_masks])
+        rollout_metrics.update(
+            {
+                "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
+                "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
+                "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
+                "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+            }
+        )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
@@ -417,7 +466,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer, chat_template: Optional[str] = None):
+def encode_messages_subset(messages: ConversationType, tokenizer, tokenizer_kwargs: Optional[dict] = None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -440,17 +489,19 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
     # TODO(Charlie): what are the tokenizers that could lead to clipping issues? Namely the previous turn ending
     # token can be combined with the tokens of the start of a turn. e.g. Qwen3 with a dummy chat template in
-    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, chat_template=dummy_chat_template)`
+    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": dummy_chat_template})`
     # But this case is not realistic.
 
     assert len(messages), "messages list cannot be empty"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -460,8 +511,8 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=chat_template,
         return_dict=False,
+        **kwargs,
     )
 
     full_conversation = base_conversation + messages
@@ -469,15 +520,49 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=chat_template,
         return_dict=False,
+        **kwargs,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
+def _find_generation_prompt_boundary(cur_token_ids: List[int], generation_prompt_ids: List[int]) -> int:
+    """Return the index in ``cur_token_ids`` where assistant-generated content starts.
+
+    Handles the common case (exact prefix match) and a merge case where the last
+    token of the generation prompt is merged with the assistant content's leading
+    whitespace by the tokenizer (e.g. ``\\n`` + ``\\nHello`` -> ``\\n\\n`` token).
+    In the merge case, returns ``len(generation_prompt_ids) - 1`` so the merged
+    boundary token is attributed to the assistant's content (loss 1).
+
+    Args:
+        cur_token_ids: Token IDs for a single assistant message.
+        generation_prompt_ids: Expected generation-prompt prefix token IDs.
+
+    Returns:
+        Index into ``cur_token_ids`` at which generated content begins.
+
+    Raises:
+        AssertionError: If neither the exact nor the merge pattern matches.
+    """
+    n = len(generation_prompt_ids)
+    if cur_token_ids[:n] == generation_prompt_ids:
+        return n
+    # Merge fallback: everything except the last header token matches, and the
+    # last header token differs because it was merged with the content's
+    # leading whitespace during tokenization.
+    if n >= 1 and len(cur_token_ids) >= n and cur_token_ids[: n - 1] == generation_prompt_ids[: n - 1]:
+        return n - 1
+    raise AssertionError(
+        "Assistant message tokens should start with generation prompt (or a "
+        "merge variant thereof). "
+        f"Expected prefix {generation_prompt_ids}, got {cur_token_ids[:n]}"
+    )
+
+
 def get_response_ids_and_loss_mask_from_messages(
-    messages: ConversationType, tokenizer, assistant_logprobs=None, chat_template: Optional[str] = None
+    messages: ConversationType, tokenizer, assistant_logprobs=None, tokenizer_kwargs: Optional[dict] = None
 ):
     """
     Get the response ids and loss mask from a list of messages.
@@ -491,8 +576,8 @@ def get_response_ids_and_loss_mask_from_messages(
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
                 `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
-        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
-                       This should be the same chat template used for serving if a custom one was used.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
 
     Returns:
         Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
@@ -500,7 +585,7 @@ def get_response_ids_and_loss_mask_from_messages(
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer, chat_template=chat_template)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, tokenizer_kwargs=tokenizer_kwargs)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -511,14 +596,15 @@ def get_response_ids_and_loss_mask_from_messages(
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer, chat_template=chat_template)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, tokenizer_kwargs=tokenizer_kwargs)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
         # Regardless of the message role, each message is responsible for adding its own generation
         # prompt, and we apply the correct masking.
-        if cur_message["role"] == "user":
-            # 3.1. For user messages, it is simply zeros
+        if cur_message["role"] in ("user", "tool"):
+            # 3.1. For user / tool (observation) messages, it is simply zeros.
+            # Tool turns carry environment output, never assistant generation.
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
@@ -527,25 +613,33 @@ def get_response_ids_and_loss_mask_from_messages(
             # 1) generation prompt IDs -- mask is 0
             # 2) tokens actually generated by the assistant (including the EOS) -- mask is 1
             # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
-            assert cur_token_ids[: len(generation_prompt_ids)] == generation_prompt_ids, (
-                f"Assistant message tokens should start with generation prompt. "
-                f"Expected {generation_prompt_ids}, got {cur_token_ids[:len(generation_prompt_ids)]}"
-            )
+            # Handle the common case (exact prefix) and the merge case, where the
+            # last generation-prompt token (e.g. '\n' -> id 198 in Qwen) is merged
+            # with the assistant content's leading whitespace by the tokenizer
+            # (e.g. content '\nHello' -> header ends with '\n\n' id 271). This
+            # occurs for datasets like TULU3 where assistant replies may begin
+            # with a blank line.
+            header_boundary = _find_generation_prompt_boundary(cur_token_ids, generation_prompt_ids)
             if tokenizer.eos_token_id in cur_token_ids:
                 last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
-                generated_token_ids = cur_token_ids[len(generation_prompt_ids) : last_eos_token_index + 1]
+                generated_token_ids = cur_token_ids[header_boundary : last_eos_token_index + 1]
                 tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
             else:
-                generated_token_ids = cur_token_ids[len(generation_prompt_ids) :]
+                generated_token_ids = cur_token_ids[header_boundary:]
                 tokens_after_eos = []
-            assert len(generation_prompt_ids) + len(generated_token_ids) + len(tokens_after_eos) == len(
+            assert header_boundary + len(generated_token_ids) + len(tokens_after_eos) == len(
                 cur_token_ids
             ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
 
             # 3.2.1. Add the generation prompt IDs.
-            loss_mask.extend([0] * len(generation_prompt_ids))
+            # Use header_boundary (not len(generation_prompt_ids)) so the mask
+            # lines up with `cur_token_ids` even when the last header token got
+            # merged with the content's leading whitespace. In that merge case,
+            # header_boundary == len(generation_prompt_ids) - 1 and the merged
+            # boundary token ends up in `generated_token_ids` (loss 1).
+            loss_mask.extend([0] * header_boundary)
             if assistant_logprobs:
-                rollout_logprobs.extend([0.0] * len(generation_prompt_ids))
+                rollout_logprobs.extend([0.0] * header_boundary)
 
             # 3.2.2. Add what the assistant actually generated
             loss_mask.extend([1] * len(generated_token_ids))
@@ -568,9 +662,197 @@ def get_response_ids_and_loss_mask_from_messages(
 
             assistant_msg_idx += 1
         else:
-            raise ValueError(f"Expected message role to be 'user' or 'assistant', got {cur_message['role']}")
+            raise ValueError(f"Expected message role to be 'user', 'assistant', or 'tool', got {cur_message['role']}")
 
         assert len(loss_mask) == len(response_ids)
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
 
     return response_ids, loss_mask, rollout_logprobs
+
+
+# -------------------------------------------
+# Prefix-aware merging for step-wise training
+# -------------------------------------------
+
+
+def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
+    """Check if maybe_prefix is a prefix of candidate (or equal)."""
+    if len(maybe_prefix) > len(candidate):
+        return False
+    return maybe_prefix == candidate[: len(maybe_prefix)]
+
+
+def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+    """Slice a GeneratorOutput to keep only the entries at the given indices.
+
+    All sliced entries must share the same TrajectoryID — this helper is used by
+    prefix-aware merging which operates on one trajectory at a time.
+    """
+    assert len(indices) > 0, "indices must be non-empty"
+    # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
+    sliced: GeneratorOutput = {}
+    for key, value in generator_output.items():
+        if key == "rollout_metrics":
+            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
+            continue
+        elif value is None:
+            sliced[key] = None
+        else:
+            sliced[key] = [value[i] for i in indices]
+    return sliced
+
+
+def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
+    """Greedily merge turns of a single trajectory using prefix matching.
+
+    Takes a GeneratorOutput whose entries all belong to the same trajectory_id
+    and returns a merged GeneratorOutput (potentially fewer entries).
+    """
+    # Make sure all entries in the trajectory have the same trajectory_id
+    trajectory_ids = gen_out.get("trajectory_ids")
+    assert trajectory_ids is not None, "trajectory_ids is required for prefix-aware merging"
+    for i in range(0, len(trajectory_ids)):
+        assert (
+            trajectory_ids[i] == trajectory_ids[0]
+        ), "all entries in a single trajectory must have the same trajectory_id"
+
+    n = len(gen_out["response_ids"])
+    assert n > 0, "Expect non-empty GeneratorOutput."
+    is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
+    has_logprobs = gen_out.get("rollout_logprobs") is not None
+    has_stop_reasons = gen_out.get("stop_reasons") is not None
+
+    # Per-field output accumulators.
+    # Fields that we take from all the entries in the merge group
+    out_prompt_ids: List[List[int]] = []
+    out_response_ids: List[List[int]] = []
+    out_loss_masks: List[List[int]] = []
+    out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
+    out_rewards: list = []
+
+    # Fields that we only take from the last turn in the merge group
+    out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_trajectory_ids: list = []
+    out_is_last_step: List[bool] = []
+
+    # Accumulator for the current merge group
+    acc_prompt: List[int] = list(gen_out["prompt_token_ids"][0])
+    acc_response: List[int] = list(gen_out["response_ids"][0])
+    acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
+    acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
+    last = 0
+
+    def flush():
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        out_prompt_ids.append(acc_prompt)
+        out_response_ids.append(acc_response)
+        out_loss_masks.append(acc_loss_mask)
+        if has_logprobs:
+            out_logprobs.append(acc_logprobs)
+        out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
+        if has_stop_reasons:
+            out_stop_reasons.append(gen_out["stop_reasons"][last])
+        out_trajectory_ids.append(gen_out["trajectory_ids"][last])
+        out_is_last_step.append(gen_out["is_last_step"][last])
+
+    for i in range(1, n):
+        full_merged = acc_prompt + acc_response
+
+        # If prompt[i-1] + response[i-1] is not a prefix of prompt[i], flush the current merge group
+        # and start a new group to merge.
+        if not _is_prefix(full_merged, gen_out["prompt_token_ids"][i]):
+            flush()
+            acc_prompt = list(gen_out["prompt_token_ids"][i])
+            acc_response = list(gen_out["response_ids"][i])
+            acc_loss_mask = list(gen_out["loss_masks"][i])
+            acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
+            last = i
+            continue
+
+        # prompt[i-1] + response[i-1] is a prefix of prompt[i], so we can merge the two turns.
+        # obs_delta is the newly prefilled tokens not generated by the assistant, so we need to
+        # properly loss mask them.
+        obs_delta = gen_out["prompt_token_ids"][i][len(full_merged) :]
+
+        # Merge obs_delta to the fields, assigning zeros since it is not generated by the assistant.
+        acc_response.extend(obs_delta)
+        acc_loss_mask.extend([0] * len(obs_delta))
+        if acc_logprobs is not None:
+            acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend([0.0] * len(obs_delta))
+
+        # Extend the current merge group with the next turn's fields, exactly the same preserved.
+        acc_response.extend(gen_out["response_ids"][i])
+        acc_loss_mask.extend(gen_out["loss_masks"][i])
+        if acc_logprobs is not None:
+            acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend(gen_out["rewards"][i])
+
+        last = i
+
+    flush()
+
+    return {
+        "prompt_token_ids": out_prompt_ids,
+        "response_ids": out_response_ids,
+        "rewards": out_rewards,
+        "loss_masks": out_loss_masks,
+        "stop_reasons": out_stop_reasons,
+        "rollout_logprobs": out_logprobs,
+        "trajectory_ids": out_trajectory_ids,
+        "rollout_expert_indices": None,
+        "is_last_step": out_is_last_step,
+    }
+
+
+def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
+    """Merge step-wise GeneratorOutput entries using prefix-aware merging.
+
+    For consecutive turns within the same trajectory where
+    prompt[i] + response[i] is a prefix of prompt[i+1],
+    merges them into a single entry with:
+    - prompt from the first turn in the merge group
+    - response tokens concatenated with observation deltas (obs_delta) in between
+    - Per-token fields (loss_masks, rewards, logprobs) concatenated, with default
+      values (0) for obs_delta positions
+    - Per-turn fields (stop_reason, is_last_step, trajectory_id) taken from the
+      last turn in the merge group
+
+    When the prefix condition fails between two consecutive turns, the current
+    merge group is flushed and a new group starts (greedy merging).
+
+    The returned GeneratorOutput's rollout_metrics should be ignored. We already recorded it before
+    calling this function.
+
+    Args:
+        generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
+
+    Returns:
+        Merged GeneratorOutput with one entry per merged group.
+    """
+    num_samples = len(generator_output["response_ids"])
+    assert (
+        generator_output.get("rollout_expert_indices") is None
+    ), "rollout_expert_indices not supported for prefix-aware merging"
+    assert (
+        generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
+    ), "pixel_values and image_grid_thw not supported for step-wise training merging"
+
+    # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
+    # (contiguity is guaranteed by validate_generator_output with step_wise=True)
+    is_last_step = generator_output["is_last_step"]
+    trajectory_slices: List[GeneratorOutput] = []
+    start = 0
+    for i in range(num_samples):
+        if is_last_step[i]:
+            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            start = i + 1
+
+    merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
+
+    return concatenate_generator_outputs(merged_slices, step_wise=True)

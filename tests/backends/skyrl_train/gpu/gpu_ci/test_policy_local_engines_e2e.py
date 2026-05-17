@@ -10,7 +10,6 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -38,10 +37,6 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     return cfg
 
 
-# TODO (aaron): add back tests when we support gloo
-_skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
@@ -56,28 +51,20 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
     ),
     [
         pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
-        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
-        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", MODEL, 1, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", MODEL, 1, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MODEL, 1),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MODEL, 1),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", MODEL, 1),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "mp", MODEL, 1),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "mp", MODEL, 1),
         # moe model, dp > 1
-        pytest.param(True, "nccl", "fsdp2", 2, 1, "ray", MOE_MODEL, 2),
-        pytest.param(False, "nccl", "fsdp2", 1, 1, "ray", MOE_MODEL, 2),
+        pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2),
+        pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
         "colocate_nccl_fsdp_vllm",
-        "no_colocate_gloo_fsdp_vllm",
-        "colocate_gloo_fsdp_vllm",
-        "no_colocate_nccl_fsdp2_vllm",
-        "colocate_nccl_fsdp2_vllm",
-        "colocate_nccl_fsdp2_vllm_mp",
-        "non_colocated_nccl_fsdp2_vllm_mp",
-        "colocate_nccl_fsdp2_vllm_dp",
-        "non_colocated_nccl_fsdp2_vllm_dp",
+        "colocate_nccl_fsdp_vllm_mp",
+        "non_colocated_nccl_fsdp_vllm_mp",
+        "colocate_nccl_fsdp_vllm_dp",
+        "non_colocated_nccl_fsdp_vllm_dp",
     ],
 )
 async def test_policy_local_engines_e2e(

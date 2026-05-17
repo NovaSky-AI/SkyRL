@@ -51,7 +51,6 @@ def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str
     else:
         # /v1/completions expects logprobs as an integer (number of top logprobs)
         sampling_params["logprobs"] = 1
-    sampling_params["return_tokens_as_token_ids"] = True
     return sampling_params
 
 
@@ -502,7 +501,7 @@ async def test_client_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     with pytest.raises(aiohttp.ClientResponseError):
-        await client.chat_completion({"json": {"model": SERVED_MODEL_NAME}})
+        await client.chat_completion({"json": {}})
 
     # Wrong model name
     with pytest.raises(aiohttp.ClientResponseError):

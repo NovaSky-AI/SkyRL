@@ -9,6 +9,9 @@ set -x
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
+MAX_PROMPT_LENGTH=512
+MAX_GENERATE_LENGTH=1024
+MAX_SEQ_LEN=$((MAX_PROMPT_LENGTH + MAX_GENERATE_LENGTH))
 
 # Dr. GRPO parameters
 
@@ -25,7 +28,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_GPUS \
@@ -40,8 +43,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.micro_forward_batch_size_per_gpu=64 \
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
-  trainer.max_prompt_length=512 \
-  generator.sampling_params.max_generate_length=1024 \
+  trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
+  generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+  trainer.algorithm.max_seq_len=$MAX_SEQ_LEN \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \

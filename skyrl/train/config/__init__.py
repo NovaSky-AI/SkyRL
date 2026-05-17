@@ -36,6 +36,13 @@ from skyrl.train.config.config import (
     get_config_as_yaml_str,
     make_config,
 )
+from skyrl.train.config.sft_config import (
+    SFTConfig,
+    SFTPlacementConfig,
+    TrainOnWhat,
+    build_skyrl_config_for_sft,
+    validate_sft_cfg,
+)
 
 __all__ = [
     "SkyRLTrainConfig",
@@ -74,4 +81,9 @@ __all__ = [
     "make_config",
     "get_config_as_dict",
     "get_config_as_yaml_str",
+    "SFTConfig",
+    "SFTPlacementConfig",
+    "TrainOnWhat",
+    "build_skyrl_config_for_sft",
+    "validate_sft_cfg",
 ]

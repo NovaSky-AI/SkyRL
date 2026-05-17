@@ -17,6 +17,7 @@ from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
+    EngineStateDB,
     FutureDB,
     ModelDB,
     RequestStatus,
@@ -119,14 +120,16 @@ def prepare_model_pass_batch(
     all_model_ids = []
     all_sampling_logprobs = []
     all_advantages = []
+    all_values = []
+    all_returns = []
     all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
 
     for request_id, (model_id, request_data) in requests.items():
-        if request_data.loss_fn not in types.LOSS_TYPES:
+        if request_data.loss_fn not in types.SUPPORTED_LOSS_FNS:
             raise ValueError(
-                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
+                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {sorted(types.SUPPORTED_LOSS_FNS)}"
             )
         request_start = len(all_model_inputs)
         for item in request_data.data:
@@ -136,6 +139,8 @@ def prepare_model_pass_batch(
             all_token_weights.append(loss_fn_inputs.weights.data)
             all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
             all_advantages.append(loss_fn_inputs.advantages.data)
+            all_values.append(loss_fn_inputs.values.data)
+            all_returns.append(loss_fn_inputs.returns.data)
             all_model_ids.append(model_id)
             all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
@@ -148,6 +153,8 @@ def prepare_model_pass_batch(
         all_token_weights=all_token_weights,
         all_sampling_logprobs=all_sampling_logprobs,
         all_advantages=all_advantages,
+        all_values=all_values,
+        all_returns=all_returns,
         all_model_ids=all_model_ids,
         all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,
@@ -155,12 +162,18 @@ def prepare_model_pass_batch(
     )
 
 
-def get_backend_classes(backend_name: str):
+def get_backend_classes(backend_name: str, use_ray: bool = False):
     """Lazy import backends to avoid importing unused backend dependencies (e.g., JAX, Ray)."""
     if backend_name == "jax":
-        from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+        if use_ray:
+            from skyrl.backends.jax import JaxBackendConfig
+            from skyrl.backends.ray_jax import RayJaxBackend
 
-        return JaxBackend, JaxBackendConfig
+            return RayJaxBackend, JaxBackendConfig
+        else:
+            from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+
+            return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
         from skyrl.backends.skyrl_train_backend import (
             FSDPBackendOverrides,
@@ -236,9 +249,17 @@ class TinkerEngine:
         enable_sqlite_wal(self.db_engine)
 
         # Initialize the backend (handles model state, computation, and adapter management)
-        backend_class, backend_config_class = get_backend_classes(config.backend)
+        use_ray = config.backend_config.get("use_ray", False)
+        backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
+
+        # Backends that support async sample routing notify us when their
+        # inference endpoint changes; we persist it to EngineStateDB so the
+        # API process can forward sample requests directly. Backends stay
+        # DB-free; only the engine owns the connection.
+        if hasattr(self.backend, "set_inference_state_publisher"):
+            self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
@@ -249,6 +270,20 @@ class TinkerEngine:
     def metrics(self) -> types.EngineMetrics:
         """Pass-through to backend metrics for backwards compatibility."""
         return self.backend.metrics
+
+    def _write_inference_state_to_db(self, proxy_url: str | None) -> None:
+        """Upsert the singleton EngineStateDB row.
+
+        Wired into the backend via set_inference_state_publisher so the API
+        process can resolve the engine-managed vLLM URL on the async sample
+        routing path. ``proxy_url=None`` clears the row (post-teardown).
+        """
+        with Session(self.db_engine) as session:
+            row = session.get(EngineStateDB, 1) or EngineStateDB(singleton_id=1)
+            row.inference_proxy_url = proxy_url
+            row.updated_at = datetime.now(timezone.utc)
+            session.add(row)
+            session.commit()
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
@@ -296,6 +331,23 @@ class TinkerEngine:
                     )
                 session.commit()
 
+    def _find_destructive_barriers(self, session: Session) -> dict[str, int]:
+        """Find the earliest pending destructive operation (optim_step/load_weights) per model.
+
+        These act as scheduling barriers: model passes before them can be batched
+        safely, and single requests after a blocked pass must wait.
+        """
+        query = (
+            select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
+            .where(
+                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
+                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
+            )
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .group_by(FutureDB.model_id)
+        )
+        return dict(session.exec(query).all())
+
     def find_batchable_model_passes(
         self, session: Session, request_type: types.RequestType
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
@@ -311,17 +363,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
-        # Find the earliest pending optim_step or load_weights per model (these act as barriers)
-        barriers_query = (
-            select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(
-                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
-                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
-            )
-            .where(FutureDB.status == RequestStatus.PENDING)
-            .group_by(FutureDB.model_id)
-        )
-        barriers = dict(session.exec(barriers_query).all())
+        barriers = self._find_destructive_barriers(session)
 
         # Get all pending operations of the requested type ordered by request_id
         query = (
@@ -389,6 +431,26 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_type, request_data) tuples
         """
+        # Find the first blocked forward pass per model: a pending FORWARD/FORWARD_BACKWARD
+        # that sits behind a destructive barrier and won't be batched this iteration.
+        # Single requests must not jump ahead of these.
+        destructive_barriers = self._find_destructive_barriers(session)
+        blocked_pass_barriers: dict[str, int] = {}
+        if destructive_barriers:
+            pending_passes = session.exec(
+                select(FutureDB.model_id, FutureDB.request_id)
+                .where(
+                    (FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
+                    | (FutureDB.request_type == types.RequestType.FORWARD)
+                )
+                .where(FutureDB.status == RequestStatus.PENDING)
+                .where(FutureDB.model_id.in_(destructive_barriers.keys()))
+                .order_by(FutureDB.request_id)
+            ).all()
+            for model_id, req_id in pending_passes:
+                if req_id >= destructive_barriers[model_id]:
+                    blocked_pass_barriers.setdefault(model_id, req_id)
+
         statement = (
             select(FutureDB)
             .where(FutureDB.status == RequestStatus.PENDING)
@@ -400,12 +462,19 @@ class TinkerEngine:
         )
         other_futures = session.exec(statement).all()
 
+        # Filter: only include ops that come before the first blocked pass for their model
+        other_futures = [
+            op
+            for op in other_futures
+            if op.model_id not in blocked_pass_barriers or op.request_id < blocked_pass_barriers[op.model_id]
+        ]
+
         return {str(f.request_id): (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Create model in backend (allocates adapter_index, creates optimizer, and configures adapter)
-        self.backend.create_model(model_id, request_data.lora_config)
+        self.backend.create_model(model_id, request_data.lora_config, model_role=request_data.model_role)
 
         logger.info(f"Created LoRA model {model_id}")
 

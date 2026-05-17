@@ -16,7 +16,8 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    WorkerOutput,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
@@ -32,12 +33,15 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.setup import create_inference_servers
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
+    build_vllm_cli_args,
+)
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
@@ -142,7 +146,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
 
 
 def import_worker(strategy: str, worker_type: str):
-    if strategy in ("fsdp", "fsdp2"):
+    if strategy == "fsdp":
         module_path = "skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker"
     elif strategy == "megatron":
         module_path = "skyrl.backends.skyrl_train.workers.megatron.megatron_worker"
@@ -226,14 +230,15 @@ def get_available_gpus():
 def wait_for_server(url: str, health_path: str, timeout: int = 60, interval: float = 1.0):
     start_time = time.time()
     while True:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Server at {url} did not come online within {timeout} seconds")
         try:
             response = requests.get(f"http://{url}/{health_path}")
             if response.ok:
                 return
         except requests.exceptions.ConnectionError:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Server at {url} did not come online within {timeout} seconds")
-            time.sleep(interval)
+            pass
+        time.sleep(interval)
 
 
 def levenshtein(s1, s2):
@@ -365,8 +370,8 @@ def get_model_logits_from_actor(actor_group: PPORayActorGroup, input_sequences, 
 
     results_refs = actor_group.async_run_ray_method("mesh", "forward", data)
     results = ray.get(results_refs)
-    ret_databatch: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)
-    logits = ret_databatch["output"]
+    output = WorkerOutput.cat(actor_group.actor_infos, results)
+    logits = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
     return logits
 
@@ -389,12 +394,11 @@ def ray_init_for_tests():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
     env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
-    if _SKYRL_USE_NEW_INFERENCE:
-        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params, tokenizer=None):
+async def run_inference(client, prompts, sampling_params, tokenizer=None, model=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
@@ -410,7 +414,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-    return await client.generate(engine_input)
+    return await client.generate(engine_input, model=model)
 
 
 @dataclass
@@ -420,12 +424,15 @@ class InferenceEngineState:
     client: Union[InferenceEngineClient, RemoteInferenceClient]
     pg: Optional[Any]  # placement group
     router: Optional[VLLMRouter]
-    server_group: Optional[ServerGroup]
+    server_groups: Optional[List[ServerGroup]] = None
+    prefill_server_groups: Optional[List[ServerGroup]] = None
+    decode_server_groups: Optional[List[ServerGroup]] = None
 
     def __post_init__(self):
         # internal attribute to track if the inference engines need a wake_up()
         # call before generation
         self._needs_wake_up = False
+        self._cleanup_pg = False
 
     def _close_common(self):
         """Shutdown router, server_group, and Ray actors (sync resources).
@@ -436,8 +443,27 @@ class InferenceEngineState:
         """
         if self.router is not None:
             self.router.shutdown()
-        if self.server_group is not None:
-            self.server_group.shutdown()
+        # Handle shutdown for prefill and decode server groups separately
+        group_lists = (
+            [self.server_groups]
+            if not self.prefill_server_groups
+            else [self.prefill_server_groups, self.decode_server_groups]
+        )
+        for group_list in group_lists:
+            if group_list is not None:
+                for group in group_list:
+                    group.shutdown()
+                if self._cleanup_pg:
+                    if len(group_list):
+                        # TODO (sumanthrh): This is a bit hacky, this assumes pg is the same
+                        # for groups in the group list - which is true for creation in
+                        # `create_inference_servers`
+                        # we should have a better way for cleaning up pg state
+                        group = group_list[0]
+                        try:
+                            ray.util.remove_placement_group(group._get_placement_group())
+                        except Exception as e:
+                            logger.info(f"Encountered error at pg cleanup: {e}")
 
         if isinstance(self.client, InferenceEngineClient):
             for engine in self.client.engines:
@@ -489,12 +515,16 @@ class InferenceEngineState:
         num_inference_engines: Optional[int] = None,
         sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
         enable_lora: bool = False,
-        active_lora_name: Optional[str] = None,
+        lora_max_loras: Optional[int] = None,
+        lora_max_cpu_loras: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
         distributed_executor_backend: Optional[str] = None,
         expert_parallel_size: Optional[int] = None,
+        enable_pd: bool = False,
+        num_prefill: int = 0,
+        language_model_only: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -528,6 +558,18 @@ class InferenceEngineState:
             ie_cfg.distributed_executor_backend = distributed_executor_backend
         if expert_parallel_size is not None:
             ie_cfg.expert_parallel_size = expert_parallel_size
+        if enable_pd:
+            ie_cfg.enable_pd = True
+            ie_cfg.num_prefill = num_prefill
+        # Propagate the LoRA limits onto the trainer config so build_vllm_cli_args
+        # (which reads from cfg.trainer.policy.model.lora) and any downstream
+        # path picks them up before vLLM is started.
+        if lora_max_loras is not None:
+            cfg.trainer.policy.model.lora.max_loras = lora_max_loras
+        if lora_max_cpu_loras is not None:
+            cfg.trainer.policy.model.lora.max_cpu_loras = lora_max_cpu_loras
+        if language_model_only is not None:
+            ie_cfg.language_model_only = language_model_only
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
@@ -555,38 +597,47 @@ class InferenceEngineState:
 
         # Return both router and server group if created to keep references alive
         router = None
-        server_group = None
         needs_wake_up = False
+        server_groups = None
+        prefill_server_groups = None
+        decode_server_groups = None
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
-                if active_lora_name is None:
-                    active_lora_name = "skyrl-lora"
-            server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
-                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
-            )
-            server_infos = server_group.start()
-            server_urls = [info.url for info in server_infos]
 
-            router = VLLMRouter(server_urls=server_urls)
-            proxy_url = router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
+            setup = create_inference_servers(
+                ie_cfg,
+                cli_args,
+                log_path=cfg.trainer.log_path,
+                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
             )
+            router = setup.router
+            server_groups = setup.server_groups
+            prefill_server_groups = setup.prefill_server_groups
+            decode_server_groups = setup.decode_server_groups
+            proxy_url = setup.proxy_url
+            server_urls = setup.server_urls
+
+            # When LoRA is enabled, point the client's default ``model_name`` at
+            # the active LoRA adapter so existing tests that don't pass an
+            # explicit ``model=`` keep routing through the adapter. Tests that
+            # need multi-LoRA can pass ``model=`` per call and rely on the
+            # client's underlying base model name only when needed.
+            # ``model_name`` is the base model the server was started with;
+            # LoRA-aware test cases are expected to pass adapter names
+            # explicitly per call (e.g. ``client.generate(..., model="lora-X")``).
+            base_model_name = served_model_name if served_model_name else cfg.trainer.policy.model.path
+
             client = RemoteInferenceClient(
                 proxy_url=proxy_url,
                 server_urls=server_urls,
-                model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
+                model_name=base_model_name,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-                active_lora_name=active_lora_name,
+                uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
+                data_parallel_size=ie_cfg.data_parallel_size,
                 tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
             )
         else:
@@ -631,8 +682,16 @@ class InferenceEngineState:
                     needs_wake_up = False
             else:
                 needs_wake_up = False
-        state = cls(client=client, pg=raw_pg if shared_pg else None, router=router, server_group=server_group)
+        state = cls(
+            client=client,
+            pg=raw_pg if shared_pg else None,
+            router=router,
+            server_groups=server_groups,
+            prefill_server_groups=prefill_server_groups,
+            decode_server_groups=decode_server_groups,
+        )
         state._needs_wake_up = needs_wake_up
+        state._cleanup_pg = not shared_pg
         return state
 
 
@@ -703,7 +762,7 @@ def init_remote_inference_servers(
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
     try:
-        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=200)
+        wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=400)
     except TimeoutError as e:
         print(f"Received timeout error while waiting for server: {e}")
         server_process.terminate()

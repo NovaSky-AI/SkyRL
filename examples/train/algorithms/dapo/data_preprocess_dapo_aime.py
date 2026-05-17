@@ -1,9 +1,14 @@
 import pandas as pd
 import polars as pl
 from pathlib import Path
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-dir", type=str, default=str(Path.home() / "data/dapo"))
+args = parser.parse_args()
 
 # Define input and output files
-DATA_DIR = Path.home() / "data/dapo"
+DATA_DIR = args.data_dir
 FILES = {
     "dapo-math-17k": "dapo-math-17k.parquet",
     "aime-2024": "aime-2024.parquet",

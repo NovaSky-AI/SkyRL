@@ -5,7 +5,7 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-For FSDP and FSDP2, run:
+For FSDP, run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
@@ -49,14 +49,14 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLTrainConfig:
+def get_test_trainer_config(strategy: str, fsdp_cpu_offload: bool = False) -> SkyRLTrainConfig:
     """Create minimal trainer config for testing"""
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
-    if strategy == "fsdp2":
-        cfg.trainer.policy.fsdp_config.cpu_offload = fsdp2_cpu_offload
+    if strategy == "fsdp":
+        cfg.trainer.policy.fsdp_config.cpu_offload = fsdp_cpu_offload
 
     # Use minimal settings for faster testing
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
@@ -130,24 +130,20 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
 
 
 @pytest.mark.parametrize(
-    ("strategy", "fsdp2_cpu_offload", "lora"),
+    ("strategy", "fsdp_cpu_offload", "lora"),
     [
         ("fsdp", False, False),
-        ("fsdp", False, False),
-        ("fsdp2", False, False),
-        ("fsdp2", True, False),
+        ("fsdp", True, False),
         pytest.param("megatron", False, False, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp_no_lora",
-        "fsdp_lora",
-        "fsdp2_no_lora",
-        "fsdp2_lora",
+        "fsdp_cpu_offload",
         "megatron_no_lora",
         # TODO (erictang000): add megatron lora test - currently full checkpointing fails
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload, lora):
+def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -159,7 +155,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
     7. Verifying all state matches
     8. Continuing training to ensure it works
     """
-    cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+    cfg = get_test_trainer_config(strategy, fsdp_cpu_offload)
     if lora:
         cfg.trainer.policy.model.lora.rank = 32
         cfg.trainer.policy.model.lora.alpha = 32
@@ -231,7 +227,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         print("Phase 2: Resume from checkpoint")
         ray_init_for_tests()
         # Create new config with resume enabled
-        cfg_resume = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+        cfg_resume = get_test_trainer_config(strategy, fsdp_cpu_offload)
         cfg_resume.trainer.resume_mode = "from_path"  # Enable resume
         cfg_resume.trainer.resume_path = checkpoint_dir  # Set resume path
         cfg_resume.trainer.export_path = cfg.trainer.export_path  # Use same export path

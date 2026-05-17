@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import torch
 from loguru import logger
 from tqdm.asyncio import tqdm
 
@@ -51,6 +52,8 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    pixel_values: Optional[torch.Tensor] = None
+    image_grid_thw: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -139,17 +142,24 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        policy_model_name: Optional[str] = None,
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            policy_model_name: identifier the inference engine knows the policy
+                by (base model path or registered LoRA adapter name). Threaded
+                into every ``client.generate(...)`` call as ``model``. When
+                ``None`` (default), the client falls back to its own
+                ``model_name``
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.policy_model_name = policy_model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
@@ -218,6 +228,35 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
+    # ------------------------------------------------------------------
+    # Subclass hooks. Default implementations are no-ops so generic envs
+    # see the upstream behavior; subclasses (e.g. RLMGymGenerator) override.
+    # ------------------------------------------------------------------
+
+    def _setup_env_extras(
+        self,
+        _env_class: str,
+        env_extras: Dict[str, Any],
+        _sampling_params: Optional[Dict[str, Any]],
+        _trajectory_id: Optional[TrajectoryID],
+    ) -> Dict[str, Any]:
+        """Hook: subclasses may inject env-specific callables/extras before env construction."""
+        return env_extras
+
+    def _post_process_agent_loop_output(
+        self,
+        agent_loop_output,
+        _env_extras: Dict[str, Any],
+        _trajectory_id: Optional[TrajectoryID],
+    ):
+        """Hook: transform agent_loop_output after per-step rewards are stamped.
+
+        Called at the end of ``agent_loop``, after reward allocation but before
+        return.  Subclasses can override to restructure, merge, or augment the
+        output steps (e.g. flattening nested trajectories, injecting metadata).
+        """
+        return agent_loop_output
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -260,6 +299,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
+        env_extras = self._setup_env_extras(env_class, env_extras, sampling_params, trajectory_id)
+
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
@@ -335,7 +376,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -522,6 +563,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_expert_indices=rollout_expert_indices_out,
             )
 
+        agent_loop_output = self._post_process_agent_loop_output(
+            agent_loop_output,
+            env_extras,
+            trajectory_id,
+        )
         return agent_loop_output
 
     def _build_per_token_rewards(
@@ -668,7 +714,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
+        engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
@@ -705,7 +751,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"
@@ -803,6 +849,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = None
             out_trajectory_ids = None
 
+        has_vision_features = any(getattr(output, "pixel_values", None) is not None for output in all_outputs)
+        pixel_values = (
+            [getattr(output, "pixel_values", None) for output in all_outputs] if has_vision_features else None
+        )
+        image_grid_thw = (
+            [getattr(output, "image_grid_thw", None) for output in all_outputs] if has_vision_features else None
+        )
+
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
             get_logprobs = sampling_params.get("logprobs", None) is not None
@@ -825,7 +879,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
@@ -846,7 +900,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
+            "env_metrics": env_metrics,
         }
+        if has_vision_features:
+            generator_output["pixel_values"] = pixel_values
+            generator_output["image_grid_thw"] = image_grid_thw
 
         return generator_output
 

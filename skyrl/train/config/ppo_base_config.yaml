@@ -23,7 +23,7 @@ trainer:
     ref_num_nodes: 1
     ref_num_gpus_per_node: 1
   sequence_parallel_backend: "ulysses"
-  strategy: fsdp2
+  strategy: fsdp
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -37,6 +37,13 @@ trainer:
         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights
         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
         init_method: "kaiming"
+        # Maximum number of LoRA adapters that can be active concurrently in a
+        # single GPU batch. Maps to vLLM's `max_loras`. Increase past 1 to
+        # serve multiple LoRA adapters from the same engine.
+        max_loras: 1
+        # Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
+        # `max_cpu_loras`; when null, vLLM defaults it to `max_loras`.
+        max_cpu_loras: null
     optimizer_config:
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
@@ -47,7 +54,7 @@ trainer:
       scheduler: "constant_with_warmup"   
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-      reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
+      reshard_after_forward: true # [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
@@ -127,8 +134,9 @@ trainer:
     tis_imp_ratio_cap: -1.0
     use_tis: false
 
-    # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
-    # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length.
+    # Used for seq_mean_token_sum_norm loss reduction.
+    # Must be set explicitly when trainer.algorithm.loss_reduction=seq_mean_token_sum_norm.
+    # Choose the total sequence-length normalization constant for your setup.
     max_seq_len: null
 
     # references
@@ -249,6 +257,7 @@ trainer:
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
+  log_example_interval: 1  # Log example prompt/response every N steps, -1 to disable.
   dump_data_batch: false
   dump_eval_results: true
 
@@ -381,6 +390,7 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  merge_stepwise_output: false
 
 environment:
   env_class: "gsm8k"

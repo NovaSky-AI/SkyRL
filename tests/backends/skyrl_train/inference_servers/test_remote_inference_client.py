@@ -4,16 +4,19 @@ import asyncio
 import pickle
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+import aiohttp
 import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
 from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
     RemoteInferenceClient,
 )
@@ -22,10 +25,34 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 def create_mock_vllm_server(server_id: int) -> FastAPI:
     """Create a mock vLLM server with standard endpoints."""
     app = FastAPI()
+    app.state.last_generate_features = None
+    app.state.last_generate_model = None
+    app.state.last_chat_model = None
+    app.state.last_completion_model = None
+    app.state.last_render_model = None
+    # Per-server LoRA registry: lora_name -> lora_path
+    app.state.lora_registry = {}
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/test/last_generate_features")
+    async def get_last_generate_features():
+        return {"features": app.state.last_generate_features}
+
+    @app.get("/test/last_models")
+    async def get_last_models():
+        return {
+            "generate": app.state.last_generate_model,
+            "chat": app.state.last_chat_model,
+            "completion": app.state.last_completion_model,
+            "render": app.state.last_render_model,
+        }
+
+    @app.get("/test/lora_registry")
+    async def get_lora_registry():
+        return {"registry": dict(app.state.lora_registry)}
 
     @app.get("/get_world_size")
     async def get_world_size():
@@ -34,13 +61,15 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: Request):
         body = await request.json()
+        app.state.last_completion_model = body.get("model")
         prompts = body.get("prompt", [])
         n_prompts = len(prompts) if isinstance(prompts, list) else 1
         return {
             "choices": [
                 {"index": i, "text": f"Response {i} from server {server_id}", "finish_reason": "stop"}
                 for i in range(n_prompts)
-            ]
+            ],
+            "model": body.get("model"),
         }
 
     @app.post("/skyrl/v1/generate")
@@ -49,6 +78,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
         input_token_ids = body.get("token_ids", [])
+        app.state.last_generate_model = body.get("model")
         n = sp.get("n", 1)
         # If logprobs is explicitly set (sample path), use n for num_choices.
         # Otherwise (generate path), use len(token_ids) for per-prompt responses.
@@ -68,6 +98,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
+
+        features = body.get("features")
+        app.state.last_generate_features = features
+        if features is not None:
+            response["features"] = features
 
         # Mock prompt_logprobs when requested via sampling_params
         pl = sp.get("prompt_logprobs")
@@ -99,25 +134,56 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        return {"choices": [{"message": {"content": f"Chat from server {server_id}"}}]}
+        body = await request.json()
+        app.state.last_chat_model = body.get("model")
+        return {
+            "choices": [{"message": {"content": f"Chat from server {server_id}"}}],
+            "model": body.get("model"),
+        }
 
     @app.post("/v1/chat/completions/render")
     async def render_chat_completion(request: Request):
         body = await request.json()
+        app.state.last_render_model = body.get("model")
         messages = body.get("messages", [])
-        has_multimodal = any(
-            isinstance(msg.get("content"), list) and any(c.get("type") == "image_url" for c in msg["content"])
+
+        # Count image_url parts across all messages.
+        num_images = sum(
+            1
             for msg in messages
+            if isinstance(msg.get("content"), list)
+            for c in msg["content"]
+            if c.get("type") == "image_url"
         )
+
         features = None
-        if has_multimodal:
+        if num_images > 0:
+            # Each image gets 100 placeholder tokens.  Token IDs are laid out as:
+            # [0..3] preamble, then 100 tokens per image, then [N..N+5] suffix.
+            placeholder_size = 100
+            preamble_len = 4
+            total_len = preamble_len + num_images * placeholder_size + 6
+
+            mm_hashes = []
+            mm_placeholders = []
+            kwargs_items = []
+            for i in range(num_images):
+                offset = preamble_len + i * placeholder_size
+                mm_hashes.append(f"hash-{i}")
+                mm_placeholders.append({"offset": offset, "length": placeholder_size})
+                kwargs_items.append(f"mock-encoded-tensor-{i}")
+
             features = {
-                "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
-                "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+                "mm_hashes": {"image": mm_hashes},
+                "mm_placeholders": {"image": mm_placeholders},
+                "kwargs_data": {"image": kwargs_items},
             }
+        else:
+            total_len = 10
+
         return {
             "request_id": f"chatcmpl-mock-{server_id}",
-            "token_ids": list(range(110)) if has_multimodal else list(range(10)),
+            "token_ids": list(range(total_len)),
             "features": features,
             "sampling_params": {"temperature": 0.7, "max_tokens": 100},
             "model": body.get("model", "test"),
@@ -169,6 +235,35 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/update_weights")
     async def update_weights(request: Request):
         return {"status": "ok", "server_id": server_id}
+
+    @app.post("/skyrl/v1/load_lora_adapter")
+    async def load_lora_adapter(request: Request):
+        body = await request.json()
+        lora_name = body.get("lora_name")
+        lora_path = body.get("lora_path")
+        if lora_name is None or lora_path is None:
+            return JSONResponse(
+                status_code=400,
+                content={"object": "error", "message": "missing lora_name/lora_path", "type": "BadRequest"},
+            )
+        app.state.lora_registry[lora_name] = lora_path
+        return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
+
+    @app.post("/v1/unload_lora_adapter")
+    async def unload_lora_adapter(request: Request):
+        body = await request.json()
+        lora_name = body.get("lora_name")
+        if lora_name is None or lora_name not in app.state.lora_registry:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "object": "error",
+                    "message": f"adapter '{lora_name}' not found",
+                    "type": "NotFoundError",
+                },
+            )
+        del app.state.lora_registry[lora_name]
+        return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' removed successfully on server {server_id}.")
 
     return app
 
@@ -226,6 +321,7 @@ async def client(mock_servers):
     client = RemoteInferenceClient(
         proxy_url=mock_servers["proxy_url"],
         server_urls=mock_servers["server_urls"],
+        data_parallel_size=1,
     )
     yield client
     await client.teardown()
@@ -240,6 +336,7 @@ class TestRemoteInferenceClientInit:
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
             model_name="test-model",
+            data_parallel_size=1,
         )
 
         # Pickle and unpickle
@@ -424,7 +521,7 @@ class TestWeightSync:
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
 
-            def for_servers(self, world_size_per_server, num_servers):
+            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
                 return [self] * num_servers
 
             def to_api_payload(self):
@@ -471,6 +568,7 @@ class TestSample:
         """Test sample with n=1 returns correct structure and prompt_logprobs."""
         request_payload = {
             "json": {
+                "model": client.model_name,
                 "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.7, "max_tokens": 64},
@@ -502,6 +600,7 @@ class TestSample:
         """Test sample with n=2 returns two sequences and prompt_logprobs."""
         request_payload = {
             "json": {
+                "model": client.model_name,
                 "prompt": {"chunks": [{"tokens": [1, 2]}, {"tokens": [3]}]},
                 "num_samples": 2,
                 "sampling_params": {"temperature": 1.0, "max_tokens": 32},
@@ -527,6 +626,7 @@ class TestSample:
         """Test topk_prompt_logprobs returns both prompt_logprobs and topk tuples."""
         request_payload = {
             "json": {
+                "model": client.model_name,
                 "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.7, "max_tokens": 64},
@@ -560,6 +660,7 @@ class TestSample:
         """topk_prompt_logprobs alone does not return prompt logprobs when include_prompt_logprobs is False."""
         request_payload = {
             "json": {
+                "model": client.model_name,
                 "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
                 "num_samples": 1,
                 "sampling_params": {"temperature": 0.7, "max_tokens": 64},
@@ -570,6 +671,82 @@ class TestSample:
 
         assert result["prompt_logprobs"] is None
         assert result["topk_prompt_logprobs"] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_with_image(self, client):
+        """Sample with [text, image, text] calls render and splices tokens correctly."""
+        import base64
+
+        image_bytes = base64.b64encode(b"fake-jpeg-data").decode("ascii")
+        request_payload = {
+            "json": {
+                "model": client.model_name,
+                "prompt": {
+                    "chunks": [
+                        {"type": "encoded_text", "tokens": [100, 101, 102]},
+                        {
+                            "type": "image",
+                            "data": image_bytes,
+                            "format": "jpeg",
+                        },
+                        {"type": "encoded_text", "tokens": [200, 201]},
+                    ]
+                },
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+        seq = result["sequences"][0]
+        assert "tokens" in seq
+        assert "logprobs" in seq
+        assert seq["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_with_image_asset_pointer(self, client):
+        """Sample with image_asset_pointer sends location URL to render."""
+        request_payload = {
+            "json": {
+                "model": client.model_name,
+                "prompt": {
+                    "chunks": [
+                        {"type": "encoded_text", "tokens": [10, 11]},
+                        {
+                            "type": "image_asset_pointer",
+                            "format": "png",
+                            "location": "https://example.com/image.png",
+                        },
+                        {"type": "encoded_text", "tokens": [20, 21]},
+                    ]
+                },
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_sample_text_only_no_features(self, client):
+        """Text-only sample does not include features in the generate payload."""
+        request_payload = {
+            "json": {
+                "model": client.model_name,
+                "prompt": {"chunks": [{"type": "encoded_text", "tokens": [1, 2, 3]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64},
+            }
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
 
 
 class TestRenderChatCompletion:
@@ -630,9 +807,37 @@ class TestRenderChatCompletion:
         assert result["kv_transfer_params"] is None
 
         assert result["features"] == {
-            "mm_hashes": {"image": ["fd2700fd096d55f04c20dbfdc903f7e65421e282"]},
+            "mm_hashes": {"image": ["hash-0"]},
             "mm_placeholders": {"image": [{"offset": 4, "length": 100}]},
+            "kwargs_data": {"image": ["mock-encoded-tensor-0"]},
         }
+
+
+class TestMultiModalGeneration:
+    """Test that mm_features are correctly forwarded through generate()."""
+
+    @pytest.mark.asyncio
+    async def test_generate_with_mm_features(self, client, mock_servers):
+        """Passing mm_features in InferenceEngineInput sends features in the HTTP payload."""
+        mm_features = {
+            "mm_hashes": {"image": ["abc123hash"]},
+            "mm_placeholders": {"image": [{"offset": 0, "length": 10}]},
+        }
+        input_batch = {
+            "prompt_token_ids": [[1, 2, 3]],
+            "sampling_params": {"max_tokens": 50},
+            "mm_features": [mm_features],
+        }
+        result = await client.generate(input_batch)
+
+        assert len(result["responses"]) == 1
+        assert len(result["response_ids"]) == 1
+        assert result["stop_reasons"][0] == "stop"
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(f"{mock_servers['proxy_url']}/test/last_generate_features")
+            captured = resp.json()
+        assert captured["features"] == mm_features
 
 
 class TestContextManager:
@@ -645,6 +850,7 @@ class TestContextManager:
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
         )
 
         async with client:
@@ -653,3 +859,389 @@ class TestContextManager:
 
         # Session should be closed after exiting context
         assert client._session is None or client._session.closed
+
+
+async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:
+    """Helper: read the per-server LoRA registries from each mock server."""
+    registries: List[Dict[str, str]] = []
+    async with httpx.AsyncClient() as http:
+        for url in server_urls:
+            resp = await http.get(f"{url}/test/lora_registry")
+            registries.append(resp.json()["registry"])
+    return registries
+
+
+async def _get_last_models(server_urls: List[str]) -> List[Dict[str, Optional[str]]]:
+    """Helper: read the last per-method ``model`` field captured by each mock."""
+    last: List[Dict[str, Optional[str]]] = []
+    async with httpx.AsyncClient() as http:
+        for url in server_urls:
+            resp = await http.get(f"{url}/test/last_models")
+            last.append(resp.json())
+    return last
+
+
+class TestLoRAControlPlane:
+    """Test load_lora_adapter / unload_lora_adapter fan-out and bookkeeping."""
+
+    @pytest.mark.asyncio
+    async def test_load_lora_adapter_fans_out(self, client, mock_servers):
+        result = await client.load_lora_adapter("lora-A", "/tmp/path/lora-A")
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert "Success" in response["body"]
+            assert "lora-A" in response["body"]
+
+        registries = await _get_lora_registries(mock_servers["server_urls"])
+        for reg in registries:
+            assert reg.get("lora-A") == "/tmp/path/lora-A"
+
+        await client.unload_lora_adapter("lora-A")
+
+    @pytest.mark.asyncio
+    async def test_load_lora_adapter_inplace_reload(self, client, mock_servers):
+        await client.load_lora_adapter("lora-X", "/tmp/path/v1")
+        await client.load_lora_adapter("lora-X", "/tmp/path/v2")
+
+        registries = await _get_lora_registries(mock_servers["server_urls"])
+        for reg in registries:
+            assert reg.get("lora-X") == "/tmp/path/v2"
+
+        await client.unload_lora_adapter("lora-X")
+
+    @pytest.mark.asyncio
+    async def test_unload_lora_adapter_fans_out(self, client, mock_servers):
+        await client.load_lora_adapter("lora-B", "/tmp/path/lora-B")
+
+        result = await client.unload_lora_adapter("lora-B")
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert "Success" in response["body"]
+
+        registries = await _get_lora_registries(mock_servers["server_urls"])
+        for reg in registries:
+            assert "lora-B" not in reg
+
+    @pytest.mark.asyncio
+    async def test_unload_unknown_lora_raises(self, client, mock_servers):
+        # Server returns 404, surfaced as ClientResponseError via raise_for_status.
+        with pytest.raises(aiohttp.ClientResponseError):
+            await client.unload_lora_adapter("nonexistent-lora")
+        registries = await _get_lora_registries(mock_servers["server_urls"])
+        for reg in registries:
+            assert "nonexistent-lora" not in reg
+
+    @pytest.mark.asyncio
+    async def test_default_lora_adapter_constant(self):
+        # Sanity check that the public constant has the documented value used
+        # across the SkyRL training paths.
+        assert SKYRL_LORA_ADAPTER_NAME == "skyrl-lora"
+
+
+class TestExplicitModelRequired:
+    """Data-plane ``model`` resolution rules.
+
+    Every data-plane method (``generate``, ``sample``, ``chat_completion``,
+    ``completion``, ``render_chat_completion``) follows the same rule:
+
+    - If a non-empty ``model`` is supplied (kwarg for ``generate``, body field
+      for the others) it is threaded through to the server as-is.
+    - If no model is supplied and LoRA is **not** in use
+      (``uses_lora_weight_sync=False``), the call falls back to
+      ``client.model_name``.
+    - If no model is supplied and LoRA **is** in use, the call raises
+      ``ValueError`` so requests don't silently target the base model.
+    """
+
+    @pytest.mark.asyncio
+    async def test_generate_threads_model_into_payload(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            input_batch = {
+                "prompt_token_ids": [[1, 2, 3]],
+                "sampling_params": {"max_tokens": 50},
+            }
+            await client.generate(input_batch, model="lora-explicit")
+            captured = await _get_last_models(mock_servers["server_urls"])
+            # generate routes through proxy_url == first server.
+            assert captured[0]["generate"] == "lora-explicit"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_generate_defaults_to_base_when_no_lora(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            input_batch = {
+                "prompt_token_ids": [[1, 2, 3]],
+                "sampling_params": {"max_tokens": 50},
+            }
+            await client.generate(input_batch)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["generate"] == "base-model"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_generate_raises_when_lora_and_no_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            input_batch = {
+                "prompt_token_ids": [[1, 2, 3]],
+                "sampling_params": {"max_tokens": 50},
+            }
+            with pytest.raises(ValueError, match="LoRA is enabled"):
+                await client.generate(input_batch)
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_uses_body_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-chat",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                "headers": {},
+            }
+            await client.chat_completion(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["chat"] == "lora-chat"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_defaults_to_base_when_no_lora(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {"messages": [{"role": "user", "content": "hi"}]},
+                "headers": {},
+            }
+            await client.chat_completion(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["chat"] == "base-model"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_raises_when_lora_and_no_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {"messages": [{"role": "user", "content": "hi"}]},
+                "headers": {},
+            }
+            with pytest.raises(ValueError, match="LoRA is enabled"):
+                await client.chat_completion(request_payload)
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_completion_uses_body_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {"model": "lora-completion", "prompt": "hello"},
+                "headers": {},
+            }
+            await client.completion(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["completion"] == "lora-completion"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_completion_defaults_to_base_when_no_lora(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {"json": {"prompt": "hello"}, "headers": {}}
+            await client.completion(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["completion"] == "base-model"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_completion_raises_when_lora_and_no_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {"json": {"prompt": "hello"}, "headers": {}}
+            with pytest.raises(ValueError, match="LoRA is enabled"):
+                await client.completion(request_payload)
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_uses_body_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-render",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            }
+            result = await client.render_chat_completion(request_payload)
+            assert result["model"] == "lora-render"
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["render"] == "lora-render"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_defaults_to_base_when_no_lora(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {"json": {"messages": [{"role": "user", "content": "hi"}]}}
+            result = await client.render_chat_completion(request_payload)
+            assert result["model"] == "base-model"
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["render"] == "base-model"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_render_chat_completion_raises_when_lora_and_no_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {"json": {"messages": [{"role": "user", "content": "hi"}]}}
+            with pytest.raises(ValueError, match="LoRA is enabled"):
+                await client.render_chat_completion(request_payload)
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_uses_body_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "model": "lora-sample",
+                    "prompt": {"chunks": [{"tokens": [1, 2, 3]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"temperature": 0.7, "max_tokens": 16},
+                }
+            }
+            await client.sample(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["generate"] == "lora-sample"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_defaults_to_base_when_no_lora(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "prompt": {"chunks": [{"tokens": [1, 2, 3]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"temperature": 0.7, "max_tokens": 16},
+                }
+            }
+            await client.sample(request_payload)
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["generate"] == "base-model"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_raises_when_lora_and_no_model(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            request_payload = {
+                "json": {
+                    "prompt": {"chunks": [{"tokens": [1, 2, 3]}]},
+                    "num_samples": 1,
+                    "sampling_params": {"temperature": 0.7, "max_tokens": 16},
+                }
+            }
+            with pytest.raises(ValueError, match="LoRA is enabled"):
+                await client.sample(request_payload)
+        finally:
+            await client.teardown()

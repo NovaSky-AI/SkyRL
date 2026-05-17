@@ -8,7 +8,6 @@ import shutil
 import pytest
 import ray
 
-from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -45,14 +44,10 @@ def cfg() -> SkyRLTrainConfig:
     [
         ("policy", "fsdp"),
         ("critic", "fsdp"),
-        ("policy", "fsdp2"),
-        ("critic", "fsdp2"),
     ],
     ids=[
         "fsdp_policy",
         "fsdp_critic",
-        "fsdp2_policy",
-        "fsdp2_critic",
     ],
 )
 async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -146,11 +141,14 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         results_backload = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
+        # `forward_backward` returns a WorkerOutput per actor (frozen dataclass);
+        # compare scalar `metrics` and per-sample `loss_fn_outputs` directly.
         for i, result in enumerate(results):
             result_backload = results_backload[i]
-            for k, v in result.items():
-                assert k in result_backload
-                assert v == result_backload[k], f"Results mismatch for {k}: {v} != {result_backload[k]}"
+            for k, v in result.metrics.items():
+                assert k in result_backload.metrics
+                assert v == result_backload.metrics[k], f"Metrics mismatch for {k}: {v} != {result_backload.metrics[k]}"
+            assert result.loss_fn_outputs == result_backload.loss_fn_outputs, "loss_fn_outputs mismatch after backload"
 
     finally:
         ray.shutdown()  # Clean up Ray resources after the test
@@ -160,14 +158,11 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
 @pytest.mark.parametrize(
     ("worker_type", "strategy"),
     [
-        # TODO (erictang000): fsdp 1 manual offloading is broken for single gpu ref worker
         ("ref", "fsdp"),
-        ("ref", "fsdp2"),
         # TODO (erictang000): Add support for reward worker.
     ],
     ids=[
         "fsdp_ref",
-        "fsdp2_ref",
     ],
 )
 async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -211,7 +206,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
 
         dummy_batch = make_dummy_tensorbatch()
         # Run forward pass
-        results: TrainingOutputBatch = actor_group.run_method("pass_through", "forward", dummy_batch)
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward", dummy_batch))
 
         after_forward = get_rank_0_memory(actor_group, "After forward")
 
@@ -238,7 +233,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
         get_rank_0_memory(actor_group, "After backload")
 
         # Run forward again and ensure output consistency
-        results_backload: TrainingOutputBatch = actor_group.run_method("pass_through", "forward", dummy_batch)
+        results_backload = ray.get(actor_group.async_run_ray_method("pass_through", "forward", dummy_batch))
 
         assert (
             results == results_backload
@@ -251,14 +246,14 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
 @pytest.mark.parametrize(
     ("worker_type", "strategy"),
     [
-        ("policy", "fsdp2"),
-        ("critic", "fsdp2"),
-        ("ref", "fsdp2"),
+        ("policy", "fsdp"),
+        ("critic", "fsdp"),
+        ("ref", "fsdp"),
     ],
     ids=[
-        "fsdp2_policy",
-        "fsdp2_critic",
-        "fsdp2_ref",
+        "fsdp_policy",
+        "fsdp_critic",
+        "fsdp_ref",
     ],
 )
 async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strategy):
@@ -303,7 +298,6 @@ async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strat
     "strategy",
     [
         "fsdp",
-        "fsdp2",
     ],
 )
 def test_offload_after_ckpt(ray_init_fixture, strategy):

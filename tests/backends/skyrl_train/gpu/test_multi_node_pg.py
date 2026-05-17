@@ -25,7 +25,7 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
     return cfg
 

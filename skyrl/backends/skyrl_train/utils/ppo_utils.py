@@ -119,7 +119,9 @@ def compute_approx_kl(
         raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
 
     if loss_mask is not None:
-        kld = kld * loss_mask
+        # Multiplying by `loss_mask` can leak `nan` from masked positions,
+        # so route masked positions to 0.0 directly while keeping mask scaling elsewhere
+        kld = torch.where(loss_mask.bool(), kld * loss_mask, 0.0)
     return kld
 
 
@@ -1007,6 +1009,7 @@ def apply_loss_reduction_to_advantages_minibatch(
 
     Args:
         advantages: Advantage tensor of shape (minibatch_size, seq_len).
+            For step-wise training, minibatch_size can be variable.
         loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
         loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "seq_mean_token_sum_norm".
         micro_batch_size: Number of sequences per micro-batch
@@ -1024,6 +1027,8 @@ def apply_loss_reduction_to_advantages_minibatch(
 
     # Option 1b: legacy token-mean that normalizes per-microbatch then averages across microbatches.
     elif loss_reduction == "token_mean_legacy":
+        # FIXME(Charlie): For step-wise training, mini_batch_size can be variable, so the number of
+        # microbatches depends on how we pad.
         num_micro_batches = batch_size // micro_batch_size
         for i in range(num_micro_batches):
             start_idx = i * micro_batch_size

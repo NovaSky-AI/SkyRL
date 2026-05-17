@@ -39,7 +39,7 @@ def run_one_training_step(
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
-    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    # Unified interface for all strategies (megatron, fsdp)
     batch = megatron_batch if strategy == "megatron" else data
     assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
     ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
@@ -66,7 +66,6 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
     ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload"),
     [
         ("fsdp", False, False, False),
-        ("fsdp2", False, False, False),
         pytest.param("megatron", False, False, False, marks=pytest.mark.megatron),
         pytest.param("megatron", False, False, True, marks=pytest.mark.megatron),
         pytest.param("megatron", True, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
@@ -88,7 +87,6 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
     ],
     ids=[
         "fsdp",
-        "fsdp2",
         "megatron",
         "megatron_optimizer_cpu_offload",
         "megatron_lora",
@@ -136,7 +134,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+            from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
                 get_test_training_batch,
             )
 
@@ -271,7 +269,7 @@ def test_save_load_checkpoint_cloud(ray_init_fixture):
 
         dp_size = actor_group.actor_infos[0].rank.dp_size
 
-        from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+        from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
             get_test_training_batch,
         )
 

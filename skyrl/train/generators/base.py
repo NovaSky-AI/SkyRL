@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
+import torch
+
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 
 TrainingPhase = Literal["train", "eval"]
@@ -43,6 +45,13 @@ class GeneratorOutput(TypedDict):
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # Per-row env metrics (one dict per row in the flattened batch). Used by
+    # ``dump_per_dataset_eval_results`` to surface env-specific info (e.g. RLM's
+    # ``rlm_metadata``) in eval JSONL dumps.
+    env_metrics: Optional[List[Dict[str, Any]]]
+    # Applicable only for vision-language models
+    pixel_values: Optional[List[torch.Tensor]]
+    image_grid_thw: Optional[List[torch.Tensor]]
 
 
 class MetricsOutput(TypedDict):

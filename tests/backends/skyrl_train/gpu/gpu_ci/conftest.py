@@ -1,3 +1,4 @@
+import contextlib
 import os
 from functools import lru_cache
 
@@ -5,7 +6,7 @@ import pytest
 import ray
 from loguru import logger
 
-from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
 from skyrl.train.utils.utils import peer_access_supported
 
 
@@ -20,7 +21,7 @@ def _build_ray_env_vars():
         "VLLM_USE_V1": "1",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-        "_SKYRL_USE_NEW_INFERENCE": os.environ.get("_SKYRL_USE_NEW_INFERENCE", "0"),
+        "_SKYRL_USE_NEW_INFERENCE": "1" if _SKYRL_USE_NEW_INFERENCE else "0",
     }
 
     if not peer_access_supported(max_num_gpus_per_node=2):
@@ -45,26 +46,35 @@ def _build_ray_env_vars():
     return env_vars
 
 
-def _ray_init():
+def _ray_init(extra_env_vars: dict[str, str] | None = None):
     if ray.is_initialized():
         ray.shutdown()
 
     # TODO (team): maybe we should use the default config and use prepare_runtime_environment in some way
     env_vars = _build_ray_env_vars()
+    if extra_env_vars:
+        env_vars.update(extra_env_vars)
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})
 
 
+@contextlib.contextmanager
+def ray_init(extra_env_vars: dict[str, str] | None = None):
+    _ray_init(extra_env_vars)
+    try:
+        yield
+    finally:
+        ray.shutdown()
+
+
 @pytest.fixture
 def ray_init_fixture():
-    _ray_init()
-    yield
-    ray.shutdown()
+    with ray_init():
+        yield
 
 
 @pytest.fixture(scope="class")
 def class_scoped_ray_init_fixture():
-    _ray_init()
-    yield
-    ray.shutdown()
+    with ray_init():
+        yield

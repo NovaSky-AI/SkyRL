@@ -4,6 +4,7 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 
 import typing
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Annotated, List, Optional
 
 import pytest
@@ -12,10 +13,20 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
-    _resolve_dataclass_type,
+    _resolve_class_type,
     build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
+from skyrl.train.utils.utils import validate_cfg
+from tests.train.util import example_dummy_config
+
+
+def _make_validated_test_config():
+    """Return a small config that passes validate_batch_sizes()."""
+    cfg = example_dummy_config()
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
+    return cfg
 
 
 # Helper dataclasses for testing
@@ -24,11 +35,16 @@ class _SimpleConfig(BaseConfig):
     a: int = 0
 
 
+class SimpleEnum(Enum):
+    A = "a"
+
+
 @dataclass
 class _NestedConfig(BaseConfig):
     b: int = 1
     c: Annotated[_SimpleConfig, "test"] = field(default_factory=_SimpleConfig)
     d: Optional[_SimpleConfig] = None
+    e: Optional[SimpleEnum] = SimpleEnum.A
 
 
 def test_build_nested_dataclass():
@@ -68,6 +84,12 @@ def test_build_config_from_dict_config():
     assert cfg.b == 1
     assert cfg.c.a == 2
 
+    cfg = OmegaConf.create({"b": 1, "c": {"a": 2}, "e": "a"})
+    cfg = _NestedConfig.from_dict_config(cfg)
+    assert cfg.b == 1
+    assert cfg.c.a == 2
+    assert isinstance(cfg.e, SimpleEnum)
+
 
 def test_build_config_from_dict_config_invalid_config():
     cfg = OmegaConf.create({"path": "path/to/model"})
@@ -76,10 +98,11 @@ def test_build_config_from_dict_config_invalid_config():
 
 
 def test_dtype_resolution():
-    assert not _resolve_dataclass_type(typing.Optional[int])
-    assert _resolve_dataclass_type(typing.Optional[_SimpleConfig]) is _SimpleConfig
-    assert _resolve_dataclass_type(typing.Union[None, _SimpleConfig]) is _SimpleConfig
-    assert _resolve_dataclass_type(typing.Annotated[_SimpleConfig, "test"]) is _SimpleConfig
+    assert not _resolve_class_type(typing.Optional[int])
+    assert _resolve_class_type(typing.Optional[_SimpleConfig]) is _SimpleConfig
+    assert _resolve_class_type(typing.Union[None, _SimpleConfig]) is _SimpleConfig
+    assert _resolve_class_type(typing.Annotated[_SimpleConfig, "test"]) is _SimpleConfig
+    assert _resolve_class_type(Optional[SimpleEnum]) is SimpleEnum
 
 
 def test_cli_overrides():
@@ -195,20 +218,35 @@ def test_cross_field_defaults():
 
 
 class TestMaxSeqLenValidation:
-    """Tests for the max_seq_len auto-calculation and explicit-override logic in __post_init__."""
+    """Tests for max_seq_len defaults and validation behavior."""
 
-    def test_max_seq_len_auto_calculated_when_none(self):
-        """When max_seq_len is None (default), __post_init__ should compute it as
-        max_input_length + max_generate_length."""
-        # implicitly set max_seq_len to None
+    def test_max_seq_len_defaults_to_none_when_not_set(self):
         cfg = SkyRLTrainConfig.from_cli_overrides([])
-
-        expected = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        assert cfg.trainer.algorithm.max_seq_len == expected
+        assert cfg.trainer.algorithm.max_seq_len is None
 
     def test_max_seq_len_preserved_when_explicitly_set(self):
-        """When max_seq_len is explicitly set by the user, __post_init__ should NOT overwrite it."""
-        # explicitly set max_seq_len to 32768
         cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
-
         assert cfg.trainer.algorithm.max_seq_len == 32768
+
+    def test_validate_cfg_requires_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+        cfg.trainer.algorithm.max_seq_len = None
+
+        with pytest.raises(ValueError, match=r"trainer\.algorithm\.max_seq_len"):
+            validate_cfg(cfg)
+
+    @pytest.mark.parametrize("loss_reduction", ["token_mean", "sequence_mean"])
+    def test_validate_cfg_allows_missing_max_seq_len_for_other_reductions(self, loss_reduction):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = loss_reduction
+        cfg.trainer.algorithm.max_seq_len = None
+
+        validate_cfg(cfg)
+
+    def test_validate_cfg_allows_explicit_max_seq_len_for_seq_mean_token_sum_norm(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+        cfg.trainer.algorithm.max_seq_len = 4096
+
+        validate_cfg(cfg)

@@ -7,7 +7,7 @@ import sys
 import ray
 import torch
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig, make_config
 from skyrl.train.trainer import RayPPOTrainer
@@ -64,7 +64,9 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str]]:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 
@@ -73,7 +75,7 @@ class DAPOTrainer(RayPPOTrainer):
             uids: List[str]
 
         Returns:
-            GeneratorOutput
+            (GeneratorOutput, uids) — uids may be shortened if base class applies step-wise merging.
         """
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
@@ -150,8 +152,8 @@ def main() -> None:
     if not cfg.generator.inference_engine.run_engines_locally:
         raise ValueError("FlashRL only supports colocated training.")
 
-    if cfg.trainer.strategy not in ("fsdp", "fsdp2"):
-        raise ValueError(f"FlashRL only supports fsdp/fsdp2 strategy, got: {cfg.trainer.strategy}")
+    if cfg.trainer.strategy != "fsdp":
+        raise ValueError(f"FlashRL only supports fsdp strategy, got: {cfg.trainer.strategy}")
 
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))

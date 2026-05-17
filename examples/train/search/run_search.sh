@@ -48,6 +48,8 @@ else
   MULTI_TURN_ARGS="generator.use_conversation_multi_turn=false"
 fi
 
+: "${MERGE_STEPWISE:=false}"
+
 STEP_WISE_ARGS=""
 if [ "$STEP_WISE" = "true" ]; then
   STEP_WISE_ARGS="generator.step_wise_trajectories=true"
@@ -55,6 +57,9 @@ if [ "$STEP_WISE" = "true" ]; then
   if [ "$USE_CONVERSATION_MULTI_TURN" != "true" ]; then
     echo "WARNING: STEP_WISE=true requires USE_CONVERSATION_MULTI_TURN=true. Enabling it automatically."
     MULTI_TURN_ARGS="generator.use_conversation_multi_turn=true generator.append_eos_token_after_stop_str_in_multi_turn=true"
+  fi
+  if [ "$MERGE_STEPWISE" = "true" ]; then
+    STEP_WISE_ARGS="$STEP_WISE_ARGS generator.merge_stepwise_output=true"
   fi
 fi
 
@@ -71,7 +76,7 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.placement.policy_num_gpus_per_node=8 \

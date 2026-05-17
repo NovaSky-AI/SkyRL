@@ -1,0 +1,1226 @@
+"""
+SFT (Supervised Fine-Tuning) trainer for SkyRL.
+
+Supports both FSDP and Megatron backends via a single ``SFTTrainer`` class.
+The backend is selected dynamically based on ``SFTConfig.strategy``.
+
+Usage::
+
+    from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
+    from skyrl.train.sft_trainer import SFTTrainer
+
+    cfg = SFTConfig(strategy="megatron")
+    trainer = SFTTrainer(cfg)
+    trainer.setup()
+    trainer.train()
+    trainer.shutdown()
+
+Or as a CLI entrypoint::
+
+    python -m skyrl.train.main_sft strategy=megatron model.path=Qwen/Qwen3-0.6B
+"""
+
+import functools
+import json
+import os
+import random
+from dataclasses import asdict
+from math import ceil
+from typing import Any, Optional
+
+import ray
+import torch
+from datasets import load_dataset
+from loguru import logger
+from ray.util.placement_group import placement_group
+
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    pad_training_input_batch,
+)
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config.sft_config import (
+    SFTConfig,
+    TrainOnWhat,
+    build_skyrl_config_for_sft,
+)
+from skyrl.train.generators.utils import (
+    get_response_ids_and_loss_mask_from_messages,
+)
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.tracking import Tracking
+from skyrl.train.utils.trainer_utils import (
+    GLOBAL_STEP_PREFIX,
+    cleanup_old_checkpoints,
+    extract_step_from_path,
+    validate_consistency_for_latest_checkpoint,
+)
+from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
+from skyrl.utils.tok import get_tokenizer
+
+# ---------------------------------------------------------------------------
+# Tokenization helpers
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=512)
+def _parse_tools_str(tools: str) -> Optional[tuple]:
+    """Parse a JSON-encoded tools string. Cached because tool-calling datasets
+    typically share one schema across thousands of rows (e.g. APIGen's airline
+    domain), and `apply_chat_template` re-tokenizes the schema on every row."""
+    tools = tools.strip()
+    if not tools:
+        return None
+    parsed = json.loads(tools)
+    if not parsed:
+        return None
+    # Return a tuple so the cache stores an immutable value; caller re-lists it.
+    return tuple(parsed)
+
+
+def _coerce_tools(tools: Any) -> Optional[list]:
+    """Coerce a dataset's ``tools`` field into a list[dict] for ``apply_chat_template``.
+
+    Tool-calling datasets ship the schema list as ``list[dict]`` (parquet-typed),
+    JSON-encoded ``str``, or absent. HF chat templates expect ``list[dict]``;
+    returns ``None`` when there are no tools so the caller can omit the kwarg.
+    """
+    if tools is None:
+        return None
+    if isinstance(tools, str):
+        cached = _parse_tools_str(tools)
+        return list(cached) if cached else None
+    if isinstance(tools, list):
+        return tools or None
+    raise TypeError(f"Unsupported `tools` type: {type(tools).__name__}")
+
+
+def _normalize_tool_call_payload(tc: Any) -> Optional[list]:
+    """Normalize an assistant message's ``tool_calls`` into the OpenAI-style list.
+
+    Datasets in the wild use:
+
+    * ``[]`` / ``""`` / ``None`` — no tool call;
+    * a single JSON-encoded ``{"name": ..., "arguments": ...}`` dict (APIGen-MT);
+    * a JSON-encoded list of such dicts (xLAM, ToolACE);
+    * an already-parsed list of OpenAI-style ``{"type": "function", "function": {...}}``.
+
+    HF chat templates expect ``[{"type": "function", "function": {"name", "arguments"}}]``,
+    so we coerce to that shape. Returns ``None`` when the message has no tool call.
+    """
+    if tc is None:
+        return None
+    if isinstance(tc, str):
+        tc = tc.strip()
+        if not tc or tc == "[]":
+            return None
+        tc = json.loads(tc)
+    if isinstance(tc, dict):
+        tc = [tc]
+    if not isinstance(tc, list) or not tc:
+        return None
+
+    out = []
+    for call in tc:
+        if not isinstance(call, dict):
+            raise TypeError(f"tool call entry must be a dict, got {type(call).__name__}")
+        fn = call["function"] if isinstance(call.get("function"), dict) else call
+        arguments = fn.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
+        out.append({"type": "function", "function": {"name": fn.get("name"), "arguments": arguments}})
+    return out
+
+
+# Fields we explicitly normalize; everything else on the message is forwarded
+# so model-specific templates can read e.g. ``reasoning_content`` (Qwen3,
+# Nemotron-3 thinking models) or ``tool_call_id``.
+_NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
+
+
+def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
+    """Return messages in a shape that HF chat templates accept.
+
+    Normalizes ``content`` (``None`` → ``""``), promotes string-encoded
+    ``tool_calls`` on assistant turns into the OpenAI list-of-dicts form,
+    drops empty/placeholder ``tool_calls`` on every role, and preserves any
+    other fields on the message verbatim.
+    """
+    out = []
+    for msg in messages:
+        role = msg["role"]
+        new_msg = {k: v for k, v in msg.items() if k not in _NORMALIZED_KEYS}
+        new_msg["role"] = role
+        new_msg["content"] = msg.get("content", "") or ""
+        if role == "assistant":
+            tool_calls = _normalize_tool_call_payload(msg.get("tool_calls"))
+            if tool_calls:
+                new_msg["tool_calls"] = tool_calls
+        out.append(new_msg)
+    return out
+
+
+def tokenize_sft_example(example: dict, tokenizer, max_length: int = 512, **tokenizer_kwargs) -> dict | None:
+    """Tokenize an Alpaca-format SFT example via ``apply_chat_template``.
+
+    Converts the instruction/input/output fields into a two-message chat
+    (user + assistant) and delegates to :func:`tokenize_chat_example`.
+    This ensures tokenization matches the HF / TRL convention (proper
+    special tokens, chat template formatting).
+
+    Returns dict with input_ids, attention_mask, num_actions (response length),
+    or None if the example was fully truncated.
+    """
+    instruction = example.get("instruction", "")
+    input_text = example.get("input", "")
+    output = example.get("output", "")
+
+    # Build user content: instruction + optional input
+    user_content = instruction
+    if input_text:
+        user_content = f"{instruction}\n\n{input_text}"
+    user_content = user_content.strip()
+
+    messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": output},
+    ]
+
+    return tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=max_length,
+        messages_key="messages",
+        **tokenizer_kwargs,
+    )
+
+
+def tokenize_chat_example(
+    example: dict,
+    tokenizer,
+    max_length: Optional[int] = None,
+    messages_key: str = "messages",
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    tools_key: Optional[str] = "tools",
+    system_key: Optional[str] = "system",
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Tokenize a chat-format example with configurable loss targets.
+
+    Uses ``apply_chat_template`` to tokenize the conversation and determine
+    which tokens to train on based on ``train_on_what``.
+
+    For tool-calling datasets (e.g. APIGen-MT, xLAM, ToolACE), if the example
+    has a ``tools_key`` column, its parsed value is forwarded as ``tools=`` to
+    ``apply_chat_template`` so the model sees the function schemas. Likewise,
+    a ``system_key`` column is prepended as a leading system message when no
+    system message is already present.
+
+    Args:
+        example: Dict containing a ``messages_key`` column with chat messages.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Maximum sequence length (truncation boundary).
+        messages_key: Key in *example* that holds the messages list.
+        train_on_what: Which tokens to compute loss on.
+        tools_key: Key in *example* whose value is the per-row tool schema list
+            (or JSON-encoded string thereof). ``None`` disables the lookup.
+        system_key: Key in *example* whose value is a system prompt string.
+            ``None`` disables the lookup.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``
+            (e.g. ``enable_thinking``).
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        optionally ``loss_mask`` (a per-token list of 0/1 within the action
+        window).  Returns ``None`` when the example should be skipped.
+    """
+    # Validate supported modes
+    _SUPPORTED = {TrainOnWhat.LAST_ASSISTANT_MESSAGE, TrainOnWhat.ALL_ASSISTANT_MESSAGES}
+    if train_on_what not in _SUPPORTED:
+        raise NotImplementedError(
+            f"train_on_what={train_on_what!r} is not yet supported. "
+            f"Supported values: {sorted(v.value for v in _SUPPORTED)}"
+        )
+    messages = list(example[messages_key])
+
+    # Trim trailing tool observations with no follow-up assistant response
+    # (common in APIGen-MT). Trailing user turns still drop the row.
+    while messages and messages[-1]["role"] == "tool":
+        messages.pop()
+
+    if not messages or messages[-1]["role"] != "assistant":
+        return None
+
+    messages = _normalize_chat_messages(messages)
+
+    system_prompt = example.get(system_key) if system_key else None
+    if system_prompt and messages[0].get("role") != "system":
+        messages = [{"role": "system", "content": system_prompt}] + messages
+
+    # Per-row schemas yield to an explicit caller-provided ``tools`` kwarg.
+    tools = _coerce_tools(example.get(tools_key)) if tools_key else None
+    if tools is not None:
+        tokenizer_kwargs = {"tools": tools, **tokenizer_kwargs}
+
+    if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
+        return _tokenize_chat_last_assistant(messages, tokenizer, max_length, **tokenizer_kwargs)
+    else:
+        # ALL_ASSISTANT_MESSAGES
+        return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+
+
+def _tokenize_chat_last_assistant(
+    messages: list[dict],
+    tokenizer,
+    max_length: Optional[int] = None,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Tokenize a conversation and compute loss only on the last assistant message.
+
+    Args:
+        messages: Full conversation (must end with an assistant message).
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates both prompt and full
+            conversation to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, and ``num_actions`` (number
+        of last-assistant tokens), or ``None`` if truncation left no response tokens.
+    """
+    # Tokenize prompt (everything except last assistant message)
+    prompt_ids = tokenizer.apply_chat_template(
+        messages[:-1],
+        add_generation_prompt=True,
+        tokenize=True,
+        truncation=max_length is not None,
+        max_length=max_length,
+        return_dict=False,
+        **tokenizer_kwargs,
+    )
+
+    # Tokenize full conversation
+    full_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=False,
+        tokenize=True,
+        truncation=max_length is not None,
+        max_length=max_length,
+        return_dict=False,
+        **tokenizer_kwargs,
+    )
+
+    num_actions = len(full_ids) - len(prompt_ids)
+    if num_actions <= 0:
+        return None
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "num_actions": num_actions,
+        "loss_mask": [1] * num_actions,
+    }
+
+
+def _tokenize_chat_all_assistants(
+    messages: list[dict],
+    tokenizer,
+    max_length: Optional[int] = None,
+    **tokenizer_kwargs,
+) -> dict | None:
+    """Tokenize a conversation and compute loss on all assistant messages.
+
+    Builds a per-token loss mask covering every assistant turn. ``num_actions``
+    spans from the first assistant token to the end of the conversation, with
+    interior 0s masking out user/system tokens between assistant turns.
+
+    Args:
+        messages: Full conversation. May start with system/user messages;
+            must contain at least one assistant message.
+        tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
+        max_length: Optional sequence length cap; truncates to this limit.
+        **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
+
+    Returns:
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions``, and
+        ``loss_mask`` (per-token 0/1 list within the action window), or
+        ``None`` if no assistant tokens survived after truncation.
+    """
+
+    # Find the index of the first assistant message.
+    i = 0
+    while i < len(messages) and messages[i]["role"] != "assistant":
+        i += 1
+
+    # Encode leading non-assistant messages separately because
+    # `get_response_ids_and_loss_mask_from_messages` does not accept system messages.
+
+    initial_token_ids = tokenizer.apply_chat_template(
+        messages[:i],
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        **tokenizer_kwargs,
+    )
+    # no assistant message
+    if i >= len(messages):
+        return None
+
+    later_token_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        messages[i:], tokenizer, tokenizer_kwargs=tokenizer_kwargs
+    )
+    input_ids = initial_token_ids + later_token_ids
+
+    # truncate
+    if max_length is not None:
+        input_ids = input_ids[:max_length]
+        max_assistant_length = max(max_length - len(initial_token_ids), 0)
+        loss_mask = loss_mask[:max_assistant_length]
+
+    if sum(loss_mask) == 0:
+        return None  # No assistant tokens survived truncation
+
+    num_actions = len(loss_mask)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": [1] * len(input_ids),
+        "num_actions": num_actions,
+        "loss_mask": loss_mask,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Collation
+# ---------------------------------------------------------------------------
+
+
+def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
+    """Collate tokenized examples into a TrainingInputBatch.
+
+    Creates the batch format expected by forward_backward with cross_entropy loss:
+    - sequences: [batch_size, seq_len] - token IDs (left-padded)
+    - attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
+    - loss_mask: [batch_size, num_actions] - 1 for tokens to compute loss on
+
+    All examples are expected to carry a ``loss_mask`` key (guaranteed by both
+    ``_tokenize_chat_last_assistant`` and ``_tokenize_chat_all_assistants``).
+    """
+    max_len = max(len(ex["input_ids"]) for ex in examples)
+    max_num_actions = max(ex["num_actions"] for ex in examples)
+
+    sequences = []
+    attention_masks = []
+    loss_masks = []
+
+    for ex in examples:
+        pad_len = max_len - len(ex["input_ids"])
+        # Left-pad sequences (SkyRL convention)
+        sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
+        attention_masks.append([0] * pad_len + ex["attention_mask"])
+
+        action_pad = max_num_actions - ex["num_actions"]
+        loss_masks.append([0] * action_pad + ex["loss_mask"])
+
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor(sequences, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+            "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+        }
+    )
+    batch.metadata = {"response_length": max_num_actions}
+    return batch
+
+
+# ---------------------------------------------------------------------------
+# SFTTrainer
+# ---------------------------------------------------------------------------
+
+
+class SFTTrainer:
+    """SFT trainer supporting FSDP and Megatron backends.
+
+    Unlike RayPPOTrainer, this does NOT subclass it. SFT's concerns are
+    fundamentally different: no generation, no critic, no advantages, no
+    KL penalty. Sharing a base class would create confusing dead code paths.
+
+    Usage::
+
+        trainer = SFTTrainer(SFTConfig(strategy="megatron"))
+        trainer.setup()
+        trainer.train()
+        trainer.shutdown()
+    """
+
+    def __init__(self, cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig | None = None):
+        self.sft_cfg = cfg
+        # Accept a pre-built bridge config to avoid redundant rebuilds.
+        # When not provided (e.g. standalone usage), build it here.
+        self.cfg = skyrl_cfg if skyrl_cfg is not None else build_skyrl_config_for_sft(cfg)
+        self.tokenizer = None
+        self.dispatch: WorkerDispatch | None = None
+        self.tracker: Tracking | None = None
+        self.global_step = 0
+        # running count of total non-padding tokens trained on
+        self._total_tokens_processed = 0
+
+    # ------------------------------------------------------------------ #
+    # Setup
+    # ------------------------------------------------------------------ #
+
+    def setup(self):
+        """Initialize tokenizer, workers, dispatch, and tracker.
+
+        Ray must already be initialized before calling this (either via
+        ``initialize_ray`` on the head node or inside a Ray task).
+        """
+        self.tokenizer = get_tokenizer(
+            self.cfg.trainer.policy.model.path,
+            trust_remote_code=True,
+            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+            padding_side="left",
+        )
+        self._init_workers()
+        self._init_tracker()
+
+    def _init_workers(self):
+        """Create PPORayActorGroup and WorkerDispatch.
+
+        Selects the correct PolicyWorker based on strategy.
+        """
+        if self.sft_cfg.strategy == "megatron":
+            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                PolicyWorker,
+            )
+        else:
+            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+
+        num_gpus = self.sft_cfg.placement.num_gpus_per_node
+        raw_pg = placement_group(
+            [{"GPU": num_gpus, "CPU": num_gpus}] * self.sft_cfg.placement.num_nodes,
+            strategy="PACK",
+        )
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        pg = ResolvedPlacementGroup(raw_pg)
+
+        actor_group = PPORayActorGroup(
+            self.cfg.trainer,
+            num_nodes=self.sft_cfg.placement.num_nodes,
+            num_gpus_per_node=num_gpus,
+            ray_actor_type=PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=1,
+            colocate_all=False,
+            sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
+            record_memory=self.cfg.trainer.policy.record_memory,
+        )
+        num_training_steps = (
+            self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
+        )
+        # num_steps may be None when num_epochs is used; the worker will use its
+        # default (large value) for the LR scheduler in that case.
+        ray.get(
+            actor_group.async_init_model(
+                self.sft_cfg.model.path,
+                num_training_steps=num_training_steps,
+            )
+        )
+        ray.get(actor_group.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+
+        self.dispatch = WorkerDispatch(self.cfg, policy_actor_group=actor_group)
+
+    def _init_tracker(self):
+        self.tracker = Tracking(
+            project_name=self.cfg.trainer.project_name,
+            experiment_name=self.cfg.trainer.run_name,
+            backends=self.cfg.trainer.logger,
+            config=self.sft_cfg,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Data
+    # ------------------------------------------------------------------ #
+
+    def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
+        """Load and tokenize a dataset.
+
+        Auto-detects the dataset format based on column names:
+        - If a ``messages_key`` column exists, uses chat-format tokenization.
+        - If ``instruction`` and ``output`` columns exist, uses Alpaca-format
+          tokenization.
+
+        Args:
+            dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
+            dataset_split: Dataset split (e.g. ``"train[:100]"`` or ``"test"``).
+
+        Returns a list of tokenized examples (dicts with ``input_ids``,
+        ``attention_mask``, ``num_actions``).
+        """
+        logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}'...")
+        dataset = load_dataset(dataset_name, split=dataset_split)
+
+        columns = dataset.column_names
+        logger.info("Tokenizing dataset...")
+
+        if self.sft_cfg.messages_key in columns:
+            # Chat format. Tool-calling datasets often ship a per-row ``tools``
+            # column (function schemas) and ``system`` column (domain policy)
+            # alongside ``messages``; thread those through when present.
+            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
+            tokenized = [
+                tokenize_chat_example(
+                    ex,
+                    self.tokenizer,
+                    self.sft_cfg.max_length,
+                    self.sft_cfg.messages_key,
+                    train_on_what=self.sft_cfg.train_on_what,
+                    tools_key=tools_key,
+                    system_key=system_key,
+                )
+                for ex in dataset
+            ]
+        elif "instruction" in columns and "output" in columns:
+            # Alpaca format
+            tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
+        else:
+            raise ValueError(
+                f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
+                f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
+                f"Found columns: {columns}"
+            )
+
+        tokenized = [ex for ex in tokenized if ex is not None]
+        logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
+        return tokenized
+
+    def load_dataset(self) -> list:
+        """Load and tokenize the training dataset."""
+        return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
+
+    def load_eval_dataset(self) -> Optional[list]:
+        """Load and tokenize the eval dataset, or return ``None`` if not configured."""
+        if not self.sft_cfg.eval_dataset_name:
+            return None
+        return self._load_and_tokenize(self.sft_cfg.eval_dataset_name, self.sft_cfg.eval_dataset_split)
+
+    def _log_dataset_stats(self, tokenized: list) -> None:
+        """Log tokenized sequence length statistics over the training set.
+
+        Reports count, mean, median (q50), q25, q75, min, max of the tokenized
+        ``input_ids`` lengths. Logs once via ``logger.info``.
+        """
+        if not tokenized:
+            logger.warning("No tokenized examples to compute stats over")
+            return
+
+        lengths = [len(ex["input_ids"]) for ex in tokenized]
+        n = len(lengths)
+        sorted_lengths = sorted(lengths)
+
+        def pct(p: float) -> int:
+            # Simple nearest-rank percentile over ints; adequate for dataset stats.
+            idx = max(0, min(n - 1, int(round((p / 100.0) * (n - 1)))))
+            return sorted_lengths[idx]
+
+        mean_len = sum(lengths) / n
+        q25 = pct(25)
+        q50 = pct(50)
+        q75 = pct(75)
+        min_len = sorted_lengths[0]
+        max_len = sorted_lengths[-1]
+
+        logger.info(
+            f"Dataset stats (tokenized lengths over {n} examples):\n"
+            f"total={sum(lengths)}, mean={mean_len:.1f}, median={q50}, q25={q25}, q75={q75}, min={min_len}, max={max_len}"
+        )
+
+    def collate_batch(self, examples: list, batch_size: int) -> TrainingInputBatch:
+        """Collate examples into a TrainingInputBatch with loss normalization.
+
+        Normalizes the loss_mask so that the sum-reduction in cross_entropy_loss
+        produces a per-non-pad-token mean, matching the standard convention.
+
+        NOTE: The scaling factor is ``batch_size / (micro_batch_size * total_nonpad)``
+        where ``total_nonpad`` is the count of non-masked (loss-contributing)
+        tokens in the full batch.  This accounts for the ``microbatch_weight``
+        (FSDP) or ``1/num_microbatches`` (Megatron) applied during gradient
+        accumulation so that the effective gradient equals
+        ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
+
+        Args:
+            examples: Tokenized examples to collate.
+            batch_size: Global batch dimension used in the loss-mask scaling
+                factor. Required; the train path passes ``sft_cfg.batch_size``
+                and the eval path passes its per-dispatch chunk size.
+        """
+        batch = collate_sft_batch(examples, self.tokenizer)
+        # Loss normalization: divide by non-pad token count (not padded seq length)
+        # NOTE (sumanthrh): This specific scaling factor is because SkyRL's workers internally normalize
+        # by number of micro batches, but aggregate otherwise
+        micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
+        total_nonpad = max(batch["loss_mask"].sum().item(), 1)
+        batch["loss_mask"] = batch["loss_mask"].float() * (batch_size / (micro_batch_size * total_nonpad))
+        return batch
+
+    # ------------------------------------------------------------------ #
+    # Checkpoint resume
+    # ------------------------------------------------------------------ #
+
+    def load_checkpoint(self) -> int:
+        """Load a checkpoint and return the step number to resume from.
+
+        Behaviour depends on ``sft_cfg.resume_from``:
+        - ``""`` (empty): no resume, return 0.
+        - ``"latest"``: read ``latest_ckpt_global_step.txt`` from ``ckpt_path``.
+        - otherwise: treat as a direct path to a ``global_step_N`` directory.
+
+        Returns:
+            The global step to resume from (0 if no checkpoint loaded).
+        """
+        resume_from = self.sft_cfg.resume_from
+        if not resume_from:
+            return 0
+
+        if resume_from == "latest":
+            if not self.sft_cfg.ckpt_path:
+                logger.info("resume_from='latest' but ckpt_path is empty, starting from scratch")
+                return 0
+            latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
+            if not io.exists(latest_file):
+                logger.info("No latest checkpoint marker found, starting from scratch")
+                return 0
+            with io.open_file(latest_file, "r") as f:
+                ckpt_step = int(f.read().strip())
+            checkpoint_path = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_step}")
+            # Validate consistency: ensure no stale checkpoint folders from prior runs
+            validate_consistency_for_latest_checkpoint(
+                self.sft_cfg.ckpt_path,
+                ckpt_step,
+                checkpoint_path,
+                latest_file,
+                self.sft_cfg.ckpt_interval,
+            )
+        else:
+            checkpoint_path = resume_from
+
+        if not io.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
+
+        global_step = extract_step_from_path(checkpoint_path)
+        if global_step == -1:
+            raise ValueError(
+                f"Cannot extract step number from checkpoint path: {checkpoint_path}. "
+                f"Expected a directory named '{GLOBAL_STEP_PREFIX}<N>'."
+            )
+
+        # Load and validate trainer state if available
+        trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
+        if io.exists(trainer_state_path):
+            with io.open_file(trainer_state_path, "rb") as f:
+                trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+            saved_global_step = trainer_state.get("global_step", global_step)
+            logger.info("Successfully loaded trainer state")
+            if saved_global_step != global_step:
+                logger.warning(
+                    f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value."
+                )
+        else:
+            logger.warning(
+                f"No trainer_state.pt found at {trainer_state_path}. "
+                "This checkpoint was likely saved by an older version."
+            )
+
+        policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
+        logger.info(f"Loading checkpoint from {checkpoint_path} (step {global_step})")
+        self.dispatch.load_checkpoint(
+            "policy",
+            policy_ckpt_dir,
+            load_optimizer_states=True,
+            load_lr_scheduler_states=True,
+        )
+        logger.info(f"Successfully resumed from global_step_{global_step}")
+        return global_step
+
+    # ------------------------------------------------------------------ #
+    # Training
+    # ------------------------------------------------------------------ #
+
+    def run_eval(self, eval_tokenized: list) -> tuple[dict, int]:
+        """Compute eval loss over the full eval dataset.
+
+        Iterates the eval dataset in chunks of ``micro_train_batch_size_per_gpu * dp_size``
+        (i.e. exactly one micro-batch per DP rank per dispatch call), calls
+        :meth:`WorkerDispatch.forward` with ``loss_fn="cross_entropy"`` (which
+        runs the model in ``eval()`` mode under ``no_grad``), and aggregates the
+        per-batch losses into a token-weighted mean.
+
+        The aggregated loss is a token-weighted mean of the per-batch losses,
+        which are themselves per-non-pad-token means within each batch. This
+        yields the true per-non-pad-token mean across the eval dataset.
+
+        Args:
+            eval_tokenized: Pre-tokenized eval dataset (output of
+                :meth:`load_eval_dataset`).
+
+        Returns:
+            ``(metrics, num_eval_batches)`` where ``metrics`` contains
+            ``eval_loss`` and ``num_eval_batches`` is bookkeeping for
+            stdout logging (not a wandb metric).
+        """
+        num_eval = len(eval_tokenized)
+        if num_eval == 0:
+            raise ValueError(
+                "Eval dataset is empty. Provide a non-empty eval split or disable eval "
+                "by setting eval_dataset_name=None."
+            )
+
+        # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
+        # and removes the need for a separate `eval_batch_size` knob.
+        dp_size = self.dispatch.dp_size("policy")
+        eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
+
+        # Pad a trailing partial batch up to ``eval_chunk_size`` via
+        # ``pad_training_input_batch`` (which zeros ``loss_mask`` on padded rows).
+        # Padded rows contribute 0 to the cross-entropy numerator, and the
+        # pre-padding ``total_nonpad`` scaling in ``collate_batch`` excludes
+        # them from the denominator, so the reported ``eval_loss`` is the
+        # per-real-token mean over the full (non-padded) eval set.
+        num_eval_batches = ceil(num_eval / eval_chunk_size)
+
+        total_loss_weighted = 0.0
+        total_tokens = 0
+        for batch_idx in range(num_eval_batches):
+            start = batch_idx * eval_chunk_size
+            end = min(start + eval_chunk_size, num_eval)
+            batch_examples = eval_tokenized[start:end]
+            batch = self.collate_batch(batch_examples, batch_size=eval_chunk_size)
+            # Pad the last (possibly-short) chunk so every dispatch sees exactly
+            # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
+            # ``loss_mask`` for padding rows; with ``pad_size=0`` it is a no-op.
+            pad_rows = eval_chunk_size - len(batch_examples)
+            if pad_rows > 0:
+                logger.info(
+                    f"Padding final eval batch by {pad_rows} rows "
+                    f"({len(batch_examples)} real -> {eval_chunk_size} total); "
+                    f"padded rows are masked out of the loss."
+                )
+                batch = pad_training_input_batch(batch, pad_rows)
+            # Count non-pad response tokens (from the unscaled mask, recovered from the batch)
+            # We use the attention_mask response window via collate_sft_batch's loss_mask which
+            # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
+            # Padded rows have loss_mask=0 so they are excluded here.
+            nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            output = self.dispatch.forward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                loss_fn_config=None,
+            )
+            batch_loss = float(output.metrics.get("loss", float("nan")))
+            total_loss_weighted += batch_loss * nonpad_tokens
+            total_tokens += nonpad_tokens
+
+        eval_loss = total_loss_weighted / max(total_tokens, 1)
+        return {"eval_loss": eval_loss}, num_eval_batches
+
+    def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
+        """Execute a single training step: forward_backward + optim_step.
+
+        Args:
+            batch: The collated training batch.
+            step: Current global step (reserved for future use, e.g. scheduling).
+
+        Returns:
+            Dict with ``loss``, ``grad_norm``, and ``timings``.
+        """
+        timings: dict[str, float] = {}
+        with Timer("forward_backward", timings):
+            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+        with Timer("optim_step", timings):
+            grad_norm = self.dispatch.optim_step("policy")
+
+        metrics = output.metrics
+        loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
+        return {
+            "loss": loss_val,
+            "grad_norm": grad_norm,
+            "timings": timings,
+        }
+
+    def _validate_batch_parallelism(self):
+        """Validate that batch_size is compatible with data-parallel and micro-batch sizes."""
+        batch_size = self.sft_cfg.batch_size
+        total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
+        if self.sft_cfg.strategy == "megatron":
+            tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
+            pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
+            dp_size = total_gpus // (tp * pp)
+        else:
+            # FSDP: all GPUs are data-parallel
+            dp_size = total_gpus
+        if batch_size % dp_size != 0:
+            raise ValueError(f"batch_size ({batch_size}) must be divisible by data-parallel size ({dp_size})")
+        per_dp_batch = batch_size // dp_size
+        micro_batch = self.sft_cfg.micro_train_batch_size_per_gpu
+        if per_dp_batch % micro_batch != 0:
+            raise ValueError(
+                f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
+                f"micro_train_batch_size_per_gpu ({micro_batch})"
+            )
+
+    def _build_dummy_batch(self) -> TrainingInputBatch:
+        """Build a dummy batch of random full-context sequences for benchmarking."""
+        batch_size = self.sft_cfg.batch_size
+        max_length = self.sft_cfg.max_length
+        micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
+        vocab_size = self.tokenizer.vocab_size
+
+        # num_actions is max_length - 1 because the autoregressive model
+        # produces log-probs for positions 1..T (predicting next token),
+        # so the first token has no corresponding log-prob.
+        num_actions = max_length - 1
+
+        sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
+        attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
+        # All tokens are non-pad in the dummy batch, so total_nonpad = batch_size * num_actions.
+        # Scaling = batch_size / (micro_batch_size * total_nonpad)
+        #         = 1 / (micro_batch_size * num_actions)
+        total_nonpad = batch_size * num_actions
+        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) * (
+            batch_size / (micro_batch_size * total_nonpad)
+        )
+
+        batch = TrainingInputBatch(
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "loss_mask": loss_mask,
+            }
+        )
+        batch.metadata = {"response_length": num_actions}
+        return batch
+
+    def _train_dummy(self):
+        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume."""
+        self._validate_batch_parallelism()
+        batch = self._build_dummy_batch()
+        num_steps = self.sft_cfg.dummy_run_max_steps
+
+        logger.info(
+            f"Starting dummy SFT training for {num_steps} steps "
+            f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
+        )
+
+        for step in range(num_steps):
+            all_timings: dict[str, float] = {}
+
+            with Timer("step", all_timings):
+                step_result = self.train_step(batch, step)
+                all_timings.update(step_result["timings"])
+
+            actual_num_tokens = batch["attention_mask"].sum().item()
+            self._total_tokens_processed += actual_num_tokens
+            tokens_per_second = actual_num_tokens / all_timings["step"]
+
+            log_dict = {
+                "train/loss": step_result["loss"],
+                "train/grad_norm": step_result["grad_norm"],
+                "train/tokens_per_second": tokens_per_second,
+                "train/actual_num_tokens": actual_num_tokens,
+                "train/total_tokens_processed": self._total_tokens_processed,
+            }
+            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+
+            self.tracker.log(log_dict, step=step, commit=True)
+            logger.info(
+                f"Step {step}: loss={step_result['loss']:.4f}, "
+                f"grad_norm={step_result['grad_norm']}, "
+                f"tokens_per_second={tokens_per_second:.0f}"
+            )
+
+        logger.info("Dummy SFT training complete!")
+
+    def train(self):
+        """Full training loop: load data, iterate, log, checkpoint."""
+        if self.sft_cfg.dummy_run_full_ctx:
+            if self.sft_cfg.resume_from:
+                logger.warning("resume_from is ignored in dummy run mode")
+            return self._train_dummy()
+
+        tokenized = self.load_dataset()
+
+        # Log tokenized sequence length statistics (once, before training loop)
+        self._log_dataset_stats(tokenized)
+
+        # Load eval dataset (if configured). We load once up-front so the
+        # tokenization cost is amortized across all eval invocations.
+        eval_tokenized = self.load_eval_dataset()
+        if eval_tokenized is not None:
+            logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
+
+        # Baseline eval before training begins (logged at step 0).
+        # Wandb's step counter starts at 0; the training loop's first commit
+        # advances it to >=1, so step=0 here does not conflict with later steps.
+        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+            self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
+            logger.info(
+                f"Baseline eval before training: "
+                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"over {num_eval_batches} batches"
+            )
+
+        batch_size = self.sft_cfg.batch_size
+
+        # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
+        if self.sft_cfg.num_steps is not None:
+            num_steps = self.sft_cfg.num_steps
+        else:
+            steps_per_epoch = ceil(len(tokenized) / batch_size)
+            num_steps = self.sft_cfg.num_epochs * steps_per_epoch
+            logger.info(
+                f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
+                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = {num_steps} steps"
+            )
+
+        # Early validation: dataset must have at least batch_size examples
+        if len(tokenized) < batch_size:
+            raise ValueError(
+                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
+                f"Reduce batch_size or use more data."
+            )
+
+        self._validate_batch_parallelism()
+
+        # Resume from checkpoint if configured
+        start_step = self.load_checkpoint()
+
+        # Shuffle data before training
+        rng = random.Random(self.sft_cfg.seed)
+        rng.shuffle(tokenized)
+
+        # When resuming, start_step is the last *completed* step (checkpoint is
+        # saved AFTER the optimizer update), so we begin at start_step + 1 to
+        # avoid replaying that step.
+
+        # Replay epoch shuffles for reproducibility on resume
+        start_epoch = (start_step * batch_size) // len(tokenized)
+        for _ in range(start_epoch):
+            rng.shuffle(tokenized)
+        current_epoch = start_epoch
+
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
+
+        logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
+        if start_step > 0:
+            logger.info(f"Resuming from step {start_step}")
+        while self.global_step <= num_steps:
+            all_timings: dict[str, float] = {}
+
+            with Timer("step", all_timings):
+
+                # Data loading with wrap-around
+                with Timer("data_loading", all_timings):
+                    start_idx = (self.global_step * batch_size) % len(tokenized)
+                    end_idx = start_idx + batch_size
+                    if end_idx > len(tokenized):
+                        batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
+                    else:
+                        batch_examples = tokenized[start_idx:end_idx]
+                    batch = self.collate_batch(batch_examples, batch_size=batch_size)
+
+                # Training step
+                step_result = self.train_step(batch, self.global_step)
+                all_timings.update(step_result["timings"])
+
+            # Compute throughput using actual (non-padding) tokens
+            batch_padded_seq_len = batch["sequences"].shape[1]
+            actual_num_tokens = batch["attention_mask"].sum().item()
+            self._total_tokens_processed += actual_num_tokens
+            tokens_per_second = actual_num_tokens / all_timings["step"]
+
+            # Build log dict
+            log_dict = {
+                "train/loss": step_result["loss"],
+                "train/grad_norm": step_result["grad_norm"],
+                "train/tokens_per_second": tokens_per_second,
+                "train/actual_num_tokens": actual_num_tokens,
+                "train/batch_padded_seq_len": batch_padded_seq_len,
+                "train/total_tokens_processed": self._total_tokens_processed,
+            }
+            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+
+            # Checkpoint at regular intervals
+            if (
+                self.sft_cfg.ckpt_path
+                and self.sft_cfg.ckpt_interval > 0
+                and self.global_step > 0
+                and self.global_step % self.sft_cfg.ckpt_interval == 0
+            ):
+                with Timer("save_checkpoint", all_timings):
+                    self.save_checkpoint()
+                log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+
+            # HF export at regular intervals
+            if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
+                with Timer("save_hf_model", all_timings):
+                    self.save_hf_model()
+                log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+
+            eval_metrics = None
+            num_eval_batches: int | None = None
+            # Eval fires at step N where N % eval_interval == 0 and N > 0.
+            # The first iteration of this loop runs as global_step=1 (the
+            # initial increment happens before this block on resume), so a
+            # baseline eval at step 0 is not currently produced by the
+            # training loop. If a step-0 baseline is needed, it would have to
+            # be evaluated before entering the training loop and logged
+            # separately.
+            if (
+                eval_tokenized is not None
+                and self.sft_cfg.eval_interval > 0
+                and self.global_step % self.sft_cfg.eval_interval == 0
+            ):
+                with Timer("eval", all_timings):
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                    log_dict["timing/eval"] = all_timings["eval"]
+
+            self.tracker.log(log_dict, step=self.global_step, commit=True)
+
+            if self.global_step % 5 == 0:
+                logger.info(
+                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
+                )
+
+            if eval_metrics:
+                logger.info(
+                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                    f"over {num_eval_batches} batches"
+                )
+
+            # Check for epoch boundary and reshuffle
+            epoch = (self.global_step * batch_size) // len(tokenized)
+            if epoch > current_epoch:
+                for _ in range(epoch - current_epoch):
+                    rng.shuffle(tokenized)
+                current_epoch = epoch
+
+            self.global_step += 1
+        self.global_step = min(self.global_step, num_steps)
+
+        # Save final checkpoint (if checkpointing is enabled)
+        if self.sft_cfg.ckpt_path:
+            final_step = num_steps
+            already_saved = (
+                self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
+            )
+            if not already_saved:
+                logger.info(f"Saving final checkpoint at step {final_step}")
+                self.save_checkpoint()
+
+        # Save final HF model if enabled (only if not already saved at last step)
+        if self.sft_cfg.hf_save_interval > 0:
+            final_step = num_steps
+            already_saved = final_step % self.sft_cfg.hf_save_interval == 0
+            if not already_saved:
+                self.global_step = final_step
+                logger.info(f"Saving final HF model at step {final_step}")
+                self.save_hf_model()
+
+        # Final eval pass (skip if the last step already ran eval).
+        # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
+        # advanced wandb's internal step counter to num_steps+1. Logging the
+        # final eval at step=num_steps would be rejected by wandb with
+        # "step N < current step N+1". We log the final eval at num_steps+1
+        # (one past the last committed train step) in a single combined
+        # tracker.log() call, preserving wandb step ordering. We use a local
+        # ``final_eval_step`` rather than mutating ``self.global_step``: the
+        # bump is purely a wandb-step accounting concern, not real trainer
+        # state.
+        if eval_tokenized is not None:
+            already_ran = self.sft_cfg.eval_interval > 0 and num_steps % self.sft_cfg.eval_interval == 0
+            if not already_ran:
+                final_eval_step = num_steps + 1
+                eval_timings: dict[str, float] = {}
+                with Timer("eval", eval_timings):
+                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                if eval_metrics:
+                    eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                    eval_log["timing/eval"] = eval_timings["eval"]
+                    self.tracker.log(eval_log, step=final_eval_step, commit=True)
+                    logger.info(
+                        f"Final eval at step {final_eval_step}: "
+                        f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {num_eval_batches} batches"
+                    )
+
+        logger.info("SFT training complete!")
+
+    def save_checkpoint(self):
+        """Save a checkpoint at the given step."""
+        step = self.global_step
+        global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        policy_save_dir = os.path.join(global_step_folder, "policy")
+        io.makedirs(global_step_folder, exist_ok=True)
+        logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
+        self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
+
+        # Save trainer state for cross-validation on resume (mirrors PPO's trainer_state.pt)
+        trainer_state = {
+            "global_step": step,
+            "config": asdict(self.sft_cfg),
+        }
+        trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
+        with io.open_file(trainer_state_path, "wb") as f:
+            torch.save(trainer_state, f)
+        logger.info(f"Saved trainer state to {trainer_state_path}")
+
+        # Atomic tracking -- write this last after all saves succeed
+        latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
+        with io.open_file(latest_file, "w") as f:
+            f.write(str(step))
+        logger.info(f"Checkpoint saved for global_step_{step}")
+
+        # Clean up old checkpoints after successful save
+        cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
+
+    def save_hf_model(self):
+        """Save policy weights in HuggingFace format.
+
+        Export path: cfg.trainer.export_path/global_step_{step}/policy
+        Mirrors the pattern used by the RL trainer's save_models().
+        """
+        step = self.global_step
+        policy_export_dir = os.path.join(
+            self.cfg.trainer.export_path,
+            f"{GLOBAL_STEP_PREFIX}{step}",
+            "policy",
+        )
+        self.dispatch.save_hf_model("policy", policy_export_dir, self.tokenizer)
+        logger.info(f"Saved HF model weights at step {step} to {policy_export_dir}")
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
+
+    def shutdown(self):
+        """Finish tracking.
+
+        Does NOT call ``ray.shutdown()`` -- when running inside a Ray task
+        (the normal path via ``sft_entrypoint``), shutting down Ray from
+        within the task would be incorrect.  The head-node process owns
+        the Ray lifecycle.
+        """
+        if self.tracker is not None:
+            self.tracker.finish()

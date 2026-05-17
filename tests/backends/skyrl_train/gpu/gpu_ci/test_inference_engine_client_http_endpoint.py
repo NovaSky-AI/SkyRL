@@ -45,12 +45,10 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
-    init_remote_inference_servers,
-)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
+    init_remote_inference_servers,
     init_worker_with_type,
 )
 
@@ -77,7 +75,6 @@ def _get_test_sampling_params(cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str,
     sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
         sampling_params["top_logprobs"] = 1
-    sampling_params["return_tokens_as_token_ids"] = True
     return sampling_params
 
 
@@ -170,8 +167,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
             choice = response_data["choices"][i]
             assert "logprobs" in choice
             assert choice["logprobs"]["content"] is not None
-            # tokens are token_id:<int> because we request `return_tokens_as_token_ids` from vllm
-            assert choice["logprobs"]["content"][0]["token"].split(":")[1].isdigit()
+            assert isinstance(choice["logprobs"]["content"][0]["token"], str)
 
 
 def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm"):
@@ -246,7 +242,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
         sampling_params = _get_test_sampling_params(cfg, "completions")
 
         engines = InferenceEngineState.create(
@@ -315,7 +311,7 @@ async def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
     cfg.trainer.placement.colocate_all = True
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     async with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
@@ -586,7 +582,7 @@ def test_structured_generation(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
 
         engines = InferenceEngineState.create(
             cfg=cfg,
@@ -653,7 +649,7 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
 
         engines = InferenceEngineState.create(
             cfg=cfg,
@@ -822,7 +818,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
         engine_init_kwargs = {}
         if use_custom_template:
             engine_init_kwargs["chat_template"] = TEMPLATE_PATH
@@ -921,7 +917,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
         # Set the served_model_name to be different from the model path
         cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
 
@@ -1012,7 +1008,7 @@ async def test_context_length_error_returns_400(ray_init_fixture):
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
     cfg.trainer.placement.colocate_all = True
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
 
     async with InferenceEngineState.create(
         cfg=cfg,

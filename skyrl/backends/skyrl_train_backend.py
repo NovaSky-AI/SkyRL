@@ -1,13 +1,11 @@
-"""SkyRL-Train backend for TinkerEngine.
-
-Uses SkyRL-Train infrastructure for supervised training with cross-entropy loss.
-Currently supports a single model only.
-"""
+"""SkyRL-Train backend for TinkerEngine."""
 
 import asyncio
+import io
 import os
 import tarfile
 import tempfile
+from typing import Callable
 
 import ray
 import torch
@@ -16,20 +14,19 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import render_model_input
+from skyrl.backends.renderer import VLLMRenderer, render_model_input
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    RemoteInferenceClient,
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    TrainingInputBatch,
+    pad_training_input_batch,
 )
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -43,9 +40,6 @@ from skyrl.train.utils.utils import (
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
-# Fixed LoRA adapter name used for generation requests when LoRA is active.
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
-
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
@@ -57,7 +51,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"
 
 
 class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
@@ -81,22 +75,27 @@ def _build_skyrl_train_config(
     user_overrides = dict(overrides.model_extra)
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
-    # that will resolve other attributes such as the reference model path based on the policy model path.
+    # that resolves other config derived from the policy model path.
     user_overrides["trainer.policy.model.path"] = base_model
+    user_overrides["trainer.critic.model.path"] = base_model
+    # Strategy must be set on the override dict (not after from_cli_overrides) so
+    # TrainerConfig.__post_init__ sees the right value during validation —
+    # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
+    assert overrides.strategy in (
+        "fsdp",
+        "megatron",
+    ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
+    user_overrides["trainer.strategy"] = overrides.strategy
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
+    cfg.trainer.critic.optimizer_config.scheduler = "constant_with_warmup"
+    cfg.trainer.critic.optimizer_config.num_warmup_steps = 0
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
-
-    assert overrides.strategy in (
-        "fsdp2",
-        "megatron",
-    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = overrides.strategy
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:
@@ -123,25 +122,107 @@ class SkyRLTrainBackend(AbstractBackend):
         self.base_model = base_model
         # NOTE: We currently have two config attributes "config" which is just config overrides and "_cfg" which is the actual config object. This is a temporary state given that the Tinker engine expects a .config attribute
         self.config = config
-        self._model_id: str | None = None
-        self._model_metadata: types.ModelMetadata | None = None
+        self._model_ids_to_role: dict[str, str] = {}
+        self._model_metadata: dict[str, types.ModelMetadata] = {}
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
+        self._colocate_pg: ResolvedPlacementGroup | None = None
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._renderer = None
+        # Captured at first LoRA create_model; subsequent create_models must
+        # match this signature exactly. None when no LoRA model is registered.
+        self._base_lora_signature: tuple | None = None
 
         # New inference infrastructure
-        self._server_group = None
+        self._server_groups: list = []
         self._inference_router = None
 
-    def has_model(self, model_id: str) -> bool:
-        return self._model_id == model_id
+        # Optional hook invoked on inference-engine state changes (after
+        # _create_new_inference_client, on delete_model teardown). The host
+        # (e.g. the Tinker engine subprocess) wires the persistence side via
+        # set_inference_state_publisher. None when running outside a host
+        # that needs to be notified (unit tests, non-Tinker uses).
+        self._inference_state_publisher: Callable[[str | None], None] | None = None
 
-    def build_models(self, PolicyWorker):
+    def has_model(self, model_id: str) -> bool:
+        return model_id in self._model_ids_to_role
+
+    def _get_role(self, model_id: str) -> str:
+        try:
+            return self._model_ids_to_role[model_id]
+        except KeyError as exc:
+            raise ValueError(f"Model {model_id} not found") from exc
+
+    def _get_batch_role(self, model_ids: list[str]) -> str:
+        if not model_ids:
+            return "policy"
+        unique_model_ids = set(model_ids)
+        if len(unique_model_ids) != 1:
+            raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(unique_model_ids)}")
+        return self._get_role(next(iter(unique_model_ids)))
+
+    def _split_model_pass_batch_by_model_id(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> list[types.PreparedModelPassBatch]:
+        """Split a mixed model-pass batch into per-model sub-batches.
+
+        The engine batches pending forward/forward_backward requests across all
+        models. Worker dispatch still executes one logical training model at a
+        time, so mixed batches must be partitioned here while preserving
+        request-level boundaries.
+        """
+        unique_model_ids = list(dict.fromkeys(prepared_batch.all_model_ids))
+        if len(unique_model_ids) <= 1:
+            return [prepared_batch]
+
+        batch_fields = (
+            "all_model_inputs",
+            "all_targets",
+            "all_token_weights",
+            "all_sampling_logprobs",
+            "all_advantages",
+            "all_values",
+            "all_returns",
+            "all_model_ids",
+            "all_loss_fns",
+            "all_loss_fn_configs",
+        )
+
+        request_slices_by_model_id: dict[str, list[tuple[str, str, int, int]]] = {}
+        for request_id, model_id, start_idx, end_idx in prepared_batch.request_batch_slices:
+            # Validate early so an unknown model_id still surfaces clearly.
+            self._get_role(model_id)
+            request_slices_by_model_id.setdefault(model_id, []).append((request_id, model_id, start_idx, end_idx))
+
+        sub_batches = []
+        for request_slices in request_slices_by_model_id.values():
+            sub_batch_data = {field: [] for field in batch_fields}
+            sub_request_batch_slices = []
+
+            for request_id, model_id, start_idx, end_idx in request_slices:
+                sub_start_idx = len(sub_batch_data["all_model_inputs"])
+                for field in batch_fields:
+                    sub_batch_data[field].extend(getattr(prepared_batch, field)[start_idx:end_idx])
+                sub_end_idx = len(sub_batch_data["all_model_inputs"])
+                sub_request_batch_slices.append((request_id, model_id, sub_start_idx, sub_end_idx))
+
+            sub_batches.append(
+                types.PreparedModelPassBatch(
+                    request_batch_slices=sub_request_batch_slices,
+                    **sub_batch_data,
+                )
+            )
+
+        return sub_batches
+
+    def _build_policy(self, PolicyWorker, model_id: str):
         cfg = self._cfg
         colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
+        is_lora = cfg.trainer.policy.model.lora.rank > 0
 
         if colocate_all:
             assert pg is not None, "placement group must be created when colocate_all=True"
@@ -179,6 +260,15 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
+        if is_lora:
+            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
+            # the freshly-initialised LoRA into a per-worker pristine slot, then
+            # register the first adapter under `model_id`. Must happen while the
+            # model + optimizer are still GPU-resident (i.e. before the offload).
+            ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
+            ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
+            ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
+
         if colocate_all:
             policy_model.offload_to_cpu()
 
@@ -189,11 +279,41 @@ class SkyRLTrainBackend(AbstractBackend):
             inference_engine_client=self._inference_engine_client,
         )
 
-        # Mark all models as offloaded
+        # Mark the offloaded policy model in dispatch state
         if colocate_all:
-            self._dispatch.mark_all_offloaded()
+            self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
+
+    def _build_critic(self, CriticWorker, lora_config: types.LoraConfig) -> None:
+        cfg = self._cfg
+        colocate_all = cfg.trainer.placement.colocate_all
+        if colocate_all:
+            num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+            num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
+            assert (
+                num_policy_gpus == num_critic_gpus
+            ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
+
+        cfg.trainer.critic.model.lora.rank = lora_config.rank
+        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        critic_model = PPORayActorGroup(
+            cfg.trainer,
+            cfg.trainer.placement.critic_num_nodes,
+            cfg.trainer.placement.critic_num_gpus_per_node,
+            CriticWorker,
+            pg=self._colocate_pg,
+            num_gpus_per_actor=0.2 if colocate_all else 1,
+            colocate_all=colocate_all,
+            sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
+        )
+        self._dispatch.register_actor_group("critic", critic_model)
+        self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
+        ray.get(critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+        if colocate_all:
+            critic_model.offload_to_cpu()
+            self._dispatch.mark_as_offloaded("critic")
+        logger.info("init critic model done")
 
     def init_weight_sync_state(self):
         """
@@ -213,73 +333,48 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.generator.inference_engine,
         )
 
-    def _create_new_inference_client(self):
-        """Create new HTTP-based inference client.
+    def set_inference_state_publisher(self, publisher: Callable[[str | None], None]) -> None:
+        """Wire a callback invoked when the inference proxy URL changes.
 
-        Possible config combinations:
-        - Both external_proxy_url and external_server_urls → fully external setup
-        - external_proxy_url only → proxy for both data + control plane
-        - external_server_urls only → create internal router over them
-        - Neither → build servers and router internally
+        Called by the host (e.g. the Tinker engine subprocess) after backend
+        construction. The callback receives the current proxy URL after a
+        new inference engine is brought up, or ``None`` on teardown. The
+        backend has no opinion on what the callback does — typical use is
+        to persist the URL somewhere the API process can read.
         """
-        ie_cfg = self._cfg.generator.inference_engine
-        is_colocated = self._cfg.trainer.placement.colocate_all
-        external_proxy_url = ie_cfg.external_proxy_url
-        external_server_urls = ie_cfg.external_server_urls
+        self._inference_state_publisher = publisher
 
-        has_external_proxy = external_proxy_url is not None
-        has_external_servers = external_server_urls is not None
+    def _publish_inference_state(self, proxy_url: str | None) -> None:
+        """Invoke the publisher if set; best-effort (failure must not raise).
 
-        if has_external_proxy and has_external_servers:
-            proxy_url = external_proxy_url
-            server_urls = list(external_server_urls)
-            logger.info(
-                f"HTTP Inference: Using fully external setup - proxy_url={proxy_url}, server_urls={server_urls}"
-            )
+        Callers rely on local state being reset regardless of publish outcome.
+        """
+        if self._inference_state_publisher is None:
+            return
+        try:
+            self._inference_state_publisher(proxy_url)
+        except Exception as e:
+            logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
 
-        elif has_external_proxy and not has_external_servers:
-            proxy_url = external_proxy_url
-            server_urls = [proxy_url]
-            logger.info(f"HTTP Inference: Using external proxy for both data and control plane - proxy_url={proxy_url}")
-
-        elif has_external_servers and not has_external_proxy:
-            server_urls = list(external_server_urls)
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Created router over external servers - "
-                f"server_urls={server_urls}, proxy_url={proxy_url}"
-            )
-
-        else:
-            cli_args = build_vllm_cli_args(self._cfg)
-
-            self._server_group = ServerGroup(
-                cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
-                placement_group=self._colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
-                distributed_executor_backend=ie_cfg.distributed_executor_backend,
-            )
-            server_infos = self._server_group.start()
-            server_urls = [info.url for info in server_infos]
-
-            self._inference_router = VLLMRouter(server_urls=server_urls)
-            proxy_url = self._inference_router.start()
-            logger.info(
-                f"HTTP Inference: Built servers and router internally - "
-                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
-            )
-
-        lora_cfg = self._cfg.trainer.policy.model.lora
-        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
-        self._inference_engine_client = RemoteInferenceClient(
-            proxy_url=proxy_url,
-            server_urls=server_urls,
-            model_name=self._cfg.trainer.policy.model.path,
-            active_lora_name=active_lora_name,
-            tokenizer=self._tokenizer,
+    def _create_new_inference_client(self):
+        """Create new HTTP-based inference client."""
+        from skyrl.backends.skyrl_train.inference_servers.setup import (
+            build_new_inference_client,
         )
+
+        is_colocated = self._cfg.trainer.placement.colocate_all
+        client, server_setup = build_new_inference_client(
+            self._cfg,
+            self._tokenizer,
+            placement_group=self._colocate_pg if is_colocated else None,
+        )
+        self._inference_router = server_setup.router
+        self._server_groups = server_setup.server_groups
+        self._inference_engine_client = client
+
+        # Publish inference endpoint so the API can forward samples directly
+        # (only meaningful in non-colocated mode; the API gates on this).
+        self._publish_inference_state(server_setup.proxy_url)
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
@@ -295,39 +390,96 @@ class SkyRLTrainBackend(AbstractBackend):
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        if self._model_id is not None:
-            raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
+    def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
+        # Tinker's public LoraConfig only exposes rank + alpha (plus
+        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
+        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
+        # AdapterStore additionally verifies parallel-state equality via
+        # its own LoraSignature.
+        return (int(lora_config.rank), int(lora_config.alpha))
 
-        # Build config
-        self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        if model_id in self._model_ids_to_role:
+            raise ValueError(f"Model '{model_id}' already exists")
 
-        if not ray.is_initialized():
-            logger.info("Initializing Ray with runtime environment")
-            initialize_ray(self._cfg)
+        is_lora = lora_config is not None and lora_config.rank > 0
+        is_first_policy = "policy" not in self._model_ids_to_role.values()
 
-        # Create shared placement group only when colocating training + inference
-        if self._cfg.trainer.placement.colocate_all:
-            self._colocate_pg = self._create_colocate_pg()
+        # Multi-LoRA path: allow additional policy adapters when LoRA is active
+        # and the first model has already been built. FFT (rank=0) keeps the
+        # original single-tenant gate.
+        if model_role == "policy" and not is_first_policy:
+            if not is_lora:
+                raise ValueError(
+                    "SkyRLTrainBackend already has a 'policy' model; multi-tenant "
+                    "training is only supported for LoRA (rank > 0)"
+                )
+            if self._base_lora_signature is None:
+                raise ValueError(
+                    "Cannot register an additional LoRA adapter: the first policy "
+                    "model was created without LoRA. Recreate the server with a "
+                    "LoRA-enabled first model."
+                )
+            new_signature = self._lora_signature_from(lora_config)
+            if new_signature != self._base_lora_signature:
+                raise ValueError(
+                    f"LoRA signature mismatch for model '{model_id}': "
+                    f"got (rank, alpha)={new_signature}, "
+                    f"first adapter registered with {self._base_lora_signature}. "
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
+                    "adapters; target_modules is fixed server-side."
+                )
+            self._dispatch.register_adapter("policy", model_id)
+            self._model_ids_to_role[model_id] = model_role
+            self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+            logger.info(f"Registered additional LoRA adapter '{model_id}'")
+            return
+
+        # First-time setup OR critic creation (existing path).
+        if model_role == "policy":
+            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+
+            if not ray.is_initialized():
+                logger.info("Initializing Ray with runtime environment")
+                initialize_ray(self._cfg)
+
+            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+
+            if self._cfg.trainer.strategy == "fsdp":
+                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                    PolicyWorker,
+                )
+            elif self._cfg.trainer.strategy == "megatron":
+                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                    PolicyWorker,
+                )
+            else:
+                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+
+            logger.info("Building models.")
+            self._build_policy(PolicyWorker, model_id=model_id)
+            if is_lora:
+                self._base_lora_signature = self._lora_signature_from(lora_config)
+        elif model_role == "critic":
+            if model_role in self._model_ids_to_role.values():
+                raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
+            if "policy" not in self._model_ids_to_role.values():
+                raise ValueError("Create a policy model before creating a critic model")
+            if self._cfg.trainer.strategy == "fsdp":
+                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                    CriticWorker,
+                )
+            elif self._cfg.trainer.strategy == "megatron":
+                raise NotImplementedError("Critic model support is not implemented for the Megatron backend yet")
+            else:
+                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+            self._build_critic(CriticWorker, lora_config)
         else:
-            self._colocate_pg = None
+            raise ValueError(f"Unknown model_role: {model_role}")
 
-        # Get worker types based on strategy
-        if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-        elif self._cfg.trainer.strategy == "megatron":
-            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                PolicyWorker,
-            )
-        else:
-            raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-
-        logger.info("Building models.")
-        self.build_models(PolicyWorker)
-
-        self._model_id = model_id
-        self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
-        logger.info(f"Created model {model_id} using RayPPOTrainer")
+        self._model_ids_to_role[model_id] = model_role
+        self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+        logger.info(f"Created {model_role} model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
         """Create a placement group for colocated training + inference."""
@@ -345,37 +497,60 @@ class SkyRLTrainBackend(AbstractBackend):
         return ResolvedPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
-        if self._model_id != model_id:
-            raise ValueError(f"Model {model_id} not found")
+        role = self._get_role(model_id)
 
-        # Currently only one model at a time is supported. Shut down Ray entirely
-        # and reset state; everything will be re-initialized in create_model().
-        logger.info(f"Deleting model {model_id}, shutting down Ray...")
-        if self._server_group:
-            self._server_group.shutdown()
-            self._server_group = None
+        # Multi-LoRA: if more than one model is currently registered, drop just
+        # this adapter slot rather than tearing down the shared Ray runtime.
+        # The live GPU state may still mirror this adapter; it'll be
+        # overwritten on the next swap_to (no eager swap-away here).
+        if len(self._model_ids_to_role) > 1:
+            if role == "policy" and self._base_lora_signature is not None:
+                self._dispatch.delete_adapter("policy", model_id)
+                del self._model_ids_to_role[model_id]
+                self._model_metadata.pop(model_id, None)
+                logger.info(f"Removed LoRA adapter '{model_id}'")
+                return
+            # Fall through to teardown for non-LoRA roles or unexpected mixes.
+
+        # Last model (or non-LoRA path): tear down the shared Ray runtime.
+        # The Tinker engine will rebuild on the next create_model().
+        logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
+        for group in self._server_groups:
+            group.shutdown()
+        self._server_groups = []
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
         ray.shutdown()
-
-        self._model_id = None
-        self._model_metadata = None
+        self._model_ids_to_role = {}
+        self._model_metadata = {}
         self._cfg = None
         self._dispatch = None
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._renderer = None
         self._colocate_pg = None
-
+        self._base_lora_signature = None
+        # Local state is fully reset above. Notify the host last so a
+        # publisher failure can't leave the controller half-torn-down.
+        # Next _create_new_inference_client repopulates.
+        self._publish_inference_state(None)
         logger.info(f"Successfully deleted model {model_id}")
 
-    def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
+    def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch, role: str) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        # Extract token IDs from ModelInput chunks
-        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
+        if _SKYRL_USE_NEW_INFERENCE:
+            if self._renderer is None:
+                self._ensure_inference_engines()
+                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        else:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
+
+        all_input_ids = [r.prompt_ids for r in rendered_inputs]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
@@ -389,12 +564,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
         sequences, attention_masks, loss_masks, response_masks = [], [], [], []
         action_log_probs_list, advantages_list = [], []
+        values_list, returns_list = [], []
 
-        for seq, weights, logprobs, advs in zip(
+        for seq, weights, logprobs, advs, values, returns in zip(
             full_sequences,
             prepared_batch.all_token_weights,
             prepared_batch.all_sampling_logprobs,
             prepared_batch.all_advantages,
+            prepared_batch.all_values,
+            prepared_batch.all_returns,
         ):
             pad_len = max_seq_len - len(seq)
             sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
@@ -404,6 +582,8 @@ class SkyRLTrainBackend(AbstractBackend):
             response_masks.append([0] * action_pad + [1] * len(weights))
             action_log_probs_list.append([0.0] * action_pad + [float(lp) for lp in logprobs])
             advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
+            values_list.append([0.0] * action_pad + [float(v) for v in values])
+            returns_list.append([0.0] * action_pad + [float(r) for r in returns])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
@@ -420,10 +600,41 @@ class SkyRLTrainBackend(AbstractBackend):
         # Include RL fields (action_log_probs, advantages) when data is present
         has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
         has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
+        has_values = any(len(v) > 0 for v in prepared_batch.all_values)
+        has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
             batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+        if role == "critic":
+            if has_values != has_returns:
+                raise ValueError("Critic batches must provide both values and returns, or neither")
+            if has_values and any(
+                len(values) != len(weights) or len(returns) != len(weights)
+                for values, returns, weights in zip(
+                    prepared_batch.all_values, prepared_batch.all_returns, prepared_batch.all_token_weights
+                )
+            ):
+                raise ValueError("Critic batches with values/returns must align with response-token lengths")
+            if has_values:
+                batch_dict["values"] = torch.tensor(values_list, dtype=torch.float32)
+                batch_dict["returns"] = torch.tensor(returns_list, dtype=torch.float32)
+
+        # In mixed batches (some vision, some text-only), text-only samples
+        # get an empty tensor placeholder so the TensorList length matches the batch size.
+        # Empty tensors contribute zero rows when torch.cat'd downstream.
+        for mm_key in ("pixel_values", "image_grid_thw"):
+            values = [
+                r.multi_modal_kwargs.get(mm_key) if r.multi_modal_kwargs is not None else None for r in rendered_inputs
+            ]
+            # Iterate through to get the first non-none value.
+            # We use the reference shape to make sure subsequent stack / cat calls
+            # don't run into shape errors.
+            ref = next((v for v in values if v is not None), None)
+            # If ref is None, then all of the values empty and we don't need to add placeholder tensors.
+            if ref is not None:
+                placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
+                batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
@@ -447,25 +658,11 @@ class SkyRLTrainBackend(AbstractBackend):
         dp_size = self._dispatch.get_lcm_dp_size()
         alignment = dp_size * micro_batch_size if micro_batch_size else dp_size
         pad_size = (alignment - batch.batch_size % alignment) % alignment
-        if pad_size == 0:
-            return batch, 0
-
-        new_tensors = {}
-        for key, tensor in batch.items():
-            if tensor is not None:
-                if key == "loss_mask":
-                    # Padding entries must not contribute to the loss
-                    additional_dims = tensor.shape[1:]
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        padded = TrainingInputBatch(new_tensors)
-        padded.metadata = batch.metadata
-        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})")
-        return padded, pad_size
+        if pad_size > 0:
+            logger.info(
+                f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})"
+            )
+        return pad_training_input_batch(batch, pad_size), pad_size
 
     def _extract_metrics(self, data: dict) -> dict[str, float]:
         """Extract training metrics from dispatch return dict.
@@ -485,8 +682,18 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["pg_loss:sum"] = float(data["policy_loss"])
         if "policy_entropy" in data:
             metrics["entropy_loss:sum"] = float(data["policy_entropy"])
+        if "critic_loss" in data:
+            metrics["critic_loss:sum"] = float(data["critic_loss"])
+        if "values_mean" in data:
+            metrics["values_mean:mean"] = float(data["values_mean"])
+        if "values_clipfrac" in data:
+            metrics["values_clipfrac:mean"] = float(data["values_clipfrac"])
         if "response_length" in data:
             metrics["num_tokens:sum"] = float(data["response_length"])
+        if "policy_lr" in data:
+            metrics["policy_lr:last"] = float(data["policy_lr"])
+        if "critic_lr" in data:
+            metrics["critic_lr:last"] = float(data["critic_lr"])
 
         return metrics
 
@@ -503,6 +710,34 @@ class SkyRLTrainBackend(AbstractBackend):
                 # Legacy client has a preset sleep level passed during create_ray_wrapped_inference_engines_from_config
                 asyncio.run(self._inference_engine_client.sleep())
 
+    def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
+        if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
+            raise ValueError(f"Critic batches must use loss_fn='ppo' or 'ppo_critic', got {loss_fn!r}")
+        if role != "critic" and loss_fn == "ppo_critic":
+            raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
+
+    def _normalize_policy_loss_request(
+        self,
+        role: str,
+        loss_fn: str,
+        loss_fn_config: dict[str, float] | None,
+    ) -> tuple[str, dict[str, float] | None]:
+        """Normalize public Tinker loss names/config into SkyRL-Train policy settings."""
+        if role == "critic":
+            return loss_fn, loss_fn_config
+
+        if loss_fn != "ppo":
+            return loss_fn, loss_fn_config
+
+        normalized_config = dict(loss_fn_config or {})
+        clip_low_threshold = normalized_config.pop("clip_low_threshold", None)
+        clip_high_threshold = normalized_config.pop("clip_high_threshold", None)
+        if clip_low_threshold is not None:
+            normalized_config["eps_clip_low"] = 1.0 - clip_low_threshold
+        if clip_high_threshold is not None:
+            normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
+        return "regular", normalized_config or None
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -511,7 +746,26 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         self._sleep_inference_engines()
-        batch = self._to_training_batch(prepared_batch)
+        results = {}
+        for sub_batch in self._split_model_pass_batch_by_model_id(prepared_batch):
+            results.update(self._forward_backward_single_model_batch(sub_batch))
+        return results
+
+    def _forward_backward_single_model_batch(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        role = self._get_batch_role(prepared_batch.all_model_ids)
+        loss_fn = prepared_batch.all_loss_fns[0]
+        self._validate_batch_role_and_loss(role, loss_fn)
+        if role == "critic" and any(
+            len(values) != len(weights) or len(returns) != len(weights)
+            for values, returns, weights in zip(
+                prepared_batch.all_values, prepared_batch.all_returns, prepared_batch.all_token_weights
+            )
+        ):
+            raise ValueError("Critic forward_backward requires values and returns for every response token")
+        batch = self._to_training_batch(prepared_batch, role)
         micro_bs = (
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
@@ -525,42 +779,52 @@ class SkyRLTrainBackend(AbstractBackend):
                 loss_fn,
             )
         loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
-        data = self._dispatch.forward_backward(
-            "policy",
-            batch,
-            loss_fn=loss_fn,
-            loss_fn_config=loss_fn_config,
-        )
+        loss_fn, loss_fn_config = self._normalize_policy_loss_request(role, loss_fn, loss_fn_config)
+        # Single model_id per sub-batch (split upstream); pass it so the
+        # dispatch layer can swap to the right LoRA adapter before the op.
+        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        if role == "critic":
+            self._dispatch.set_algorithm_config(
+                "critic",
+                value_clip=(loss_fn_config or {}).get("value_clip", self._cfg.trainer.algorithm.value_clip),
+            )
+            data = self._dispatch.forward_backward("critic", batch, model_id=model_id)
+        else:
+            data = self._dispatch.forward_backward(
+                role,
+                batch,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                model_id=model_id,
+            )
 
         # Trim padding entries from loss_fn_outputs
-        if pad_size > 0 and "loss_fn_outputs" in data:
-            data["loss_fn_outputs"] = data["loss_fn_outputs"][:-pad_size]
+        per_sample_outputs = data.loss_fn_outputs
+        if pad_size > 0 and per_sample_outputs:
+            per_sample_outputs = per_sample_outputs[:-pad_size]
 
-        metrics = self._extract_metrics(data)
+        metrics = self._extract_metrics(data.metrics)
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
-            loss_fn_outputs = []
-            for i in range(start_idx, end_idx):
-                raw_output = data["loss_fn_outputs"][i]
-                logprobs = list(raw_output.get("logprobs", []))
-                elementwise_loss = list(raw_output.get("elementwise_loss", []))
-                loss_fn_outputs.append(
-                    {
-                        "elementwise_loss": {
-                            "data": elementwise_loss,
-                            "dtype": "float32",
-                            "shape": [len(elementwise_loss)],
-                        },
-                        "logprobs": {
-                            "data": logprobs,
-                            "dtype": "float32",
-                            "shape": [len(logprobs)],
-                        },
-                    }
-                )
+            if per_sample_outputs:
+                loss_fn_outputs = []
+                for i in range(start_idx, end_idx):
+                    raw_output = per_sample_outputs[i]
+                    formatted_output = {}
+                    for key in ("elementwise_loss", "logprobs", "values"):
+                        values = list(raw_output.get(key, []))
+                        if values or key in raw_output:
+                            formatted_output[key] = {
+                                "data": values,
+                                "dtype": "float32",
+                                "shape": [len(values)],
+                            }
+                    loss_fn_outputs.append(formatted_output)
+            else:
+                loss_fn_outputs = [{} for _ in range(end_idx - start_idx)]
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar",
+                loss_fn_output_type=data.loss_fn_output_type,
                 loss_fn_outputs=loss_fn_outputs,
                 metrics=metrics,
             )
@@ -574,18 +838,28 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         self._sleep_inference_engines()
-        batch = self._to_training_batch(prepared_batch)
+        results = {}
+        for sub_batch in self._split_model_pass_batch_by_model_id(prepared_batch):
+            results.update(self._forward_single_model_batch(sub_batch))
+        return results
+
+    def _forward_single_model_batch(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        role = self._get_batch_role(prepared_batch.all_model_ids)
+        batch = self._to_training_batch(prepared_batch, role)
         micro_bs = (
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
-        data = self._dispatch.forward("policy", batch)
+        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        data = self._dispatch.forward(role, batch, model_id=model_id)
 
-        # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
-        # Trim padding entries from output
-        output_logprobs = data["output"]
-        if pad_size > 0:
-            output_logprobs = output_logprobs[:-pad_size]
+        # Workers emit per-sample loss_fn_outputs directly. Trim padding entries.
+        per_sample_outputs = data.loss_fn_outputs
+        if pad_size > 0 and per_sample_outputs:
+            per_sample_outputs = per_sample_outputs[:-pad_size]
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
@@ -593,34 +867,39 @@ class SkyRLTrainBackend(AbstractBackend):
             for i in range(start_idx, end_idx):
                 # Use token weights length to determine each example's actual response length
                 valid_len = len(prepared_batch.all_token_weights[i])
-                start = max(output_logprobs.shape[1] - valid_len, 0)
-                logprobs = output_logprobs[i, start:].tolist()
+                output_key = "values" if role == "critic" else "logprobs"
+                raw_values = per_sample_outputs[i].get(output_key, []) if per_sample_outputs else []
+                # Each per-sample list has length ``max_response_len`` (the batch's
+                # response length), left-padded with zeros so the real per-token
+                # values land in the rightmost ``valid_len`` positions. Slice the
+                # tail to recover this sample's actual response tokens.
+                start = max(len(raw_values) - valid_len, 0)
+                outputs = list(raw_values[start:])
                 loss_fn_outputs.append(
                     {
-                        "logprobs": {
-                            "data": logprobs,
+                        output_key: {
+                            "data": outputs,
                             "dtype": "float32",
-                            "shape": [len(logprobs)],
+                            "shape": [len(outputs)],
                         },
                     }
                 )
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar",
+                loss_fn_output_type=data.loss_fn_output_type,
                 loss_fn_outputs=loss_fn_outputs,
                 metrics={},
             )
         return results
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
-        if model_id != self._model_id:
-            raise ValueError(f"Model {model_id} not found")
+        role = self._get_role(model_id)
 
         # Apply learning rate from AdamParams before optimizer step
         # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
         adam_params = request_data.adam_params
-        self._dispatch.set_lr("policy", adam_params.learning_rate)
+        self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
-        grad_norm = self._dispatch.optim_step("policy")
+        grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
         metrics: dict[str, float] = {}
@@ -642,11 +921,22 @@ class SkyRLTrainBackend(AbstractBackend):
         # 1. Ensure inference engines are initialized
         self._ensure_inference_engines()
 
-        # 2. Validate single model
+        # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
+        # mixes adapters in one batched sample call (the engine batches across
+        # model_ids in find_batchable_sample); we route each request via the
+        # `model` field in _sample_with_remote_client below.
         unique_models = set(prepared_batch.all_model_ids)
-        if unique_models != {self._model_id}:
+        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
+        if unknown:
             error = types.ErrorResponse(
-                error=f"Model mismatch. Expected {self._model_id}, got {unique_models}", status="error"
+                error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
+            )
+            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
+        if non_policy:
+            error = types.ErrorResponse(
+                error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
+                status="error",
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
@@ -703,6 +993,16 @@ class SkyRLTrainBackend(AbstractBackend):
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
 
+        # Resolve the inference-engine model name per request. With multi-LoRA
+        # the adapter name on vLLM IS the Tinker model_id (registered by
+        # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
+        # FFT path falls back to resolve_policy_model_name(cfg).
+        fallback_model_name = resolve_policy_model_name(self._cfg)
+        per_request_models = [
+            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
+            for mid in prepared_batch.all_model_ids
+        ]
+
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_model_inputs)):
@@ -711,6 +1011,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 request_payload = {
                     "json": {
+                        "model": per_request_models[i],
                         "prompt": model_input.model_dump(),
                         "num_samples": 1,
                         "sampling_params": sampling_params.model_dump(),
@@ -805,8 +1106,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
-        if model_id != self._model_id:
-            raise ValueError(f"Model {model_id} not found")
+        self._get_role(model_id)
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
 
@@ -822,13 +1122,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def save_checkpoint(self, output_path, model_id: str) -> None:
         """Save full training checkpoint (model + optimizer + scheduler) as tar."""
         self._validate_model_state(model_id)
+        role = self._get_role(model_id)
 
         # Create temp directory for checkpoint
         with tempfile.TemporaryDirectory() as temp_dir:
             ckpt_dir = os.path.join(temp_dir, "checkpoint")
 
             # Save checkpoint directory (includes optimizer state automatically)
-            self._dispatch.save_checkpoint(model="policy", ckpt_dir=ckpt_dir, tokenizer=self._tokenizer)
+            self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer, model_id=model_id)
 
             # Create tar archive
             self._create_tar_from_directory(ckpt_dir, output_path)
@@ -838,6 +1139,7 @@ class SkyRLTrainBackend(AbstractBackend):
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
         """Load full training checkpoint (model + optimizer + scheduler) from tar."""
         self._validate_model_state(model_id)
+        role = self._get_role(model_id)
 
         # Extract tar to temp directory (filter='data' prevents path traversal attacks)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -846,7 +1148,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
             # Load checkpoint (includes optimizer and scheduler states)
             self._dispatch.load_checkpoint(
-                model="policy", ckpt_dir=temp_dir, load_optimizer_states=True, load_lr_scheduler_states=True
+                model=role,
+                ckpt_dir=temp_dir,
+                load_optimizer_states=True,
+                load_lr_scheduler_states=True,
+                model_id=model_id,
             )
 
         logger.info(f"Loaded checkpoint for {model_id} from {checkpoint_path}")
@@ -859,11 +1165,17 @@ class SkyRLTrainBackend(AbstractBackend):
         loops) the expensive HuggingFace model export is skipped entirely.
         """
         self._validate_model_state(model_id)
+        if self._get_role(model_id) != "policy":
+            raise ValueError("save_sampler_checkpoint is only supported for policy models")
 
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
-        asyncio.run(self._dispatch.save_weights_for_sampler())
+        # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
+        # before broadcasting and the worker registers it on vLLM under that
+        # name. None for the FFT / single-tenant path uses legacy behavior.
+        sync_id = model_id if self._base_lora_signature is not None else None
+        asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
@@ -877,8 +1189,11 @@ class SkyRLTrainBackend(AbstractBackend):
             # Hot path: write a lightweight marker so the engine's checkpoint
             # bookkeeping stays consistent.  Actual weights live in GPU memory.
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with tarfile.open(output_path, "w"):
-                pass  # empty tar — marker only
+            marker = f"SkyRL sampler marker for {model_id}: weights live in GPU memory (persist=False).\n".encode()
+            with tarfile.open(output_path, "w") as tar:
+                info = tarfile.TarInfo("MARKER")
+                info.size = len(marker)
+                tar.addfile(info, io.BytesIO(marker))
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
 
 
@@ -908,14 +1223,18 @@ def create_ray_wrapped_inference_engines_from_config(
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
         "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
+        "language_model_only": cfg.generator.inference_engine.language_model_only,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+        lora_cfg = cfg.trainer.policy.model.lora
         engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["max_lora_rank"] = lora_cfg.rank
         engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = 1
+        engine_kwargs["max_loras"] = lora_cfg.max_loras
+        if lora_cfg.max_cpu_loras is not None:
+            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
         engine_kwargs["fully_sharded_loras"] = cfg.generator.inference_engine.fully_sharded_loras
 
         if cfg.generator.inference_engine.enforce_eager and cfg.generator.inference_engine.backend == "vllm":

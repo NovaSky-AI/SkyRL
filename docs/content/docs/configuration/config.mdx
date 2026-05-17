@@ -118,6 +118,7 @@ run_name: "test_run"
 log_path: "/tmp/skyrl-logs"
 dump_data_batch: false
 dump_eval_results: true
+log_example_interval: 1
 
 ```
 
@@ -127,30 +128,29 @@ dump_eval_results: true
 - `log_path`: Path for infrastructure log files. Infrastructure logs (vLLM engine startup, model loading, worker initialization) are written to `{log_path}/infra-YYMMDD_HHMMSS.log`. For multi-node training, use a shared filesystem path to consolidate logs into a single file. See the [logging guide](../checkpointing-logging/logging) for details.
 - `dump_data_batch`: Whether to dump the data batch to a file. This is useful for debugging. When `true`, the data batch will be dumped to a file in the `export_path` directory. The training batch at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input`
 - `dump_eval_results`: Whether to dump the evaluation results to a file. When `true`, the full evaluation results will be dumped to a file in the `export_path` directory. The evaluation results at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_eval" / global_step_N_eval_results`
+- `log_example_interval`: Log an example prompt every N training steps, `0`/`-1` to disable.
 
 ## Training Backends
 
-We support three backends: FSDP1, FSDP2, and Megatron. The backend can be chosen with `trainer.strategy` field.
+We support two backends: FSDP (PyTorch's composable `fully_shard` API, formerly known as FSDP2) and Megatron. The backend can be chosen with the `trainer.strategy` field.
 
 ### FSDP Configuration
-
-We use the same configuration group for FSDP1 and FSDP2
 
 ```yaml
 fsdp_config:
     cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-    reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
+    reshard_after_forward: true # [True, False, int between 1 and fsdp_size]
     fsdp_size: -1
 
 ```
 
-- `cpu_offload`: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to [cpu_offload](https://docs.pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel)  parameter in FSDP1 and [offload_policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) in FSDP2.
-- `reshard_after_forward`: Whether to re-shard FSDP model after forward pass. This is a FSDP2 specific configuration, please refer to the [FSDP2 docs](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) for more details. If set to `false`, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
+- `cpu_offload`: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to [offload_policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) in FSDP.
+- `reshard_after_forward`: Whether to re-shard the FSDP model after the forward pass. See the [FSDP docs](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) for details. If set to `false`, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
 - `fsdp_size`: The group size within which worker state is sharded with FSDP. This is a parameter to be used for hybrid sharding in multi-node settings. For example, if the number of workers in the actor group is 8, with 4 in each node, and `fsdp_size` is 4, then the training state will be fully sharded across 4 ranks in each node, but replicated (DP) across nodes.
 
     `cpu_offload` is different from worker state offloading with model colocation.
 
-    In FSDP, `cpu_offload` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
+    With FSDP, `cpu_offload` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
 
     In the SkyRL-Train backend, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on [model placement and colocation](placement)
 
@@ -494,7 +494,7 @@ algorithm:
 
   - `token_mean`: computes average loss over all valid tokens in the batch. Used in [DAPO](https://dapo-sia.github.io/).
   - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch.
-  - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). If `algorithm.max_seq_len` is not explicitly set, it defaults to `generator.max_input_length + generator.sampling_params.max_generate_length`.
+  - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). `algorithm.max_seq_len` must be set explicitly for this mode because multi-turn/token budgets are workload-dependent.
 
 - `algorithm.grpo_norm_by_std`: Whether to normalize advantages by the standard deviation in GRPO. This is set to `false` in [Dr. GRPO](https://arxiv.org/abs/2503.20783).
 - `algorithm.zero_variance_filter`: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.
@@ -509,7 +509,7 @@ algorithm:
   - `algorithm.dynamic_sampling.max_sample_batches`: Maximum number of batches to sample before stopping. Set to `-1` to sample forever.
   - `algorithm.dynamic_sampling.min_replace_ratio`: Minimum proportion of good samples with which to replace bad samples for `replace` strategy.
 - `algorithm.use_tis`: Whether to use Truncated Importance Sampling (TIS) as proposed in [this blog](https://fengyao.notion.site/off-policy-rl). This flag is to be deprecated, use `off_policy_correction.tis_ratio_type = "token"` instead.
-- `max_seq_len`: Used for `seq_mean_token_sum_norm` `loss_reduction`. Users should set this value for multi-turn for that loss. If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length, which is incorrect for multi-turn.
+- `max_seq_len`: Used for `seq_mean_token_sum_norm` `loss_reduction`. Required when using that reduction mode. Set it to the total sequence-length normalization constant for your setup; this often matches the model context window / vLLM `max_model_len` when that is the intended budget.
 - `algorithm.tis_imp_ratio_cap`: Cap parameter for the importance ratio in TIS. This flag is to be deprecated, use `off_policy_correction.token_tis_ratio_clip_high` instead.
 - `algorithm.clip_cov`: Clip-Cov parameters (only used when `policy_loss_type` is `clip_cov`):
 

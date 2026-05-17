@@ -20,6 +20,7 @@ Usage:
     uv run -m skyrl.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
+import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from flax import nnx
 from flax.training import checkpoints
 from jax.experimental import multihost_utils
 from pydantic import BaseModel, Field, TypeAdapter
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.renderer import render_model_input
@@ -111,6 +112,22 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     num_processes: int | None = Field(
         default=None,
         description="Total number of processes in the multi-node cluster",
+    )
+    # RayJaxBackend configuration
+    use_ray: bool = Field(
+        default=False,
+        description="Use Ray to schedule JAX workers",
+    )
+
+    ray_actor_options: dict = Field(
+        default_factory=dict,
+        description="Options to pass to Ray actors (e.g., resources, num_cpus)",
+        json_schema_extra={"argparse_type": json.loads},
+    )
+    ray_pg_bundles: list = Field(
+        default_factory=list,
+        description="Bundles for the Ray placement group (e.g., [{'CPU': 1}] * num_processes)",
+        json_schema_extra={"argparse_type": json.loads},
     )
 
 
@@ -203,7 +220,7 @@ class JaxBackendImpl(AbstractBackend):
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
+        base_config = AutoConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=config.max_lora_adapters,
@@ -546,11 +563,13 @@ class JaxBackendImpl(AbstractBackend):
         """Check if a model is registered with the backend."""
         return model_id in self.models
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         """Create a new model in the backend.
 
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
+        if model_role != "policy":
+            raise ValueError(f"JaxBackend only supports model_role='policy', got {model_role!r}")
         # Allocate adapter index for this model_id (find first available slot)
         # Index 0 is reserved for base model, so user models use indices 1 to max_lora_adapters-1
         used_indices = {m.adapter_index for m in self.models.values()}
@@ -615,6 +634,8 @@ class JaxBackendImpl(AbstractBackend):
         """
         if not prepared_batch.all_model_inputs:
             return {}
+        if "ppo_critic" in prepared_batch.all_loss_fns:
+            raise ValueError("ppo_critic is only supported by the SkyRL-Train backend")
 
         results = {}
 
@@ -1105,8 +1126,8 @@ class JaxBackend(JaxBackendImpl):
             )
         return getattr(super(), method)(**kwargs)
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config, model_role=model_role)
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
         return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)

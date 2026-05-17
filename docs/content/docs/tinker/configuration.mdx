@@ -54,7 +54,24 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=32
 python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 ```
 
-No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning.
+No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
+
+### Multi-tenant LoRA
+
+Hosting multiple LoRA tenants concurrently against one server *does* require server-side configuration on the Megatron backend. At minimum:
+
+```json
+{
+    "trainer.placement.colocate_all": false,
+    "trainer.policy.megatron_config.lora_config.merge_lora": false,
+    "trainer.policy.model.lora.max_loras": <max concurrent adapters in a single batch>,
+    "trainer.policy.model.lora.max_cpu_loras": <total adapter capacity>
+}
+```
+
+`merge_lora: false` is required so vLLM serves each tenant's adapter by name (with `merge_lora: true` vLLM only sees the merged base and per-tenant sampling returns the wrong weights). `max_cpu_loras` must be sized to the peak number of concurrent tenants — there is no on-demand reload, and if vLLM evicts an adapter the next `sample()` against it 404s. All adapters on one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
+
+See [Multi-tenancy](./multi_tenancy) for the full operator contract and SFT/RL quickstarts.
 
 ## Full Config Reference
 

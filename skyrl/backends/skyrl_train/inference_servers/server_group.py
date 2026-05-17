@@ -4,13 +4,16 @@ Server Group - manages server actors with placement groups.
 
 import logging
 from argparse import Namespace
-from typing import Any, List, Optional, Type
+from typing import Any, List, Optional, Type, Union
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    SERVER_PORT_STRIDE,
+    ServerInfo,
+)
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool
 from skyrl.train.utils.utils import ResolvedPlacementGroup
@@ -182,7 +185,7 @@ class ServerGroup:
 
             actor = ServerActorClass.remote(
                 self._cli_args,
-                self._start_port + server_idx,
+                self._start_port + server_idx * SERVER_PORT_STRIDE,
                 server_idx=server_idx,
                 bundle_indices=bundle_indices,
                 dp_size=self._num_servers if self._enable_dp else -1,
@@ -203,29 +206,41 @@ class ServerGroup:
 
         return actors
 
-    def start(self) -> List[ServerInfo]:
-        """Create actors, start the pool, and return endpoints."""
+    def start(self, blocking: bool = True) -> Union[List[ServerInfo], List[ray.ObjectRef]]:
+        """Create actors, start the pool, and return endpoints.
+
+        Args:
+            blocking: If True (default), waits for all servers to be ready
+                and returns ``List[ServerInfo]``.  If False, creates actors
+                and fires off start RPCs but returns the
+                ``List[ObjectRef]`` without waiting.
+        """
         logger.info(f"Starting {self._num_servers} server(s)...")
         actors = self._create_actors()
         self._pool = ServerActorPool(actors)
-        server_infos = self._pool.start()
 
-        for i, info in enumerate(server_infos):
-            logger.info(f"Server {i}: {info.url}")
+        if blocking:
+            server_infos = self._pool.start(blocking=True)
+            for i, info in enumerate(server_infos):
+                logger.info(f"Server {i}: {info.url}")
+            return server_infos
 
-        return server_infos
+        return self._pool.start(blocking=False)
+
+    @property
+    def server_infos(self) -> List[ServerInfo]:
+        """Lazily resolved server infos (delegates to pool)."""
+        if self._pool is None:
+            return []
+        return self._pool.server_infos
 
     def get_pool(self) -> Optional[ServerActorPool]:
         """Get the underlying actor pool."""
         return self._pool
 
-    def get_server_infos(self) -> List[ServerInfo]:
-        """Get the list of server endpoints."""
-        return self._pool.get_server_infos() if self._pool else []
-
     def get_server_urls(self) -> List[str]:
         """Get the list of server URLs."""
-        return self._pool.get_server_urls() if self._pool else []
+        return [info.url for info in self.server_infos]
 
     def get_actors(self) -> List[Any]:
         """Get the list of actor handles."""
@@ -236,3 +251,7 @@ class ServerGroup:
         if self._pool:
             logger.info("Shutting down servers...")
             self._pool.shutdown()
+
+        if self._internal_pg:
+            # created pg internally, teardown
+            ray.util.remove_placement_group(self._internal_pg)
