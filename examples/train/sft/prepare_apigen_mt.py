@@ -42,7 +42,9 @@ def _convert_turn(turn: dict) -> dict:
         return {"role": "assistant", "content": "", "tool_calls": value}
     if role == "observation":
         return {"role": "tool", "content": value}
-    raise ValueError(f"Unknown ShareGPT role {role!r} in APIGen-MT-5k turn; expected one of human/gpt/function_call/observation")
+    raise ValueError(
+        f"Unknown ShareGPT role {role!r} in APIGen-MT-5k turn; expected one of human/gpt/function_call/observation"
+    )
 
 
 def convert_example(example: dict) -> dict:
