@@ -12,7 +12,7 @@
 #   - ttl_seconds=1800 (browser envs are slower)
 #
 # Model: Qwen/Qwen3.5-35B-A3B (MoE, 35B total, 3B active, natively multimodal)
-# TP=2 (2 GPUs per engine, 8 engines on 16 GPUs across 2 nodes)
+# TP=2 (2 GPUs per engine, 16 engines on 32 GPUs across 4 nodes)
 # Modality: browser_use (screenshots + click/type via Fleet browser lease API)
 #
 # Required env vars: FLEET_API_KEY, WANDB_API_KEY
@@ -29,7 +29,7 @@ export NUM_EPOCHS="${NUM_EPOCHS:-10}"
 export MAX_TURNS="${MAX_TURNS:-80}"
 export MAX_INPUT_LENGTH="${MAX_INPUT_LENGTH:-80000}"
 export MAX_GENERATE_LENGTH="${MAX_GENERATE_LENGTH:-4096}"
-export NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-8}"
+export NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-16}"
 export ENV_KEYS="${ENV_KEYS:-}"
 export DIFFICULTY="${DIFFICULTY:-}"
 export RUN_ID="${RUN_ID:-}"
@@ -63,14 +63,14 @@ bash scripts/fleet-common-run.sh \
   +generator.engine_init_kwargs.mm_processor_cache_gb=0 \
   generator.inference_engine_tensor_parallel_size=2 \
   trainer.epochs=${NUM_EPOCHS} \
-  trainer.eval_batch_size=8 \
-  trainer.eval_before_train=true \
+  trainer.eval_batch_size=16 \
+  trainer.eval_before_train=false \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=16 \
+  trainer.train_batch_size=32 \
   trainer.use_hybrid_env_sampling=true \
   trainer.min_samples_per_env=1 \
-  trainer.policy_mini_batch_size=16 \
+  trainer.policy_mini_batch_size=32 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
