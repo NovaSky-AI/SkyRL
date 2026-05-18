@@ -1,0 +1,20 @@
+name: clear-uv-cache
+entrypoint: |
+  echo "Before:"; du -sh /mnt/cluster_storage/.uv_cache 2>/dev/null
+  rm -rf /mnt/cluster_storage/.uv_cache 2>&1
+  echo "Done."
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 2
+      memory: 4Gi
