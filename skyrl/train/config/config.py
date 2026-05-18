@@ -805,9 +805,6 @@ class SkyRLTrainConfig(BaseConfig):
         Parses CLI arguments and builds a typed config. Dataclass field defaults
         are used for any values not specified on the command line.
 
-        Supports both new-style config paths (e.g., generator.inference_engine.backend)
-        and legacy YAML-style paths (e.g., generator.backend) for backward compatibility.
-
         Args:
             args: Either a list of CLI arguments in 'key.path=value' format, or a dict
                   mapping dot-notation keys to values.
@@ -827,13 +824,6 @@ class SkyRLTrainConfig(BaseConfig):
             # the round-trip through OmegaConf.from_cli below.
             args = [f"{k}=null" if v is None else f"{k}={v}" for k, v in args.items()]
 
-        from skyrl.train.config.legacy import (
-            is_legacy_config,
-            translate_legacy_config,
-            warn_legacy_config,
-        )
-        from skyrl.train.config.utils import get_legacy_config
-
         # Check for unsupported '+' prefix
         for arg in args:
             if arg.startswith("+"):
@@ -842,26 +832,7 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
-
-        # Try new format first
-        try:
-            return cls.from_dict_config(overrides)
-        except ValueError:
-            # Fall back to legacy format: load base YAML, merge overrides, translate
-            try:
-                base_cfg = get_legacy_config()
-                merged = OmegaConf.merge(base_cfg, overrides)
-                merged_dict = OmegaConf.to_container(merged, resolve=True)
-
-                if is_legacy_config(merged_dict):
-                    warn_legacy_config()
-                    translated = translate_legacy_config(merged_dict)
-                    return build_nested_dataclass(cls, translated)
-            except Exception:
-                pass  # Legacy translation failed, re-raise original error
-
-            # Re-raise original error if not a legacy config issue
-            raise
+        return cls.from_dict_config(overrides)
 
 
 def make_config(

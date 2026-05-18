@@ -5,10 +5,10 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 import typing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 
 import pytest
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from skyrl.train.config.config import (
     BaseConfig,
@@ -16,7 +16,6 @@ from skyrl.train.config.config import (
     _resolve_class_type,
     build_nested_dataclass,
 )
-from skyrl.train.config.utils import get_legacy_config
 from skyrl.train.utils.utils import validate_cfg
 from tests.train.util import example_dummy_config
 
@@ -144,57 +143,6 @@ def test_temperature_propagation():
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
     assert cfg.generator.sampling_params.temperature == 0.7
     assert cfg.trainer.algorithm.temperature == 0.7
-
-
-def test_legacy_config_translation():
-    """Test that legacy config format is translated to new format."""
-    import warnings
-
-    # Use legacy-style paths (flat under generator instead of nested in inference_engine)
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.backend=vllm"])
-
-        # Should have issued a deprecation warning (filter for DeprecationWarning only)
-        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-        assert len(deprecation_warnings) == 1
-        assert "legacy" in str(deprecation_warnings[0].message).lower()
-
-    # Value should be translated to the new nested location
-    assert cfg.generator.inference_engine.backend == "vllm"
-
-    # test with full YAML
-    full_legacy_cfg = get_legacy_config()
-    # custom override
-    full_legacy_cfg.generator.backend = "vllm"
-
-    # convert to CLI overrides
-    def traverse_and_convert(cfg: DictConfig, parent_key: str = "") -> List[str]:
-        overrides = []
-        for key, value in cfg.items():
-            if isinstance(value, DictConfig):
-                overrides.extend(traverse_and_convert(value, f"{parent_key}.{key}" if parent_key else key))
-            else:
-                overrides.append(f"{parent_key}.{key}={value}" if parent_key else f"{key}={value}")
-        return overrides
-
-    full_legacy_cfg_as_overrides = traverse_and_convert(full_legacy_cfg)
-
-    # should pass without error
-    translated_cfg = SkyRLTrainConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
-    assert translated_cfg.generator.inference_engine.backend == "vllm"
-
-
-def test_legacy_config_field_rename():
-    """Test that renamed fields are translated correctly."""
-    import warnings
-
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        # Old field name: num_inference_engines -> new: num_engines
-        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.num_inference_engines=4"])
-
-    assert cfg.generator.inference_engine.num_engines == 4
 
 
 def test_cross_field_defaults():
