@@ -65,7 +65,7 @@ class WorkerWrap:
             else:
                 warnings.warn(
                     "Detected an existing weight receiver. "
-                    "For overriding, use `generator.override_existing_update_group=enable`"
+                    "For overriding, use `generator.inference_engine.override_existing_update_group=enable`"
                 )
                 return
 

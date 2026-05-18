@@ -896,7 +896,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
 
 def test_http_endpoint_served_model_name(ray_init_fixture):
     """
-    Test that `generator.served_model_name` allows using a different model name in requests
+    Test that `generator.inference_engine.served_model_name` allows using a different model name in requests
     than the actual model path.
 
     This is useful when:
