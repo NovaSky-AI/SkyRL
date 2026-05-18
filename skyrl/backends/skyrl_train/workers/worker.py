@@ -130,10 +130,11 @@ class DistributedTorchRayActor:
         def _sigterm_cleanup(signum, frame):
             logger.warning(f"SIGTERM received in worker rank={rank}, cleaning up...")
 
-            try:
-                torch.cuda.synchronize()
-            except Exception as e:
-                logger.warning(f"cuda.synchronize() failed: {e}")
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception as e:
+                    logger.warning(f"cuda.synchronize() failed: {e}")
 
             try:
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
