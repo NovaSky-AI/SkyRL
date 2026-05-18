@@ -601,6 +601,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
+    # manually set this for testing everywhere
+    env_vars["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
+
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
     # that previously ran successfully, so keeping this to maintain backwards compatibility.

@@ -21,6 +21,7 @@ def _build_ray_env_vars():
         "VLLM_USE_V1": "1",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": "1",
         "_SKYRL_USE_NEW_INFERENCE": "1" if _SKYRL_USE_NEW_INFERENCE else "0",
     }
 
