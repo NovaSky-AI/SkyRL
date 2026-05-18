@@ -69,6 +69,25 @@ if [ "${MODALITY:-}" != "tool_use" ] && [ "${MODALITY:-}" != "computer_use" ] &&
 fi
 echo "Environment validation passed"
 
+# --- Shared-filesystem guard ---
+# On Slurm with shared /workspace, only one node should install packages.
+# SLURM_PROCID=0 is the first task (head node); others wait for a sentinel file.
+SETUP_SENTINEL=".venv/.setup_complete"
+IS_INSTALLER=true
+if [ -n "${SLURM_PROCID:-}" ] && [ "$SLURM_PROCID" != "0" ]; then
+  IS_INSTALLER=false
+  echo "Slurm worker (SLURM_PROCID=$SLURM_PROCID): waiting for node-0 to finish install..."
+  while [ ! -f "$SETUP_SENTINEL" ]; do sleep 5; done
+  echo "Sentinel found, activating shared venv"
+  source .venv/bin/activate
+  echo "=== Fleet Common Setup Complete (worker) ==="
+  return 0 2>/dev/null || exit 0
+fi
+
+echo "Slurm installer (SLURM_PROCID=${SLURM_PROCID:-unset}): installing packages..."
+# Remove stale sentinel from previous runs
+rm -f "$SETUP_SENTINEL"
+
 # --- Fix Ray binary permissions (some cloud images strip +x) ---
 for f in .venv/bin/ray .venv/lib/python*/site-packages/ray/core/src/ray/raylet/raylet; do
   [ -f "$f" ] && chmod +x "$f" 2>/dev/null || true
@@ -129,4 +148,6 @@ else
   eval "$PREPARE_CMD"
 fi
 
+# --- Signal workers that install is done ---
+touch "$SETUP_SENTINEL"
 echo "=== Fleet Common Setup Complete ==="
