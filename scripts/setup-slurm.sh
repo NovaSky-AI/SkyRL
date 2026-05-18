@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-time setup for RunPod Slurm cluster access via SkyPilot.
-# Requires: ~/.ssh/runpod_key (ask team for the key)
+# Requires: ~/.ssh/runpod_key (or set RUNPOD_SSH_KEY to override)
 #
 # This script handles EVERYTHING needed for Slurm training:
 #   1. Creates ~/.slurm/config (SSH connection to Slurm controller)
@@ -13,21 +13,23 @@
 # the project-level .sky.yaml, so these MUST be in ~/.sky/config.yaml.
 set -euo pipefail
 
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-  echo "ERROR: ~/.ssh/id_ed25519 not found. Generate one with: ssh-keygen -t ed25519"
-  echo "Then add the public key in RunPod console > Settings > SSH Keys."
+RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/runpod_key}"
+if [ ! -f "$RUNPOD_KEY" ]; then
+  echo "ERROR: $RUNPOD_KEY not found."
+  echo "Save your RunPod private key as ~/.ssh/runpod_key"
+  echo "(or set RUNPOD_SSH_KEY to point to it)."
   exit 1
 fi
 
 # 1. SSH config for Slurm controller
 echo "[1/5] Setting up ~/.slurm/config..."
 mkdir -p ~/.slurm
-cat > ~/.slurm/config <<'EOF'
+cat > ~/.slurm/config <<EOF
 Host runpod-cluster
     HostName 31.24.80.22
     Port 10714
     User root
-    IdentityFile ~/.ssh/id_ed25519
+    IdentityFile $RUNPOD_KEY
     StrictHostKeyChecking no
 EOF
 
