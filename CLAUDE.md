@@ -7,6 +7,7 @@ SkyRL is a full-stack reinforcement learning library for training LLMs, designed
 - **Always use `uv run --isolated`** to run commands. Never use bare `python`, `pip`, or `pip install`.
 - **Log output to files**: `<cmd> > /tmp/results_1.log 2>&1` for persistence.
 - Backend extras (`fsdp`, `megatron`, `jax`) conflict with each other -- never combine them.
+- Always read the relevant documentation files in `.claude/docs` before troubleshooting or working on any changes. Follow the routing rules below.
 
 ## Test Commands
 
