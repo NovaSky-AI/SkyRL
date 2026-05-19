@@ -34,9 +34,7 @@ resources:
 
 num_nodes: 1
 
-workdir:
-  url: https://github.com/fleet-ai/SkyRL-Fleet.git
-  ref: main
+workdir: .
 
 envs:
   WANDB_API_KEY: ""
