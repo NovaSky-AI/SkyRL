@@ -13,6 +13,7 @@
 # the project-level .sky.yaml, so these MUST be in ~/.sky/config.yaml.
 set -euo pipefail
 
+RUNPOD_CLUSTER_NAME="runpod-cluster-41k3q8w5xqlro3"
 RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/runpod_key}"
 if [ ! -f "$RUNPOD_KEY" ]; then
   echo "ERROR: $RUNPOD_KEY not found."
@@ -25,11 +26,13 @@ fi
 echo "[1/5] Setting up ~/.slurm/config..."
 mkdir -p ~/.slurm
 cat > ~/.slurm/config <<EOF
-Host runpod-cluster
+Host runpod-cluster $RUNPOD_CLUSTER_NAME
     HostName 31.24.80.22
     Port 10714
     User root
     IdentityFile $RUNPOD_KEY
+    IdentitiesOnly yes
+    BatchMode yes
     StrictHostKeyChecking no
 EOF
 
@@ -54,18 +57,27 @@ fi
 
 # 3. Add slurm.cluster_configs
 echo "[3/5] Adding slurm.cluster_configs..."
-if grep -q 'cluster_configs:' ~/.sky/config.yaml 2>/dev/null && grep -q 'runpod-cluster:' ~/.sky/config.yaml 2>/dev/null; then
-  echo "  cluster_configs.runpod-cluster already exists — skipping"
+if grep -q 'cluster_configs:' ~/.sky/config.yaml 2>/dev/null && grep -q "$RUNPOD_CLUSTER_NAME:" ~/.sky/config.yaml 2>/dev/null; then
+  echo "  cluster_configs.$RUNPOD_CLUSTER_NAME already exists — skipping"
 elif grep -q '^slurm:' ~/.sky/config.yaml 2>/dev/null; then
   # slurm section exists but no cluster_configs — append under it
-  sed -i.bak '/^slurm:/a\  cluster_configs:\n    runpod-cluster:\n      workdir: /workspace\n      gpu_partition_map:\n        H200: gpu' ~/.sky/config.yaml && rm -f ~/.sky/config.yaml.bak
+  sed -i.bak "/^slurm:/a\\  allowed_clusters:\\
+    - $RUNPOD_CLUSTER_NAME\\
+  cluster_configs:\\
+    $RUNPOD_CLUSTER_NAME:\\
+      workdir: /workspace\\
+      gpu_partition_map:\\
+        H200: gpu" ~/.sky/config.yaml && rm -f ~/.sky/config.yaml.bak
   echo "  Added cluster_configs under existing slurm section"
 else
-  cat >> ~/.sky/config.yaml <<'EOF'
+  cat >> ~/.sky/config.yaml <<EOF
 
 slurm:
+  allowed_clusters:
+    - $RUNPOD_CLUSTER_NAME
+  provision_timeout: 120
   cluster_configs:
-    runpod-cluster:
+    $RUNPOD_CLUSTER_NAME:
       workdir: /workspace
       gpu_partition_map:
         H200: gpu
@@ -81,7 +93,7 @@ sky api start 2>&1 | tail -3
 # 5. Verify
 echo "[5/5] Verifying..."
 echo "  SSH connectivity..."
-ssh -F ~/.slurm/config runpod-cluster "sinfo -N" || { echo "FAIL: Cannot connect to Slurm controller"; exit 1; }
+ssh -F ~/.slurm/config "$RUNPOD_CLUSTER_NAME" "sinfo -N" || { echo "FAIL: Cannot connect to Slurm controller"; exit 1; }
 echo "  SkyPilot detection..."
 sky check slurm 2>&1 | grep -E "Slurm:|enabled|disabled"
 echo ""

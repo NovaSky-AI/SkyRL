@@ -236,12 +236,14 @@ wait_for_ray() {
 
 if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
   # === Head node: start Ray head + launch training ===
-  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+  if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
     # --node-ip-address: on SLURM, force Ray to use the overlay IP (from SKYPILOT_NODE_IPS)
     # instead of auto-detecting the Docker-internal IP (172.19.x.x). Without this, the head
     # registers as a ghost node and the placement group can't schedule GPU bundles.
     ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
       --node-ip-address="$head_ip" --temp-dir="$RAY_TMPDIR"
+  else
+    echo "Ray head already running at $head_ip:6479"
   fi
   wait_for_ray "$head_ip:6479"
 
