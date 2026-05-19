@@ -319,6 +319,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        if self.cfg.trainer.max_training_steps is not None:
+            self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
@@ -368,6 +370,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         start_epoch = self.global_step // self.num_steps_per_epoch
         self.global_step += 1  # start training at global_step 1
+        stop_training = False
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
@@ -457,6 +460,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_timings = {}
                 self.global_step += 1
 
+                if (
+                    self.cfg.trainer.max_training_steps is not None
+                    and self.global_step > self.cfg.trainer.max_training_steps
+                ):
+                    logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                    for t in generator_tasks:
+                        t.cancel()
+                    await asyncio.gather(*generator_tasks, return_exceptions=True)
+                    stop_training = True
+                    break
+
                 # 8. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
                 steps_completed_in_epoch = (self.global_step - 1) % self.num_steps_per_epoch
@@ -469,6 +483,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     "Unexpected number of consumed data UIDs. Got: "
                     f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
                 )
+
+            if stop_training:
+                break
 
             # 9. Per-epoch epilogue.
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
