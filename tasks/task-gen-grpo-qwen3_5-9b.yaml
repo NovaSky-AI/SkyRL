@@ -35,7 +35,7 @@ resources:
 num_nodes: 1
 
 workdir:
-  url: https://github.com/fleet-ai/SkyRL-v2.git
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
   ref: main
 
 envs:
