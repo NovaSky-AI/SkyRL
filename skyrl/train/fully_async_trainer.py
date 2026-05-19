@@ -666,19 +666,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return self.convert_to_training_input(generator_output, uids)
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> str:
         """
         Extend base checkpointing by recording consumed UIDs for fully-async training.
 
         Otherwise, when resuming, there is no way to know which data has been trained on.
+        Returns the checkpoint folder path (forwarded from the base implementation).
         """
         consumed_uids_list = (
             self.async_train_dataloader.get_consumed_uids_list()
         )  # read first to prevent race condition
         # The base method will save the model, dataloader path, trainer_state, and latest_ckpt_global_step.txt.
-        super().save_checkpoints()
+        global_step_folder = super().save_checkpoints()
         # In addition, we need to save the consumed UIDs -- the data that we have already trained on.
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         fully_async_state_path = os.path.join(global_step_folder, "fully_async_state.pt")
         fully_async_state = {
             "consumed_uids": consumed_uids_list,
@@ -686,6 +686,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with io.open_file(fully_async_state_path, "wb") as f:
             torch.save(fully_async_state, f)
         logger.info(f"Saved fully-async state to {fully_async_state_path}")
+        return global_step_folder
 
     def load_checkpoints(self) -> Tuple[int, str, Set[str]]:
         """

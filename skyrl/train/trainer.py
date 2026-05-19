@@ -67,6 +67,12 @@ from skyrl.train.utils import (
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
+from skyrl.train.utils.callbacks import (
+    CallbackHandler,
+    CallbackInput,
+    TrainingCallback,
+    TrainingControl,
+)
 from skyrl.train.utils.logging_utils import log_example
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -96,6 +102,7 @@ class RayPPOTrainer:
         generator: GeneratorInterface,
         colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
+        callbacks: Optional[List[TrainingCallback]] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
@@ -135,7 +142,34 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
+
+        # Callback infrastructure
+        self._callback_handler = CallbackHandler(callbacks)
+        self._training_control = TrainingControl()
+        self._current_epoch: int = 0
+
         configure_ray_worker_logging()
+
+    def add_callback(self, callback: TrainingCallback) -> None:
+        """Register a callback. Events fired after this call reach the new callback."""
+        self._callback_handler.add(callback)
+
+    def _build_callback_input(self, **fields) -> CallbackInput:
+        """Snapshot loop counters + per-event fields into a CallbackInput."""
+        steps_per_epoch = len(self.train_dataloader) if self.train_dataloader is not None else 0
+        total_steps = self.total_training_steps or 0
+        return CallbackInput(
+            global_step=self.global_step,
+            epoch=self._current_epoch,
+            total_steps=total_steps,
+            steps_per_epoch=steps_per_epoch,
+            **fields,
+        )
+
+    def _fire(self, event_name: str, **fields) -> None:
+        """Build a CallbackInput and dispatch the given event to all callbacks."""
+        cb_input = self._build_callback_input(**fields)
+        getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
     @property
     def has_critic(self) -> bool:
@@ -201,11 +235,23 @@ class RayPPOTrainer:
         with Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
-        # Eval before training
+        # Compute start_epoch up-front so callback metadata is ready before
+        # any event fires (including the baseline eval below).
+        start_epoch = self.global_step // len(self.train_dataloader)
+        self._current_epoch = start_epoch
+        self._training_control.reset()
+
+        self._fire("on_train_start")
+
+        # Eval before training. Wrapped in eval callbacks + on_log so that e.g.
+        # EarlyStopping or best-checkpoint callbacks see the baseline reading.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+            self._fire("on_eval_start")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+            self._fire("on_eval_end", metrics=eval_metrics)
+            self._fire("on_log", logs=eval_metrics)
+            self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -213,10 +259,20 @@ class RayPPOTrainer:
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
+
+        stop_training = False
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
+            self._current_epoch = epoch
+            self._fire("on_epoch_start")
+            # ``step_started`` tracks the on_step_start/on_step_end pairing across
+            # dynamic-sampling continues (which span multiple inner iterations
+            # before completing a logical step).
+            step_started = False
             for _, rand_prompts in enumerate(self.train_dataloader):
+                if not step_started:
+                    self._fire("on_step_start")
+                    step_started = True
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -301,12 +357,24 @@ class RayPPOTrainer:
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
+                    self._fire("on_step_end", batch=training_input, metrics=status)
+                    step_started = False
+
+                    # Capture callback-driven triggers, then reset.
+                    force_save = self._training_control.should_save
+                    force_eval = self._training_control.should_evaluate
+                    self._training_control.should_save = False
+                    self._training_control.should_evaluate = False
+
                     # 8. conditionally save checkpoints and hf model
                     is_epoch_end = self.global_step % len(self.train_dataloader) == 0
-                    if self.cfg.trainer.ckpt_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                            with Timer("save_checkpoints", self.all_timings):
-                                self.save_checkpoints()
+                    interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+                        is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
+                    )
+                    if force_save or interval_save:
+                        with Timer("save_checkpoints", self.all_timings):
+                            ckpt_path = self.save_checkpoints()
+                        self._fire("on_save", ckpt_path=ckpt_path)
                     if self.cfg.trainer.hf_save_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
                             with Timer("save_hf_model", self.all_timings):
@@ -330,13 +398,16 @@ class RayPPOTrainer:
                 logger.info(status)
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                if self.cfg.trainer.eval_interval > 0 and (
+                interval_eval = self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
-                ):
+                )
+                if force_eval or interval_eval:
+                    self._fire("on_eval_start")
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
+                    self._fire("on_eval_end", metrics=eval_metrics)
 
                 log_payload = {
                     **self.all_metrics,
@@ -344,6 +415,7 @@ class RayPPOTrainer:
                 }
                 if self._vllm_metrics_scraper is not None:
                     log_payload.update(await self._vllm_metrics_scraper.sample())
+                self._fire("on_log", logs=log_payload)
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 self.all_timings = {}
@@ -355,21 +427,40 @@ class RayPPOTrainer:
 
                 del training_input, generator_output
 
+                if self._training_control.should_training_stop:
+                    logger.info(f"Callback requested training stop at step {self.global_step - 1}; exiting loop.")
+                    stop_training = True
+                    break
+
+            self._fire("on_epoch_end")
+            if stop_training:
+                break
+
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
 
         # Safety net: always save final checkpoint at end of training.
+        # save_checkpoints uses self.global_step verbatim for folder naming
+        # (the loop's final +1 increment carries through here, matching the
+        # pre-callback behavior). We roll global_step back before firing
+        # callbacks so on_save / on_train_end see the actual last-completed
+        # step rather than the bookkeeping +1.
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
+                ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
+            self.global_step -= 1
+            self._fire("on_save", ckpt_path=ckpt_path)
+        else:
+            self.global_step -= 1
         if self.cfg.trainer.hf_save_interval > 0:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
+        self._fire("on_train_end")
         self.tracker.finish()
         logger.info("Training done!")
 
@@ -1272,9 +1363,10 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> str:
         """
-        Save the model, optimizer, and training states to disk.
+        Save the model, optimizer, and training states to disk. Returns the
+        checkpoint folder path.
 
         Dispatch handles offload/backload automatically for all colocation configurations.
         """
@@ -1322,6 +1414,8 @@ class RayPPOTrainer:
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):
             self._cleanup_old_checkpoints()
+
+        return global_step_folder
 
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:
