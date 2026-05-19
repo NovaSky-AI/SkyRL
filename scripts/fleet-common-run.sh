@@ -221,8 +221,9 @@ if [ -n "$head_ip" ]; then
   # Use awk to pick the Nth word (1-indexed) to avoid bash set -u array issues
   my_ip=$(echo "$SKYPILOT_NODE_IPS" | awk -v n="$((${SKYPILOT_NODE_RANK:-0} + 1))" '{print $n}')
   export RAY_NODE_IP_ADDRESS="$my_ip"
-  # Also set the legacy env var that some Ray versions check
-  export RAY_IP="$my_ip"
+  # Tell ray.init() where to find the cluster (needed when --temp-dir differs
+  # from Ray's default, since auto-detection looks in the default temp dir)
+  export RAY_ADDRESS="$head_ip:6479"
 fi
 
 wait_for_ray() {
