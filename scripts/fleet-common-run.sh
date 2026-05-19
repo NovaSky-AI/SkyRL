@@ -218,14 +218,12 @@ export RAY_DISABLE_MEMORY_MONITOR=1
 # On GKE with RDMA, gIB is preserved for inter-node GPUDirect.
 
 read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
-# Tell ray.init() where to find the cluster (needed when --temp-dir differs
-# from Ray's default, since auto-detection looks in the default temp dir).
-export RAY_ADDRESS="$head_ip:6479"
+ray_address="$head_ip:6479"
 
 wait_for_ray() {
   local address=$1
   for _ in $(seq 1 24); do
-    if ray status --address "$address" >/dev/null 2>&1; then
+    if env -u RAY_ADDRESS ray status --address "$address" >/dev/null 2>&1; then
       return 0
     fi
     sleep 5
@@ -234,18 +232,50 @@ wait_for_ray() {
   return 1
 }
 
+cleanup_existing_ray() {
+  echo "Cleaning local Ray state before launch..."
+  env -u RAY_ADDRESS ray stop --force >/dev/null 2>&1 || true
+  local patterns=(
+    gcs_server
+    raylet
+    plasma_store
+    'ray::'
+    ray.dashboard
+    dashboard_agent
+    runtime_env_agent
+    log_monitor
+    monitor.py
+    default_worker.py
+  )
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    pkill -9 -f "$pattern" 2>/dev/null || true
+  done
+  fuser -k 6479/tcp 2>/dev/null || true
+  rm -rf "$RAY_TMPDIR" /tmp/ray 2>/dev/null || true
+  mkdir -p "$RAY_TMPDIR"
+  for _ in $(seq 1 10); do
+    if ! fuser 6479/tcp >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  sleep 2
+}
+
+cleanup_existing_ray
+
 if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
   # === Head node: start Ray head + launch training ===
-  if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
-    # --node-ip-address: on SLURM, force Ray to use the overlay IP (from SKYPILOT_NODE_IPS)
-    # instead of auto-detecting the Docker-internal IP (172.19.x.x). Without this, the head
-    # registers as a ghost node and the placement group can't schedule GPU bundles.
-    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
-      --node-ip-address="$head_ip" --temp-dir="$RAY_TMPDIR"
-  else
-    echo "Ray head already running at $head_ip:6479"
-  fi
-  wait_for_ray "$head_ip:6479"
+  # --node-ip-address: on SLURM, force Ray to use the overlay IP (from SKYPILOT_NODE_IPS)
+  # instead of auto-detecting the Docker-internal IP (172.19.x.x). Without this, the head
+  # registers as a ghost node and the placement group can't schedule GPU bundles.
+  env -u RAY_ADDRESS ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
+    --node-ip-address="$head_ip" --temp-dir="$RAY_TMPDIR"
+  wait_for_ray "$ray_address"
+  # Tell ray.init() where to find the cluster (needed when --temp-dir differs
+  # from Ray's default, since auto-detection looks in the default temp dir).
+  export RAY_ADDRESS="$ray_address"
 
   TOTAL_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * ${SKYPILOT_NUM_NODES:-1}))
   export TOTAL_GPUS
@@ -319,11 +349,11 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
 
 else
   # === Worker node: join Ray cluster and wait ===
-  echo "=== Worker node (rank ${SKYPILOT_NODE_RANK}), joining Ray cluster at $head_ip:6479 ==="
-  if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
-    ray start --address "$head_ip:6479" --disable-usage-stats --temp-dir="$RAY_TMPDIR"
-  fi
-  wait_for_ray "$head_ip:6479"
+  echo "=== Worker node (rank ${SKYPILOT_NODE_RANK}), joining Ray cluster at $ray_address ==="
+  wait_for_ray "$ray_address"
+  env -u RAY_ADDRESS ray start --address "$ray_address" --disable-usage-stats --temp-dir="$RAY_TMPDIR"
+  wait_for_ray "$ray_address"
+  export RAY_ADDRESS="$ray_address"
   echo "Worker node joined. Sleeping..."
   sleep infinity
 fi
