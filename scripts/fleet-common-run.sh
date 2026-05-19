@@ -218,9 +218,8 @@ read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
 # Force Ray to use the overlay IP for all processes (head, workers, spawned tasks).
 if [ -n "$head_ip" ]; then
   # Determine this node's overlay IP from SKYPILOT_NODE_IPS
-  IFS=' ' read -ra all_ips <<< "$SKYPILOT_NODE_IPS"
-  node_rank="${SKYPILOT_NODE_RANK:-0}"
-  my_ip="${all_ips[$node_rank]}"
+  # Use awk to pick the Nth word (1-indexed) to avoid bash set -u array issues
+  my_ip=$(echo "$SKYPILOT_NODE_IPS" | awk -v n="$((${SKYPILOT_NODE_RANK:-0} + 1))" '{print $n}')
   export RAY_NODE_IP_ADDRESS="$my_ip"
   # Also set the legacy env var that some Ray versions check
   export RAY_IP="$my_ip"
