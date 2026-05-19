@@ -213,6 +213,18 @@ export RAY_DISABLE_MEMORY_MONITOR=1
 
 read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
 
+# On SLURM containers have dual IPs: Docker-internal (172.19.x.x) and SLURM overlay
+# (10.65.x.x). Ray auto-detects 172.19.x.x but SKYPILOT_NODE_IPS uses overlay IPs.
+# Force Ray to use the overlay IP for all processes (head, workers, spawned tasks).
+if [ -n "$head_ip" ]; then
+  # Determine this node's overlay IP from SKYPILOT_NODE_IPS
+  IFS=' ' read -ra all_ips <<< "$SKYPILOT_NODE_IPS"
+  my_ip="${all_ips[${SKYPILOT_NODE_RANK:-0}]}"
+  export RAY_NODE_IP_ADDRESS="$my_ip"
+  # Also set the legacy env var that some Ray versions check
+  export RAY_IP="$my_ip"
+fi
+
 wait_for_ray() {
   local address=$1
   for _ in $(seq 1 24); do

@@ -741,7 +741,13 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
-    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    # On SLURM, pass _node_ip_address to prevent Ray from detecting the Docker-internal
+    # IP (172.19.x.x) instead of the SLURM overlay IP (10.65.x.x).
+    init_kwargs = dict(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    node_ip = os.environ.get("RAY_NODE_IP_ADDRESS")
+    if node_ip:
+        init_kwargs["_node_ip_address"] = node_ip
+    ray.init(**init_kwargs)
 
     if not verbose_logging:
         logger.info(f"Infrastructure logs will be written to: {log_file}")
