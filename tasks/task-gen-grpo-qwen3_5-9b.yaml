@@ -18,7 +18,7 @@ resources:
       cloud: slurm
       region: runpod-cluster
     # RunPod on-demand (API provisioned)
-    - accelerators: H200:8
+    - accelerators: H200-SXM:8
       cloud: runpod
       ports: 6479
     # GCP fallback
