@@ -361,6 +361,7 @@ class RayPPOTrainer:
                     and self.global_step > self.cfg.trainer.max_training_steps
                 ):
                     logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                    self.global_step = self.cfg.trainer.max_training_steps
                     stop_training = True
                     break
 

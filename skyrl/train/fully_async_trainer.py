@@ -465,6 +465,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     and self.global_step > self.cfg.trainer.max_training_steps
                 ):
                     logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                    self.global_step = self.cfg.trainer.max_training_steps
                     for t in generator_tasks:
                         t.cancel()
                     await asyncio.gather(*generator_tasks, return_exceptions=True)
