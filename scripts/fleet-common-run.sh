@@ -95,7 +95,13 @@ fi
 
 TMP_DIR="${CKPT_ROOT}/skyrl-tmp"
 mkdir -p "$TMP_DIR"
+# Ray uses TMPDIR for session dirs which contain Unix domain sockets.
+# UDS don't work over NFS, so use local /tmp for Ray while keeping
+# TMPDIR on NFS for everything else (checkpoints, data).
+RAY_TMPDIR="/tmp/skyrl-ray"
+mkdir -p "$RAY_TMPDIR"
 export TMPDIR="$TMP_DIR"
+export RAY_TMPDIR="$RAY_TMPDIR"
 
 TASKS_FILE="${DATA_ROOT}/data/fleet/tasks_${MODALITY}.json"
 DATA_DIR="${DATA_ROOT}/data/fleet/${DATA_DIR_NAME}"
@@ -212,6 +218,9 @@ export RAY_DISABLE_MEMORY_MONITOR=1
 # On GKE with RDMA, gIB is preserved for inter-node GPUDirect.
 
 read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
+# Tell ray.init() where to find the cluster (needed when --temp-dir differs
+# from Ray's default, since auto-detection looks in the default temp dir).
+export RAY_ADDRESS="$head_ip:6479"
 
 wait_for_ray() {
   local address=$1
@@ -232,7 +241,7 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     # instead of auto-detecting the Docker-internal IP (172.19.x.x). Without this, the head
     # registers as a ghost node and the placement group can't schedule GPU bundles.
     ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
-      --node-ip-address="$head_ip"
+      --node-ip-address="$head_ip" --temp-dir="$RAY_TMPDIR"
   fi
   wait_for_ray "$head_ip:6479"
 
@@ -310,7 +319,7 @@ else
   # === Worker node: join Ray cluster and wait ===
   echo "=== Worker node (rank ${SKYPILOT_NODE_RANK}), joining Ray cluster at $head_ip:6479 ==="
   if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
-    ray start --address "$head_ip:6479" --disable-usage-stats
+    ray start --address "$head_ip:6479" --disable-usage-stats --temp-dir="$RAY_TMPDIR"
   fi
   wait_for_ray "$head_ip:6479"
   echo "Worker node joined. Sleeping..."
