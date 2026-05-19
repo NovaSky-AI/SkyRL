@@ -42,6 +42,8 @@ fi
 # --env-class: task_gen environment (not fleet_task)
 # TP=2: 8 engines × 2 GPUs each across 2 nodes (16 GPUs total)
 # flash_attn=false: SDPA to avoid Xid 31 in GatedDeltaNet with vLLM 0.18.0
+# gdn_prefill_backend=triton: FlashInfer GDN JIT hangs silently on GCP/RunPod
+export VLLM_GDN_PREFILL_BACKEND=triton
 # loss_chunk_size=4096: chunked lm_head to avoid OOM on 131K vocab
 # --no-pytorch-alloc-conf: disables expandable_segments (conflicts with vLLM CuMemAllocator)
 bash scripts/fleet-common-run.sh \
