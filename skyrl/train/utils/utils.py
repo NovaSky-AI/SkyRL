@@ -741,9 +741,6 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
-    # On SLURM, RAY_ADDRESS env var (set in fleet-common-run.sh) handles cluster discovery.
-    # Do NOT pass _node_ip_address — it triggers a local raylet lookup that fails when
-    # --temp-dir differs from the default.
     ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
 
     if not verbose_logging:

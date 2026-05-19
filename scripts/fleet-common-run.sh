@@ -213,19 +213,6 @@ export RAY_DISABLE_MEMORY_MONITOR=1
 
 read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
 
-# On SLURM containers have dual IPs: Docker-internal (172.19.x.x) and SLURM overlay
-# (10.65.x.x). Ray auto-detects 172.19.x.x but SKYPILOT_NODE_IPS uses overlay IPs.
-# Force Ray to use the overlay IP for all processes (head, workers, spawned tasks).
-if [ -n "$head_ip" ]; then
-  # Determine this node's overlay IP from SKYPILOT_NODE_IPS
-  # Use awk to pick the Nth word (1-indexed) to avoid bash set -u array issues
-  my_ip=$(echo "$SKYPILOT_NODE_IPS" | awk -v n="$((${SKYPILOT_NODE_RANK:-0} + 1))" '{print $n}')
-  export RAY_NODE_IP_ADDRESS="$my_ip"
-  # Tell ray.init() where to find the cluster (needed when --temp-dir differs
-  # from Ray's default, since auto-detection looks in the default temp dir)
-  export RAY_ADDRESS="$head_ip:6479"
-fi
-
 wait_for_ray() {
   local address=$1
   for _ in $(seq 1 24); do
@@ -240,52 +227,15 @@ wait_for_ray() {
 
 if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
   # === Head node: start Ray head + launch training ===
-  # Kill ALL Ray processes hard (SLURM containers persist across jobs, and
-  # ray stop --force may not catch processes from other sessions/venvs).
-  ray stop --force 2>/dev/null || true
-  pkill -9 -f 'ray/' 2>/dev/null || true
-  pkill -9 -f 'gcs_server' 2>/dev/null || true
-  pkill -9 -f 'raylet' 2>/dev/null || true
-  sleep 2  # let processes die
-  rm -rf /tmp/ray 2>/dev/null || true
-  # Ray temp dir MUST be local (not NFS) — Unix domain sockets don't work over NFS.
-  # Bind Ray to the SLURM overlay IP (from SKYPILOT_NODE_IPS) so the training
-  # entrypoint and Ray use the same address for raylet socket paths.
-  ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
-    --temp-dir=/tmp/ray --node-ip-address="$head_ip"
-  wait_for_ray "$head_ip:6479"
+  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
+  fi
+  wait_for_ray 127.0.0.1:6479
 
   TOTAL_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * ${SKYPILOT_NUM_NODES:-1}))
   export TOTAL_GPUS
   # NUM_INFERENCE_ENGINES can be overridden via env var for TP>1 (engines = GPUs / TP)
   NUM_INFERENCE_ENGINES=${NUM_INFERENCE_ENGINES:-$TOTAL_GPUS}
-
-  # Wait for all nodes to register with Ray before launching training.
-  # On SLURM, ghost nodes from previous sessions can confuse placement group scheduling.
-  # We wait until Ray sees exactly the expected GPU count to avoid this.
-  expected_nodes=${SKYPILOT_NUM_NODES:-1}
-  if [ "$expected_nodes" -gt 1 ]; then
-    echo "Waiting for $expected_nodes nodes ($TOTAL_GPUS GPUs) to register with Ray..."
-    for attempt in $(seq 1 60); do
-      gpu_count=$(python3 -c "
-import ray
-ray.init(address='$head_ip:6479', ignore_reinit_error=True)
-gpus = ray.cluster_resources().get('GPU', 0)
-print(int(gpus))
-ray.shutdown()
-" 2>/dev/null || echo 0)
-      if [ "$gpu_count" -ge "$TOTAL_GPUS" ]; then
-        echo "All $gpu_count GPUs registered across $expected_nodes node(s)."
-        break
-      fi
-      if [ "$attempt" -eq 60 ]; then
-        echo "ERROR: Only $gpu_count/$TOTAL_GPUS GPUs registered after 5 minutes. Aborting." >&2
-        exit 1
-      fi
-      sleep 5
-    done
-  fi
-
   echo "=== Head node: $TOTAL_GPUS GPUs across ${SKYPILOT_NUM_NODES:-1} node(s), $NUM_INFERENCE_ENGINES inference engines ==="
 
   # Build training command
@@ -355,14 +305,9 @@ ray.shutdown()
 else
   # === Worker node: join Ray cluster and wait ===
   echo "=== Worker node (rank ${SKYPILOT_NODE_RANK}), joining Ray cluster at $head_ip:6479 ==="
-  # Always stop stale Ray first (SLURM containers persist across jobs)
-  ray stop --force 2>/dev/null || true
-  pkill -9 -f 'ray/' 2>/dev/null || true
-  pkill -9 -f 'gcs_server' 2>/dev/null || true
-  pkill -9 -f 'raylet' 2>/dev/null || true
-  sleep 2
-  rm -rf /tmp/ray 2>/dev/null || true
-  ray start --address "$head_ip:6479" --disable-usage-stats --temp-dir=/tmp/ray
+  if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
+    ray start --address "$head_ip:6479" --disable-usage-stats
+  fi
   wait_for_ray "$head_ip:6479"
   echo "Worker node joined. Sleeping..."
   sleep infinity
