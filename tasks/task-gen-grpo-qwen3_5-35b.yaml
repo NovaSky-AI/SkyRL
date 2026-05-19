@@ -65,6 +65,12 @@ envs:
   NUM_INFERENCE_ENGINES: 8
 
 setup: |
+  # Kill stale Ray from previous SkyPilot jobs (SLURM containers persist)
+  pkill -9 -f 'ray/' 2>/dev/null || true
+  pkill -9 -f gcs_server 2>/dev/null || true
+  pkill -9 -f raylet 2>/dev/null || true
+  rm -rf /tmp/ray 2>/dev/null || true
+  sleep 2
   bash scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
     --extra-setup scripts/fleet-qwen35-extra-setup.sh \
