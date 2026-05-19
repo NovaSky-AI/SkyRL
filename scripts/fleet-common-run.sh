@@ -219,7 +219,8 @@ read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
 if [ -n "$head_ip" ]; then
   # Determine this node's overlay IP from SKYPILOT_NODE_IPS
   IFS=' ' read -ra all_ips <<< "$SKYPILOT_NODE_IPS"
-  my_ip="${all_ips[${SKYPILOT_NODE_RANK:-0}]}"
+  node_rank="${SKYPILOT_NODE_RANK:-0}"
+  my_ip="${all_ips[$node_rank]}"
   export RAY_NODE_IP_ADDRESS="$my_ip"
   # Also set the legacy env var that some Ray versions check
   export RAY_IP="$my_ip"
