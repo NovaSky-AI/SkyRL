@@ -232,13 +232,13 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
   # Clean stale Ray session dirs and IP cache (SLURM containers have dual IPs:
   # Docker 172.19.x.x vs SLURM overlay 10.65.x.x — stale node_ip_address.json
   # from a previous session causes raylet socket path mismatches)
-  rm -rf /workspace/skyrl-tmp/ray/session_* /tmp/ray 2>/dev/null || true
-  # Bind Ray to the same IP that SKYPILOT_NODE_IPS advertises (SLURM overlay)
-  # so the training entrypoint and Ray use the same address for raylet sockets.
-  # Without --node-ip-address, Ray picks the Docker-internal 172.19.x.x but the
-  # entrypoint connects via the SLURM overlay 10.65.x.x → raylet socket mismatch.
+  rm -rf /tmp/ray 2>/dev/null || true
+  # Ray temp dir MUST be local (not NFS) — Unix domain sockets don't work over NFS.
+  # /workspace is NFS on RunPod SLURM, so use /tmp which is always local.
+  # Bind Ray to the SLURM overlay IP (from SKYPILOT_NODE_IPS) so the training
+  # entrypoint and Ray use the same address for raylet socket paths.
   ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000 \
-    --temp-dir=/workspace/skyrl-tmp/ray --node-ip-address="$head_ip"
+    --temp-dir=/tmp/ray --node-ip-address="$head_ip"
   wait_for_ray "$head_ip:6479"
 
   TOTAL_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * ${SKYPILOT_NUM_NODES:-1}))
@@ -316,8 +316,8 @@ else
   echo "=== Worker node (rank ${SKYPILOT_NODE_RANK}), joining Ray cluster at $head_ip:6479 ==="
   # Always stop stale Ray first (SLURM containers persist across jobs)
   ray stop --force 2>/dev/null || true
-  rm -rf /workspace/skyrl-tmp/ray/session_* /tmp/ray 2>/dev/null || true
-  ray start --address "$head_ip:6479" --disable-usage-stats --temp-dir=/workspace/skyrl-tmp/ray
+  rm -rf /tmp/ray 2>/dev/null || true
+  ray start --address "$head_ip:6479" --disable-usage-stats --temp-dir=/tmp/ray
   wait_for_ray "$head_ip:6479"
   echo "Worker node joined. Sleeping..."
   sleep infinity
