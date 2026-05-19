@@ -59,14 +59,14 @@ bash scripts/fleet-common-run.sh \
   trainer.use_sample_packing=false \
   generator.inference_engine_tensor_parallel_size=2 \
   trainer.epochs=${NUM_EPOCHS} \
-  trainer.eval_batch_size=8 \
+  trainer.eval_batch_size=${TASK_GEN_EVAL_BATCH_SIZE:-8} \
   trainer.eval_before_train=false \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=12 \
+  trainer.train_batch_size=${TASK_GEN_TRAIN_BATCH_SIZE:-8} \
   trainer.use_hybrid_env_sampling=true \
   trainer.min_samples_per_env=1 \
-  trainer.policy_mini_batch_size=12 \
+  trainer.policy_mini_batch_size=${TASK_GEN_POLICY_MINI_BATCH_SIZE:-8} \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
@@ -93,8 +93,8 @@ bash scripts/fleet-common-run.sh \
   generator.batched=false \
   generator.trajectory_timeout_seconds=1800 \
   generator.use_conversation_multi_turn=true \
-  generator.n_samples_per_prompt=8 \
-  generator.eval_n_samples_per_prompt=3 \
+  generator.n_samples_per_prompt=${TASK_GEN_SAMPLES_PER_PROMPT:-4} \
+  generator.eval_n_samples_per_prompt=${TASK_GEN_EVAL_SAMPLES_PER_PROMPT:-2} \
   generator.enforce_eager=false \
   generator.gpu_memory_utilization=0.65 \
   trainer.logger="$LOGGER" \
@@ -109,6 +109,7 @@ bash scripts/fleet-common-run.sh \
   ++environment.skyrl_gym.task_gen.alpha=$ALPHA \
   ++environment.skyrl_gym.task_gen.max_eval_steps=$MAX_EVAL_STEPS \
   ++environment.skyrl_gym.task_gen.evaluator_model="$EVALUATOR_MODEL" \
+  ++environment.skyrl_gym.task_gen.base_quality_reward=0.0 \
   ++environment.skyrl_gym.task_gen.eval_k_rollouts=8 \
   ++environment.skyrl_gym.task_gen.tool_call_reward_per_call=0.02 \
   "${ENV_FILTER_ARGS[@]}" \
