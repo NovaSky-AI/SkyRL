@@ -117,6 +117,16 @@ class TestSFTConfigMaxSteps:
         cfg = SFTConfig()
         validate_sft_cfg(cfg)
 
+    def test_validation_rejects_zero(self):
+        cfg = SFTConfig(max_training_steps=0)
+        with pytest.raises(ValueError, match="max_training_steps must be > 0"):
+            validate_sft_cfg(cfg)
+
+    def test_validation_rejects_negative(self):
+        cfg = SFTConfig(max_training_steps=-1)
+        with pytest.raises(ValueError, match="max_training_steps must be > 0"):
+            validate_sft_cfg(cfg)
+
 
 # ---------------------------------------------------------------------------
 # RL Trainer: total_training_steps capping logic (shared by sync and async)
