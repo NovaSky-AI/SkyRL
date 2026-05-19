@@ -128,6 +128,24 @@ class TestSFTConfigMaxSteps:
             validate_sft_cfg(cfg)
 
 
+class TestRLValidateCfgMaxSteps:
+    """validate_cfg rejects max_training_steps <= 0 for RL configs."""
+
+    def test_rejects_zero(self):
+        from skyrl.train.utils.utils import validate_cfg
+
+        cfg = SimpleNamespace(trainer=TrainerConfig(max_training_steps=0))
+        with pytest.raises(ValueError, match="max_training_steps must be > 0"):
+            validate_cfg(cfg)
+
+    def test_rejects_negative(self):
+        from skyrl.train.utils.utils import validate_cfg
+
+        cfg = SimpleNamespace(trainer=TrainerConfig(max_training_steps=-5))
+        with pytest.raises(ValueError, match="max_training_steps must be > 0"):
+            validate_cfg(cfg)
+
+
 # ---------------------------------------------------------------------------
 # RL Trainer: total_training_steps capping logic (shared by sync and async)
 # ---------------------------------------------------------------------------
