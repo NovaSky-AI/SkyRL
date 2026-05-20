@@ -191,24 +191,6 @@ def _compute_cache_key(
     return hashlib.sha256(cache_params.encode()).hexdigest()[:16]
 
 
-def _resolve_cache_dir(config_cache_dir: Optional[str]) -> str:
-    """Resolve the tokenized-dataset cache directory.
-
-    Precedence: explicit config > ``$XDG_CACHE_HOME/skyrl/tokenized_datasets`` >
-    ``~/.cache/skyrl/tokenized_datasets`` (per the XDG Base Directory Spec).
-
-    Args:
-        config_cache_dir: Value of ``SFTConfig.cache_dir`` (may be ``""``/``None``).
-
-    Returns:
-        Absolute path to the cache directory.
-    """
-    if config_cache_dir:
-        return config_cache_dir
-    xdg = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(xdg, "skyrl", "tokenized_datasets")
-
-
 def _get_cache_path(cache_dir: str, cache_key: str) -> str:
     """Get the full path to a cached tokenized dataset.
 
@@ -767,8 +749,6 @@ class SFTTrainer:
         Caching:
         - Tokenized datasets are cached to disk (pickle) for reuse across runs
         - Cache key is a hash of dataset name, split, model, and tokenization params
-        - Use ``cache_dir`` (defaults to ``$XDG_CACHE_HOME/skyrl/tokenized_datasets``
-          or ``~/.cache/skyrl/tokenized_datasets`` per XDG Base Directory Spec) to set location
         - Set ``force_recache=True`` to ignore cache and re-tokenize
         - Set ``disable_cache=True`` to disable caching entirely
 
@@ -781,7 +761,7 @@ class SFTTrainer:
         """
         # Check cache first (unless disabled or force_recache)
         if not self.sft_cfg.disable_cache:
-            cache_dir = _resolve_cache_dir(self.sft_cfg.cache_dir)
+            cache_dir = self.sft_cfg.cache_dir
 
             # Compute cache key
             tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key else None

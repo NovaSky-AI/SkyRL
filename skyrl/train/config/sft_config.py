@@ -178,10 +178,10 @@ class SFTConfig(BaseConfig):
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
 
     # ---- Tokenized dataset caching ----
-    cache_dir: str = ""
-    """Directory to cache tokenized datasets. Defaults to ``$XDG_CACHE_HOME/skyrl/tokenized_datasets``
-    if ``XDG_CACHE_HOME`` is set, else ``~/.cache/skyrl/tokenized_datasets`` (per the XDG Base
-    Directory Spec). For multi-node training, set this to an NFS-mounted path so all nodes can
+    cache_dir: str = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "skyrl", "tokenized_datasets"
+    )
+    """Directory to cache tokenized datasets. For multi-node training, set this to an NFS-mounted path so all nodes can
     share the cache."""
     force_recache: bool = False
     """If True, ignore existing cache and re-tokenize the dataset."""

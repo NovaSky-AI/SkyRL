@@ -14,7 +14,6 @@ from skyrl.train.config.sft_config import SFTConfig, TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
 from skyrl.train.sft_trainer import (
     _normalize_chat_messages,
-    _resolve_cache_dir,
     collate_sft_batch,
     tokenize_chat_example,
     tokenize_sft_example,
@@ -758,35 +757,6 @@ def test_normalize_strips_tool_calls_off_non_assistant_roles():
     assert out[0]["name"] == "alice"
     assert "tool_calls" not in out[1]
     assert out[1]["tool_call_id"] == "c0"
-
-
-# ---------------------------------------------------------------------------
-# _resolve_cache_dir (XDG_CACHE_HOME compliance)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("case", ["default_no_env", "uses_xdg", "config_overrides_env"])
-def test_resolve_cache_dir_precedence(monkeypatch, tmp_path, case):
-    """Precedence: explicit config.cache_dir > $XDG_CACHE_HOME/skyrl/tokenized_datasets > ~/.cache/skyrl/tokenized_datasets."""
-    import os
-
-    if case == "default_no_env":
-        # No config and no XDG_CACHE_HOME -> defaults to ~/.cache/skyrl/tokenized_datasets.
-        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
-        expected = os.path.join(os.path.expanduser("~/.cache"), "skyrl", "tokenized_datasets")
-        assert _resolve_cache_dir("") == expected
-        assert _resolve_cache_dir(None) == expected
-    elif case == "uses_xdg":
-        # XDG_CACHE_HOME set -> uses $XDG_CACHE_HOME/skyrl/tokenized_datasets.
-        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        expected = os.path.join(str(tmp_path), "skyrl", "tokenized_datasets")
-        assert _resolve_cache_dir("") == expected
-        assert _resolve_cache_dir(None) == expected
-    elif case == "config_overrides_env":
-        # Explicit config.cache_dir wins over $XDG_CACHE_HOME and the default.
-        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
-        override = str(tmp_path / "explicit")
-        assert _resolve_cache_dir(override) == override
 
 
 # ---------------------------------------------------------------------------
