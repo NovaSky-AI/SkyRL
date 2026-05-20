@@ -1,0 +1,72 @@
+name: qwen3-30b-validate
+entrypoint: |
+  set -e
+  DIAG_LOG=/mnt/cluster_storage/head_diag.log
+  RUN_TAG="run-30b-$(date -u +%Y%m%dT%H%M%SZ)-pid$$"
+  echo "===== [$RUN_TAG] HEAD ENTRYPOINT START $(date -u) =====" | tee -a "$DIAG_LOG"
+  trap 'rc=$?; echo "[$RUN_TAG] TRAP EXIT code=$rc at $(date -u)" | tee -a "$DIAG_LOG"; exit $rc' EXIT
+  bash examples/train/megatron/run_megatron_qwen3_30b_2nodes.sh
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+# Use the shared pre-built venv on NFS for all Ray worker actors.
+# This eliminates per-actor `uv run` which was causing 16 redundant installs.
+py_executable: "/mnt/cluster_storage/.skyrl-venv/bin/python"
+
+env_vars:
+  # Disable Ray's auto "uv run" propagation — we are using a pre-built venv directly.
+  # NOTE: do NOT set RAY_RUNTIME_ENV_HOOK to empty string; Ray's load_class()
+  # treats that as "load class named ''" and crashes. We unset it inside the
+  # entrypoint script instead.
+  RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+  UV_CACHE_DIR: "/mnt/cluster_storage/.uv_cache"
+  UV_LINK_MODE: "copy"
+  MAX_JOBS: "4"
+  NINJA_JOBS: "4"
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+  RAY_worker_register_timeout_seconds: "1800"
+  SKYRL_RAY_PG_TIMEOUT_IN_S: "1800"
+  SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S: "3600"
+  HF_HOME: "/mnt/cluster_storage/hf_cache"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  NVTE_FUSED_ATTN: "0"
+  VLLM_ALLOW_RUNTIME_LORA_UPDATING: "true"
+  VLLM_ALLOW_INSECURE_SERIALIZATION: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+  VLLM_USE_V1: "1"
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+  _SKYRL_USE_NEW_INFERENCE: "1"
+  CUDA_HOME: "/usr/local/cuda"
+  # Point to our pre-installed cuDNN/NCCL/cublas etc. on shared NFS.
+  # /opt/cudnn doesn't exist in this image (Dockerfile.megatron paths don't apply).
+  CPATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include:/mnt/cluster_storage/nv_pkg/nvidia/cublas/include"
+  C_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  CPLUS_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib:/mnt/cluster_storage/nv_pkg/nvidia/cublas/lib"
+  LD_LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib"
+  CUDNN_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn"
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 8
+      memory: 32Gi
+  worker_nodes:
+    - required_resources:
+        CPU: 184
+        memory: 1920Gi
+        GPU: 8
+      required_labels:
+        ray.io/accelerator-type: H100
+      min_nodes: 2
+      max_nodes: 2
