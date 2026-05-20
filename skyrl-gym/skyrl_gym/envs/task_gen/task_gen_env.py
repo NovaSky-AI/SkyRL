@@ -93,8 +93,7 @@ class TaskGenEnv(BaseTextEnv):
         k_rollouts: Number of rollouts per condition (raw/hinted, default 4)
         max_eval_steps: Max agent steps per evaluator rollout (default 30)
         evaluator_model: Fleet harness model for task evaluation (default anthropic/claude-sonnet-4.5)
-        base_quality_reward: Small reward for passing sandbox+judge (default 0.1).
-            Prevents GRPO zero-signal deadlock when all harness evals fail.
+        base_quality_reward: Optional reward for passing sandbox+judge (default 0.0).
     """
 
     def __init__(
@@ -207,8 +206,8 @@ class TaskGenEnv(BaseTextEnv):
         os.makedirs(self._rollout_dir, exist_ok=True)
 
         # Base quality reward for tasks passing sandbox + judge gate.
-        # Provides GRPO gradient signal even when all harness evals return 0.
-        self.base_quality_reward = float(env_config.get("base_quality_reward", 0.1)) if env_config else 0.1
+        # Default 0.0 keeps the learning signal tied to solver rollout variance.
+        self.base_quality_reward = float(env_config.get("base_quality_reward", 0.0)) if env_config else 0.0
 
         # Small per-tool-call reward to incentivize DB exploration (query_db).
         # Default 0.0 = off (no behavior change for existing runs).
@@ -1100,8 +1099,7 @@ Generate exactly ONE task. Output it in this format:
             5. Hint-based evaluation via Fleet harness (k raw + k hinted rollouts)
             6. R = base_quality + binary_eval_signal
 
-        base_quality (default 0.1) rewards structural validity (sandbox+judge pass),
-        providing GRPO gradient signal even when harness evals return all zeros.
+        base_quality rewards structural validity (sandbox+judge pass) when enabled.
         """
         metadata: Dict[str, Any] = {"env_key": self.env_key, "turn": self.turns}
         max_turns_reached = self.turns >= self.max_turns
