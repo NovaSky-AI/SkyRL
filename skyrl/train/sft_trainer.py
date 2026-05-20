@@ -1096,6 +1096,7 @@ class SFTTrainer:
                     log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                     log_dict["timing/eval"] = all_timings["eval"]
 
+            log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
             self.tracker.log(log_dict, step=self.global_step, commit=True)
 
             if self.global_step % 5 == 0:
