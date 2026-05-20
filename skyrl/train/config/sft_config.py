@@ -173,6 +173,21 @@ class SFTConfig(BaseConfig):
 
     seed: int = 42
 
+    # ---- Data loading ----
+    num_workers: int = 8
+    """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+
+    # ---- Tokenized dataset caching ----
+    cache_dir: str = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "skyrl", "tokenized_datasets"
+    )
+    """Directory to cache tokenized datasets. For multi-node training, set this to an NFS-mounted path so all nodes can
+    share the cache."""
+    force_recache: bool = False
+    """If True, ignore existing cache and re-tokenize the dataset."""
+    disable_cache: bool = False
+    """If True, disable cache completely (always tokenize from scratch)."""
+
     # ---- Training target ----
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""

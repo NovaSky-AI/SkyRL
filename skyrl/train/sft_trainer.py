@@ -22,8 +22,10 @@ Or as a CLI entrypoint::
 
 import functools
 import json
+import multiprocessing as mp
 import os
 import random
+import tempfile
 from dataclasses import asdict
 from math import ceil
 from typing import Any, Optional
@@ -33,6 +35,7 @@ import torch
 from datasets import load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
+from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -65,6 +68,189 @@ from skyrl.utils.tok import get_tokenizer
 # ---------------------------------------------------------------------------
 # Tokenization helpers
 # ---------------------------------------------------------------------------
+
+
+def _tokenize_chat_slice_worker(args):
+    """Worker function for parallel chat-format tokenization with slice-based loading.
+
+    Each worker loads the full dataset (HF caches it locally after the parent's
+    first call) and tokenizes only its assigned index range.
+
+    Must be top-level for pickling with spawn.
+    """
+    (
+        dataset_name,
+        dataset_split,
+        start_idx,
+        end_idx,
+        tokenizer_path,
+        max_length,
+        messages_key,
+        train_on_what_str,
+        tools_key,
+        system_key,
+    ) = args
+
+    # Worker loads tokenizer from cached path
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+        use_fast=True,
+        local_files_only=True,
+    )
+
+    train_on_what = TrainOnWhat(train_on_what_str)
+
+    # Reload the dataset using the original split string and slice by index.
+    # The parent has already loaded once so this hits the HF cache.
+    dataset = load_dataset(dataset_name, split=dataset_split)
+    dataset_slice = dataset.select(range(start_idx, end_idx))
+
+    # Tokenize and filter inline
+    results = []
+    for example in dataset_slice:
+        tokenized = tokenize_chat_example(
+            example,
+            tokenizer,
+            max_length=max_length,
+            messages_key=messages_key,
+            train_on_what=train_on_what,
+            tools_key=tools_key,
+            system_key=system_key,
+        )
+        if tokenized is not None:
+            results.append(tokenized)
+
+    return results
+
+
+def _tokenize_alpaca_slice_worker(args):
+    """Worker function for parallel Alpaca-format tokenization with slice-based loading.
+
+    Each worker loads the full dataset (HF caches it locally after the parent's
+    first call) and tokenizes only its assigned index range.
+
+    Must be top-level for pickling with spawn.
+    """
+    dataset_name, dataset_split, start_idx, end_idx, tokenizer_path, max_length = args
+
+    # Worker loads tokenizer from cached path
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+        use_fast=True,
+        local_files_only=True,
+    )
+
+    # Reload the dataset using the original split string and slice by index.
+    dataset = load_dataset(dataset_name, split=dataset_split)
+    dataset_slice = dataset.select(range(start_idx, end_idx))
+
+    # Tokenize and filter inline
+    results = []
+    for example in dataset_slice:
+        tokenized = tokenize_sft_example(example, tokenizer, max_length)
+        if tokenized is not None:
+            results.append(tokenized)
+
+    return results
+
+
+def _compute_cache_key(
+    dataset_name: str,
+    dataset_split: str,
+    model_path: str,
+    max_length: Optional[int],
+    messages_key: str,
+    train_on_what: str,
+    tools_key: Optional[str],
+    system_key: Optional[str],
+) -> str:
+    """Compute a cache key (hash) for a tokenized dataset.
+
+    The hash uniquely identifies the dataset and tokenization parameters so
+    that cached results can be safely reused when parameters match.
+
+    Args:
+        dataset_name: HuggingFace dataset name
+        dataset_split: Dataset split string (e.g., "train[:100000]")
+        model_path: Model name/path (tokenizer identity)
+        max_length: Maximum sequence length for truncation
+        messages_key: Column name for messages
+        train_on_what: Training target (last_assistant_message or all_assistant_messages)
+        tools_key: Column name for tools (if applicable)
+        system_key: Column name for system prompt (if applicable)
+
+    Returns:
+        A hex string hash (e.g., "a3f2c1...")
+    """
+    import hashlib
+
+    # Build a deterministic string from all relevant parameters
+    cache_params = f"{dataset_name}|{dataset_split}|{model_path}|{max_length}|{messages_key}|{train_on_what}|{tools_key}|{system_key}"
+    return hashlib.sha256(cache_params.encode()).hexdigest()[:16]
+
+
+def _get_cache_path(cache_dir: str, cache_key: str) -> str:
+    """Get the full path to a cached tokenized dataset.
+
+    Args:
+        cache_dir: Base cache directory
+        cache_key: Cache key (hash) for this dataset
+
+    Returns:
+        Path to the cache file (e.g., /path/to/cache/a3f2c1.pkl)
+    """
+    return os.path.join(cache_dir, f"{cache_key}.pkl")
+
+
+def _load_from_cache(cache_path: str) -> Optional[list]:
+    """Load tokenized dataset from cache.
+
+    Args:
+        cache_path: Path to cached pickle file
+
+    Returns:
+        List of tokenized examples, or None if cache doesn't exist or is invalid
+    """
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        import pickle
+
+        logger.info(f"Loading tokenized dataset from cache: {cache_path}")
+        with open(cache_path, "rb") as f:
+            tokenized = pickle.load(f)
+        logger.info(f"Loaded {len(tokenized)} examples from cache")
+        return tokenized
+    except Exception as e:
+        logger.warning(f"Failed to load cache from {cache_path}: {e}")
+        return None
+
+
+def _save_to_cache(cache_path: str, tokenized: list) -> None:
+    """Save tokenized dataset to cache.
+
+    Args:
+        cache_path: Path to save the cache file
+        tokenized: List of tokenized examples
+    """
+    try:
+        import pickle
+
+        cache_dir = os.path.dirname(cache_path)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        logger.info(f"Saving {len(tokenized)} examples to cache: {cache_path}")
+        # Write to a temp file first, then atomic rename for NFS safety
+        temp_path = cache_path + ".tmp"
+        with open(temp_path, "wb") as f:
+            pickle.dump(tokenized, f)
+        os.rename(temp_path, cache_path)
+        logger.info("Cache saved successfully")
+    except Exception as e:
+        logger.warning(f"Failed to save cache to {cache_path}: {e}")
 
 
 @functools.lru_cache(maxsize=512)
@@ -549,12 +735,22 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
 
     def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
-        """Load and tokenize a dataset.
+        """Load and tokenize a dataset with caching support.
 
         Auto-detects the dataset format based on column names:
         - If a ``messages_key`` column exists, uses chat-format tokenization.
         - If ``instruction`` and ``output`` columns exist, uses Alpaca-format
           tokenization.
+
+        Uses manual multiprocessing for parallel tokenization when num_workers > 0.
+        With parallel mode, uses slice-based loading where each worker loads its
+        own data slice directly from HuggingFace to eliminate pickle overhead.
+
+        Caching:
+        - Tokenized datasets are cached to disk (pickle) for reuse across runs
+        - Cache key is a hash of dataset name, split, model, and tokenization params
+        - Set ``force_recache=True`` to ignore cache and re-tokenize
+        - Set ``disable_cache=True`` to disable caching entirely
 
         Args:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
@@ -563,43 +759,171 @@ class SFTTrainer:
         Returns a list of tokenized examples (dicts with ``input_ids``,
         ``attention_mask``, ``num_actions``).
         """
+        # Check cache first (unless disabled or force_recache)
+        if not self.sft_cfg.disable_cache:
+            cache_dir = self.sft_cfg.cache_dir
+
+            # Compute cache key
+            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key else None
+            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key else None
+            cache_key = _compute_cache_key(
+                dataset_name=dataset_name,
+                dataset_split=dataset_split,
+                model_path=self.sft_cfg.model.path,
+                max_length=self.sft_cfg.max_length,
+                messages_key=self.sft_cfg.messages_key,
+                train_on_what=self.sft_cfg.train_on_what.value,
+                tools_key=tools_key,
+                system_key=system_key,
+            )
+            cache_path = _get_cache_path(cache_dir, cache_key)
+
+            # Try to load from cache (unless force_recache)
+            if not self.sft_cfg.force_recache:
+                cached = _load_from_cache(cache_path)
+                if cached is not None:
+                    return cached
+
+            logger.info("Cache miss or force_recache=True, tokenizing dataset...")
+            logger.info(f"Cache key: {cache_key}")
+
         logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}'...")
         dataset = load_dataset(dataset_name, split=dataset_split)
 
         columns = dataset.column_names
-        logger.info("Tokenizing dataset...")
+        num_workers = self.sft_cfg.num_workers
 
-        if self.sft_cfg.messages_key in columns:
-            # Chat format. Tool-calling datasets often ship a per-row ``tools``
-            # column (function schemas) and ``system`` column (domain policy)
-            # alongside ``messages``; thread those through when present.
-            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
-            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
-            tokenized = [
-                tokenize_chat_example(
-                    ex,
-                    self.tokenizer,
-                    self.sft_cfg.max_length,
-                    self.sft_cfg.messages_key,
-                    train_on_what=self.sft_cfg.train_on_what,
-                    tools_key=tools_key,
-                    system_key=system_key,
+        # Sequential tokenization path
+        if num_workers == 0:
+            logger.info("Tokenizing dataset (sequential)...")
+            if self.sft_cfg.messages_key in columns:
+                tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+                system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
+                tokenized = [
+                    tokenize_chat_example(
+                        ex,
+                        self.tokenizer,
+                        self.sft_cfg.max_length,
+                        self.sft_cfg.messages_key,
+                        train_on_what=self.sft_cfg.train_on_what,
+                        tools_key=tools_key,
+                        system_key=system_key,
+                    )
+                    for ex in dataset
+                ]
+            elif "instruction" in columns and "output" in columns:
+                tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
+            else:
+                raise ValueError(
+                    f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
+                    f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
+                    f"Found columns: {columns}"
                 )
-                for ex in dataset
-            ]
-        elif "instruction" in columns and "output" in columns:
-            # Alpaca format
-            tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
-        else:
-            raise ValueError(
-                f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
-                f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
-                f"Found columns: {columns}"
-            )
+            tokenized = [ex for ex in tokenized if ex is not None]
+            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
 
-        tokenized = [ex for ex in tokenized if ex is not None]
-        logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
-        return tokenized
+            # Save to cache if enabled
+            if not self.sft_cfg.disable_cache:
+                _save_to_cache(cache_path, tokenized)
+
+            return tokenized
+
+        # Parallel tokenization path with slice-based loading
+        logger.info(f"Tokenizing dataset with {num_workers} workers (slice-based loading)...")
+
+        # Cache tokenizer to temp dir for fast worker loading
+        tokenizer_cache_dir = tempfile.mkdtemp(prefix="skyrl_tokenizer_")
+        try:
+            self.tokenizer.save_pretrained(tokenizer_cache_dir)
+
+            # Slice the already-loaded dataset; the original split string is
+            # forwarded to workers verbatim so HF parses it (no local regex).
+            dataset_size = len(dataset)
+            chunk_size = max(1, dataset_size // num_workers)
+
+            # Generate worker slice boundaries
+            worker_args = []
+            for worker_idx in range(num_workers):
+                worker_start = worker_idx * chunk_size
+                # Last worker takes any remainder
+                if worker_idx == num_workers - 1:
+                    worker_end = dataset_size
+                else:
+                    worker_end = min((worker_idx + 1) * chunk_size, dataset_size)
+
+                # Skip empty slices
+                if worker_start >= worker_end:
+                    continue
+
+                # Prepare worker arguments based on format
+                if self.sft_cfg.messages_key in columns:
+                    tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+                    system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
+                    worker_args.append(
+                        (
+                            dataset_name,
+                            dataset_split,
+                            worker_start,
+                            worker_end,
+                            tokenizer_cache_dir,
+                            self.sft_cfg.max_length,
+                            self.sft_cfg.messages_key,
+                            self.sft_cfg.train_on_what.value,
+                            tools_key,
+                            system_key,
+                        )
+                    )
+                elif "instruction" in columns and "output" in columns:
+                    worker_args.append(
+                        (
+                            dataset_name,
+                            dataset_split,
+                            worker_start,
+                            worker_end,
+                            tokenizer_cache_dir,
+                            self.sft_cfg.max_length,
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
+                        f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
+                        f"Found columns: {columns}"
+                    )
+
+            # Select worker function based on format
+            if self.sft_cfg.messages_key in columns:
+                worker_fn = _tokenize_chat_slice_worker
+            else:
+                worker_fn = _tokenize_alpaca_slice_worker
+
+            logger.info(f"Dividing {dataset_size} examples among {len(worker_args)} workers")
+
+            # Use spawn to avoid Ray fork issues
+            ctx = mp.get_context("spawn")
+
+            # Process in parallel
+            with ctx.Pool(processes=num_workers) as pool:
+                results = pool.map(worker_fn, worker_args)
+
+            # Flatten results
+            tokenized = []
+            for chunk_results in results:
+                tokenized.extend(chunk_results)
+
+            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {dataset_size})")
+
+            # Save to cache if enabled
+            if not self.sft_cfg.disable_cache:
+                _save_to_cache(cache_path, tokenized)
+
+            return tokenized
+
+        finally:
+            # Cleanup temp tokenizer cache
+            import shutil
+
+            shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
     def load_dataset(self) -> list:
         """Load and tokenize the training dataset."""
