@@ -422,12 +422,18 @@ class MegatronModelWrapper:
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
+            # When present, sub_seq_lengths enumerates every sub-sequence
+            # inside every row of the micro-batch (controller-side mini-batch
+            # packing). preprocess_packed_seqs uses it to emit cu_seqlens
+            # entries covering all sub-seqs, not one per row.
+            sub_seq_lengths = batch.get("sub_seq_lengths")
 
             if self.use_sample_packing:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -455,6 +461,7 @@ class MegatronModelWrapper:
                     micro_batch_size,
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
                 )
             else:
                 outputs = recover_left_padding(

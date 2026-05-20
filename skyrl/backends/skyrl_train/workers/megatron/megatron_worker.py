@@ -356,7 +356,6 @@ class MegatronWorker:
         # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
         # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
         # (512) is used instead, causing the wrong model architecture to be built.
-        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
         if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
             provider.q_lora_rank = hf_config.q_lora_rank
 
@@ -802,9 +801,54 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
+        # When the controller emits sub_seq_lengths (per-row sub-sequence
+        # length lists), chunk that alongside the tensor rows so each micro
+        # batch can pass the slice through to preprocess_packed_seqs. Absent
+        # (RL path, eager-old SFT path), this stays None.
+        #
+        # NOTE: ``TensorBatch.chunk()`` preserves ``metadata`` unchanged across
+        # all per-DP shards (metadata is treated as a global, broadcasted
+        # field). When the controller-side packing trainer fills
+        # ``metadata['sub_seq_lengths']``, the list received here therefore
+        # spans the **global** bin layout (length = num_bins_total), not just
+        # this rank's shard. MeshDispatch.dispatch shards via
+        # ``data.chunk(num_bins // dp_size)`` in DP-rank-major contiguous
+        # order, so we recover this rank's slice by the same contiguous index
+        # math.
+        sub_seq_lengths_full: Optional[List[List[int]]] = (
+            (data.metadata or {}).get("sub_seq_lengths") if data.metadata else None
+        )
+        sub_seq_lengths_chunks: List[Optional[List[List[int]]]] = []
+        if sub_seq_lengths_full is not None:
+            # If the metadata length already matches the per-rank tensor shard,
+            # accept it as-is (in-process tests / single-rank dispatch).
+            if len(sub_seq_lengths_full) == data.batch_size:
+                sub_seq_lengths_rank = sub_seq_lengths_full
+            else:
+                dp_size = mpu.get_data_parallel_world_size()
+                dp_rank = mpu.get_data_parallel_rank()
+                total_rows = len(sub_seq_lengths_full)
+                if total_rows % dp_size != 0:
+                    raise ValueError(
+                        f"sub_seq_lengths has {total_rows} rows, not divisible by "
+                        f"dp_size={dp_size}. The controller's bin count is supposed "
+                        f"to be a multiple of dp_size (_adjust_bin_count)."
+                    )
+                rank_chunk = total_rows // dp_size
+                if rank_chunk != data.batch_size:
+                    raise ValueError(
+                        f"sub_seq_lengths shard size {rank_chunk} (global {total_rows} / "
+                        f"dp_size {dp_size}) does not match data.batch_size={data.batch_size}"
+                    )
+                start = dp_rank * rank_chunk
+                end = start + rank_chunk
+                sub_seq_lengths_rank = sub_seq_lengths_full[start:end]
+            for i in range(0, data.batch_size, micro_batch_size):
+                sub_seq_lengths_chunks.append(sub_seq_lengths_rank[i : i + micro_batch_size])
+
         # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
-        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+        for chunk_idx, experience in enumerate(BatchIterator(data, micro_batch_size, drop_last=False)):
             sequences = experience.sequences
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
@@ -826,6 +870,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    "sub_seq_lengths": (
+                        sub_seq_lengths_chunks[chunk_idx] if sub_seq_lengths_full is not None else None
+                    ),
                 }
             )
 

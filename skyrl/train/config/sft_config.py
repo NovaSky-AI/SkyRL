@@ -179,6 +179,17 @@ class SFTConfig(BaseConfig):
 
     # ---- Packing ----
     use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)
+    use_minibatch_packing: bool = False
+    """Enable controller-level FFD bin-packing across the global mini-batch.
+    Requires ``use_sample_packing=True`` and the Megatron backend. When
+    enabled, ``SFTTrainerWithPacking`` is used instead of ``SFTTrainer``.
+    Each bin row becomes one row in the dispatched batch and one
+    micro-batch on the worker (per ``packed_micro_batch_size_per_gpu``).
+    """
+    packed_micro_batch_size_per_gpu: Optional[int] = None
+    """Number of bins per micro-batch on the worker. ``None`` (default)
+    means 1 bin per micro-batch (one packed sequence per micro-batch).
+    Only consulted when ``use_minibatch_packing=True``."""
 
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
@@ -256,6 +267,19 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"parallel is not supported for megatron"
         )
 
+    # ---- minibatch packing checks ----
+    if cfg.use_minibatch_packing:
+        if cfg.strategy != "megatron":
+            raise ValueError("use_minibatch_packing=True is only supported with strategy='megatron'.")
+        if not cfg.use_sample_packing:
+            raise ValueError("use_minibatch_packing=True requires use_sample_packing=True.")
+        if cfg.megatron_config.context_parallel_size > 1:
+            raise ValueError("use_minibatch_packing=True does not support context_parallel_size > 1 in v1.")
+        if cfg.megatron_config.expert_model_parallel_size > 1:
+            raise ValueError("use_minibatch_packing=True does not support expert_model_parallel_size > 1 in v1.")
+        if cfg.max_length is None:
+            raise ValueError("use_minibatch_packing=True requires max_length to be set (it is the bin capacity).")
+
 
 # NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend
 # on the RL configuration dataclass so we add this translation layer.
@@ -298,6 +322,12 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
     cfg.trainer.use_sample_packing = sft_cfg.use_sample_packing
+    # When minibatch packing is on, the worker-side ``micro_train_batch_size_per_gpu``
+    # refers to bins-per-micro-batch (because each row in the dispatched
+    # batch is one bin). Override with ``packed_micro_batch_size_per_gpu``
+    # (default 1) so the bin-per-MB knob is explicit.
+    if sft_cfg.use_minibatch_packing:
+        cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.packed_micro_batch_size_per_gpu or 1
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger
