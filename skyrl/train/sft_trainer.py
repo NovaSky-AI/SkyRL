@@ -524,8 +524,14 @@ class SFTTrainer:
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
         )
-        # num_steps may be None when num_epochs is used; the worker will use its
-        # default (large value) for the LR scheduler in that case.
+        if self.sft_cfg.max_training_steps is not None:
+            num_training_steps = (
+                self.sft_cfg.max_training_steps
+                if num_training_steps is None
+                else min(num_training_steps, self.sft_cfg.max_training_steps)
+            )
+        # num_steps may be None when num_epochs is used; without an explicit cap,
+        # the worker will use its default large value for the LR scheduler.
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,
@@ -990,6 +996,10 @@ class SFTTrainer:
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
                 f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = {num_steps} steps"
             )
+
+        if self.sft_cfg.max_training_steps is not None:
+            num_steps = min(num_steps, self.sft_cfg.max_training_steps)
+            logger.info(f"Capping training at max_training_steps={self.sft_cfg.max_training_steps}")
 
         # Early validation: dataset must have at least batch_size examples
         if len(tokenized) < batch_size:

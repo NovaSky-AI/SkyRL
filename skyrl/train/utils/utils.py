@@ -227,6 +227,10 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         )
         cfg.trainer.strategy = "fsdp"
 
+    if cfg.trainer.max_training_steps is not None:
+        if cfg.trainer.max_training_steps <= 0:
+            raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
