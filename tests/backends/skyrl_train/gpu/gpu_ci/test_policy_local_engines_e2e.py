@@ -95,6 +95,11 @@ async def test_policy_local_engines_e2e(
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
     cfg = get_test_actor_config(model)
+    # Large MoE policy on 4xH100 can't hold fp32 master weights alongside vLLM,
+    # so init in bf16 here. Production keeps fp32 init (FSDP mixed precision
+    # handles the bf16 cast during forward).
+    if model == QWEN_LARGE_MOE_MODEL:
+        cfg.trainer.policy.bf16_init = True
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy

@@ -72,20 +72,15 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # sample packing not yet supported for GDN
         # https://github.com/NVIDIA/Megatron-LM/pull/2644
         cfg.trainer.use_sample_packing = False
-    # Large MoE models: AdamW's fp32 optimizer state (~6x model) is the
-    # dominant per-rank GPU cost during Megatron init.
-    # use_precision_aware_optimizer keeps it in bf16 (halves it), and
-    # optimizer_cpu_offload moves it off GPU entirely. Without these the
-    # optimizer state alone OOMs the H100 on 4 GPUs.
+    # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
+    # the fp32 master + AdamW state on GPU at init (~6x model size), which
+    # OOMs on 4xH100 before forward ever runs. These tests only forward +
+    # weight-sync, so skip optimizer construction entirely.
     is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
         "nemotron-3-nano" in model_name.lower()
     )
     if is_large_moe:
-        if cfg.trainer.policy.megatron_config.optimizer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {}
-        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["use_precision_aware_optimizer"] = True
-        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_cpu_offload"] = True
-        cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1.0
+        cfg.trainer.policy.skip_optimizer_init = True
     validate_cfg(cfg)
     return cfg
 
@@ -225,13 +220,15 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
-        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=1 EP=4
+        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
         # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
-        # AdamW optimizer state is offloaded to CPU via the heuristic in
-        # get_test_actor_config (see is_large_moe), and vLLM gmu is lowered
-        # to 0.5 so the policy shard + vLLM pool fit on each H100.
+        # TP=1 OOMed in the EP alltoall because dense layers were replicated
+        # on every GPU; TP=4 shards them 4-way and matches the qwen3.5-35b
+        # layout below. AdamW optimizer is skipped entirely via is_large_moe
+        # in get_test_actor_config (forward-only test), and vLLM gmu is
+        # lowered to 0.5 so the policy shard + vLLM pool fit on each H100.
         pytest.param(
-            1,
+            4,
             1,
             1,
             4,
@@ -241,7 +238,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
             5e-1,
             5e-2,
-            id="nemotron3-nano_tp1_ep4_h100",
+            id="nemotron3-nano_tp4_ep4_h100",
             marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:
