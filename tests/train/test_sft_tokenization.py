@@ -15,6 +15,7 @@ from skyrl.train.config.sft_config import TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
 from skyrl.train.sft_trainer import (
     _normalize_chat_messages,
+    _resolve_cache_dir,
     collate_sft_batch,
     tokenize_chat_example,
     tokenize_sft_example,
@@ -766,3 +767,216 @@ def test_normalize_strips_tool_calls_off_non_assistant_roles():
     assert out[0]["name"] == "alice"
     assert "tool_calls" not in out[1]
     assert out[1]["tool_call_id"] == "c0"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_cache_dir (XDG_CACHE_HOME compliance)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["default_no_env", "uses_xdg", "config_overrides_env"])
+def test_resolve_cache_dir_precedence(monkeypatch, tmp_path, case):
+    """Precedence: explicit config.cache_dir > $XDG_CACHE_HOME/skyrl/tokenized_datasets > ~/.cache/skyrl/tokenized_datasets."""
+    import os
+
+    if case == "default_no_env":
+        # No config and no XDG_CACHE_HOME -> defaults to ~/.cache/skyrl/tokenized_datasets.
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        expected = os.path.join(os.path.expanduser("~/.cache"), "skyrl", "tokenized_datasets")
+        assert _resolve_cache_dir("") == expected
+        assert _resolve_cache_dir(None) == expected
+    elif case == "uses_xdg":
+        # XDG_CACHE_HOME set -> uses $XDG_CACHE_HOME/skyrl/tokenized_datasets.
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        expected = os.path.join(str(tmp_path), "skyrl", "tokenized_datasets")
+        assert _resolve_cache_dir("") == expected
+        assert _resolve_cache_dir(None) == expected
+    elif case == "config_overrides_env":
+        # Explicit config.cache_dir wins over $XDG_CACHE_HOME and the default.
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+        override = str(tmp_path / "explicit")
+        assert _resolve_cache_dir(override) == override
+
+
+# ---------------------------------------------------------------------------
+# _load_and_tokenize: num_workers > 0 (parallel path) and cache-hit behavior.
+#
+# The parallel-path test runs real multiprocessing -- no stubs on
+# ``mp.get_context``, ``Pool``, or the slice worker. The dataset is written to
+# disk as JSONL inside ``tmp_path`` so spawned workers (which re-import the
+# module and lose any in-process monkeypatches) can ``load_dataset`` it via the
+# directory path. The cache-hit test stays in-process with ``num_workers=0``
+# and monkeypatches ``load_dataset`` to return an in-memory Dataset.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeModelCfg:
+    path: str = "Qwen/Qwen3-0.6B"
+
+
+@dataclass
+class _FakeLoadCfg:
+    """Minimal stand-in for SFTConfig used by ``_load_and_tokenize`` tests."""
+
+    cache_dir: str = ""
+    disable_cache: bool = False
+    force_recache: bool = False
+    num_workers: int = 0
+    messages_key: str = "messages"
+    tools_key: str = "tools"
+    system_key: str = "system"
+    max_length: int = 512
+    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
+    model: _FakeModelCfg = None
+
+    def __post_init__(self):
+        if self.model is None:
+            self.model = _FakeModelCfg()
+
+
+def _make_inmem_dataset():
+    """Tiny chat-format Dataset used by parallel/cache tests. Six short rows so
+    a 2-worker split is non-trivial (3 + 3) without spending real tokenizer time."""
+    from datasets import Dataset
+
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": f"Q{i}: what is {i} + {i}?"},
+                {"role": "assistant", "content": f"{2 * i}"},
+            ]
+        }
+        for i in range(6)
+    ]
+    return Dataset.from_list(rows)
+
+
+def _write_inmem_dataset_to_dir(dataset_dir):
+    """Materialize the in-memory chat fixture as JSONL inside ``dataset_dir``.
+
+    The directory is structured so HF ``load_dataset(<dir>, split='train')``
+    autodetects the JSON builder. Required for the real-mp parallel test --
+    spawned workers re-import the module and cannot see in-process patches, so
+    the data must live on disk where they can load it independently."""
+    import json
+    import os
+
+    os.makedirs(dataset_dir, exist_ok=True)
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": f"Q{i}: what is {i} + {i}?"},
+                {"role": "assistant", "content": f"{2 * i}"},
+            ]
+        }
+        for i in range(6)
+    ]
+    with open(os.path.join(dataset_dir, "train.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def _build_trainer(tokenizer, sft_cfg):
+    """Build a bare SFTTrainer with just the attributes ``_load_and_tokenize`` reads."""
+    from skyrl.train.sft_trainer import SFTTrainer
+
+    trainer = object.__new__(SFTTrainer)
+    trainer.sft_cfg = sft_cfg
+    trainer.tokenizer = tokenizer
+    return trainer
+
+
+def test_load_and_tokenize_num_workers_uses_parallel_path(tokenizer, tmp_path):
+    """``num_workers > 0`` actually runs the real ``mp.Pool`` parallel path and
+    produces bit-exact output vs ``num_workers=0``.
+
+    The implementation uses ``mp.get_context("spawn")`` -- spawned workers
+    re-import ``skyrl.train.sft_trainer``, so we can't monkeypatch around them.
+    Instead the dataset is materialized as JSONL on disk and workers re-load it
+    via ``load_dataset(<dir>, split=...)``. The serial reference run uses the
+    same directory; equality of (input_ids, attention_mask, num_actions,
+    loss_mask) across both paths verifies the parallel implementation."""
+    dataset_dir = str(tmp_path / "ds")
+    _write_inmem_dataset_to_dir(dataset_dir)
+
+    # Serial reference: num_workers=0 path.
+    serial_cfg = _FakeLoadCfg(num_workers=0, cache_dir=str(tmp_path / "ser_cache"))
+    serial_trainer = _build_trainer(tokenizer, serial_cfg)
+    serial_out = serial_trainer._load_and_tokenize(dataset_dir, "train")
+
+    # Real-multiprocessing run: num_workers=2 path. With 6 rows that's a 3+3
+    # split across two spawned worker processes.
+    parallel_cfg = _FakeLoadCfg(num_workers=2, cache_dir=str(tmp_path / "par_cache"))
+    parallel_trainer = _build_trainer(tokenizer, parallel_cfg)
+    parallel_out = parallel_trainer._load_and_tokenize(dataset_dir, "train")
+
+    assert len(parallel_out) == len(serial_out) == 6
+    for par_ex, ser_ex in zip(parallel_out, serial_out):
+        assert par_ex["input_ids"] == ser_ex["input_ids"]
+        assert par_ex["attention_mask"] == ser_ex["attention_mask"]
+        assert par_ex["num_actions"] == ser_ex["num_actions"]
+        assert par_ex["loss_mask"] == ser_ex["loss_mask"]
+
+
+def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, monkeypatch):
+    """With caching enabled (default), a second call hits the pickle cache and
+    does NOT re-tokenize:
+      - the inner per-row tokenizer is not called on the second run,
+      - the cache file exists at the resolved ``_get_cache_path`` path,
+      - the two calls return bit-exact equal output."""
+    import os
+    from unittest.mock import MagicMock
+
+    from skyrl.train import sft_trainer as sft_mod
+
+    dataset = _make_inmem_dataset()
+    monkeypatch.setattr(sft_mod, "load_dataset", lambda *a, **kw: dataset)
+
+    cfg = _FakeLoadCfg(
+        num_workers=0,  # serial path -- exercises tokenize_chat_example directly
+        cache_dir=str(tmp_path),
+        disable_cache=False,
+        force_recache=False,
+    )
+    trainer = _build_trainer(tokenizer, cfg)
+
+    # First call: cache miss -> tokenizes and writes the pickle.
+    first_out = trainer._load_and_tokenize("dummy/ds", "train")
+    assert len(first_out) == 6
+
+    # The cache file must exist at the path derived from cache_dir + cache_key.
+    cache_key = sft_mod._compute_cache_key(
+        dataset_name="dummy/ds",
+        dataset_split="train",
+        model_path=cfg.model.path,
+        max_length=cfg.max_length,
+        messages_key=cfg.messages_key,
+        train_on_what=cfg.train_on_what.value,
+        tools_key=cfg.tools_key,
+        system_key=cfg.system_key,
+    )
+    expected_cache_path = sft_mod._get_cache_path(str(tmp_path), cache_key)
+    assert os.path.exists(expected_cache_path), f"cache file missing at {expected_cache_path}"
+
+    # Second call: cache hit. Spy on tokenize_chat_example AND on _load_from_cache
+    # so we can prove (a) no re-tokenization happens and (b) the cached pickle
+    # is what served the result.
+    tok_spy = MagicMock(side_effect=AssertionError("tokenize_chat_example must not be called on cache hit"))
+    monkeypatch.setattr(sft_mod, "tokenize_chat_example", tok_spy)
+    load_spy = MagicMock(wraps=sft_mod._load_from_cache)
+    monkeypatch.setattr(sft_mod, "_load_from_cache", load_spy)
+
+    second_out = trainer._load_and_tokenize("dummy/ds", "train")
+
+    assert tok_spy.call_count == 0, "cache hit must not re-tokenize"
+    assert load_spy.call_count == 1, "cache hit must go through _load_from_cache exactly once"
+    assert load_spy.call_args[0][0] == expected_cache_path
+
+    # Bit-exact equality between fresh-tokenize and cache-hit outputs.
+    assert len(second_out) == len(first_out)
+    for a, b in zip(first_out, second_out):
+        assert a["input_ids"] == b["input_ids"]
+        assert a["attention_mask"] == b["attention_mask"]
+        assert a["num_actions"] == b["num_actions"]
+        assert a["loss_mask"] == b["loss_mask"]
