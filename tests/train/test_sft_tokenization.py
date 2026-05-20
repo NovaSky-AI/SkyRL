@@ -5,13 +5,12 @@ uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_tokenizat
 """
 
 import json
-from dataclasses import dataclass
 
 import pytest
 import torch
 from transformers import AutoTokenizer
 
-from skyrl.train.config.sft_config import TrainOnWhat
+from skyrl.train.config.sft_config import SFTConfig, TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
 from skyrl.train.sft_trainer import (
     _normalize_chat_messages,
@@ -319,14 +318,6 @@ def test_alpaca_no_input_uses_chat_template(tokenizer):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _FakeSFTConfig:
-    """Minimal stand-in for SFTConfig used by SFTTrainer.collate_batch."""
-
-    batch_size: int = 4
-    micro_train_batch_size_per_gpu: int = 2
-
-
 def test_loss_norm_sums_to_expected(tokenizer):
     """After collate_batch normalization, loss_mask encodes the correct
     per-non-pad-token scaling factor.
@@ -339,7 +330,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
     """
     from skyrl.train.sft_trainer import SFTTrainer
 
-    cfg = _FakeSFTConfig(batch_size=4, micro_train_batch_size_per_gpu=2)
+    cfg = SFTConfig(batch_size=4, micro_train_batch_size_per_gpu=2)
 
     # Build a batch with known non-pad counts:
     # Ex 0: 2 actions out of max 4 -> [0, 0, 1, 1]
@@ -380,7 +371,7 @@ def test_loss_norm_all_nonpad(tokenizer):
     = 1 / (micro_batch_size * num_actions)."""
     from skyrl.train.sft_trainer import SFTTrainer
 
-    cfg = _FakeSFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
+    cfg = SFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
 
     examples = [
         _make_example([1, 2, 3], 2),  # 2 actions
@@ -810,31 +801,6 @@ def test_resolve_cache_dir_precedence(monkeypatch, tmp_path, case):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _FakeModelCfg:
-    path: str = "Qwen/Qwen3-0.6B"
-
-
-@dataclass
-class _FakeLoadCfg:
-    """Minimal stand-in for SFTConfig used by ``_load_and_tokenize`` tests."""
-
-    cache_dir: str = ""
-    disable_cache: bool = False
-    force_recache: bool = False
-    num_workers: int = 0
-    messages_key: str = "messages"
-    tools_key: str = "tools"
-    system_key: str = "system"
-    max_length: int = 512
-    train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
-    model: _FakeModelCfg = None
-
-    def __post_init__(self):
-        if self.model is None:
-            self.model = _FakeModelCfg()
-
-
 def _make_inmem_dataset():
     """Tiny chat-format Dataset used by parallel/cache tests. Six short rows so
     a 2-worker split is non-trivial (3 + 3) without spending real tokenizer time."""
@@ -901,13 +867,13 @@ def test_load_and_tokenize_num_workers_uses_parallel_path(tokenizer, tmp_path):
     _write_inmem_dataset_to_dir(dataset_dir)
 
     # Serial reference: num_workers=0 path.
-    serial_cfg = _FakeLoadCfg(num_workers=0, cache_dir=str(tmp_path / "ser_cache"))
+    serial_cfg = SFTConfig(num_workers=0, cache_dir=str(tmp_path / "ser_cache"))
     serial_trainer = _build_trainer(tokenizer, serial_cfg)
     serial_out = serial_trainer._load_and_tokenize(dataset_dir, "train")
 
     # Real-multiprocessing run: num_workers=2 path. With 6 rows that's a 3+3
     # split across two spawned worker processes.
-    parallel_cfg = _FakeLoadCfg(num_workers=2, cache_dir=str(tmp_path / "par_cache"))
+    parallel_cfg = SFTConfig(num_workers=2, cache_dir=str(tmp_path / "par_cache"))
     parallel_trainer = _build_trainer(tokenizer, parallel_cfg)
     parallel_out = parallel_trainer._load_and_tokenize(dataset_dir, "train")
 
@@ -933,7 +899,7 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
     dataset = _make_inmem_dataset()
     monkeypatch.setattr(sft_mod, "load_dataset", lambda *a, **kw: dataset)
 
-    cfg = _FakeLoadCfg(
+    cfg = SFTConfig(
         num_workers=0,  # serial path -- exercises tokenize_chat_example directly
         cache_dir=str(tmp_path),
         disable_cache=False,
