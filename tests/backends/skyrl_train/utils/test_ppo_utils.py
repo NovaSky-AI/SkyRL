@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 import pytest
+import ray
 import torch
 
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -25,6 +26,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     reduce_loss,
     register_advantage_estimator,
     register_policy_loss,
+    snapshot_policy_loss_registry_for_workers,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 
@@ -445,6 +447,64 @@ def test_policy_loss_registry_specific():
 
     # Clean up
     PolicyLossRegistry.unregister("test_policy_decorator")
+
+
+def test_policy_loss_registry_get_local_does_not_sync(monkeypatch):
+    """Local lookup should never contact the Ray registry actor."""
+    PolicyLossRegistry.repopulate_registry()
+
+    def fail_sync():
+        pytest.fail("get_local should not sync with the registry actor")
+
+    monkeypatch.setattr(PolicyLossRegistry, "sync_with_actor", fail_sync)
+
+    assert PolicyLossRegistry.get_local("regular") is not None
+    with pytest.raises(ValueError, match="Unknown local policy loss"):
+        PolicyLossRegistry.get_local("missing_policy_loss")
+
+
+def test_policy_loss_registry_snapshot_install_round_trip():
+    """Serialized snapshots should install custom losses locally without actor sync."""
+    from skyrl.train.config import AlgorithmConfig
+
+    loss_name = "snapshot_round_trip_policy_loss"
+
+    def custom_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None):
+        return torch.tensor(4.0), {"clip_ratio": 0.7}
+
+    PolicyLossRegistry._functions.pop(loss_name, None)
+
+    try:
+        PolicyLossRegistry.register(loss_name, custom_policy_loss)
+        snapshot = PolicyLossRegistry.snapshot_serialized([loss_name], sync_with_actor=False)
+        PolicyLossRegistry.unregister(loss_name)
+
+        PolicyLossRegistry.install_serialized(snapshot)
+        retrieved = PolicyLossRegistry.get_local(loss_name)
+        loss, metrics = retrieved(
+            log_probs=torch.tensor([[0.1]]),
+            old_log_probs=torch.tensor([[0.2]]),
+            advantages=torch.tensor([[1.0]]),
+            config=AlgorithmConfig(policy_loss_type=loss_name),
+        )
+
+        assert loss.item() == 4.0
+        assert metrics["clip_ratio"] == 0.7
+    finally:
+        PolicyLossRegistry._functions.pop(loss_name, None)
+        if ray.is_initialized():
+            try:
+                actor = ray.get_actor("policy_loss_registry")
+                ray.get(actor.unregister.remote(loss_name))
+            except ValueError:
+                pass
+
+
+def test_snapshot_policy_loss_registry_for_workers_syncs_then_serializes():
+    snapshot = snapshot_policy_loss_registry_for_workers()
+
+    assert "regular" in snapshot
+    assert "cross_entropy" in snapshot
 
 
 def test_registry_cross_ray_process():

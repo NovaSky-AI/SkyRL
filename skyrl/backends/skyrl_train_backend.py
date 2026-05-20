@@ -27,6 +27,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    snapshot_policy_loss_registry_for_workers,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -247,6 +250,9 @@ class SkyRLTrainBackend(AbstractBackend):
             colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             record_memory=cfg.trainer.policy.record_memory,
+            worker_init_kwargs={
+                "policy_loss_registry_snapshot": snapshot_policy_loss_registry_for_workers(),
+            },
         )
 
         # set to a large number for megatron scheduler init

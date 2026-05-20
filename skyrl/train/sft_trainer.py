@@ -39,6 +39,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     pad_training_input_batch,
 )
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    snapshot_policy_loss_registry_for_workers,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -520,6 +523,9 @@ class SFTTrainer:
             colocate_all=False,
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
             record_memory=self.cfg.trainer.policy.record_memory,
+            worker_init_kwargs={
+                "policy_loss_registry_snapshot": snapshot_policy_loss_registry_for_workers(),
+            },
         )
         num_training_steps = (
             self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps

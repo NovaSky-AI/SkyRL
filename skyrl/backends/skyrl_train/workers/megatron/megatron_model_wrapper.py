@@ -21,10 +21,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl.backends.skyrl_train.utils.ppo_utils import (
-    PolicyLossRegistry,
-    compute_approx_kl,
-)
+from skyrl.backends.skyrl_train.utils.ppo_utils import compute_approx_kl
 from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
@@ -40,11 +37,13 @@ class MegatronModelWrapper:
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
+        policy_loss_fn_resolver: Optional[Callable[[str], Callable]] = None,
     ):
         self.cfg = config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
+        self.policy_loss_fn_resolver = policy_loss_fn_resolver
         self.use_sample_packing = self.cfg.use_sample_packing
 
         config = get_model_config(self.actor_module[0])
@@ -229,7 +228,9 @@ class MegatronModelWrapper:
         # Resolve loss function
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
         if loss_fn is not None:
-            current_loss_fn = PolicyLossRegistry.get(loss_fn)
+            if self.policy_loss_fn_resolver is None:
+                raise ValueError("MegatronModelWrapper requires policy_loss_fn_resolver for loss overrides")
+            current_loss_fn = self.policy_loss_fn_resolver(loss_fn)
         else:
             current_loss_fn = self.policy_loss_fn
 
