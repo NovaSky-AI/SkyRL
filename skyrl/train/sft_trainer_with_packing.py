@@ -10,8 +10,8 @@ The packed rows carry a per-row ``sub_seq_lengths`` list inside
 :func:`preprocess_packed_seqs` can enumerate every sub-sequence in the
 ``cu_seqlens`` it emits.
 
-Megatron backend only. CP > 1 and EP > 1 are not supported in v1
-(`prompts/implement.md` scopes them out).
+Megatron backend only. CP > 1 is not supported in v1
+(`prompts/implement.md` scopes it out).
 """
 
 from __future__ import annotations
@@ -63,8 +63,6 @@ class SFTTrainerWithPacking(SFTTrainer):
                 "use_minibatch_packing=True does not support context_parallel_size > 1 in v1. "
                 "Disable packing or set context_parallel_size=1."
             )
-        if self.sft_cfg.megatron_config.expert_model_parallel_size > 1:
-            raise ValueError("use_minibatch_packing=True does not support expert_model_parallel_size > 1 in v1.")
 
     # ------------------------------------------------------------------ #
     # Data path

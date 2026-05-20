@@ -14,8 +14,9 @@ set -x
 #
 # All other knobs (model, dataset, batch sizing, parallelism, optimizer,
 # scheduler, logger, checkpointing) match the reference exactly. The v1
-# packing impl requires Megatron with CP=1 and EP=1, which the reference
-# already satisfies. See docs/agent_packing_design.md for the design.
+# packing impl requires Megatron with CP=1, which the reference already
+# satisfies. EP>1 is supported (the ban was lifted 2026-05-20). See
+# docs/agent_packing_design.md for the design.
 
 # SFT training with Megatron backend for Qwen2.5-0.5B-Instruct on Tulu3
 #
