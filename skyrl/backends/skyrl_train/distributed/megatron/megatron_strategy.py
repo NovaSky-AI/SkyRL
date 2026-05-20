@@ -180,22 +180,32 @@ class MegatronStrategy(DistributedStrategy):
     def offload_to_cpu(self, model, optimizer, offload_optimizer=True, offload_model=True):
         """
         Offload model weights and optimizer to CPU memory.
+
+        The grad buffer belongs to the DDP-wrapped model, not the optimizer,
+        so it is offloaded whenever ``offload_optimizer`` is requested even if
+        ``optimizer is None`` (e.g. ``policy.skip_optimizer_init=True`` flows).
         """
         if offload_model:
             offload_megatron_model_to_cpu(model)
-        if optimizer and offload_optimizer:
+        if offload_optimizer:
             offload_megatron_grads_to_cpu(model)
-            offload_megatron_optimizer(optimizer)
+            if optimizer is not None:
+                offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
     def backload_to_gpu(self, model, optimizer, backload_optimizer=True, backload_model=True):
-        """Reload model weights back to GPU."""
+        """Reload model weights back to GPU.
+
+        See :meth:`offload_to_cpu` for why the grad-buffer half is decoupled
+        from optimizer existence.
+        """
         if backload_model:
             load_megatron_model_to_gpu(model)
-        if optimizer and backload_optimizer:
+        if backload_optimizer:
             load_megatron_grads_to_gpu(model)
-            load_megatron_optimizer(optimizer)
+            if optimizer is not None:
+                load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:

@@ -37,6 +37,33 @@ def _build_ray_env_vars():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
 
+    # Mirrors prepare_runtime_environment for the nccl weight-sync backend.
+    # Without this, NCCL 2.28's cuMem-based commAlloc SEGV's on this driver.
+    env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
+    # H100 CI hosts run a CUDA 13 driver; the cu12-built NCCL 2.28.9 that
+    # torch/vllm bundle SIGSEGV's in commAlloc on that driver. Pin both
+    # pynccl (via VLLM_NCCL_SO_PATH) and torch.distributed (via LD_PRELOAD)
+    # to the cu13-built NCCL 2.29.7 wheel if it is present in the uv cache.
+    # LD_PRELOAD is required because VLLM_NCCL_SO_PATH only affects pynccl;
+    # torch's bundled NCCL is loaded independently and otherwise still
+    # SEGV's on TP>1 collectives.
+    import glob
+    import subprocess
+
+    _candidates = glob.glob("/home/ray/.cache/uv/archive-v0/*/nvidia/nccl/lib/libnccl.so.2")
+    for _p in _candidates:
+        try:
+            _ver = subprocess.run(["strings", _p], capture_output=True, text=True, timeout=10).stdout
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if "NCCL version 2.29" in _ver and "cuda13" in _ver:
+            env_vars["VLLM_NCCL_SO_PATH"] = _p
+            existing_preload = os.environ.get("LD_PRELOAD", "")
+            env_vars["LD_PRELOAD"] = f"{_p}:{existing_preload}" if existing_preload else _p
+            log_once(f"Pinning VLLM_NCCL_SO_PATH and LD_PRELOAD={_p} (cu13-matched NCCL)")
+            break
+
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
         if pythonpath is None:
