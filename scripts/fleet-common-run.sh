@@ -95,13 +95,16 @@ fi
 
 TMP_DIR="${CKPT_ROOT}/skyrl-tmp"
 mkdir -p "$TMP_DIR"
-# Ray uses TMPDIR for session dirs which contain Unix domain sockets.
-# UDS don't work over NFS, so use local /tmp for Ray while keeping
-# TMPDIR on NFS for everything else (checkpoints, data).
+# TMPDIR and HF_HOME must be LOCAL, not NFS. On SLURM (RunPod), /workspace is NFS
+# and SkyPilot sets HOME to /workspace/.sky_clusters/... so ~/.cache is also NFS.
+# - filelock on NFS causes ESTALE (errno 116) when concurrent vLLM engines race
+# - Ray needs local temp for Unix domain sockets (UDS don't work over NFS)
 RAY_TMPDIR="/tmp/skyrl-ray"
 mkdir -p "$RAY_TMPDIR"
-export TMPDIR="$TMP_DIR"
+export TMPDIR="/tmp"
 export RAY_TMPDIR="$RAY_TMPDIR"
+export HF_HOME="/tmp/hf_cache"
+mkdir -p "$HF_HOME"
 
 TASKS_FILE="${DATA_ROOT}/data/fleet/tasks_${MODALITY}.json"
 DATA_DIR="${DATA_ROOT}/data/fleet/${DATA_DIR_NAME}"
