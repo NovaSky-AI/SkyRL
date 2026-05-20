@@ -36,13 +36,14 @@ from skyrl_gym.envs.base_text_env import (
     BaseTextEnvStepOutput,
     ConversationType,
 )
-from skyrl_gym.envs.task_gen.tool_call_parser import parse_tool_call, parse_tool_calls
+from skyrl_gym.envs.task_gen.tool_call_parser import parse_tool_calls
 from skyrl_gym.envs.task_gen.verifier_sandbox import (
     VerifierSandbox,
     parse_task_output,
 )
 
 logger = logging.getLogger(__name__)
+
 
 def _format_compact_schema(describe_result: Any) -> str:
     """Convert a DescribeResponse dict to compact 'table: col (type), ...' format."""
@@ -64,280 +65,102 @@ def _format_compact_schema(describe_result: Any) -> str:
     return "\n".join(lines)
 
 
-# Meta-tools the model can call to explore the seed database.
-_META_TOOLS = {"query_db"}
+def build_task_gen_db_schema_prompt(
+    env_key: str,
+    env_tools_schema: List[Dict[str, Any]],
+    env_tools: List[str],
+    env_variables: Dict[str, Any],
+    env_variable_keys: List[str],
+    env_schema: str,
+) -> str:
+    """Build environment, tool summary, variable, and database schema context."""
+    parts = []
 
-# All callable tools = meta-tools + any MCP env tools discovered at init time.
-# Populated per-instance in init_async().
+    parts.append(f'You are a task designer for the "{env_key}" environment.')
 
-
-class TaskGenEnv(BaseTextEnv):
-    """Environment for RL-based task generation.
-
-    The LLM generates (prompt, verifier) pairs for Fleet environments.
-    Supports multi-turn: the model can explore the seed DB via ``query_db``
-    meta-tool before outputting a ``<task>`` block. Schema is in the prompt.
-
-    Reward = llm_validity * (alpha * var(raw_scores) + (p_hint - p_raw))
-
-    Evaluation uses Fleet harness jobs (POST /v1/jobs) to run an LLM agent
-    against the generated task, rather than a stub evaluator.
-
-    Constructor args (via extras, from dataset):
-        env_key, env_version, data_key, data_version
-        env_tools, env_tools_schema, env_variable_keys
-
-    Constructor args (via env_config, from Hydra):
-        max_turns: Max turns before forced termination (default 10)
-        judge_model: Model ID for LLM-as-a-judge gate
-        k_rollouts: Number of rollouts per condition (raw/hinted, default 4)
-        max_eval_steps: Max agent steps per evaluator rollout (default 30)
-        evaluator_model: Fleet harness model for task evaluation (default anthropic/claude-sonnet-4.5)
-        base_quality_reward: Optional reward for passing sandbox+judge (default 0.0).
-    """
-
-    def __init__(
-        self,
-        env_config: DictConfig,
-        extras: Dict[str, Any] = {},
-    ):
-        super().__init__()
-
-        # Configurable multi-turn (default 10; set to 1 for single-turn)
-        self.max_turns = int(env_config.get("max_turns", 10)) if env_config else 10
-
-        # Fleet orchestrator for DB exploration (set in init_async)
-        self.orch = None
-        # MCP tools client for calling env tools (set in init_async)
-        self.mcp_tools = None
-        # Set of all callable tool names (meta-tools + MCP tools)
-        self.callable_tools = set(_META_TOOLS)
-        # Exploration sequence tracking (reset in init_async)
-        self.called_query_db = False
-
-        # Environment context from dataset (extras)
-        self.env_key = extras.get("env_key") or extras.get("data_source", "unknown")
-        self.env_version = extras.get("env_version", "")
-        self.data_key = extras.get("data_key", "")
-        self.data_version = extras.get("data_version", "")
-
-        # Parse env_tools_schema (full tool schemas for prompt building)
-        env_tools_schema_raw = extras.get("env_tools_schema", "[]")
-        if isinstance(env_tools_schema_raw, str):
-            try:
-                self.env_tools_schema: List[Dict[str, Any]] = json.loads(env_tools_schema_raw)
-            except json.JSONDecodeError:
-                self.env_tools_schema: List[Dict[str, Any]] = []
-        else:
-            self.env_tools_schema: List[Dict[str, Any]] = env_tools_schema_raw or []
-
-        # Parse env_tools (tool name list for sandbox validation)
-        env_tools_raw = extras.get("env_tools", [])
-        if isinstance(env_tools_raw, str):
-            try:
-                self.env_tools: List[str] = json.loads(env_tools_raw)
-            except json.JSONDecodeError:
-                self.env_tools: List[str] = []
-        else:
-            self.env_tools: List[str] = env_tools_raw or []
-
-        # If env_tools is empty but we have schemas, extract names from schemas
-        if not self.env_tools and self.env_tools_schema:
-            self.env_tools = [
-                t["function"]["name"] for t in self.env_tools_schema if "function" in t and "name" in t["function"]
-            ]
-
-        # Parse env_variable_keys (available context variables for this env)
-        env_var_keys_raw = extras.get("env_variable_keys", "[]")
-        if isinstance(env_var_keys_raw, str):
-            try:
-                self.env_variable_keys: List[str] = json.loads(env_var_keys_raw)
-            except json.JSONDecodeError:
-                self.env_variable_keys: List[str] = []
-        else:
-            self.env_variable_keys: List[str] = env_var_keys_raw or []
-
-        # Parse env_variables (actual values for harness evaluation)
-        env_vars_raw = extras.get("env_variables", "{}")
-        if isinstance(env_vars_raw, str):
-            try:
-                self.env_variables: Dict[str, Any] = json.loads(env_vars_raw)
-            except json.JSONDecodeError:
-                self.env_variables: Dict[str, Any] = {}
-        else:
-            self.env_variables: Dict[str, Any] = env_vars_raw or {}
-
-        # Parse env_schema (compact DB schema: table→columns)
-        self.env_schema: str = extras.get("env_schema", "") or ""
-
-        # Verifier sandbox — filters out CUA-only tool "computer" from available tools
-        api_tools = set(self.env_tools) - {"computer"} if self.env_tools else None
-        self.sandbox = VerifierSandbox(available_tools=api_tools if api_tools else None)
-
-        # Judge config (from Hydra env_config)
-        self.judge_model = str(env_config.get("judge_model", "")) if env_config else ""
-
-        # Evaluator config (from Hydra env_config)
-        self.k_rollouts = int(env_config.get("k_rollouts", 4)) if env_config else 4
-        self.max_eval_steps = int(env_config.get("max_eval_steps", 30)) if env_config else 30
-        self.evaluator_model = (
-            str(env_config.get("evaluator_model", "anthropic/claude-sonnet-4.5"))
-            if env_config
-            else "anthropic/claude-sonnet-4.5"
-        )
-
-        # API keys from environment variables (set by SkyPilot YAML)
-        self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        self.fleet_api_key = os.environ.get("FLEET_API_KEY", "")
-
-        # Eval mode: k=8 raw only (no hints)
-        self.is_eval = extras.get("training_phase") == "eval"
-        self.eval_k_rollouts = int(env_config.get("eval_k_rollouts", 8)) if env_config else 8
-        # Whether to run hinted evaluation jobs (2nd harness job with verifier feedback).
-        # Default off — hints were net negative in iter#11 (verifier code dump confused evaluator).
-        self.enable_hints = bool(env_config.get("enable_hints", False)) if env_config else False
-
-        # Lazy-init Fleet SDK client for harness evaluation
-        self._fleet_client = None
-
-        # Rollout dump directory (full prompt/verifier/scores per eval)
-        default_rollout_dir = os.path.join(os.path.expanduser("~"), "reward_rollouts")
-        self._rollout_dir = os.environ.get("REWARD_ROLLOUT_DIR", default_rollout_dir)
-        os.makedirs(self._rollout_dir, exist_ok=True)
-
-        # Base quality reward for tasks passing sandbox + judge gate.
-        # Default 0.0 keeps the learning signal tied to solver rollout variance.
-        self.base_quality_reward = float(env_config.get("base_quality_reward", 0.0)) if env_config else 0.0
-
-        # Small per-tool-call reward to incentivize DB exploration (query_db).
-        # Default 0.0 = off (no behavior change for existing runs).
-        self.tool_call_reward_per_call = float(env_config.get("tool_call_reward_per_call", 0.0)) if env_config else 0.0
-
-        logger.info(
-            f"TaskGenEnv: env={self.env_key}, max_turns={self.max_turns}, "
-            f"judge={self.judge_model or 'none'}, "
-            f"tools={len(self.env_tools)}, k={self.k_rollouts}, eval_k={self.eval_k_rollouts}, "
-            f"evaluator={self.evaluator_model}, is_eval={self.is_eval}, "
-            f"base_quality={self.base_quality_reward}, tool_call_reward={self.tool_call_reward_per_call}"
-        )
-
-    def _format_tool_schema(self, tool: Dict[str, Any]) -> str:
-        """Format a single tool schema for the system prompt."""
-        func = tool.get("function", {})
-        name = func.get("name", "unknown")
-        desc = func.get("description", "")
-        params = func.get("parameters", {})
-        properties = params.get("properties", {})
-        required = set(params.get("required", []))
-
-        lines = [f"**{name}**: {desc}"]
-        if properties:
-            lines.append("  Parameters:")
-            for pname, pschema in properties.items():
-                ptype = pschema.get("type", "any")
-                pdesc = pschema.get("description", "")
-                req_marker = " (required)" if pname in required else ""
-                lines.append(f"  - {pname} ({ptype}{req_marker}): {pdesc}")
-
-        return "\n".join(lines)
-
-    def _build_system_prompt(self) -> str:
-        """Build the system prompt with environment context and priors."""
-        parts = []
-
-        parts.append(f'You are a task designer for the "{self.env_key}" environment.')
-
-        # --- Date context (critical for date-sensitive environments) ---
-        current_date = self.env_variables.get("CURRENT_DATE", "")
-        if current_date:
-            parts.append(
-                f"\n**IMPORTANT — Current Date: {current_date}**\n"
-                f"The environment's current date is {current_date}. "
-                "All dates in generated tasks MUST be on or after this date. "
-                "Do NOT use past dates — the environment will reject them "
-                "(e.g., check-in dates, event dates, appointment dates must be in the future)."
-            )
-
-        # --- A. Environment context (from tool discovery) ---
-        parts.append(f"\n## Environment: {self.env_key}")
-        parts.append("\n### Available Tools")
-
-        # Filter out CUA-only "computer" tool — task-gen is for tool-use APIs
-        api_schemas = [t for t in self.env_tools_schema if t.get("function", {}).get("name") != "computer"]
-        api_tool_names = [t for t in self.env_tools if t != "computer"]
-
-        if api_schemas:
-            # Compact format: name + description only (no parameter schemas)
-            # Full schemas make the prompt too long for envs with many tools
-            for tool in api_schemas:
-                func = tool.get("function", {})
-                name = func.get("name", "unknown")
-                desc = func.get("description", "")
-                parts.append(f"- **{name}**: {desc}")
-        elif api_tool_names:
-            parts.append("\n".join(f"- {t}" for t in api_tool_names))
-        else:
-            parts.append("No tools discovered for this environment.")
-
-        # Environment variables (user context available at task runtime)
-        if self.env_variables:
-            parts.append("\n### Environment Variables (embed as constants)")
-            parts.append(
-                "These variables describe the user/session context. "
-                "**Embed them directly as string constants** in your verifier code. "
-                "Do NOT use `env.env_variables` — it is not available at verifier runtime."
-            )
-            for var_key, var_val in self.env_variables.items():
-                parts.append(f'- `{var_key}` = `"{var_val}"`')
-            parts.append(
-                "\nExample usage in verifier:\n"
-                "```python\n"
-                f'LOGGED_IN_USER = "{self.env_variables.get("LOGGED_IN_USER", "user@example.com")}"\n'
-                f'# Use as: rows = current.table("users").eq("email", LOGGED_IN_USER).all()\n'
-                "```"
-            )
-        elif self.env_variable_keys:
-            parts.append("\n### Environment Variables")
-            parts.append(
-                "These variables parameterize each environment instance. "
-                "Look up values from the database instead of using env.env_variables."
-            )
-            for var_key in self.env_variable_keys:
-                parts.append(f"- `{var_key}`")
-
-        # Database schema (table names and columns)
-        if self.env_schema:
-            parts.append("\n### Database Schema")
-            parts.append(
-                "Use these exact table and column names in verifiers "
-                '(e.g., `current.table("bookings").eq("guest_email", val).all()`):'
-            )
-            parts.append(f"```\n{self.env_schema}\n```")
-
-        # --- B. Priors (concise, static, same for all envs) ---
-        # Date awareness guidance (prevents past-date failures in booking/ticketmaster)
-        if current_date:
-            date_guidance = (
-                f"### Date Awareness\n"
-                f"The environment's current date is **{current_date}**. "
-                f"ALL dates in your task MUST be on or after {current_date}. "
-                "Tasks with past dates will always fail because the environment "
-                "rejects them (e.g., 'checkIn date cannot be in the past'). "
-                "Use `query_db` to check what date ranges exist in the data, "
-                "and always generate future dates."
-            )
-        else:
-            date_guidance = (
-                "### Date Awareness\n"
-                "If the environment works with dates, verify what date ranges "
-                "are valid before generating tasks. Use `query_db` to check."
-            )
-
-        # NOTE: env.env_variables is NOT available at verifier runtime (Fleet harness bug).
-        # Model is instructed to embed env var values as constants instead.
-
+    current_date = env_variables.get("CURRENT_DATE", "")
+    if current_date:
         parts.append(
-            f"""
+            f"\n**IMPORTANT — Current Date: {current_date}**\n"
+            f"The environment's current date is {current_date}. "
+            "All dates in generated tasks MUST be on or after this date. "
+            "Do NOT use past dates — the environment will reject them "
+            "(e.g., check-in dates, event dates, appointment dates must be in the future)."
+        )
+
+    parts.append(f"\n## Environment: {env_key}")
+    parts.append("\n### Available Tools")
+
+    api_schemas = [t for t in env_tools_schema if t.get("function", {}).get("name") != "computer"]
+    api_tool_names = [t for t in env_tools if t != "computer"]
+
+    if api_schemas:
+        for tool in api_schemas:
+            func = tool.get("function", {})
+            name = func.get("name", "unknown")
+            desc = func.get("description", "")
+            parts.append(f"- **{name}**: {desc}")
+    elif api_tool_names:
+        parts.append("\n".join(f"- {t}" for t in api_tool_names))
+    else:
+        parts.append("No tools discovered for this environment.")
+
+    if env_variables:
+        parts.append("\n### Environment Variables (embed as constants)")
+        parts.append(
+            "These variables describe the user/session context. "
+            "**Embed them directly as string constants** in your verifier code. "
+            "Do NOT use `env.env_variables` — it is not available at verifier runtime."
+        )
+        for var_key, var_val in env_variables.items():
+            parts.append(f'- `{var_key}` = `"{var_val}"`')
+        parts.append(
+            "\nExample usage in verifier:\n"
+            "```python\n"
+            f'LOGGED_IN_USER = "{env_variables.get("LOGGED_IN_USER", "user@example.com")}"\n'
+            f'# Use as: rows = current.table("users").eq("email", LOGGED_IN_USER).all()\n'
+            "```"
+        )
+    elif env_variable_keys:
+        parts.append("\n### Environment Variables")
+        parts.append(
+            "These variables parameterize each environment instance. "
+            "Look up values from the database instead of using env.env_variables."
+        )
+        for var_key in env_variable_keys:
+            parts.append(f"- `{var_key}`")
+
+    if env_schema:
+        parts.append("\n### Database Schema")
+        parts.append(
+            "Use these exact table and column names in verifiers "
+            '(e.g., `current.table("bookings").eq("guest_email", val).all()`):'
+        )
+        parts.append(f"```\n{env_schema}\n```")
+
+    return "\n".join(parts)
+
+
+def build_task_gen_task_verifier_instructions(current_date: str) -> str:
+    """Build task-design and verifier-construction instructions."""
+    if current_date:
+        date_guidance = (
+            f"### Date Awareness\n"
+            f"The environment's current date is **{current_date}**. "
+            f"ALL dates in your task MUST be on or after {current_date}. "
+            "Tasks with past dates will always fail because the environment "
+            "rejects them (e.g., 'checkIn date cannot be in the past'). "
+            "Use `query_db` to check what date ranges exist in the data, "
+            "and always generate future dates."
+        )
+    else:
+        date_guidance = (
+            "### Date Awareness\n"
+            "If the environment works with dates, verify what date ranges "
+            "are valid before generating tasks. Use `query_db` to check."
+        )
+
+    return f"""
 ## Verifier Guidelines
 
 The verifier checks whether the agent completed the task by inspecting database state changes.
@@ -524,12 +347,11 @@ The verifier must check exactly what the prompt asks — no more, no less. Befor
 2. Does the verifier return 0.0 on a fresh environment? (It must — the agent hasn't acted yet)
 3. Does the verifier avoid hardcoded values? (Query the DB instead)
 4. Could a different valid approach fool the verifier? (If so, fix the verifier to accept it)"""
-        )
 
-        # --- C. Exploration tools (multi-turn only) ---
-        if self.max_turns > 1:
-            parts.append(
-                """
+
+def build_task_gen_tool_call_instructions() -> str:
+    """Build the RL/Qwen XML tool-call protocol instructions."""
+    return """
 ## Exploration Tools
 
 The database schema is provided above. Use BOTH `query_db` AND environment API tools during exploration.
@@ -552,18 +374,11 @@ Calls the environment API tool and returns its result. **You MUST call at least 
    - Does your verifier check for a DB mutation (e.g., new order, new cart item)? If so, does the task actually cause that mutation?
    - Will the verifier return 0 on the unmodified DB? (If it uses `find_new_entries`, the task MUST involve a write action like buy/reserve/create — NOT just search/list.)
 5. **Output**: Only when confident, output the final task in the format below."""
-            )
 
-        # --- D. Few-shot examples removed ---
-        # Few-shot examples were removed because they anchored the model to
-        # generate near-copies of the examples (especially booking/wishlist tasks),
-        # causing mode collapse and zero reward signal. The verifier template +
-        # guidelines above provide enough structure for the model to generate
-        # diverse tasks from the actual DB schema and tools.
 
-        # --- E. Output format ---
-        parts.append(
-            """
+def build_task_gen_output_format_instructions() -> str:
+    """Build final task submission instructions."""
+    return """
 ## Output Format
 
 Generate exactly ONE task. Output it in this format:
@@ -576,8 +391,211 @@ Generate exactly ONE task. Output it in this format:
 [Python function: def validate_task(env, final_answer=None) -> int]
 </verifier>
 </task>"""
+
+
+# Meta-tools the model can call to explore the seed database.
+_META_TOOLS = {"query_db"}
+
+# All callable tools = meta-tools + any MCP env tools discovered at init time.
+# Populated per-instance in init_async().
+
+
+class TaskGenEnv(BaseTextEnv):
+    """Environment for RL-based task generation.
+
+    The LLM generates (prompt, verifier) pairs for Fleet environments.
+    Supports multi-turn: the model can explore the seed DB via ``query_db``
+    meta-tool before outputting a ``<task>`` block. Schema is in the prompt.
+
+    Reward = llm_validity * (alpha * var(raw_scores) + (p_hint - p_raw))
+
+    Evaluation uses Fleet harness jobs (POST /v1/jobs) to run an LLM agent
+    against the generated task, rather than a stub evaluator.
+
+    Constructor args (via extras, from dataset):
+        env_key, env_version, data_key, data_version
+        env_tools, env_tools_schema, env_variable_keys
+
+    Constructor args (via env_config, from Hydra):
+        max_turns: Max turns before forced termination (default 10)
+        judge_model: Model ID for LLM-as-a-judge gate
+        k_rollouts: Number of rollouts per condition (raw/hinted, default 4)
+        max_eval_steps: Max agent steps per evaluator rollout (default 30)
+        evaluator_model: Fleet harness model for task evaluation (default anthropic/claude-sonnet-4.5)
+        base_quality_reward: Optional reward for passing sandbox+judge (default 0.0).
+    """
+
+    def __init__(
+        self,
+        env_config: DictConfig,
+        extras: Dict[str, Any] = {},
+    ):
+        super().__init__()
+
+        # Configurable multi-turn (default 10; set to 1 for single-turn)
+        self.max_turns = int(env_config.get("max_turns", 10)) if env_config else 10
+
+        # Fleet orchestrator for DB exploration (set in init_async)
+        self.orch = None
+        # MCP tools client for calling env tools (set in init_async)
+        self.mcp_tools = None
+        # Set of all callable tool names (meta-tools + MCP tools)
+        self.callable_tools = set(_META_TOOLS)
+        # Exploration sequence tracking (reset in init_async)
+        self.called_query_db = False
+
+        # Environment context from dataset (extras)
+        self.env_key = extras.get("env_key") or extras.get("data_source", "unknown")
+        self.env_version = extras.get("env_version", "")
+        self.data_key = extras.get("data_key", "")
+        self.data_version = extras.get("data_version", "")
+
+        # Parse env_tools_schema (full tool schemas for prompt building)
+        env_tools_schema_raw = extras.get("env_tools_schema", "[]")
+        if isinstance(env_tools_schema_raw, str):
+            try:
+                self.env_tools_schema: List[Dict[str, Any]] = json.loads(env_tools_schema_raw)
+            except json.JSONDecodeError:
+                self.env_tools_schema: List[Dict[str, Any]] = []
+        else:
+            self.env_tools_schema: List[Dict[str, Any]] = env_tools_schema_raw or []
+
+        # Parse env_tools (tool name list for sandbox validation)
+        env_tools_raw = extras.get("env_tools", [])
+        if isinstance(env_tools_raw, str):
+            try:
+                self.env_tools: List[str] = json.loads(env_tools_raw)
+            except json.JSONDecodeError:
+                self.env_tools: List[str] = []
+        else:
+            self.env_tools: List[str] = env_tools_raw or []
+
+        # If env_tools is empty but we have schemas, extract names from schemas
+        if not self.env_tools and self.env_tools_schema:
+            self.env_tools = [
+                t["function"]["name"] for t in self.env_tools_schema if "function" in t and "name" in t["function"]
+            ]
+
+        # Parse env_variable_keys (available context variables for this env)
+        env_var_keys_raw = extras.get("env_variable_keys", "[]")
+        if isinstance(env_var_keys_raw, str):
+            try:
+                self.env_variable_keys: List[str] = json.loads(env_var_keys_raw)
+            except json.JSONDecodeError:
+                self.env_variable_keys: List[str] = []
+        else:
+            self.env_variable_keys: List[str] = env_var_keys_raw or []
+
+        # Parse env_variables (actual values for harness evaluation)
+        env_vars_raw = extras.get("env_variables", "{}")
+        if isinstance(env_vars_raw, str):
+            try:
+                self.env_variables: Dict[str, Any] = json.loads(env_vars_raw)
+            except json.JSONDecodeError:
+                self.env_variables: Dict[str, Any] = {}
+        else:
+            self.env_variables: Dict[str, Any] = env_vars_raw or {}
+
+        # Parse env_schema (compact DB schema: table→columns)
+        self.env_schema: str = extras.get("env_schema", "") or ""
+
+        # Verifier sandbox — filters out CUA-only tool "computer" from available tools
+        api_tools = set(self.env_tools) - {"computer"} if self.env_tools else None
+        self.sandbox = VerifierSandbox(
+            available_tools=api_tools if api_tools else None,
+            min_ast_nodes=env_config.get("verifier_min_ast_nodes") if env_config else None,
+            max_ast_nodes=env_config.get("verifier_max_ast_nodes") if env_config else None,
         )
 
+        # Judge config (from Hydra env_config)
+        self.judge_model = str(env_config.get("judge_model", "")) if env_config else ""
+
+        # Evaluator config (from Hydra env_config)
+        self.k_rollouts = int(env_config.get("k_rollouts", 4)) if env_config else 4
+        self.max_eval_steps = int(env_config.get("max_eval_steps", 30)) if env_config else 30
+        self.evaluator_model = (
+            str(env_config.get("evaluator_model", "anthropic/claude-sonnet-4.5"))
+            if env_config
+            else "anthropic/claude-sonnet-4.5"
+        )
+
+        # API keys from environment variables (set by SkyPilot YAML)
+        self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.fleet_api_key = os.environ.get("FLEET_API_KEY", "")
+
+        # Eval mode: k=8 raw only (no hints)
+        self.is_eval = extras.get("training_phase") == "eval"
+        self.eval_k_rollouts = int(env_config.get("eval_k_rollouts", 8)) if env_config else 8
+        # Whether to run hinted evaluation jobs (2nd harness job with verifier feedback).
+        # Default off — hints were net negative in iter#11 (verifier code dump confused evaluator).
+        self.enable_hints = bool(env_config.get("enable_hints", False)) if env_config else False
+
+        # Lazy-init Fleet SDK client for harness evaluation
+        self._fleet_client = None
+
+        # Rollout dump directory (full prompt/verifier/scores per eval)
+        default_rollout_dir = os.path.join(os.path.expanduser("~"), "reward_rollouts")
+        self._rollout_dir = os.environ.get("REWARD_ROLLOUT_DIR", default_rollout_dir)
+        os.makedirs(self._rollout_dir, exist_ok=True)
+
+        # Base quality reward for tasks passing sandbox + judge gate.
+        # Default 0.0 keeps the learning signal tied to solver rollout variance.
+        self.base_quality_reward = float(env_config.get("base_quality_reward", 0.0)) if env_config else 0.0
+
+        # Small per-tool-call reward to incentivize DB exploration (query_db).
+        # Default 0.0 = off (no behavior change for existing runs).
+        self.tool_call_reward_per_call = float(env_config.get("tool_call_reward_per_call", 0.0)) if env_config else 0.0
+
+        logger.info(
+            f"TaskGenEnv: env={self.env_key}, max_turns={self.max_turns}, "
+            f"judge={self.judge_model or 'none'}, "
+            f"tools={len(self.env_tools)}, k={self.k_rollouts}, eval_k={self.eval_k_rollouts}, "
+            f"evaluator={self.evaluator_model}, is_eval={self.is_eval}, "
+            f"base_quality={self.base_quality_reward}, tool_call_reward={self.tool_call_reward_per_call}"
+        )
+
+    def _format_tool_schema(self, tool: Dict[str, Any]) -> str:
+        """Format a single tool schema for the system prompt."""
+        func = tool.get("function", {})
+        name = func.get("name", "unknown")
+        desc = func.get("description", "")
+        params = func.get("parameters", {})
+        properties = params.get("properties", {})
+        required = set(params.get("required", []))
+
+        lines = [f"**{name}**: {desc}"]
+        if properties:
+            lines.append("  Parameters:")
+            for pname, pschema in properties.items():
+                ptype = pschema.get("type", "any")
+                pdesc = pschema.get("description", "")
+                req_marker = " (required)" if pname in required else ""
+                lines.append(f"  - {pname} ({ptype}{req_marker}): {pdesc}")
+
+        return "\n".join(lines)
+
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt with environment context and priors."""
+        parts = [
+            build_task_gen_db_schema_prompt(
+                env_key=self.env_key,
+                env_tools_schema=self.env_tools_schema,
+                env_tools=self.env_tools,
+                env_variables=self.env_variables,
+                env_variable_keys=self.env_variable_keys,
+                env_schema=self.env_schema,
+            ),
+            build_task_gen_task_verifier_instructions(self.env_variables.get("CURRENT_DATE", "")),
+        ]
+        if self.max_turns > 1:
+            parts.append(build_task_gen_tool_call_instructions())
+
+        # Few-shot examples were removed because they anchored the model to
+        # generate near-copies of the examples (especially booking/wishlist tasks),
+        # causing mode collapse and zero reward signal. The verifier template +
+        # guidelines above provide enough structure for the model to generate
+        # diverse tasks from the actual DB schema and tools.
+        parts.append(build_task_gen_output_format_instructions())
         return "\n".join(parts)
 
     def _judge_task(self, prompt: str, verifier: str) -> float:
@@ -607,8 +625,8 @@ Generate exactly ONE task. Output it in this format:
             "correctly completed a task.\n\n"
             "## Context\n\n"
             "The verifier has access to:\n"
-            "- `env.db(\"seed\")` — database state BEFORE the agent acted\n"
-            "- `env.db(\"current\")` — database state AFTER the agent acted\n"
+            '- `env.db("seed")` — database state BEFORE the agent acted\n'
+            '- `env.db("current")` — database state AFTER the agent acted\n'
             "- `final_answer` — the agent's text response\n"
             "- DB query methods: `.table(name)`, `.eq(col, val)`, `.first()`, `.all()`, "
             "`.select()`, `.neq()`, `.gt()`, `.lt()`\n\n"
@@ -627,11 +645,11 @@ Generate exactly ONE task. Output it in this format:
             "checks its field values match expected values.\n\n"
             "### REJECT if the verifier does ANY of:\n\n"
             "1. **Generic keyword checking**: Checks if generic category words appear in "
-            "`final_answer` (e.g., \"event\", \"venue\", \"concert\", \"price\", \"bedroom\", "
-            "\"listing\"). These words appear in any topically-relevant response regardless "
+            '`final_answer` (e.g., "event", "venue", "concert", "price", "bedroom", '
+            '"listing"). These words appear in any topically-relevant response regardless '
             "of task completion.\n\n"
             "2. **Prompt echo checking**: Checks if values from the task prompt appear in "
-            "`final_answer` (e.g., \"Los Angeles\" when the prompt asked about LA events). "
+            '`final_answer` (e.g., "Los Angeles" when the prompt asked about LA events). '
             "The agent could echo prompt values without doing any work.\n\n"
             "3. **Exists-check-only**: Only checks `final_answer is not None` or "
             "`len(answer) > 0`.\n\n"
@@ -643,7 +661,7 @@ Generate exactly ONE task. Output it in this format:
             "6. **Cargo-cult DB**: Queries the DB only for user/account existence (which always "
             "passes for pre-existing entities), then gates on keyword checks for actual "
             "validation.\n\n"
-            "7. **Phantom tables**: The verifier calls `.table(\"X\")` where X does not exist "
+            '7. **Phantom tables**: The verifier calls `.table("X")` where X does not exist '
             "in the schema above.\n\n"
             "8. **Undefined references**: The verifier calls functions or uses constants that "
             "are not defined in the code and are not Python builtins.\n\n"
@@ -651,7 +669,7 @@ Generate exactly ONE task. Output it in this format:
             "- Read-only tasks with DB-grounded keywords: ACCEPT — if the verifier queries a "
             "DB table to get specific values then checks those values appear in `final_answer`.\n"
             "- JSON structure validation without DB cross-reference: REJECT.\n"
-            "- Existence checks on initially-empty tables (e.g., orders after \"place order\"): "
+            '- Existence checks on initially-empty tables (e.g., orders after "place order"): '
             "weak ACCEPT.\n\n"
             f"## Generated Task\n\n"
             f"Prompt:\n{prompt}\n\n"
@@ -671,10 +689,7 @@ Generate exactly ONE task. Output it in this format:
             )
             answer = response.choices[0].message.content.strip().upper()
             accepted = "ACCEPT" in answer and "REJECT" not in answer
-            logger.info(
-                f"LLM classifier [{self.env_key}]: {answer} -> "
-                f"{'ACCEPT' if accepted else 'REJECT'}"
-            )
+            logger.info(f"LLM classifier [{self.env_key}]: {answer} -> " f"{'ACCEPT' if accepted else 'REJECT'}")
             return 1.0 if accepted else 0.0
         except Exception as e:
             logger.warning(f"LLM classifier failed, defaulting to accept: {e}")
@@ -739,17 +754,26 @@ Generate exactly ONE task. Output it in this format:
             Final job status string.
         """
         start = time.time()
+        last_status = None
         while time.time() - start < timeout:
             try:
                 job = fleet.get_job(job_id)
                 status = job.status
+                if status != last_status:
+                    print(
+                        f"[task-gen eval] Job {job_id} status={status} elapsed={time.time() - start:.0f}s",
+                        flush=True,
+                    )
+                    last_status = status
                 if status in ("completed", "cancelled", "errored"):
                     return status
             except Exception as e:
                 logger.warning(f"Error polling job {job_id}: {e}")
+                print(f"[task-gen eval] Error polling job {job_id}: {e}", flush=True)
             await asyncio.sleep(poll_interval)
 
         logger.error(f"Job {job_id} timed out after {timeout}s")
+        print(f"[task-gen eval] Job {job_id} timed out after {timeout}s", flush=True)
         return "timeout"
 
     def _query_supabase_scores(self, job_id: str) -> Dict[str, float]:
@@ -792,7 +816,9 @@ Generate exactly ONE task. Output it in this format:
             logger.warning(f"Supabase fallback failed: {e}")
             return {}
 
-    def _extract_job_results(self, fleet, job_id: str) -> List[Tuple[float, Optional[str], Optional[str]]]:
+    def _extract_job_results(
+        self, fleet, job_id: str, rollout_label: str = "raw"
+    ) -> List[Tuple[float, Optional[str], Optional[str]]]:
         """Extract (score, verifier_stdout, verifier_error) from completed job sessions.
 
         Primary path: read from session.verifier_execution (Fleet SDK).
@@ -825,23 +851,15 @@ Generate exactly ONE task. Output it in this format:
                         score = float(session.verifier_execution.score)
                     elif session.verifier_execution.success:
                         score = 1.0
-                    stdout = getattr(session.verifier_execution, "stdout", None)
+                    stdout = session.verifier_execution.stdout
                     # Capture error from verifier crashes — error is nested in result.error
-                    ve_result = getattr(session.verifier_execution, "result", None)
+                    ve_result = session.verifier_execution.result
                     if ve_result:
-                        ve_error = (
-                            ve_result.get("error") if isinstance(ve_result, dict) else getattr(ve_result, "error", None)
-                        )
+                        ve_error = ve_result.get("error") if isinstance(ve_result, dict) else ve_result.error
                         if ve_error:
-                            error = (
-                                ve_error.get("message", "")
-                                if isinstance(ve_error, dict)
-                                else getattr(ve_error, "message", "")
-                            )
+                            error = ve_error.get("message", "") if isinstance(ve_error, dict) else ve_error.message
                             traceback_str = (
-                                ve_error.get("traceback", "")
-                                if isinstance(ve_error, dict)
-                                else getattr(ve_error, "traceback", "")
+                                ve_error.get("traceback", "") if isinstance(ve_error, dict) else ve_error.traceback
                             )
                             if traceback_str:
                                 # Extract just the last line of traceback (the actual error)
@@ -850,10 +868,15 @@ Generate exactly ONE task. Output it in this format:
                     # Fallback: use Supabase metadata.verifier_score
                     score = supabase_scores[session.session_id]
                 results.append((score, stdout, error))
+                print(
+                    f"[task-gen eval] Finished {rollout_label} solver rollout {len(results)} "
+                    f"for job {job_id}: score={score}",
+                    flush=True,
+                )
         return results
 
     async def _run_harness_job(
-        self, prompt: str, verifier: str, k: int
+        self, prompt: str, verifier: str, k: int, rollout_label: str = "raw"
     ) -> List[Tuple[float, Optional[str], Optional[str]]]:
         """Run a single Fleet harness job and return per-session results + job ID.
 
@@ -871,6 +894,16 @@ Generate exactly ONE task. Output it in this format:
 
         fleet = self._get_fleet_client()
         task_key = f"taskgen_{uuid.uuid4().hex[:12]}"
+        print(
+            f"[task-gen eval] Preparing {rollout_label} harness job for {k} solver rollout(s) "
+            f"(model={self.evaluator_model}, env={self.env_key})",
+            flush=True,
+        )
+        for rollout_index in range(1, k + 1):
+            print(
+                f"[task-gen eval] Starting {rollout_label} solver rollout {rollout_index}/{k} " f"for task {task_key}",
+                flush=True,
+            )
 
         task = Task(
             key=task_key,
@@ -884,14 +917,24 @@ Generate exactly ONE task. Output it in this format:
         )
 
         try:
+            print(f"[task-gen eval] Importing generated task {task_key} into Fleet", flush=True)
             import_response = fleet.import_single_task(task)
         except Exception as e:
             logger.error(f"[{task_key}] Failed to import task to Fleet: {e}")
+            print(f"[task-gen eval] Failed to import task {task_key}: {e}", flush=True)
             return (None, [(0.0, None, None)] * k)
         if import_response is None:
-            logger.error(f"[{task_key}] Failed to import task to Fleet (returned None, api_key set: {bool(self.fleet_api_key)})")
+            logger.error(
+                f"[{task_key}] Failed to import task to Fleet (returned None, api_key set: {bool(self.fleet_api_key)})"
+            )
+            print(f"[task-gen eval] Failed to import task {task_key}: Fleet returned None", flush=True)
             return (None, [(0.0, None, None)] * k)
 
+        print(
+            f"[task-gen eval] Creating {rollout_label} Fleet harness job for task {task_key} "
+            f"with pass_k={k}, max_steps={self.max_eval_steps}",
+            flush=True,
+        )
         job_response = fleet.create_job(
             models=[self.evaluator_model],
             task_keys=[task_key],
@@ -902,13 +945,20 @@ Generate exactly ONE task. Output it in this format:
         )
         job_id = job_response.job_id
         logger.info(f"[{task_key}] Harness job created: {job_id} (model={self.evaluator_model}, k={k})")
+        print(f"[task-gen eval] Harness job created: {job_id} for task {task_key}", flush=True)
 
         status = await self._poll_job(fleet, job_id)
         if status != "completed":
             logger.warning(f"[{task_key}] Job {job_id} ended with status: {status}")
+            print(f"[task-gen eval] Job {job_id} ended with status={status}; returning zero scores", flush=True)
             return (job_id, [(0.0, None, None)] * k)
 
-        return (job_id, self._extract_job_results(fleet, job_id))
+        results = self._extract_job_results(fleet, job_id, rollout_label=rollout_label)
+        print(
+            f"[task-gen eval] Completed {rollout_label} job {job_id}: " f"scores={[score for score, _, _ in results]}",
+            flush=True,
+        )
+        return (job_id, results)
 
     async def _evaluate_task(self, prompt: str, verifier: str) -> Dict[str, float]:
         """Run hint-based evaluation via Fleet harness jobs.
@@ -934,10 +984,17 @@ Generate exactly ONE task. Output it in this format:
         try:
             # Eval: k=eval_k_rollouts for pass rate; Train: k=k_rollouts
             eval_k = self.eval_k_rollouts if self.is_eval else self.k_rollouts
+            print(
+                f"[task-gen eval] Starting task evaluation: phase={'eval' if self.is_eval else 'train'}, "
+                f"raw_rollouts={eval_k}, hinted_rollouts={self.k_rollouts if self.enable_hints and not self.is_eval else 0}, "
+                f"model={self.evaluator_model}, max_steps={self.max_eval_steps}",
+                flush=True,
+            )
 
             # 1. Raw job: k rollouts without hints
-            raw_job_id, raw_results = await self._run_harness_job(prompt, verifier, k=eval_k)
+            raw_job_id, raw_results = await self._run_harness_job(prompt, verifier, k=eval_k, rollout_label="raw")
             raw_scores = [r[0] for r in raw_results]
+            print(f"[task-gen eval] Raw rollout scores: {raw_scores}", flush=True)
 
             if self.enable_hints and not self.is_eval:
                 # Hinted training: k raw + k hinted for hint_gap signal
@@ -968,8 +1025,11 @@ Generate exactly ONE task. Output it in this format:
 
                 # 3. Hinted job: k rollouts with hint
                 hinted_prompt = f"{prompt}\n\nHere is feedback from a previous attempt to help you:\n{hint_text}"
-                hinted_job_id, hinted_results = await self._run_harness_job(hinted_prompt, verifier, k=self.k_rollouts)
+                hinted_job_id, hinted_results = await self._run_harness_job(
+                    hinted_prompt, verifier, k=self.k_rollouts, rollout_label="hinted"
+                )
                 hinted_scores = [r[0] for r in hinted_results]
+                print(f"[task-gen eval] Hinted rollout scores: {hinted_scores}", flush=True)
 
                 # 4. Compute reward
                 result = compute_task_reward(raw_scores, hinted_scores, validity=1.0)
@@ -981,6 +1041,12 @@ Generate exactly ONE task. Output it in this format:
                 result = compute_task_reward(raw_scores, raw_scores, validity=1.0)
 
             duration = time.time() - start
+            print(
+                f"[task-gen eval] Reward computed: p_raw={result['p_raw']:.4f}, "
+                f"var_raw={result['var_raw']:.4f}, hint_gap={result['hint_gap']:.4f}, "
+                f"total={result['total']:.4f}, duration={duration:.0f}s",
+                flush=True,
+            )
 
             # --- Iron-clad eval logging ---
             # Truncate prompt/verifier for log readability
@@ -1061,7 +1127,7 @@ Generate exactly ONE task. Output it in this format:
         except Exception as e:
             logger.warning(f"[{task_id}] Failed to save rollout: {e}")
 
-    async def _dryrun_verifier(self, verifier: str) -> Tuple[bool, str]:
+    async def dryrun_verifier(self, verifier: str) -> Tuple[bool, str]:
         """Run verifier against seed DB (no agent actions). Returns (ok, error_msg).
 
         A correct verifier should return 0 on unmodified DB (task not done yet).
@@ -1071,6 +1137,7 @@ Generate exactly ONE task. Output it in this format:
             return True, ""  # Can't dry-run without orchestrator, skip
         try:
             from fleet._async.tasks import Task as AsyncFleetTask
+
             task = AsyncFleetTask(
                 key=f"dryrun_{self.env_key}",
                 prompt="dry-run",
@@ -1078,8 +1145,18 @@ Generate exactly ONE task. Output it in this format:
                 verifier_func=verifier,
             )
             result = await task.verify_detailed_async(self.orch._fleet_env)
-            if result.success:
-                return False, "Verifier returned 1 on the unmodified database — it passes even when no agent has acted. Your verifier must return 0 on seed state. Check that your task involves a write/mutation action and your verifier checks for that mutation (e.g., find_new_entries)."
+            if not result.success:
+                return False, f"Verifier execution failed on seed DB: {result.error}"
+            verifier_score = result.result
+            try:
+                verifier_passed = float(verifier_score) > 0.0
+            except (TypeError, ValueError):
+                verifier_passed = bool(verifier_score)
+            if verifier_passed:
+                return (
+                    False,
+                    "Verifier returned 1 on the unmodified database — it passes even when no agent has acted. Your verifier must return 0 on seed state. Check that your task involves a write/mutation action and your verifier checks for that mutation (e.g., find_new_entries).",
+                )
             return True, ""
         except Exception as e:
             err_msg = str(e)
@@ -1127,19 +1204,26 @@ Generate exactly ONE task. Output it in this format:
         if not validation.valid:
             if not max_turns_reached:
                 remaining = self.max_turns - self.turns
-                obs = {"role": "user", "content": f"Sandbox rejected your verifier: {', '.join(validation.checks_failed)}. Fix and resubmit. {remaining} turn(s) left."}
+                obs = {
+                    "role": "user",
+                    "content": f"Sandbox rejected your verifier: {', '.join(validation.checks_failed)}. Fix and resubmit. {remaining} turn(s) left.",
+                }
                 return BaseTextEnvStepOutput(observations=[obs], reward=0.0, done=False, metadata=metadata)
             metadata["reward_breakdown"] = {"sandbox": 0.0, "total": 0.0}
             return BaseTextEnvStepOutput(observations=[], reward=0.0, done=True, metadata=metadata)
 
         # 3. Verifier dry-run on seed DB
-        dryrun_ok, dryrun_error = await self._dryrun_verifier(verifier)
+        dryrun_ok, dryrun_error = await self.dryrun_verifier(verifier)
         metadata["dryrun_ok"] = dryrun_ok
         if not dryrun_ok:
+            metadata["dryrun_error"] = dryrun_error
             logger.info(f"TaskGenEnv [{self.env_key}]: Verifier dry-run failed: {dryrun_error[:200]}")
             if not max_turns_reached:
                 remaining = self.max_turns - self.turns
-                obs = {"role": "user", "content": f"⚠️ Verifier dry-run FAILED: {dryrun_error}\n\nFix your verifier and resubmit. {remaining} turn(s) left."}
+                obs = {
+                    "role": "user",
+                    "content": f"⚠️ Verifier dry-run FAILED: {dryrun_error}\n\nFix your verifier and resubmit. {remaining} turn(s) left.",
+                }
                 return BaseTextEnvStepOutput(observations=[obs], reward=0.0, done=False, metadata=metadata)
             metadata["reward_breakdown"] = {"dryrun": 0.0, "total": 0.0}
             return BaseTextEnvStepOutput(observations=[], reward=0.0, done=True, metadata=metadata)
@@ -1302,14 +1386,16 @@ Generate exactly ONE task. Output it in this format:
                     # Truncate rows to save context — model only needs a sample
                     if "rows" in result and isinstance(result["rows"], list) and len(result["rows"]) > 5:
                         result["rows"] = result["rows"][:5]
-                        result["message"] = f"Query returned more rows; showing first 5."
+                        result["message"] = "Query returned more rows; showing first 5."
                     formatted = json.dumps(result, indent=2, default=str)
                     if len(formatted) > 3000:
                         formatted = formatted[:3000] + "\n... (truncated)"
                     return f"Tool result:\n{formatted}"
                 return f"Tool result:\n{str(result)[:3000]}"
             except Exception as e:
-                if attempt < max_retries - 1 and ("closed" in str(e).lower() or "transport" in str(e).lower() or "connection" in str(e).lower()):
+                if attempt < max_retries - 1 and (
+                    "closed" in str(e).lower() or "transport" in str(e).lower() or "connection" in str(e).lower()
+                ):
                     await asyncio.sleep(1)
                     continue
                 return f"Error: {e}"
@@ -1371,7 +1457,9 @@ Generate exactly ONE task. Output it in this format:
                         schema_result = await self.orch.describe_db_async(db_name="seed")
                         self.env_schema = _format_compact_schema(schema_result)
                         if self.env_schema:
-                            logger.info(f"TaskGenEnv [{self.env_key}]: Auto-populated env_schema ({len(self.env_schema)} chars)")
+                            logger.info(
+                                f"TaskGenEnv [{self.env_key}]: Auto-populated env_schema ({len(self.env_schema)} chars)"
+                            )
                     except Exception as e:
                         logger.warning(f"TaskGenEnv [{self.env_key}]: Failed to auto-populate env_schema: {e}")
 

@@ -81,13 +81,23 @@ class VerifierSandbox:
     6. Prompt-verifier alignment (optional, LLM-based)
     """
 
-    def __init__(self, available_tools: Optional[Set[str]] = None):
+    def __init__(
+        self,
+        available_tools: Optional[Set[str]] = None,
+        min_ast_nodes: Optional[int] = None,
+        max_ast_nodes: Optional[int] = None,
+    ):
         """
         Args:
             available_tools: Set of tool names available in the target environment.
                 If provided, checks that verifier references at least one real tool.
+            min_ast_nodes: Minimum allowed verifier AST nodes. Defaults to MIN_AST_NODES.
+            max_ast_nodes: Maximum allowed verifier AST nodes. Defaults to MAX_AST_NODES.
         """
         self.available_tools = available_tools or set()
+        # Callers may pass explicit None when no Hydra override is set.
+        self.min_ast_nodes = MIN_AST_NODES if min_ast_nodes is None else min_ast_nodes
+        self.max_ast_nodes = MAX_AST_NODES if max_ast_nodes is None else max_ast_nodes
 
     def validate(
         self,
@@ -177,12 +187,12 @@ class VerifierSandbox:
         """Check AST node count is within bounds."""
         node_count = sum(1 for _ in ast.walk(tree))
 
-        if node_count < MIN_AST_NODES:
+        if node_count < self.min_ast_nodes:
             result.checks_failed.append("complexity_min")
-            result.error = f"Verifier too simple ({node_count} nodes < {MIN_AST_NODES})"
-        elif node_count > MAX_AST_NODES:
+            result.error = f"Verifier too simple ({node_count} nodes < {self.min_ast_nodes})"
+        elif node_count > self.max_ast_nodes:
             result.checks_failed.append("complexity_max")
-            result.error = f"Verifier too complex ({node_count} nodes > {MAX_AST_NODES})"
+            result.error = f"Verifier too complex ({node_count} nodes > {self.max_ast_nodes})"
         else:
             result.checks_passed.append("complexity")
 
@@ -291,7 +301,7 @@ class VerifierSandbox:
             if self._is_table_call(receiver):
                 result.checks_failed.append("unfiltered_all")
                 result.error = (
-                    'Unfiltered .all() on table — use .eq()/.neq()/.select() '
+                    "Unfiltered .all() on table — use .eq()/.neq()/.select() "
                     'before .all() (e.g., table("X").eq("col", val).all())'
                 )
                 return
@@ -301,11 +311,7 @@ class VerifierSandbox:
     @staticmethod
     def _is_table_call(node: ast.AST) -> bool:
         """Check if an AST node is a .table("...") call."""
-        return (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "table"
-        )
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "table"
 
     def _check_prompt_bounds(self, prompt: str, result: ValidationResult):
         """Check that prompt is within reasonable length bounds."""
