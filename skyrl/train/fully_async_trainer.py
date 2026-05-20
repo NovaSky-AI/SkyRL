@@ -14,7 +14,6 @@ High-level notes:
 import asyncio
 import inspect
 import os
-import sys
 import traceback
 from dataclasses import dataclass
 from typing import Iterable, List, Set, Tuple
@@ -596,19 +595,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 except asyncio.QueueFull:
                     raise AssertionError("Generation buffer should never be full given staleness control.")
                 await self._staleness_manager.on_rollout_accepted()
+                slot_acquired = False
         except asyncio.CancelledError:
-            # If a slot was acquired but we exit early, release running count
-            try:
-                if "slot_acquired" in locals() and slot_acquired:
-                    raise RuntimeError("Generation workers should only be cancelled when they finish running.")
-            finally:
-                return
+            if "slot_acquired" in locals() and slot_acquired:
+                logger.warning("Generation worker cancelled while slot was acquired. Releasing slot.")
+                await self._staleness_manager.on_rollout_rejected()
+            return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
             logger.error(f"Traceback: \n{traceback.format_exc()}")
-            if "slot_acquired" in locals() and slot_acquired:
-                raise RuntimeError("Generation workers should only run into error when they finish running.")
-            sys.exit(1)
+            os._exit(1)
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
