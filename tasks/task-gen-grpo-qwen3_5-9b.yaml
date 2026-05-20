@@ -16,7 +16,7 @@ resources:
     # RunPod Slurm cluster (reserved H200s, no preemption)
     - accelerators: H200:8
       cloud: slurm
-      region: runpod-cluster-41k3q8w5xqlro3
+      region: runpod-cluster-y8puzql3juawue
     # RunPod on-demand (API provisioned)
     - accelerators: H200-SXM:8
       cloud: runpod

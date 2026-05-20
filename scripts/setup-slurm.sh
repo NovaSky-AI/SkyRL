@@ -13,8 +13,8 @@
 # the project-level .sky.yaml, so these MUST be in ~/.sky/config.yaml.
 set -euo pipefail
 
-RUNPOD_CLUSTER_NAME="runpod-cluster-41k3q8w5xqlro3"
-RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/runpod_key}"
+RUNPOD_CLUSTER_NAME="runpod-cluster-y8puzql3juawue"
+RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 if [ ! -f "$RUNPOD_KEY" ]; then
   echo "ERROR: $RUNPOD_KEY not found."
   echo "Save your RunPod private key as ~/.ssh/runpod_key"
@@ -27,8 +27,8 @@ echo "[1/5] Setting up ~/.slurm/config..."
 mkdir -p ~/.slurm
 cat > ~/.slurm/config <<EOF
 Host runpod-cluster $RUNPOD_CLUSTER_NAME
-    HostName 31.24.80.22
-    Port 10714
+    HostName 31.24.80.55
+    Port 13122
     User root
     IdentityFile $RUNPOD_KEY
     IdentitiesOnly yes

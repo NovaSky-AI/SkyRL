@@ -1,0 +1,19 @@
+name: test-ray-multinode
+
+resources:
+  disk_size: 100
+  memory: 800+
+  ordered:
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster
+
+num_nodes: 2
+
+workdir: .
+
+setup: |
+  pip install ray[default]==2.55.1
+
+run: |
+  bash scripts/test-ray-multinode.sh
