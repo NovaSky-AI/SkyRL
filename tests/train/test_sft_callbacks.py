@@ -1,12 +1,13 @@
-"""GPU test: callbacks fire end-to-end during an SFT training run.
+"""CPU test: callbacks fire end-to-end during an SFTTrainer training run.
 
-Runs a 1-step / 1-eval FSDP SFT job on Qwen2.5-0.5B-Instruct with a spy
-callback registered, then asserts the full event sequence + per-event
-CallbackInput payloads.
+Mocks the worker dispatch, tokenizer, and dataset loading so the test only
+exercises the orchestration in ``SFTTrainer.train()`` and asserts the
+callback event sequence + per-event payloads.
 
-uv run --isolated --extra dev --extra fsdp pytest \
-    tests/backends/skyrl_train/gpu/gpu_ci/test_sft_callbacks.py -v
+uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_callbacks.py -v
 """
+
+from unittest.mock import MagicMock
 
 from skyrl.train.config.sft_config import (
     SFTConfig,
@@ -17,10 +18,7 @@ from skyrl.train.sft_trainer import SFTTrainer
 from skyrl.train.utils.callbacks import (
     CallbackInput,
     TrainingCallback,
-    TrainingControl,
 )
-
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 class RecorderCallback(TrainingCallback):
@@ -48,45 +46,45 @@ class RecorderCallback(TrainingCallback):
             )
         )
 
-    def on_train_start(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_train_start(self, trainer, ci, control):
         self._snap("on_train_start", ci)
 
-    def on_train_end(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_train_end(self, trainer, ci, control):
         self._snap("on_train_end", ci)
 
-    def on_epoch_start(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_epoch_start(self, trainer, ci, control):
         self._snap("on_epoch_start", ci)
 
-    def on_epoch_end(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_epoch_end(self, trainer, ci, control):
         self._snap("on_epoch_end", ci)
 
-    def on_step_start(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_step_start(self, trainer, ci, control):
         self._snap("on_step_start", ci)
 
-    def on_step_end(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_step_end(self, trainer, ci, control):
         self._snap("on_step_end", ci)
 
-    def on_eval_start(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_eval_start(self, trainer, ci, control):
         self._snap("on_eval_start", ci)
 
-    def on_eval_end(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_eval_end(self, trainer, ci, control):
         self._snap("on_eval_end", ci)
 
-    def on_save(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_save(self, trainer, ci, control):
         self._snap("on_save", ci)
 
-    def on_log(self, trainer, ci: CallbackInput, control: TrainingControl) -> None:
+    def on_log(self, trainer, ci, control):
         self._snap("on_log", ci)
 
 
 def _build_test_sft_config() -> SFTConfig:
     cfg = SFTConfig()
     cfg.strategy = "fsdp"
-    cfg.model.path = MODEL_NAME
+    # model.path / dataset_name are unused — we never load the model and
+    # monkeypatch _load_and_tokenize. eval_dataset_name must be non-empty so
+    # load_eval_dataset actually invokes _load_and_tokenize.
+    cfg.model.path = "unused"
     cfg.placement = SFTPlacementConfig(num_nodes=1, num_gpus_per_node=1)
-    # dataset_name / eval_dataset_name are unused — _load_and_tokenize is
-    # monkeypatched. eval_dataset_name must be non-empty so load_eval_dataset
-    # actually invokes _load_and_tokenize (rather than returning None).
     cfg.dataset_name = "unused-monkeypatched"
     cfg.dataset_split = "train"
     cfg.eval_dataset_name = "unused-monkeypatched"
@@ -106,12 +104,8 @@ def _build_test_sft_config() -> SFTConfig:
 
 
 def _dummy_tokenized() -> list[dict]:
-    """One synthetic example: 10 input tokens, 4 response tokens.
-
-    Token ids are small ints within Qwen2.5's vocab range; the trainer
-    treats them as opaque embeddings. The shape matches what
-    `_tokenize_chat_last_assistant` produces.
-    """
+    """One synthetic example: 10 input tokens, 4 response tokens. Shape matches
+    what ``_tokenize_chat_last_assistant`` produces."""
     return [
         {
             "input_ids": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -122,7 +116,7 @@ def _dummy_tokenized() -> list[dict]:
     ]
 
 
-def test_callbacks_fire_during_sft_training(ray_init_fixture, monkeypatch):
+def test_callbacks_fire_during_sft_training(monkeypatch):
     """A 1-step SFT run dispatches every relevant callback with the right payload."""
     cfg = _build_test_sft_config()
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
@@ -130,15 +124,33 @@ def test_callbacks_fire_during_sft_training(ray_init_fixture, monkeypatch):
     recorder = RecorderCallback()
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=[recorder])
 
+    # Skip setup() (which would load the model + spin up workers). Replace
+    # what setup() would have set with mocks.
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    trainer.tokenizer = tokenizer
+    trainer.tracker = MagicMock()
+
+    # Mock the worker dispatch — the only thing train_step / run_eval touch
+    # that requires real GPU workers. forward_backward returns an object with
+    # ``.metrics`` (loss); optim_step returns a grad_norm; forward (eval path)
+    # returns ``.metrics`` with a per-batch loss.
+    step_output = MagicMock()
+    step_output.metrics = {"loss": 0.42, "final_loss": 0.42}
+    eval_output = MagicMock()
+    eval_output.metrics = {"loss": 0.31}
+    dispatch_mock = MagicMock()
+    dispatch_mock.forward_backward = MagicMock(return_value=step_output)
+    dispatch_mock.optim_step = MagicMock(return_value=1.0)
+    dispatch_mock.forward = MagicMock(return_value=eval_output)
+    dispatch_mock.dp_size = MagicMock(return_value=1)
+    trainer.dispatch = dispatch_mock
+
     # Bypass HF network fetch + tokenization: both load_dataset() and
     # load_eval_dataset() funnel through _load_and_tokenize.
     monkeypatch.setattr(trainer, "_load_and_tokenize", lambda *_args, **_kw: _dummy_tokenized())
 
-    try:
-        trainer.setup()
-        trainer.train()
-    finally:
-        trainer.shutdown()
+    trainer.train()
 
     event_names = [name for name, _ in recorder.events]
 
@@ -155,10 +167,9 @@ def test_callbacks_fire_during_sft_training(ray_init_fixture, monkeypatch):
     ]
     assert event_names == expected, f"unexpected event sequence: {event_names}"
 
-    # Index snapshots for content checks. (Each event fires exactly once here.)
     snap_by_event = {name: snap for name, snap in recorder.events}
 
-    # on_step_end carries batch + step metrics
+    # on_step_end carries the batch + step metrics
     step_end = snap_by_event["on_step_end"]
     assert step_end["has_batch"], "on_step_end should see the training batch"
     assert step_end["has_metrics"], "on_step_end should see step metrics"
@@ -179,7 +190,7 @@ def test_callbacks_fire_during_sft_training(ray_init_fixture, monkeypatch):
     # No checkpoint configured -> on_save must not fire
     assert "on_save" not in event_names
 
-    # Loop metadata is consistent across every event
+    # Loop metadata stays consistent across every event
     for name, snap in recorder.events:
         assert snap["total_steps"] == 1, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 1, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
