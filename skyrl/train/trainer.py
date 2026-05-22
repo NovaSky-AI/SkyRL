@@ -368,7 +368,9 @@ class RayPPOTrainer:
 
                     # 8. conditionally save checkpoints and hf model
                     is_epoch_end = self.global_step % len(self.train_dataloader) == 0
-                    hf_model_save = is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                    hf_model_save = self.cfg.trainer.hf_save_interval > 0 and (
+                        is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                    )
                     ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
                         is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
                     )
@@ -377,10 +379,9 @@ class RayPPOTrainer:
                         with Timer("save_checkpoints", self.all_timings):
                             ckpt_path = self.save_checkpoints()
                         self._fire("on_save", ckpt_path=ckpt_path)
-                    if self.cfg.trainer.hf_save_interval > 0:
-                        if hf_model_save:
-                            with Timer("save_hf_model", self.all_timings):
-                                self.save_models()
+                    if hf_model_save:
+                        with Timer("save_hf_model", self.all_timings):
+                            self.save_models()
 
                     # 9. conditionally sync policy and ref at the end of the epoch
                     if (
