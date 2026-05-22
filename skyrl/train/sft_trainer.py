@@ -848,9 +848,9 @@ class SFTTrainer:
 
             # Save to cache if enabled
             if not self.sft_cfg.disable_cache:
-                # TODO (sumanthrh): Currently we use a simple list instead of dataset + stateful dataloader 
+                # TODO (sumanthrh): Currently we use a simple list instead of dataset + stateful dataloader
                 # for simplicity but for caching we use HF Dataset since file sizes can get large
-                # We should migrate to using HF datasets + a dataloader so that we don't materialize 
+                # We should migrate to using HF datasets + a dataloader so that we don't materialize
                 # the full dataset in memory
                 _save_to_cache(cache_path, tokenized)
 

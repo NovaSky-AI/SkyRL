@@ -897,8 +897,7 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
     )
     expected_cache_path = sft_mod._get_cache_path(str(tmp_path), cache_key)
     assert os.path.isdir(expected_cache_path), f"cache directory missing at {expected_cache_path}"
-    # The cache directory is an actual ``Dataset.save_to_disk`` output, not a
-    # legacy pickle file: ``dataset_info.json`` is part of every HF dataset
+    # ``dataset_info.json`` is part of every HF dataset
     # written this way, and ``load_from_disk`` round-trips the rows verbatim.
     assert os.path.isfile(
         os.path.join(expected_cache_path, "dataset_info.json")
