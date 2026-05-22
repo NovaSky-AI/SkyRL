@@ -116,16 +116,21 @@ logger: "wandb"
 project_name: "skyrl"
 run_name: "test_run"
 log_path: "/tmp/skyrl-logs"
+trackio_trace:
+  max_traces_per_step: 16
+  trace_key: "rollout/traces"
 dump_data_batch: false
 dump_eval_results: true
 log_example_interval: 1
 
 ```
 
-- `logger`: Logger to use. Currently, we support `wandb`, `mlflow`, and `console`. `console` will simply log metrics to the console.
-- `project_name`: Name of the project in WandB and MLFlow.
-- `run_name`: Name of the run in WandB and MLFlow.
+- `logger`: Logger to use. Currently, we support `wandb`, `mlflow`, `swanlab`, `tensorboard`, `trackio`, and `console`. `console` will simply log metrics to the console.
+- `project_name`: Name of the project in WandB, MLFlow, SwanLab, and Trackio.
+- `run_name`: Name of the run in WandB, MLFlow, SwanLab, and Trackio.
 - `log_path`: Path for infrastructure log files. Infrastructure logs (vLLM engine startup, model loading, worker initialization) are written to `{log_path}/infra-YYMMDD_HHMMSS.log`. For multi-node training, use a shared filesystem path to consolidate logs into a single file. See the [logging guide](../checkpointing-logging/logging) for details.
+- `trackio_trace.max_traces_per_step`: Maximum number of rollout samples to log as Trackio traces per generation call when `trackio` is enabled. Set to `0` to disable trace logging.
+- `trackio_trace.trace_key`: Metric key used for logged `trackio.Trace` records.
 - `dump_data_batch`: Whether to dump the data batch to a file. This is useful for debugging. When `true`, the data batch will be dumped to a file in the `export_path` directory. The training batch at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input`
 - `dump_eval_results`: Whether to dump the evaluation results to a file. When `true`, the full evaluation results will be dumped to a file in the `export_path` directory. The evaluation results at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_eval" / global_step_N_eval_results`
 - `log_example_interval`: Log an example prompt every N training steps, `0`/`-1` to disable.

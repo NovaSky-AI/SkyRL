@@ -30,7 +30,7 @@ from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
-    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
+    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console", "trackio"]
 
     def __init__(
         self,
@@ -81,12 +81,23 @@ class Tracking:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
+        if "trackio" in backends:
+            self.logger["trackio"] = _TrackioLoggingAdapter(project_name, experiment_name, config)
+
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
                 logger_instance.log(data=data, step=step, commit=commit)
             else:
                 logger_instance.log(data=data, step=step)
+
+    def log_traces(self, trace_key: str, records: List[Dict[str, Any]], step: Optional[int] = None):
+        if not records:
+            return
+        for logger_instance in self.logger.values():
+            log_traces = getattr(logger_instance, "log_traces", None)
+            if log_traces is not None:
+                log_traces(trace_key, records, step=step)
 
     def finish(self):
         for logger_name, logger_instance in self.logger.items():
@@ -150,6 +161,27 @@ class _TensorboardAdapter:
 
     def finish(self):
         self.writer.close()
+
+
+class _TrackioLoggingAdapter:
+    def __init__(self, project_name, experiment_name, config: Optional[Union[SkyRLTrainConfig, DictConfig]] = None):
+        import trackio
+
+        self.trackio = trackio
+        self.run = trackio.init(project=project_name, name=experiment_name, config=get_config_as_dict(config))
+
+    def log(self, data, step):
+        self.run.log(data, step=step)
+
+    def log_traces(self, trace_key: str, records: List[Dict[str, Any]], step: Optional[int] = None):
+        traces = [
+            self.trackio.Trace(messages=record["messages"], metadata=record.get("metadata")) for record in records
+        ]
+        if traces:
+            self.run.log({trace_key: traces}, step=step)
+
+    def finish(self):
+        self.run.finish()
 
 
 class _MlflowLoggingAdapter:

@@ -2737,6 +2737,22 @@ wheels = [
 ]
 
 [[package]]
+name = "gradio-client"
+version = "2.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec" },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "packaging" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/e6/6b6029f5fe2ad7f1211105d530e34d991014c2cae463f9223033031cfc4f/gradio_client-2.5.0.tar.gz", hash = "sha256:4cde99bad62149595c30c90876ca2e405e3a13687ecf895474f3412cb476673d", size = 59013, upload-time = "2026-04-20T23:16:21.518Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/81/0a861b8e1ff42960139c6cd4c7dd591292fa09ea1ae2d87677441cba4c00/gradio_client-2.5.0-py3-none-any.whl", hash = "sha256:d43e2179c29076292a76485ad7ed2e6eaa19d14ac58283bd7f5beabfe4ca958c", size = 59952, upload-time = "2026-04-20T23:16:20.186Z" },
+]
+
+[[package]]
 name = "graphene"
 version = "3.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3143,7 +3159,7 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.9.1"
+version = "1.16.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -3156,9 +3172,9 @@ dependencies = [
     { name = "typer" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/44/40/68d9b286b125d9318ae95c8f8b206e8672e7244b0eea61ebb4a88037638c/huggingface_hub-1.9.1.tar.gz", hash = "sha256:442af372207cc24dcb089caf507fcd7dbc1217c11d6059a06f6b90afe64e8bd2", size = 750355, upload-time = "2026-04-07T13:47:59.167Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/0f/ed994dbade67a54407c28cab96ef845e0e6d25500be56aca6394f8bfc9dd/huggingface_hub-1.16.1.tar.gz", hash = "sha256:7f1dc4c5ec21aed69be630ad0c3378616be16f3de1a47b141c0e812965d9c832", size = 792534, upload-time = "2026-05-21T18:40:00.908Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/af/10a89c54937dccf6c10792770f362d96dd67aedfde108e6e1fd7a0836789/huggingface_hub-1.9.1-py3-none-any.whl", hash = "sha256:8dae771b969b318203727a6c6c5209d25e661f6f0dd010fc09cc4a12cf81c657", size = 637356, upload-time = "2026-04-07T13:47:57.239Z" },
+    { url = "https://files.pythonhosted.org/packages/49/79/621a7dbb80c70974f73a597275351ebe03ce5bc65cb5f8f4acb5859252bc/huggingface_hub-1.16.1-py3-none-any.whl", hash = "sha256:64340de934b9ce37857ef85a82de72f5629e8a270f9119eabb12bf495eb53c22", size = 668176, upload-time = "2026-05-21T18:39:58.596Z" },
 ]
 
 [[package]]
@@ -9725,6 +9741,7 @@ flashrl = [
     { name = "torchvision", version = "0.22.0", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux' and extra == 'extra-5-skyrl-flashrl') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (python_full_version >= '3.14' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_python_implementation != 'CPython' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "torchvision", version = "0.22.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (python_full_version < '3.14' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (python_full_version >= '3.14' and sys_platform == 'linux' and extra == 'extra-5-skyrl-flashrl') or (platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-flashrl') or (platform_python_implementation != 'CPython' and sys_platform == 'linux' and extra == 'extra-5-skyrl-flashrl') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "uvicorn" },
     { name = "vllm-router", marker = "sys_platform == 'linux'" },
     { name = "wandb" },
@@ -9763,6 +9780,7 @@ fsdp = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "uvicorn" },
     { name = "vllm", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "vllm-router", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
@@ -9821,6 +9839,7 @@ megatron = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "transformer-engine", extra = ["pytorch"], marker = "(sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "uvicorn" },
     { name = "vllm", marker = "sys_platform == 'linux'" },
@@ -9855,6 +9874,7 @@ miniswe = [
     { name = "tensordict" },
     { name = "torchdata" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "uvicorn" },
     { name = "vllm-router", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax')" },
     { name = "wandb" },
@@ -9888,6 +9908,7 @@ skyrl-train = [
     { name = "tensordict" },
     { name = "torchdata" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "uvicorn" },
     { name = "vllm-router", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "wandb" },
@@ -10010,6 +10031,7 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'fsdp'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'megatron'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", marker = "extra == 'skyrl-train'" },
+    { name = "trackio", marker = "extra == 'skyrl-train'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
     { name = "transformers", specifier = ">=5.6.1,<=5.8.0" },
     { name = "ty", marker = "extra == 'dev'" },
@@ -11076,6 +11098,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/e1/3079a9ff9b8e11b846c6ac5c8b5bfb7ff225eee721825310c91b3b50304f/tqdm-4.67.3-py3-none-any.whl", hash = "sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf", size = 78374, upload-time = "2026-02-03T17:35:50.982Z" },
+]
+
+[[package]]
+name = "trackio"
+version = "0.25.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "gradio-client" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "orjson" },
+    { name = "pillow" },
+    { name = "python-multipart" },
+    { name = "starlette" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/9a/80caa250ef9e0e465db883958764c9b27a413c8b246349f60c237b820201/trackio-0.25.1-py3-none-any.whl", hash = "sha256:d019b79a8dfb14264db1055b7e9b2681984138b827dabd5ec01585c0bd24116d", size = 1653922, upload-time = "2026-04-26T02:13:41.814Z" },
 ]
 
 [[package]]

@@ -85,6 +85,7 @@ skyrl-train = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
+    "trackio",
     "datasets>=4.0.0",
     "tensordict",
     "jaxtyping",
@@ -357,4 +358,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-
