@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 import ray
 import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
@@ -194,34 +194,41 @@ def _compute_cache_key(
 def _get_cache_path(cache_dir: str, cache_key: str) -> str:
     """Get the full path to a cached tokenized dataset.
 
+    The cache is stored as an arrow-backed HuggingFace dataset on disk
+    (``Dataset.save_to_disk``), so this path is a directory, not a file.
+
     Args:
         cache_dir: Base cache directory
         cache_key: Cache key (hash) for this dataset
 
     Returns:
-        Path to the cache file (e.g., /path/to/cache/a3f2c1.pkl)
+        Path to the cache directory (e.g., /path/to/cache/a3f2c1).
     """
-    return os.path.join(cache_dir, f"{cache_key}.pkl")
+    return os.path.join(cache_dir, cache_key)
 
 
 def _load_from_cache(cache_path: str) -> Optional[list]:
     """Load tokenized dataset from cache.
 
+    Reads an arrow-backed HF ``Dataset`` directory written by
+    :func:`_save_to_cache` and materializes it back to the ``list[dict]``
+    representation expected by the trainer (which slices, shuffles, and
+    concatenates the result during the training loop).
+
     Args:
-        cache_path: Path to cached pickle file
+        cache_path: Path to cached dataset directory.
 
     Returns:
-        List of tokenized examples, or None if cache doesn't exist or is invalid
+        List of tokenized examples, or ``None`` if the cache directory
+        does not exist or fails to load.
     """
-    if not os.path.exists(cache_path):
+    if not os.path.isdir(cache_path):
         return None
 
     try:
-        import pickle
-
         logger.info(f"Loading tokenized dataset from cache: {cache_path}")
-        with open(cache_path, "rb") as f:
-            tokenized = pickle.load(f)
+        dataset = Dataset.load_from_disk(cache_path)
+        tokenized = dataset.to_list()
         logger.info(f"Loaded {len(tokenized)} examples from cache")
         return tokenized
     except Exception as e:
@@ -232,21 +239,37 @@ def _load_from_cache(cache_path: str) -> Optional[list]:
 def _save_to_cache(cache_path: str, tokenized: list) -> None:
     """Save tokenized dataset to cache.
 
+    Materializes the in-memory ``list[dict]`` as a HuggingFace ``Dataset``
+    and writes it via ``save_to_disk``. At 1M-row scale, the arrow-backed,
+    memory-mapped format reads and writes dramatically faster than pickle
+    while also being portable across Python versions. The write goes to a
+    sibling ``<cache_path>.tmp`` directory which is then atomically renamed
+    onto ``cache_path`` for NFS safety.
+
     Args:
-        cache_path: Path to save the cache file
-        tokenized: List of tokenized examples
+        cache_path: Path to the cache directory to create.
+        tokenized: List of tokenized examples.
     """
     try:
-        import pickle
+        import shutil
 
-        cache_dir = os.path.dirname(cache_path)
-        os.makedirs(cache_dir, exist_ok=True)
+        parent_dir = os.path.dirname(cache_path)
+        os.makedirs(parent_dir, exist_ok=True)
 
         logger.info(f"Saving {len(tokenized)} examples to cache: {cache_path}")
-        # Write to a temp file first, then atomic rename for NFS safety
+        # Build the HF Dataset from rows and write to a sibling temp dir.
+        # An atomic rename onto cache_path makes concurrent readers see only
+        # a fully-written cache (NFS-safe; matches the previous pickle path).
+        dataset = Dataset.from_list(tokenized)
         temp_path = cache_path + ".tmp"
-        with open(temp_path, "wb") as f:
-            pickle.dump(tokenized, f)
+        # Clean up any stale temp dir from an interrupted prior run.
+        if os.path.isdir(temp_path):
+            shutil.rmtree(temp_path)
+        dataset.save_to_disk(temp_path)
+        # If a previous cache exists at the final path, drop it before
+        # rename so the swap is the only visible state change.
+        if os.path.isdir(cache_path):
+            shutil.rmtree(cache_path)
         os.rename(temp_path, cache_path)
         logger.info("Cache saved successfully")
     except Exception as e:
@@ -747,10 +770,11 @@ class SFTTrainer:
         own data slice directly from HuggingFace to eliminate pickle overhead.
 
         Caching:
-        - Tokenized datasets are cached to disk (pickle) for reuse across runs
-        - Cache key is a hash of dataset name, split, model, and tokenization params
-        - Set ``force_recache=True`` to ignore cache and re-tokenize
-        - Set ``disable_cache=True`` to disable caching entirely
+        - Tokenized datasets are cached to disk as a HuggingFace ``Dataset``
+          (arrow-backed, memory-mapped) for reuse across runs.
+        - Cache key is a hash of dataset name, split, model, and tokenization params.
+        - Set ``force_recache=True`` to ignore cache and re-tokenize.
+        - Set ``disable_cache=True`` to disable caching entirely.
 
         Args:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
@@ -824,6 +848,10 @@ class SFTTrainer:
 
             # Save to cache if enabled
             if not self.sft_cfg.disable_cache:
+                # TODO (sumanthrh): Currently we use a simple list instead of dataset + stateful dataloader 
+                # for simplicity but for caching we use HF Dataset since file sizes can get large
+                # We should migrate to using HF datasets + a dataloader so that we don't materialize 
+                # the full dataset in memory
                 _save_to_cache(cache_path, tokenized)
 
             return tokenized

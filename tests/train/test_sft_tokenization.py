@@ -856,13 +856,16 @@ def test_load_and_tokenize_num_workers_uses_parallel_path(tokenizer, tmp_path):
 
 
 def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, monkeypatch):
-    """With caching enabled (default), a second call hits the pickle cache and
-    does NOT re-tokenize:
+    """With caching enabled (default), a second call hits the on-disk HF
+    dataset cache and does NOT re-tokenize:
       - the inner per-row tokenizer is not called on the second run,
-      - the cache file exists at the resolved ``_get_cache_path`` path,
+      - the cache directory exists at the resolved ``_get_cache_path`` path
+        and contains an HF ``Dataset`` (``dataset_info.json`` is present),
       - the two calls return bit-exact equal output."""
     import os
     from unittest.mock import MagicMock
+
+    from datasets import Dataset
 
     from skyrl.train import sft_trainer as sft_mod
 
@@ -877,11 +880,11 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
     )
     trainer = _build_trainer(tokenizer, cfg)
 
-    # First call: cache miss -> tokenizes and writes the pickle.
+    # First call: cache miss -> tokenizes and writes the HF dataset to disk.
     first_out = trainer._load_and_tokenize("dummy/ds", "train")
     assert len(first_out) == 6
 
-    # The cache file must exist at the path derived from cache_dir + cache_key.
+    # The cache directory must exist at the path derived from cache_dir + cache_key.
     cache_key = sft_mod._compute_cache_key(
         dataset_name="dummy/ds",
         dataset_split="train",
@@ -893,10 +896,18 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
         system_key=cfg.system_key,
     )
     expected_cache_path = sft_mod._get_cache_path(str(tmp_path), cache_key)
-    assert os.path.exists(expected_cache_path), f"cache file missing at {expected_cache_path}"
+    assert os.path.isdir(expected_cache_path), f"cache directory missing at {expected_cache_path}"
+    # The cache directory is an actual ``Dataset.save_to_disk`` output, not a
+    # legacy pickle file: ``dataset_info.json`` is part of every HF dataset
+    # written this way, and ``load_from_disk`` round-trips the rows verbatim.
+    assert os.path.isfile(
+        os.path.join(expected_cache_path, "dataset_info.json")
+    ), f"cache at {expected_cache_path} is not an HF dataset"
+    cached_rows = Dataset.load_from_disk(expected_cache_path).to_list()
+    assert len(cached_rows) == len(first_out)
 
     # Second call: cache hit. Spy on tokenize_chat_example AND on _load_from_cache
-    # so we can prove (a) no re-tokenization happens and (b) the cached pickle
+    # so we can prove (a) no re-tokenization happens and (b) the cached dataset
     # is what served the result.
     tok_spy = MagicMock(side_effect=AssertionError("tokenize_chat_example must not be called on cache hit"))
     monkeypatch.setattr(sft_mod, "tokenize_chat_example", tok_spy)
