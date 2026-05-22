@@ -288,6 +288,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Initialize base trainer
         super().__init__(*args, **kwargs)
 
+        # Callbacks aren't wired into FullyAsyncRayPPOTrainer.train() yet — fail
+        # fast rather than silently dropping events
+        if self._callback_handler.callbacks:
+            raise NotImplementedError(
+                "Callbacks are not yet supported by FullyAsyncRayPPOTrainer. "
+                "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
+            )
+
         # Some async-specific validations
         assert (
             self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
@@ -310,6 +318,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
+        )
+
+    def add_callback(self, callback):
+        raise NotImplementedError(
+            "Callbacks are not yet supported by FullyAsyncRayPPOTrainer. "
+            "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
         )
 
     def _build_train_dataloader_and_compute_training_steps(self):
