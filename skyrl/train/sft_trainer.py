@@ -187,7 +187,19 @@ def _compute_cache_key(
     import hashlib
 
     # Build a deterministic string from all relevant parameters
-    cache_params = json.dumps({"dataset_name": dataset_name, "dataset_split": dataset_split, "model_path": model_path, "max_length": max_length, "messages_key": messages_key, "train_on_what": train_on_what, "tools_key": tools_key, "system_key": system_key}, sort_keys=True)
+    cache_params = json.dumps(
+        {
+            "dataset_name": dataset_name,
+            "dataset_split": dataset_split,
+            "model_path": model_path,
+            "max_length": max_length,
+            "messages_key": messages_key,
+            "train_on_what": train_on_what,
+            "tools_key": tools_key,
+            "system_key": system_key,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(cache_params.encode()).hexdigest()[:16]
 
 
