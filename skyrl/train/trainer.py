@@ -368,15 +368,17 @@ class RayPPOTrainer:
 
                     # 8. conditionally save checkpoints and hf model
                     is_epoch_end = self.global_step % len(self.train_dataloader) == 0
-                    interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+                    hf_model_save = is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                    ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
                         is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
                     )
-                    if force_save or interval_save:
+                    will_save_ckpts = force_save or ckpt_interval_save
+                    if will_save_ckpts:
                         with Timer("save_checkpoints", self.all_timings):
                             ckpt_path = self.save_checkpoints()
                         self._fire("on_save", ckpt_path=ckpt_path)
                     if self.cfg.trainer.hf_save_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                        if hf_model_save:
                             with Timer("save_hf_model", self.all_timings):
                                 self.save_models()
 
@@ -440,21 +442,19 @@ class RayPPOTrainer:
         if self.colocate_all:
             await self.inference_engine_client.sleep()
 
+        # Decrement global step by 1 to stop at the last global step
+        # We use the global step value in callbacks when training finishes,
+        # as well as for a final checkpoint save
+        self.global_step -= 1
+
         # Safety net: always save final checkpoint at end of training.
-        # save_checkpoints uses self.global_step verbatim for folder naming
-        # (the loop's final +1 increment carries through here, matching the
-        # pre-callback behavior). We roll global_step back before firing
-        # callbacks so on_save / on_train_end see the actual last-completed
-        # step rather than the bookkeeping +1.
-        if self.cfg.trainer.ckpt_interval > 0:
+        # Skip if we already saved at the last step
+        if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
             with Timer("save_checkpoints", self.all_timings):
                 ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
-            self.global_step -= 1
             self._fire("on_save", ckpt_path=ckpt_path)
-        else:
-            self.global_step -= 1
-        if self.cfg.trainer.hf_save_interval > 0:
+        if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
