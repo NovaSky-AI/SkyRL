@@ -262,6 +262,10 @@ class RayPPOTrainer:
         self.global_step += 1  # start training at global_step 1
 
         stop_training = False
+        # booleans tracking whether we save ckpts
+        # as well as hf model at step end
+        will_save_ckpts = False
+        hf_model_save = False
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             self._current_epoch = epoch
             self._fire("on_epoch_start")
