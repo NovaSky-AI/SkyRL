@@ -416,6 +416,16 @@ class FullyAsyncConfig(BaseConfig):
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
 
 
+@dataclass
+class TrackioTraceConfig(BaseConfig):
+    """Configuration for logging rollout samples as Trackio traces."""
+
+    max_traces_per_step: int = 16
+    """Maximum number of rollout traces to log per generation call. Set to ``0`` to disable."""
+    trace_key: str = "rollout/traces"
+    """Metric key used when logging ``trackio.Trace`` records."""
+
+
 # ---------------------------------------------------------------------------
 # Sampling / Chat Template
 # ---------------------------------------------------------------------------
@@ -644,6 +654,7 @@ class TrainerConfig(BaseConfig):
     project_name: str = "skyrl"
     run_name: str = "test_run"
     logger: str = "wandb"
+    trackio_trace: TrackioTraceConfig = field(default_factory=TrackioTraceConfig)
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None

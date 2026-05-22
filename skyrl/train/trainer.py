@@ -739,15 +739,101 @@ class RayPPOTrainer:
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
-        generator_output.pop("rollout_metrics", None)
 
         validate_generator_output(
             len(input_batch["prompts"]),
             generator_output,
             step_wise=self.cfg.generator.step_wise_trajectories,
         )
+        self._log_trackio_rollout_traces(input_batch, generator_output)
+        generator_output.pop("rollout_metrics", None)
 
         return generator_output
+
+    def _log_trackio_rollout_traces(self, input_batch: GeneratorInput, generator_output: GeneratorOutput):
+        trace_cfg = self.cfg.trainer.trackio_trace
+        if trace_cfg.max_traces_per_step <= 0 or "trackio" not in self.tracker.logger:
+            return
+
+        step = input_batch["batch_metadata"].global_step if input_batch.get("batch_metadata") is not None else None
+        records = self._build_trackio_rollout_trace_records(
+            input_batch,
+            generator_output,
+            max_traces=trace_cfg.max_traces_per_step,
+        )
+        self.tracker.log_traces(trace_cfg.trace_key, records, step=step)
+
+    def _build_trackio_rollout_trace_records(
+        self,
+        input_batch: GeneratorInput,
+        generator_output: GeneratorOutput,
+        max_traces: int,
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        prompts = input_batch["prompts"]
+        if not prompts:
+            return records
+        input_trajectory_ids = input_batch.get("trajectory_ids") or []
+        output_trajectory_ids = generator_output.get("trajectory_ids") or []
+        trajectory_id_to_input_idx = {
+            trajectory_id.to_string(): idx for idx, trajectory_id in enumerate(input_trajectory_ids)
+        }
+        rewards = generator_output.get("rewards") or []
+        stop_reasons = generator_output.get("stop_reasons")
+        batch_metadata = input_batch.get("batch_metadata")
+
+        num_traces = min(max_traces, len(generator_output["response_ids"]))
+        samples_per_prompt = max(1, len(generator_output["response_ids"]) // len(prompts))
+        for sample_index in range(num_traces):
+            input_idx = min(sample_index // samples_per_prompt, len(prompts) - 1)
+            output_trajectory_id = None
+            if sample_index < len(output_trajectory_ids):
+                output_trajectory_id = output_trajectory_ids[sample_index]
+                input_idx = trajectory_id_to_input_idx.get(output_trajectory_id.to_string(), input_idx)
+
+            response = self.tokenizer.decode(generator_output["response_ids"][sample_index], skip_special_tokens=False)
+            messages = self._messages_for_trackio_trace(prompts[input_idx], response)
+            metadata: Dict[str, Any] = {
+                "sample_index": sample_index,
+                "input_index": input_idx,
+            }
+            if batch_metadata is not None:
+                metadata["step"] = batch_metadata.global_step
+                metadata["split"] = batch_metadata.training_phase
+            if sample_index < len(rewards):
+                metadata["reward"] = self._trackio_metadata_value(rewards[sample_index])
+            if stop_reasons is not None and sample_index < len(stop_reasons):
+                metadata["stop_reason"] = stop_reasons[sample_index]
+            if output_trajectory_id is not None:
+                metadata["trajectory_id"] = output_trajectory_id.to_string()
+                metadata["instance_id"] = output_trajectory_id.instance_id
+                metadata["repetition_id"] = output_trajectory_id.repetition_id
+
+            records.append({"messages": messages, "metadata": metadata})
+        return records
+
+    @staticmethod
+    def _messages_for_trackio_trace(prompt: Any, response: str) -> List[Dict[str, Any]]:
+        if isinstance(prompt, list):
+            messages = [dict(message) for message in prompt if isinstance(message, dict)]
+        elif isinstance(prompt, dict):
+            messages = [dict(prompt)]
+        else:
+            messages = [{"role": "user", "content": str(prompt)}]
+        messages.append({"role": "assistant", "content": response})
+        return messages
+
+    @staticmethod
+    def _trackio_metadata_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return RayPPOTrainer._trackio_metadata_value(value.detach().cpu().tolist())
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(k): RayPPOTrainer._trackio_metadata_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [RayPPOTrainer._trackio_metadata_value(v) for v in value]
+        return value
 
     @torch.no_grad()
     def postprocess_generator_output(

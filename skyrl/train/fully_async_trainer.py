@@ -29,7 +29,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     prepare_generator_input,
@@ -55,6 +55,7 @@ class GeneratedOutputGroup:
     """
 
     generator_output: GeneratorOutput
+    generator_input: GeneratorInput
     uid: str
     global_step_when_scheduled: int
 
@@ -589,6 +590,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     generation_output_group_buffer.put_nowait(
                         GeneratedOutputGroup(
                             generator_output=cur_generator_output,
+                            generator_input=generator_input,
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
                         )
@@ -615,6 +617,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     ) -> TrainingInputBatch:
         """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch."""
         generator_outputs = []
+        generator_inputs = []
         uids = []
         stalenesses = []
         staleness_violation_count = 0
@@ -622,6 +625,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+            generator_inputs.append(cur_generated_output_group.generator_input)
             # NOTE(Charlie): for step-wise training each group can contain a variable number of entries
             # (n_samples_per_prompt * variable turns_per_trajectory), so the uid fanout is per-group.
             group_size = len(cur_generated_output_group.generator_output["response_ids"])
@@ -644,6 +648,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
+        self._log_trackio_rollout_traces(
+            self._merge_generator_inputs_for_trace_logging(generator_inputs),
+            generator_output,
+        )
         generator_output.pop("rollout_metrics", None)
 
         # Log staleness statistics for this step
@@ -665,6 +673,27 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Example generated: {vis}")
 
         return self.convert_to_training_input(generator_output, uids)
+
+    @staticmethod
+    def _merge_generator_inputs_for_trace_logging(generator_inputs: List[GeneratorInput]) -> GeneratorInput:
+        assert generator_inputs, "Expected at least one generator input."
+        first = generator_inputs[0]
+        return {
+            "prompts": sum((generator_input["prompts"] for generator_input in generator_inputs), []),
+            "env_classes": sum((generator_input["env_classes"] for generator_input in generator_inputs), []),
+            "env_extras": (
+                sum((generator_input["env_extras"] for generator_input in generator_inputs), [])
+                if first.get("env_extras") is not None
+                else None
+            ),
+            "sampling_params": first.get("sampling_params"),
+            "trajectory_ids": (
+                sum((generator_input["trajectory_ids"] for generator_input in generator_inputs), [])
+                if first.get("trajectory_ids") is not None
+                else None
+            ),
+            "batch_metadata": first.get("batch_metadata"),
+        }
 
     def save_checkpoints(self):
         """

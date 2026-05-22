@@ -14,6 +14,8 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl.train.generators.base import BatchMetadata, TrajectoryID
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
@@ -130,6 +132,143 @@ def test_calculate_kl_create_experience_batched(dummy_config):
     assert metrics["avg_kl_max"] == approx(0.3143, abs=1e-4)
     # Note; the raw KL mean is 0.054, but then the masked mean is different.
     assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
+
+
+def test_log_trackio_rollout_traces(dummy_config):
+    dummy_config.trainer.trackio_trace.max_traces_per_step = 1
+    dummy_config.trainer.trackio_trace.trace_key = "rollout/traces"
+    tracker = MagicMock()
+    tracker.logger = {"trackio": MagicMock()}
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "4"
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=tracker,
+        tokenizer=tokenizer,
+        train_dataset=None,
+        inference_engine_client=MagicMock(),
+        generator=MagicMock(),
+    )
+    generator_input = {
+        "prompts": [[{"role": "user", "content": "What is 2 + 2?"}]],
+        "env_classes": ["gsm8k"],
+        "env_extras": [{}],
+        "sampling_params": {"temperature": 0.0},
+        "trajectory_ids": [TrajectoryID(instance_id="uid-1", repetition_id=0)],
+        "batch_metadata": BatchMetadata(global_step=7, training_phase="train"),
+    }
+    generator_output = {
+        "prompt_token_ids": [[1, 2]],
+        "response_ids": [[3, 4]],
+        "rewards": [1.0],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_metrics": {},
+        "rollout_logprobs": None,
+        "trajectory_ids": [TrajectoryID(instance_id="uid-1", repetition_id=0)],
+        "rollout_expert_indices": None,
+        "is_last_step": None,
+        "env_metrics": None,
+        "pixel_values": None,
+        "image_grid_thw": None,
+    }
+
+    trainer._log_trackio_rollout_traces(generator_input, generator_output)
+
+    tracker.log_traces.assert_called_once()
+    trace_key, records = tracker.log_traces.call_args.args
+    assert trace_key == "rollout/traces"
+    assert tracker.log_traces.call_args.kwargs["step"] == 7
+    assert records == [
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+            "metadata": {
+                "sample_index": 0,
+                "input_index": 0,
+                "step": 7,
+                "split": "train",
+                "reward": 1.0,
+                "stop_reason": "stop",
+                "trajectory_id": "uid-1_0",
+                "instance_id": "uid-1",
+                "repetition_id": 0,
+            },
+        }
+    ]
+
+
+def test_build_trackio_rollout_trace_records_uses_blocked_prompt_fallback(dummy_config):
+    tracker = MagicMock()
+    tracker.logger = {"trackio": MagicMock()}
+    tokenizer = MagicMock()
+    tokenizer.decode.side_effect = lambda ids, skip_special_tokens=False: f"response-{ids[0]}"
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=tracker,
+        tokenizer=tokenizer,
+        train_dataset=None,
+        inference_engine_client=MagicMock(),
+        generator=MagicMock(),
+    )
+    generator_input = {
+        "prompts": [
+            [{"role": "user", "content": "prompt-0"}],
+            [{"role": "user", "content": "prompt-1"}],
+        ],
+        "env_classes": ["gsm8k", "gsm8k"],
+        "env_extras": [{}, {}],
+        "sampling_params": {"temperature": 0.0},
+        "trajectory_ids": None,
+        "batch_metadata": BatchMetadata(global_step=7, training_phase="train"),
+    }
+    generator_output = {
+        "prompt_token_ids": [[1], [2], [3], [4]],
+        "response_ids": [[1], [2], [3], [4]],
+        "rewards": [1.0, 0.9, 0.8, 0.7],
+        "loss_masks": [[1], [1], [1], [1]],
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": {},
+        "rollout_logprobs": None,
+        "trajectory_ids": None,
+        "rollout_expert_indices": None,
+        "is_last_step": None,
+        "env_metrics": None,
+        "pixel_values": None,
+        "image_grid_thw": None,
+    }
+
+    records = trainer._build_trackio_rollout_trace_records(generator_input, generator_output, max_traces=4)
+
+    assert [record["messages"][0]["content"] for record in records] == ["prompt-0", "prompt-0", "prompt-1", "prompt-1"]
+
+
+def test_merge_generator_inputs_for_trace_logging():
+    first = {
+        "prompts": [[{"role": "user", "content": "prompt-0"}]],
+        "env_classes": ["gsm8k"],
+        "env_extras": [{"source": "a"}],
+        "sampling_params": {"temperature": 0.0},
+        "trajectory_ids": [TrajectoryID(instance_id="uid-0", repetition_id=0)],
+        "batch_metadata": BatchMetadata(global_step=3, training_phase="train"),
+    }
+    second = {
+        "prompts": [[{"role": "user", "content": "prompt-1"}]],
+        "env_classes": ["gsm8k"],
+        "env_extras": [{"source": "b"}],
+        "sampling_params": {"temperature": 0.0},
+        "trajectory_ids": [TrajectoryID(instance_id="uid-1", repetition_id=0)],
+        "batch_metadata": BatchMetadata(global_step=3, training_phase="train"),
+    }
+
+    merged = FullyAsyncRayPPOTrainer._merge_generator_inputs_for_trace_logging([first, second])
+
+    assert [prompt[0]["content"] for prompt in merged["prompts"]] == ["prompt-0", "prompt-1"]
+    assert merged["env_extras"] == [{"source": "a"}, {"source": "b"}]
+    assert [trajectory_id.to_string() for trajectory_id in merged["trajectory_ids"]] == ["uid-0_0", "uid-1_0"]
+    assert merged["batch_metadata"].global_step == 3
 
 
 @patch("skyrl.backends.skyrl_train.utils.ppo_utils.compute_advantages_and_returns", new_callable=MagicMock)
