@@ -180,6 +180,8 @@ def _build_test_cfg():
 # ---------------------------------------------------------------------------
 
 
+# TODO (sumanthrh): See if heavy mocking in this test can be reduced
+# Currently there isn't a better option due to the number of worker-related training methods
 def test_callbacks_fire_during_rl_training(monkeypatch):
     """A 2-step PPO run fires every relevant event, in order, with the right payloads."""
     cfg = _build_test_cfg()
@@ -241,6 +243,20 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
         lambda *_args, **_kw: ({"prompts": [[{"role": "user", "content": "q"}]]}, ["uid-0"]),
     )
 
+    # Enable the resume branch and stamp a "load_checkpoints" marker into
+    # recorder.events so the event-order assertion below proves on_train_start
+    # fires AFTER the resume read. Returning (0, "") keeps the step count the
+    # same as the no-resume case.
+    from skyrl.train.utils.trainer_utils import ResumeMode
+
+    trainer.resume_mode = ResumeMode.LATEST
+
+    def _record_load_checkpoints():
+        recorder.events.append(("load_checkpoints", {"global_step": trainer.global_step}))
+        return (0, "")
+
+    monkeypatch.setattr(trainer, "load_checkpoints", _record_load_checkpoints)
+
     asyncio.run(trainer.train())
 
     event_names = [name for name, _ in recorder.events]
@@ -249,7 +265,10 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     # at step 1 only appear because ForceEvaluateAtStep set should_evaluate.
     # on_save at step 2 only appears because ForceSaveAtStep set should_save.
     # Step 2's eval is interval-driven (last_step == total_training_steps).
+    # The leading "load_checkpoints" marker proves on_train_start fires AFTER
+    # the resume read (regression guard for callback timing).
     expected = [
+        "load_checkpoints",
         "on_train_start",
         "on_epoch_start",
         # --- step 1 ---
@@ -306,7 +325,10 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     eval_steps = [snap["global_step"] for snap in snaps_by_event["on_eval_end"]]
     assert eval_steps == [1, 2], eval_steps
 
-    # Loop metadata stays consistent across every event
+    # Loop metadata stays consistent across every callback event (skip the
+    # synthetic "load_checkpoints" marker which doesn't carry CallbackInput).
     for name, snap in recorder.events:
+        if name == "load_checkpoints":
+            continue
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"

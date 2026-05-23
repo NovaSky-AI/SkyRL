@@ -131,3 +131,26 @@ Don't:
   #   bash examples/train/sft/run_sft_megatron_apigen_mt.sh num_epochs=1 num_steps=null
 
 ```
+
+## Error messages
+
+The same holds true for error messages:
+
+Do:
+
+```python
+        if self._callback_handler.callbacks:
+            raise NotImplementedError(
+                "Callbacks are not yet supported by `FullyAsyncRayPPOTrainer`. "
+            )
+```
+
+Don't: 
+
+```python
+        if self._callback_handler.callbacks:
+            raise NotImplementedError(
+                "Callbacks are not yet supported by `FullyAsyncRayPPOTrainer`. "
+                "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
+            )
+```

@@ -1,15 +1,15 @@
 # Training callbacks
 
-Demonstrates the `TrainingCallback` API by adding an `EarlyStopping` callback
-to the SFT trainer. The same pattern works for the RL trainer
+Demonstrates the `TrainingCallback` API by adding a `PerplexityLogger`
+callback to the SFT trainer. The same pattern works for the RL trainer
 (`RayPPOTrainer` accepts a `callbacks=` constructor arg).
 
 ## Files
 
-- `early_stopping.py` — example callback that sets
-  `control.should_training_stop` when a monitored eval metric stops improving.
+- `perplexity_logger.py` — example callback that logs `train/perplexity` on
+  every step, piggy-backing on the trainer's own wandb step.
 - `main_sft_with_callbacks.py` — custom entrypoint that constructs
-  `SFTTrainer(..., callbacks=[EarlyStopping(...)])`.
+  `SFTTrainer(..., callbacks=[PerplexityLogger()])`.
 - `run_sft_with_callbacks.sh` — launcher; mirrors `examples/train/sft/run_sft_fsdp.sh`
   but runs through the custom entrypoint.
 
@@ -25,17 +25,15 @@ Subclass `TrainingCallback` and override the events you care about. Every
 event receives the same three arguments: `(trainer, callback_input, control)`.
 
 ```python
-import math
-
 from skyrl.train.utils.callbacks import TrainingCallback
 
-class LogPerplexity(TrainingCallback):
+class LogGradNorm(TrainingCallback):
     def on_step_end(self, trainer, callback_input, control):
-        loss = (callback_input.metrics or {}).get("loss")
-        if loss is None:
+        gn = (callback_input.metrics or {}).get("grad_norm")
+        if gn is None:
             return
         trainer.tracker.log(
-            {"train/perplexity": math.exp(min(loss, 20))},
+            {"diag/grad_norm": gn},
             step=callback_input.global_step,
             commit=False,
         )
@@ -46,6 +44,6 @@ applies (`batch` on step events, `metrics` on step/eval end, `logs` on
 `on_log`, `ckpt_path` on `on_save`). Anything else — `tokenizer`, `dispatch`,
 `tracker`, `cfg` — is reached through `trainer.*`.
 
-Set `control.should_save` / `should_evaluate` / `should_training_stop` to
-request a save, an eval, or a training stop; the trainer honors and resets
-those flags.
+Set `control.should_save` / `should_evaluate` to request a checkpoint save
+or an eval pass at the end of the current step; the trainer honors and
+resets those flags.

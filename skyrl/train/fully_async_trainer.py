@@ -321,10 +321,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def add_callback(self, callback):
-        raise NotImplementedError(
-            "Callbacks are not yet supported by FullyAsyncRayPPOTrainer. "
-            "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
-        )
+        raise NotImplementedError("Callbacks are not yet supported by FullyAsyncRayPPOTrainer. ")
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """

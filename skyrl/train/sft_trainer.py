@@ -1424,7 +1424,6 @@ class SFTTrainer:
 
         # Tracks whether the most recent in-loop iteration saved a checkpoint
         # (either via the ckpt_interval or via a callback-driven ``should_save``).
-        # The post-loop safety-net save reads this to avoid double-saving.
         did_save_last_step = False
 
         self._fire("on_train_start")
@@ -1438,7 +1437,7 @@ class SFTTrainer:
             self._fire("on_eval_end", metrics=eval_metrics)
             baseline_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
             self._fire("on_log", logs=baseline_log)
-            self.tracker.log(baseline_log, step=0, commit=True)
+            self.tracker.log(baseline_log, step=self.global_step, commit=True)
             logger.info(
                 f"Baseline eval before training: "
                 f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
@@ -1542,11 +1541,6 @@ class SFTTrainer:
                     f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
                     f"over {num_eval_batches} batches"
                 )
-
-            # Honor a stop request set on any of this iteration's callbacks.
-            if self._training_control.should_training_stop:
-                logger.info(f"Callback requested training stop at step {self.global_step}; exiting loop.")
-                break
 
             # Check for epoch boundary and reshuffle
             epoch = (self.global_step * batch_size) // len(tokenized)

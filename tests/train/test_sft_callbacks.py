@@ -198,6 +198,14 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     # receives the fake path the stub returns.
     monkeypatch.setattr(trainer, "save_checkpoint", lambda: _FAKE_CKPT_PATH)
 
+    # Stamp a "load_checkpoint" marker into recorder.events so the event-order
+    # assertion below proves on_train_start fires AFTER load_checkpoint.
+    def _record_load_checkpoint():
+        recorder.events.append(("load_checkpoint", {"global_step": trainer.global_step}))
+        return 0
+
+    monkeypatch.setattr(trainer, "load_checkpoint", _record_load_checkpoint)
+
     trainer.train()
 
     event_names = [name for name, _ in recorder.events]
@@ -206,7 +214,10 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     # at step 1 only appear because ForceEvaluateAtStep set should_evaluate.
     # on_save at step 2 only appears because ForceSaveAtStep set should_save.
     # Step 2's eval is interval-driven (num_steps % eval_interval == 0).
+    # The leading "load_checkpoint" marker proves on_train_start fires AFTER
+    # the resume read (regression guard for callback timing).
     expected = [
+        "load_checkpoint",
         "on_train_start",
         "on_epoch_start",
         # --- step 1 ---
@@ -265,7 +276,10 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     eval_steps = [snap["global_step"] for snap in snaps_by_event["on_eval_end"]]
     assert eval_steps == [1, 2], eval_steps
 
-    # Loop metadata stays consistent across every event
+    # Loop metadata stays consistent across every callback event (skip the
+    # synthetic "load_checkpoint" marker which doesn't carry CallbackInput).
     for name, snap in recorder.events:
+        if name == "load_checkpoint":
+            continue
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"

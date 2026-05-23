@@ -260,7 +260,6 @@ class RayPPOTrainer:
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
 
-        stop_training = False
         # booleans tracking whether we save ckpts
         # as well as hf model at step end
         will_save_ckpts = False
@@ -433,14 +432,7 @@ class RayPPOTrainer:
 
                 del training_input, generator_output
 
-                if self._training_control.should_training_stop:
-                    logger.info(f"Callback requested training stop at step {self.global_step - 1}; exiting loop.")
-                    stop_training = True
-                    break
-
             self._fire("on_epoch_end")
-            if stop_training:
-                break
 
         pbar.close()
         if self.colocate_all:

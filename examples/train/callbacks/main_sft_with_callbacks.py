@@ -1,4 +1,4 @@
-"""SFT entrypoint demonstrating the EarlyStopping callback.
+"""SFT entrypoint demonstrating the PerplexityLogger callback.
 
 Usage:
     bash examples/train/callbacks/run_sft_with_callbacks.sh
@@ -8,7 +8,7 @@ import sys
 
 import ray
 
-from examples.train.callbacks.early_stopping import EarlyStopping
+from examples.train.callbacks.perplexity_logger import PerplexityLogger
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
     SFTConfig,
@@ -21,7 +21,7 @@ from skyrl.train.utils.utils import initialize_ray
 
 @ray.remote(num_cpus=1)
 def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
-    callbacks = [EarlyStopping(monitor="eval_loss", patience=3, mode="min")]
+    callbacks = [PerplexityLogger()]
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=callbacks)
     trainer.setup()
     trainer.train()

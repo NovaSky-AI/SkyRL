@@ -70,12 +70,10 @@ class TrainingControl:
 
     should_save: bool = False
     should_evaluate: bool = False
-    should_training_stop: bool = False
 
     def reset(self) -> None:
         self.should_save = False
         self.should_evaluate = False
-        self.should_training_stop = False
 
 
 class TrainingCallback:
