@@ -1,8 +1,17 @@
 """CPU test: callbacks fire end-to-end during a RayPPOTrainer training run.
 
+Runs 2 training steps (1 epoch over a 4-example dummy dataset, train_batch_size=2)
+with three callbacks registered:
+  * RecorderCallback — snapshots every event for sequence + payload assertions.
+  * ForceEvaluateAtStep — sets ``control.should_evaluate = True`` on the
+    on_step_end of step 1, exercising the callback-driven eval path. With
+    ``eval_interval=2`` step 1 would not normally eval, so any eval event
+    seen at step 1 comes from this callback.
+  * ForceSaveAtStep — sets ``control.should_save = True`` on the on_step_end
+    of step 2, exercising the callback-driven save path.
+
 Mocks generation, the inference engine, and the GPU-heavy worker methods so
-the test only exercises the orchestration in ``RayPPOTrainer.train()`` and
-asserts the callback event sequence.
+the test only exercises the orchestration in ``RayPPOTrainer.train()``.
 
 uv run --isolated --extra dev pytest tests/train/test_rl_callbacks.py -v
 """
@@ -97,6 +106,31 @@ class RecorderCallback(TrainingCallback):
         self._snap("on_log", ci)
 
 
+class ForceSaveAtStep(TrainingCallback):
+    """Sets ``control.should_save = True`` on on_step_end when the global step matches."""
+
+    def __init__(self, step: int):
+        self.step = step
+
+    def on_step_end(self, trainer, ci, control):
+        if ci.global_step == self.step:
+            control.should_save = True
+
+
+class ForceEvaluateAtStep(TrainingCallback):
+    """Sets ``control.should_evaluate = True`` on on_step_end when the global step matches."""
+
+    def __init__(self, step: int):
+        self.step = step
+
+    def on_step_end(self, trainer, ci, control):
+        if ci.global_step == self.step:
+            control.should_evaluate = True
+
+
+_FAKE_CKPT_PATH = "/fake/rl-callback-test/global_step_2"
+
+
 def _stub_training_input() -> TrainingInputBatch:
     """Minimal TrainingInputBatch that survives the keys the loop pops post-advantages."""
     batch = TrainingInputBatch(
@@ -121,10 +155,13 @@ def _stub_training_input() -> TrainingInputBatch:
 
 def _build_test_cfg():
     cfg = example_dummy_config()
-    # 1 epoch over a 1-step dataloader; eval fires once at step 1
+    # 1 epoch over a 2-batch dataloader -> 2 steps total.
     cfg.trainer.epochs = 1
-    cfg.trainer.eval_interval = 1
+    # eval_interval=2 means step 1 has no interval-driven eval; only the force-evaluate
+    # callback can trigger eval at step 1. Step 2 still gets an interval-driven eval.
+    cfg.trainer.eval_interval = 2
     cfg.trainer.eval_before_train = False
+    # ckpt_interval=0 means the callback-driven force-save is the only save path tested.
     cfg.trainer.ckpt_interval = 0
     cfg.trainer.hf_save_interval = 0
     cfg.trainer.ckpt_path = ""
@@ -144,7 +181,7 @@ def _build_test_cfg():
 
 
 def test_callbacks_fire_during_rl_training(monkeypatch):
-    """A 1-step PPO run dispatches every relevant callback with the right payload."""
+    """A 2-step PPO run fires every relevant event, in order, with the right payloads."""
     cfg = _build_test_cfg()
 
     tokenizer = MagicMock()
@@ -154,16 +191,18 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     tracker = MagicMock()
 
     recorder = RecorderCallback()
+    force_eval = ForceEvaluateAtStep(step=1)
+    force_save = ForceSaveAtStep(step=2)
     trainer = RayPPOTrainer(
         cfg=cfg,
         tracker=tracker,
         tokenizer=tokenizer,
-        # train_batch_size=2 (from example_dummy_config) -> need >=2 examples to get 1 batch
-        train_dataset=DummyDataset(size=2),
+        # train_batch_size=2 (from example_dummy_config) -> 4 examples gives 2 batches = 2 steps.
+        train_dataset=DummyDataset(size=4),
         eval_dataset=DummyDataset(size=2),
         inference_engine_client=None,
         generator=MagicMock(),
-        callbacks=[recorder],
+        callbacks=[recorder, force_eval, force_save],
     )
 
     # Replace dispatch (normally built by build_models). The loop awaits
@@ -175,9 +214,7 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     trainer.dispatch = dispatch_mock
 
     # Stub out GPU-heavy / generator-touching methods. The train() loop is
-    # mostly orchestration over these calls — replacing each one with a
-    # passthrough (or async stub) lets us exercise the callback firings
-    # without any workers / GPUs / network.
+    # mostly orchestration over these calls
     monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
     monkeypatch.setattr(
         trainer,
@@ -192,6 +229,10 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     monkeypatch.setattr(trainer, "compute_advantages_and_returns", lambda batch: batch)
     monkeypatch.setattr(trainer, "train_critic_and_policy", lambda batch: {"policy_loss": 0.42})
 
+    # Stub save_checkpoints so the callback-driven save doesn't touch disk.
+    # on_save still receives the fake path the stub returns.
+    monkeypatch.setattr(trainer, "save_checkpoints", lambda: _FAKE_CKPT_PATH)
+
     # prepare_generator_input has a heavy signature; bypass it via a
     # module-level patch so the trainer's call site gets back something
     # benign that the downstream (already-mocked) methods accept.
@@ -204,43 +245,68 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
 
     event_names = [name for name, _ in recorder.events]
 
+    # eval_interval=2 -> step 1 has no interval-driven eval, so on_eval_start/end
+    # at step 1 only appear because ForceEvaluateAtStep set should_evaluate.
+    # on_save at step 2 only appears because ForceSaveAtStep set should_save.
+    # Step 2's eval is interval-driven (last_step == total_training_steps).
     expected = [
         "on_train_start",
         "on_epoch_start",
+        # --- step 1 ---
         "on_step_start",
         "on_step_end",
-        "on_eval_start",
+        "on_eval_start",  # forced
         "on_eval_end",
         "on_log",
+        # --- step 2 ---
+        "on_step_start",
+        "on_step_end",
+        "on_save",  # forced
+        "on_eval_start",  # interval
+        "on_eval_end",
+        "on_log",
+        # --- epoch boundary + cleanup ---
         "on_epoch_end",
         "on_train_end",
     ]
     assert event_names == expected, f"unexpected event sequence: {event_names}"
 
-    snap_by_event = {name: snap for name, snap in recorder.events}
+    snaps_by_event: dict[str, list[dict]] = {}
+    for name, snap in recorder.events:
+        snaps_by_event.setdefault(name, []).append(snap)
 
-    # on_step_end carries the (mocked) batch + step metrics
-    step_end = snap_by_event["on_step_end"]
-    assert step_end["has_batch"], "on_step_end should see the training batch"
-    assert step_end["has_metrics"], "on_step_end should see step metrics"
-    assert "policy_loss" in step_end["metrics_keys"]
+    # Both step ends carry the (mocked) batch + step metrics
+    for snap in snaps_by_event["on_step_end"]:
+        assert snap["has_batch"], "on_step_end should see the training batch"
+        assert snap["has_metrics"], "on_step_end should see step metrics"
+        assert "policy_loss" in snap["metrics_keys"], snap["metrics_keys"]
 
-    # on_eval_end carries eval metrics
-    eval_end = snap_by_event["on_eval_end"]
-    assert eval_end["has_metrics"], "on_eval_end should see eval metrics"
-    assert "eval/score" in eval_end["metrics_keys"]
+    # Both eval ends carry eval metrics
+    for snap in snaps_by_event["on_eval_end"]:
+        assert snap["has_metrics"], "on_eval_end should see eval metrics"
+        assert "eval/score" in snap["metrics_keys"], snap["metrics_keys"]
 
-    # on_log carries the log dict the trainer is about to commit
-    log_snap = snap_by_event["on_log"]
-    assert log_snap["has_logs"], "on_log should see the log dict"
-    # the trainer always stamps trainer/epoch + trainer/global_step into log_payload
-    assert "trainer/epoch" in log_snap["logs_keys"]
-    assert "trainer/global_step" in log_snap["logs_keys"]
+    # Both on_log calls carry the standard trainer keys
+    for snap in snaps_by_event["on_log"]:
+        log_keys = snap["logs_keys"]
+        assert "trainer/epoch" in log_keys, log_keys
+        assert "trainer/global_step" in log_keys, log_keys
 
-    # No checkpoint configured -> on_save must not fire
-    assert "on_save" not in event_names
+    # on_save fired exactly once at step 2, with the fake ckpt path
+    assert len(snaps_by_event["on_save"]) == 1, snaps_by_event["on_save"]
+    save_snap = snaps_by_event["on_save"][0]
+    assert save_snap["global_step"] == 2, save_snap
+    assert save_snap["ckpt_path"] == _FAKE_CKPT_PATH, save_snap
+
+    # The step_end that triggered the force-save must come immediately before on_save
+    save_idx = event_names.index("on_save")
+    assert event_names[save_idx - 1] == "on_step_end"
+
+    # Two evals total: forced at step 1, interval at step 2.
+    eval_steps = [snap["global_step"] for snap in snaps_by_event["on_eval_end"]]
+    assert eval_steps == [1, 2], eval_steps
 
     # Loop metadata stays consistent across every event
     for name, snap in recorder.events:
-        assert snap["total_steps"] == 1, f"{name}: total_steps={snap['total_steps']}"
-        assert snap["steps_per_epoch"] == 1, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
+        assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
+        assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"

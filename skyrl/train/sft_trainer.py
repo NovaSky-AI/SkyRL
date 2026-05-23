@@ -702,7 +702,7 @@ class SFTTrainer:
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
-        # Callback infrastructure
+
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
         # Loop metadata used to build CallbackInput. Populated in train().
@@ -1422,6 +1422,11 @@ class SFTTrainer:
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
 
+        # Tracks whether the most recent in-loop iteration saved a checkpoint
+        # (either via the ckpt_interval or via a callback-driven ``should_save``).
+        # The post-loop safety-net save reads this to avoid double-saving.
+        did_save_last_step = False
+
         self._fire("on_train_start")
 
         # Baseline eval before training begins (logged at step 0).
@@ -1495,7 +1500,8 @@ class SFTTrainer:
                 and self.global_step > 0
                 and self.global_step % self.sft_cfg.ckpt_interval == 0
             )
-            if self.sft_cfg.ckpt_path and (force_save or interval_save):
+            did_save_last_step = force_save or interval_save
+            if did_save_last_step:
                 with Timer("save_checkpoint", all_timings):
                     ckpt_path = self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
@@ -1564,16 +1570,14 @@ class SFTTrainer:
             self._fire("on_epoch_end")
             epoch_in_progress = False
 
-        # Save final checkpoint (if checkpointing is enabled)
-        if self.sft_cfg.ckpt_path:
+        # Save final checkpoint (if checkpointing is enabled). Skip if the last
+        # in-loop iteration already saved (either via ckpt_interval or via a
+        # callback-driven force-save) so we don't double-save.
+        if self.sft_cfg.ckpt_path and not did_save_last_step:
             final_step = num_steps
-            already_saved = (
-                self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
-            )
-            if not already_saved:
-                logger.info(f"Saving final checkpoint at step {final_step}")
-                ckpt_path = self.save_checkpoint()
-                self._fire("on_save", ckpt_path=ckpt_path)
+            logger.info(f"Saving final checkpoint at step {final_step}")
+            ckpt_path = self.save_checkpoint()
+            self._fire("on_save", ckpt_path=ckpt_path)
 
         # Save final HF model if enabled (only if not already saved at last step)
         if self.sft_cfg.hf_save_interval > 0:

@@ -143,7 +143,6 @@ class RayPPOTrainer:
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
 
-        # Callback infrastructure
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
         self._current_epoch: int = 0
@@ -269,8 +268,8 @@ class RayPPOTrainer:
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             self._current_epoch = epoch
             self._fire("on_epoch_start")
-            # ``step_started`` tracks the on_step_start/on_step_end pairing across
-            # dynamic-sampling continues (which span multiple inner iterations
+            # ``step_started`` tracks the on_step_start/on_step_end pairing taking
+            # dynamic-sampling into account (which span multiple inner iterations
             # before completing a logical step).
             step_started = False
             for _, rand_prompts in enumerate(self.train_dataloader):
