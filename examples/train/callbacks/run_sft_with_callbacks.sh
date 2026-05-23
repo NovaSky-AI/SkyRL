@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-# SFT training with an EarlyStopping callback on eval_loss.
+# SFT training with a `PerplexityLogger` callback.
 #
 # Usage:
 #   bash examples/train/callbacks/run_sft_with_callbacks.sh [extra overrides...]
