@@ -1,7 +1,7 @@
 """Slack notifications for auto-train events.
 
 Uses the Slack Web API via SLACK_BOT_TOKEN. Channel from
-SLACK_AUTO_TRAIN_CHANNEL (defaults to #training-runs).
+SLACK_AUTO_TRAIN_CHANNEL (defaults to #fleet-training-runs).
 """
 
 from __future__ import annotations
@@ -48,44 +48,44 @@ def slack_notify(text: str, channel: Optional[str] = None) -> bool:
         return False
 
 
-def notify_launch(project_key: str, modality: str, task_count: int, s3_uri: str) -> None:
+def notify_launch(dataset_key: str, modality: str, task_count: int, s3_uri: str) -> None:
     slack_notify(
         f":rocket: Auto-launched training\n"
-        f"• project: `{project_key}`\n"
+        f"• dataset: `{dataset_key}`\n"
         f"• modality: `{modality}`\n"
         f"• tasks: {task_count}\n"
-        f"• dataset: `{s3_uri}`"
+        f"• s3: `{s3_uri}`"
     )
 
 
-def notify_smoke_failure(project_key: str, modality: str, report) -> None:
+def notify_smoke_failure(dataset_key: str, modality: str, report) -> None:
     failures = report.failures()
-    lines = [f"• `{r.env_key}` — {r.error}" for r in failures[:5]]
+    lines = [f"• `{r.env_key}`: {r.error}" for r in failures[:5]]
     if len(failures) > 5:
-        lines.append(f"• …and {len(failures) - 5} more")
+        lines.append(f"• ...and {len(failures) - 5} more")
     body = "\n".join(lines) if lines else "(no failure details)"
     slack_notify(
-        f":warning: Smoke test FAILED — NOT launching training\n"
-        f"• project: `{project_key}`\n"
+        f":warning: Smoke test FAILED, NOT launching training\n"
+        f"• dataset: `{dataset_key}`\n"
         f"• modality: `{modality}`\n"
         f"• {report.summary()}\n"
         f"Failed envs:\n{body}"
     )
 
 
-def notify_launch_failure(project_key: str, modality: str, reason: str) -> None:
+def notify_launch_failure(dataset_key: str, modality: str, reason: str) -> None:
     slack_notify(
         f":x: Training launch FAILED\n"
-        f"• project: `{project_key}`\n"
+        f"• dataset: `{dataset_key}`\n"
         f"• modality: `{modality}`\n"
         f"• reason: {reason}"
     )
 
 
-def notify_not_implemented(project_key: str, modality: str, env_count: int) -> None:
+def notify_not_implemented(dataset_key: str, modality: str, env_count: int) -> None:
     slack_notify(
         f":construction: Skipped unsupported modality\n"
-        f"• project: `{project_key}`\n"
+        f"• dataset: `{dataset_key}`\n"
         f"• modality: `{modality}` (no training YAML; {env_count} envs)\n"
         "Marked as processed; will not re-alert."
     )

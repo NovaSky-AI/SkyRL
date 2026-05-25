@@ -14,15 +14,15 @@ on:
         required: false
         default: "false"
       team_id:
-        description: "Filter projects by team_id (e.g. 042fd173-... for Fleet Research). Leave blank for all teams."
+        description: "Filter datasets by team_id (e.g. a1025f0b-... for fleet team, 042fd173-... for Fleet Research). Leave blank for all teams."
         required: false
         default: ""
-      max_projects:
-        description: "Cap number of projects processed this run (newest-first). 0 = unlimited."
+      max_datasets:
+        description: "Cap number of datasets processed this run (newest-first). 0 = unlimited."
         required: false
         default: "1"
       ignore_seed:
-        description: "Treat all matching projects as candidates (bypass seen/processed filters). Use for targeted testing."
+        description: "Treat all matching datasets as candidates (bypass seen/processed filters). For targeted testing."
         required: false
         default: "false"
       modality:
@@ -102,9 +102,9 @@ jobs:
           if [ -n "${{ github.event.inputs.modality }}" ]; then
             ARGS="$ARGS --modality ${{ github.event.inputs.modality }}"
           fi
-          MAX_P="${{ github.event.inputs.max_projects }}"
-          if [ -n "$MAX_P" ] && [ "$MAX_P" != "0" ]; then
-            ARGS="$ARGS --max-projects $MAX_P"
+          MAX_D="${{ github.event.inputs.max_datasets }}"
+          if [ -n "$MAX_D" ] && [ "$MAX_D" != "0" ]; then
+            ARGS="$ARGS --max-datasets $MAX_D"
           fi
           python -m integrations.fleet.auto_train trigger $ARGS
 

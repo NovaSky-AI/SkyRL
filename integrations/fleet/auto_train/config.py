@@ -7,7 +7,7 @@ SUPPORTED_MODALITIES: tuple[str, ...] = ("tool_use", "browser_use")
 # S3
 S3_DATASET_BUCKET = "fleet-internal-datasets"
 S3_STATE_KEY = ".auto_train_state.json"
-S3_DATASET_PATH_TEMPLATE = "{project_key}/openenv/all_{modality}.json"
+S3_DATASET_PATH_TEMPLATE = "{dataset_key}/openenv/all_{modality}.json"
 AWS_DEFAULT_REGION = "us-east-1"
 
 # Modality detection — the Supabase task_modality field is wrong for many

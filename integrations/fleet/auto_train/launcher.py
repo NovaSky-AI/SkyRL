@@ -21,14 +21,14 @@ def _repo_root() -> Path:
 
 
 def build_launch_command(
-    project_key: str,
+    dataset_key: str,
     modality: str,
     env_vars: dict[str, str],
     extra_sky_args: list[str] | None = None,
 ) -> list[str]:
     if modality not in SUPPORTED_MODALITIES:
         raise NotImplementedError(
-            f"modality {modality!r} not supported (project={project_key})"
+            f"modality {modality!r} not supported (dataset={dataset_key})"
         )
 
     root = _repo_root()
@@ -37,7 +37,7 @@ def build_launch_command(
 
     cmd: list[str] = [
         "bash", str(launch_script), str(yaml_path),
-        "--env", f"DATA_VERSION={project_key}",
+        "--env", f"DATA_VERSION={dataset_key}",
         "--env", f"MODALITY={modality}",
     ]
     for k, v in env_vars.items():
@@ -49,7 +49,7 @@ def build_launch_command(
 
 
 def launch_training(
-    project_key: str,
+    dataset_key: str,
     modality: str,
     dry_run: bool = False,
     extra_sky_args: list[str] | None = None,
@@ -61,7 +61,7 @@ def launch_training(
         return False
 
     env_vars = {k: os.environ.get(k, "") for k in REQUIRED_LAUNCH_ENV_VARS}
-    cmd = build_launch_command(project_key, modality, env_vars, extra_sky_args)
+    cmd = build_launch_command(dataset_key, modality, env_vars, extra_sky_args)
 
     if dry_run:
         # Redact credential values in dry-run output
@@ -82,13 +82,13 @@ def launch_training(
         logger.info("[DRY RUN] %s", " ".join(printable))
         return True
 
-    logger.info("Launching: %s/%s", project_key, modality)
+    logger.info("Launching: %s/%s", dataset_key, modality)
     result = subprocess.run(cmd, cwd=str(_repo_root()))
     if result.returncode != 0:
         logger.error(
             "fleet-launch.sh failed (exit=%d) for %s/%s",
-            result.returncode, project_key, modality,
+            result.returncode, dataset_key, modality,
         )
         return False
-    logger.info("fleet-launch.sh succeeded for %s/%s", project_key, modality)
+    logger.info("fleet-launch.sh succeeded for %s/%s", dataset_key, modality)
     return True

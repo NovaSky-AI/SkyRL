@@ -1,7 +1,7 @@
-"""Export project tasks → OpenEnv JSON → S3.
+"""Export dataset tasks, OpenEnv JSON, then S3.
 
 Mirrors fleet-research-scripts/training-data-pipeline/v6/export_s3.py but
-scoped to a single project + modality. Reads directly from Supabase.
+scoped to a single Fleet dataset + modality. Reads directly from Supabase.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .discovery import (
     _supabase_headers,
     _supabase_url,
     fetch_task_records,
-    get_project_task_ids,
+    get_dataset_task_ids,
     resolve_modality,
 )
 
@@ -87,13 +87,13 @@ def _fetch_verifier_code(
 
 
 def build_openenv_tasks(
-    client: httpx.Client, project_id: str, modality: str
+    client: httpx.Client, dataset_id: str, modality: str
 ) -> list[dict]:
-    """Return list of task dicts with OPENENV_FIELDS for the given project + modality."""
+    """Return list of task dicts with OPENENV_FIELDS for the given dataset + modality."""
     if modality not in SUPPORTED_MODALITIES:
         raise NotImplementedError(f"modality {modality!r} not supported")
 
-    task_ids = get_project_task_ids(client, project_id)
+    task_ids = get_dataset_task_ids(client, dataset_id)
     if not task_ids:
         return []
     records = fetch_task_records(client, task_ids)
@@ -182,36 +182,36 @@ def _s3_client():
 
 def export_to_s3(
     tasks: list[dict],
-    project_key: str,
+    dataset_key: str,
     modality: str,
     bucket: str = S3_DATASET_BUCKET,
 ) -> str:
-    """Upload tasks to s3://{bucket}/{project_key}/openenv/all_{modality}.json.
+    """Upload tasks to s3://{bucket}/{dataset_key}/openenv/all_{modality}.json.
 
     Returns the S3 URI.
     """
-    key = S3_DATASET_PATH_TEMPLATE.format(project_key=project_key, modality=modality)
+    key = S3_DATASET_PATH_TEMPLATE.format(dataset_key=dataset_key, modality=modality)
     payload = json.dumps({"tasks": tasks}, ensure_ascii=False).encode("utf-8")
     s3 = _s3_client()
     s3.put_object(Bucket=bucket, Key=key, Body=payload, ContentType="application/json")
     uri = f"s3://{bucket}/{key}"
-    logger.info("Uploaded %d tasks → %s (%d KB)", len(tasks), uri, len(payload) // 1024)
+    logger.info("Uploaded %d tasks to %s (%d KB)", len(tasks), uri, len(payload) // 1024)
     return uri
 
 
-def export_project(
+def export_dataset(
     client: httpx.Client,
-    project_id: str,
-    project_key: str,
+    dataset_id: str,
+    dataset_key: str,
     modality: str,
     bucket: str = S3_DATASET_BUCKET,
 ) -> tuple[str, int]:
-    """Full export flow: query tasks → build JSON → upload. Returns (s3_uri, task_count)."""
-    tasks = build_openenv_tasks(client, project_id, modality)
+    """Full export flow: query tasks, build JSON, upload. Returns (s3_uri, task_count)."""
+    tasks = build_openenv_tasks(client, dataset_id, modality)
     if not tasks:
         raise ValueError(
-            f"No exportable tasks for {project_key}/{modality} "
+            f"No exportable tasks for {dataset_key}/{modality} "
             "(check prompt/verifier coverage)"
         )
-    uri = export_to_s3(tasks, project_key, modality, bucket=bucket)
+    uri = export_to_s3(tasks, dataset_key, modality, bucket=bucket)
     return uri, len(tasks)

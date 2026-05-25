@@ -1,7 +1,11 @@
-"""Query Supabase for candidate dataset projects + resolve modalities.
+"""Query Supabase for candidate Fleet datasets + resolve modalities.
 
-Reads task_projects + eval_task_projects + eval_tasks. Mirrors the query
-patterns in fleet-research-scripts/training-data-pipeline/v6/export_s3.py.
+In the Fleet UI these are 'Datasets'. In Supabase they live in `task_projects`
+with a `project_key` column. We expose them as Dataset objects with
+`dataset_key` to match the UI; Supabase queries use the literal column names.
+
+Mirrors the query patterns in
+fleet-research-scripts/training-data-pipeline/v6/export_s3.py.
 """
 
 from __future__ import annotations
@@ -32,21 +36,22 @@ def _supabase_headers() -> dict:
 
 
 @dataclass
-class Project:
-    id: str
-    project_key: str
+class Dataset:
+    """A Fleet dataset (Supabase row from `task_projects`)."""
+    id: str                # task_projects.id (UUID)
+    dataset_key: str       # task_projects.project_key (the stable string identifier)
     name: str
     status: str
     team_id: str | None = None
     created_at: str | None = None
 
 
-def list_active_projects(
+def list_active_datasets(
     client: httpx.Client,
     team_id: str | None = None,
-) -> list[Project]:
-    """All active projects, optionally filtered by team_id. Sorted newest-first."""
-    out: list[Project] = []
+) -> list[Dataset]:
+    """All active Fleet datasets, optionally filtered by team_id. Sorted newest-first."""
+    out: list[Dataset] = []
     offset = 0
     while True:
         params = {
@@ -67,12 +72,12 @@ def list_active_projects(
         r.raise_for_status()
         rows = r.json()
         for row in rows:
-            pk = row.get("project_key") or row.get("name")
-            if not pk:
+            key = row.get("project_key") or row.get("name")
+            if not key:
                 continue
-            out.append(Project(
+            out.append(Dataset(
                 id=row["id"],
-                project_key=pk,
+                dataset_key=key,
                 name=row.get("name", ""),
                 status=row["status"],
                 team_id=row.get("team_id"),
@@ -81,12 +86,12 @@ def list_active_projects(
         if len(rows) < 1000:
             break
         offset += 1000
-    logger.info("Active projects: %d (team_id=%s)", len(out), team_id or "all")
+    logger.info("Active datasets: %d (team_id=%s)", len(out), team_id or "all")
     return out
 
 
-def get_project_task_ids(client: httpx.Client, project_id: str) -> list[str]:
-    """Task ids linked to a project via eval_task_projects."""
+def get_dataset_task_ids(client: httpx.Client, dataset_id: str) -> list[str]:
+    """Task ids linked to a dataset via eval_task_projects."""
     out: list[str] = []
     offset = 0
     while True:
@@ -94,7 +99,7 @@ def get_project_task_ids(client: httpx.Client, project_id: str) -> list[str]:
             f"{_supabase_url()}/rest/v1/eval_task_projects",
             params={
                 "select": "eval_task_id",
-                "project_id": f"eq.{project_id}",
+                "project_id": f"eq.{dataset_id}",
                 "offset": str(offset),
                 "limit": "1000",
             },
@@ -134,8 +139,8 @@ def resolve_modality(raw_modality: str | None, env_key: str | None) -> str | Non
 
     The Supabase task_modality field is unreliable: tasks marked 'computer_use'
     are actually 'browser_use' unless the env_key starts with 'fos-' (true
-    desktop). Returns None for unsupported modalities (real fos-* computer_use,
-    missing fields, etc.).
+    desktop). Returns None for unsupported modalities (excluded envs, missing
+    fields, etc.).
     """
     if not raw_modality or not env_key:
         return None
@@ -148,19 +153,19 @@ def resolve_modality(raw_modality: str | None, env_key: str | None) -> str | Non
         return "browser_use"
     if m == "computer_use":
         if env_key.startswith(COMPUTER_USE_ENV_PREFIX):
-            # real desktop computer_use — not supported yet
+            # real desktop computer_use, not supported yet
             return "computer_use"
         return "browser_use"
     return None
 
 
-def get_project_modalities(client: httpx.Client, project_id: str) -> dict[str, int]:
-    """Return effective modality -> task count for a project (after fos-* override).
+def get_dataset_modalities(client: httpx.Client, dataset_id: str) -> dict[str, int]:
+    """Return effective modality -> task count for a dataset (after fos-* override).
 
     Includes 'computer_use' if any real fos-* tasks exist (so the caller can
-    detect + raise NotImplementedError).
+    detect and raise NotImplementedError).
     """
-    task_ids = get_project_task_ids(client, project_id)
+    task_ids = get_dataset_task_ids(client, dataset_id)
     if not task_ids:
         return {}
     records = fetch_task_records(client, task_ids)
@@ -171,5 +176,3 @@ def get_project_modalities(client: httpx.Client, project_id: str) -> dict[str, i
             continue
         counts[m] += 1
     return dict(counts)
-
-

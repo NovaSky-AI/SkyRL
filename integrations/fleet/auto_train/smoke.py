@@ -35,9 +35,9 @@ class SmokeResult:
 
 @dataclass
 class SmokeReport:
-    project_key: str
+    dataset_key: str
     modality: str
-    total_envs_in_project: int
+    total_envs_in_dataset: int
     sampled_envs: int
     results: list[SmokeResult] = field(default_factory=list)
 
@@ -47,7 +47,7 @@ class SmokeReport:
 
     def summary(self) -> str:
         ok = sum(1 for r in self.results if r.success)
-        return f"{ok}/{len(self.results)} envs ok (of {self.total_envs_in_project} envs in project)"
+        return f"{ok}/{len(self.results)} envs ok (of {self.total_envs_in_dataset} envs in dataset)"
 
     def failures(self) -> list[SmokeResult]:
         return [r for r in self.results if not r.success]
@@ -140,7 +140,7 @@ def _provision_one(
 def run_smoke_test(
     tasks: list[dict],
     modality: str,
-    project_key: str,
+    dataset_key: str,
     api_key: str,
     sample_envs: int = SMOKE_SAMPLE_ENVS,
 ) -> SmokeReport:
@@ -151,27 +151,27 @@ def run_smoke_test(
     """
     if modality not in SUPPORTED_MODALITIES:
         raise NotImplementedError(
-            f"Modality {modality!r} not supported (project={project_key}). "
+            f"Modality {modality!r} not supported (dataset={dataset_key}). "
             f"Supported: {SUPPORTED_MODALITIES}"
         )
 
     unique_envs = {t.get("env_key") for t in tasks if t.get("env_key")}
     report = SmokeReport(
-        project_key=project_key,
+        dataset_key=dataset_key,
         modality=modality,
-        total_envs_in_project=len(unique_envs),
+        total_envs_in_dataset=len(unique_envs),
         sampled_envs=0,
     )
 
     sampled = _sample_env_keys(tasks, n=sample_envs)
     report.sampled_envs = len(sampled)
     if not sampled:
-        logger.warning("No sampleable envs for %s/%s", project_key, modality)
+        logger.warning("No sampleable envs for %s/%s", dataset_key, modality)
         return report
 
     for env_key, env_version in sampled:
         result = _provision_one(api_key, env_key, env_version)
         report.results.append(result)
 
-    logger.info("smoke %s/%s: %s", project_key, modality, report.summary())
+    logger.info("smoke %s/%s: %s", dataset_key, modality, report.summary())
     return report
