@@ -71,20 +71,32 @@ jobs:
       - name: Set up gcloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Write sky + RunPod config
+      - name: Write sky + RunPod + Slurm config
         env:
           SKY_CONFIG_YAML: ${{ secrets.SKY_CONFIG_YAML }}
           RUNPOD_SSH_KEY: ${{ secrets.RUNPOD_SSH_KEY }}
+          RUNPOD_CONFIG_TOML: ${{ secrets.RUNPOD_CONFIG_TOML }}
+          SLURM_CONFIG: ${{ secrets.SLURM_CONFIG }}
+          SSH_ID_ED25519: ${{ secrets.SSH_ID_ED25519 }}
         run: |
-          mkdir -p ~/.sky ~/.ssh
+          mkdir -p ~/.sky ~/.ssh ~/.runpod ~/.slurm
+          # SkyPilot user config (allowed_clouds, slurm cluster_configs)
           printf '%s\n' "$SKY_CONFIG_YAML" > ~/.sky/config.yaml
+          # RunPod CLI / SkyPilot RunPod provider creds
+          printf '%s\n' "$RUNPOD_CONFIG_TOML" > ~/.runpod/config.toml
+          # SkyPilot Slurm provider: SSH-style hostnames for each cluster
+          printf '%s\n' "$SLURM_CONFIG" > ~/.slurm/config
+          # SSH private keys referenced by ~/.slurm/config (id_ed25519 for the
+          # y8puzql cluster; the other cluster uses runpod_key).
+          printf '%s\n' "$SSH_ID_ED25519" > ~/.ssh/id_ed25519
           printf '%s\n' "$RUNPOD_SSH_KEY" > ~/.ssh/runpod_key
-          chmod 600 ~/.ssh/runpod_key
-          # Match how the local config expects to find it. Some Slurm providers
-          # look for ~/.ssh/runpod (the runpodctl-style file). Reuse the same key.
-          cp ~/.ssh/runpod_key ~/.ssh/runpod
-          chmod 600 ~/.ssh/runpod
-          echo "Wrote ~/.sky/config.yaml ($(wc -c < ~/.sky/config.yaml) bytes)"
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/runpod_key
+          echo "Wrote configs:"
+          echo "  ~/.sky/config.yaml      ($(wc -c < ~/.sky/config.yaml) bytes)"
+          echo "  ~/.runpod/config.toml   ($(wc -c < ~/.runpod/config.toml) bytes)"
+          echo "  ~/.slurm/config         ($(wc -c < ~/.slurm/config) bytes)"
+          echo "  ~/.ssh/id_ed25519       ($(wc -c < ~/.ssh/id_ed25519) bytes, mode $(stat -c %a ~/.ssh/id_ed25519))"
+          echo "  ~/.ssh/runpod_key       ($(wc -c < ~/.ssh/runpod_key) bytes, mode $(stat -c %a ~/.ssh/runpod_key))"
 
       - name: Verify sky check
         env:
