@@ -1,0 +1,117 @@
+name: auto-train
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no S3 writes, no sky launch)"
+        required: false
+        default: "false"
+      skip_smoke:
+        description: "Skip env smoke test"
+        required: false
+        default: "false"
+      team_id:
+        description: "Filter projects by team_id (e.g. 042fd173-... for Fleet Research). Leave blank for all teams."
+        required: false
+        default: ""
+      max_projects:
+        description: "Cap number of projects processed this run (newest-first). 0 = unlimited."
+        required: false
+        default: "1"
+      ignore_seed:
+        description: "Treat all matching projects as candidates (bypass seen/processed filters). Use for targeted testing."
+        required: false
+        default: "false"
+      modality:
+        description: "Filter to one modality (tool_use or browser_use). Leave blank for both."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-train
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "boto3>=1.34" \
+            "botocore>=1.34" \
+            "httpx>=0.27" \
+            "fleet-python<=0.2.119" \
+            "skypilot[gcp]>=0.7.0"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify sky check
+        run: sky check gcp
+
+      - name: Run auto-train trigger
+        env:
+          FLEET_API_KEY: ${{ secrets.FLEET_API_KEY }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_AUTO_TRAIN_CHANNEL: "#fleet-training-runs"
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ github.event.inputs.skip_smoke }}" = "true" ]; then
+            ARGS="$ARGS --skip-smoke"
+          fi
+          if [ "${{ github.event.inputs.ignore_seed }}" = "true" ]; then
+            ARGS="$ARGS --ignore-seed"
+          fi
+          if [ -n "${{ github.event.inputs.team_id }}" ]; then
+            ARGS="$ARGS --team-id ${{ github.event.inputs.team_id }}"
+          fi
+          if [ -n "${{ github.event.inputs.modality }}" ]; then
+            ARGS="$ARGS --modality ${{ github.event.inputs.modality }}"
+          fi
+          MAX_P="${{ github.event.inputs.max_projects }}"
+          if [ -n "$MAX_P" ] && [ "$MAX_P" != "0" ]; then
+            ARGS="$ARGS --max-projects $MAX_P"
+          fi
+          python -m integrations.fleet.auto_train trigger $ARGS
+
+      - name: Print state on completion
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: python -m integrations.fleet.auto_train status || true
