@@ -168,10 +168,15 @@ class MegatronConfig(BaseConfig):
     # MoE runtime configuration flags
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
+    """Set to "aux_loss", "seq_aux_loss", or "global_aux_loss" to enable aux loss-based load balancing and logging."""
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
     moe_enable_routing_replay: bool = False
+    moe_per_layer_logging: bool = False
+    """Enable per-layer logging of MoE metrics (i.e. per layer aux losses)."""
+    moe_router_dtype: str = "fp32"
+    """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
