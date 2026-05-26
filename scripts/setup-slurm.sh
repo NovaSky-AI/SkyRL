@@ -14,7 +14,7 @@
 set -euo pipefail
 
 RUNPOD_CLUSTER_NAME="runpod-cluster-y8puzql3juawue"
-RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+RUNPOD_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/runpod_key}"
 if [ ! -f "$RUNPOD_KEY" ]; then
   echo "ERROR: $RUNPOD_KEY not found."
   echo "Save your RunPod private key as ~/.ssh/runpod_key"
