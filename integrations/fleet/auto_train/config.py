@@ -43,6 +43,12 @@ SMOKE_SAMPLE_ENVS = 2
 SMOKE_TTL_SECONDS = 300
 SMOKE_RETRIES = 3
 
+# Minimum task count for an auto-launch. Datasets below this fail with
+# "dataset should be at least as large as train_batch_size" once training
+# starts. SkyRL train_batch_size defaults to 16, and the 20% eval split
+# pulls capacity out of train. 50 gives a reasonable margin.
+MIN_TASKS_TO_LAUNCH = 50
+
 # Slack
 SLACK_CHANNEL_DEFAULT = "#fleet-training-runs"
 

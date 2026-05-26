@@ -15,7 +15,7 @@ import sys
 
 import httpx
 
-from .config import SUPPORTED_MODALITIES
+from .config import MIN_TASKS_TO_LAUNCH, SUPPORTED_MODALITIES
 from .discovery import (
     get_dataset_modalities,
     list_active_datasets,
@@ -23,6 +23,7 @@ from .discovery import (
 from .exporter import build_openenv_tasks, export_to_s3
 from .launcher import launch_training
 from .notify import (
+    notify_below_threshold,
     notify_launch,
     notify_launch_failure,
     notify_not_implemented,
@@ -105,6 +106,18 @@ def _process_one(
         return 1
     if not tasks:
         logger.warning("No exportable tasks for %s/%s; skipping", dataset_key, modality)
+        state.mark_processed(dataset_key, modality)
+        return 0
+
+    # Minimum-tasks gate. Datasets below threshold will fail training with
+    # "dataset should be at least as large as train_batch_size" regardless of
+    # smoke result. Slack-alert and skip rather than burn a cluster.
+    if len(tasks) < MIN_TASKS_TO_LAUNCH:
+        logger.warning(
+            "Skipping %s/%s: %d tasks < %d threshold",
+            dataset_key, modality, len(tasks), MIN_TASKS_TO_LAUNCH,
+        )
+        notify_below_threshold(dataset_key, modality, len(tasks), MIN_TASKS_TO_LAUNCH)
         state.mark_processed(dataset_key, modality)
         return 0
 

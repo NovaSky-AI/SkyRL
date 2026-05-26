@@ -89,3 +89,13 @@ def notify_not_implemented(dataset_key: str, modality: str, env_count: int) -> N
         f"• modality: `{modality}` (no training YAML; {env_count} envs)\n"
         "Marked as processed; will not re-alert."
     )
+
+
+def notify_below_threshold(dataset_key: str, modality: str, task_count: int, threshold: int) -> None:
+    slack_notify(
+        f":no_entry: Skipped: too few tasks to train\n"
+        f"• dataset: `{dataset_key}`\n"
+        f"• modality: `{modality}`\n"
+        f"• tasks: {task_count} (min: {threshold})\n"
+        "Marked as processed; will not re-alert."
+    )
