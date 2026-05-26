@@ -675,6 +675,8 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    tags: Optional[List[str]] = None
+    """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
