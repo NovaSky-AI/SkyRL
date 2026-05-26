@@ -169,6 +169,8 @@ class MegatronConfig(BaseConfig):
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
     """Set to "aux_loss", "seq_aux_loss", or "global_aux_loss" to enable aux loss-based load balancing and logging."""
+    moe_aux_loss_coeff: int = 0
+    """Scaling coefficient for the moe load balancing loss if moe_router_load_balancing_type is not 'none'. Will disable aux loss in megatron-core if set to 0."""
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
@@ -192,6 +194,14 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+
+    def __post_init__(self):
+        # Backfill defaults for any keys the user didn't override so an override dict
+        # doesn't have to repeat every default just to set one value.
+        for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
+            self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
+        for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
+            self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
 
 # ---------------------------------------------------------------------------
