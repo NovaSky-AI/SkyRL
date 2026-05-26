@@ -1029,10 +1029,14 @@ class RayPPOTrainer:
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
 
+            logprobs_diff_max = logprobs_diff.max().item()
+            logprobs_diff_min = logprobs_diff.min().item()
             logprobs_diff_mean = logprobs_diff.mean().item()
             logprobs_diff_std = logprobs_diff.std().item()
             self.all_metrics.update(
                 {
+                    "policy/rollout_train_logprobs_abs_diff_max": logprobs_diff_max,
+                    "policy/rollout_train_logprobs_abs_diff_min": logprobs_diff_min,
                     "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
                     "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
                 }
