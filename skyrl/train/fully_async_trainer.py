@@ -595,8 +595,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 slot_acquired = False
         except asyncio.CancelledError:
             if "slot_acquired" in locals() and slot_acquired:
-                logger.warning("Generation worker cancelled while slot was acquired. Releasing slot.")
-                await self._staleness_manager.on_rollout_rejected()
+                logger.error("Generation worker cancelled mid-flight (slot acquired). Exiting.")
+                os._exit(1)
             return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
