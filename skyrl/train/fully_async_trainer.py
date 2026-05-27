@@ -289,12 +289,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         super().__init__(*args, **kwargs)
 
         # Callbacks aren't wired into FullyAsyncRayPPOTrainer.train() yet — fail
-        # fast rather than silently dropping events
+        # fast
         if self._callback_handler.callbacks:
-            raise NotImplementedError(
-                "Callbacks are not yet supported by FullyAsyncRayPPOTrainer. "
-                "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
-            )
+            raise NotImplementedError("Callbacks are not yet supported by FullyAsyncRayPPOTrainer. ")
 
         # Some async-specific validations
         assert (
