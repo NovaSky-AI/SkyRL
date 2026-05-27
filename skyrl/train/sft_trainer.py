@@ -1409,8 +1409,8 @@ class SFTTrainer:
             rng.shuffle(tokenized)
         current_epoch = start_epoch
 
-        # SkyRL starts counting at step 1
-        self.global_step = start_step + 1 if start_step > 0 else 1
+        # Initialize `global_step`
+        self.global_step = start_step
 
         # Publish loop metadata so CallbackInput can be built consistently.
         self._total_steps = num_steps
@@ -1444,6 +1444,8 @@ class SFTTrainer:
                 f"over {num_eval_batches} batches"
             )
 
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
         self._fire("on_epoch_start")
         epoch_in_progress = True
 
