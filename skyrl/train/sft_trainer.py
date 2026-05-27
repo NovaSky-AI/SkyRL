@@ -1559,7 +1559,7 @@ class SFTTrainer:
         self.global_step = min(self.global_step, num_steps)
 
         # Pair the leading on_epoch_start: fire on_epoch_end if we exited the
-        # loop mid-epoch (early stop, or natural end without a boundary cross).
+        # loop mid-epoch
         if epoch_in_progress:
             self._fire("on_epoch_end")
             epoch_in_progress = False

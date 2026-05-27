@@ -18,8 +18,8 @@ Every event method receives the same three arguments:
                         (``batch``, ``metrics``, ``logs``, ``ckpt_path``) are
                         populated only when relevant to the firing event.
 * ``control``         - a mutable :class:`TrainingControl`. Callbacks set its
-                        flags to request a save, an eval, or a training stop;
-                        the trainer honors and resets them.
+                        flags to request a save or an eval; the trainer honors
+                        and resets them.
 """
 
 from __future__ import annotations
@@ -64,8 +64,12 @@ class CallbackInput:
 class TrainingControl:
     """Mutable flags callbacks can set to influence the trainer.
 
-    The trainer inspects these after each callback dispatch and resets them
-    after honoring.
+    The trainer reads these once per step — right after ``on_step_end`` — then
+    honors and resets them. As a result, flags are only acted on for the
+    *current* step when set during ``on_step_end`` (or earlier in the same
+    step). Setting a flag from a later event in the same step (``on_eval_end``,
+    ``on_save``, ``on_log``) takes effect on the *next* step's read, so prefer
+    setting control flags from ``on_step_end``.
     """
 
     should_save: bool = False
@@ -79,34 +83,35 @@ class TrainingControl:
 class TrainingCallback:
     """Base class. Subclass and override the events you care about."""
 
-    def on_train_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
-    def on_train_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
+    def on_train_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires once before the training loop begins (after checkpoint resume)."""
 
-    def on_epoch_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
-    def on_epoch_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
+    def on_train_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires once after the training loop and all final saves/eval complete."""
 
-    def on_step_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
-    def on_step_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
+    def on_epoch_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires at the start of each epoch."""
 
-    def on_eval_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
-    def on_eval_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
+    def on_epoch_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires at the end of each epoch."""
 
-    def on_save(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
-    def on_log(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None: ...
+    def on_step_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires before each training step. ``callback_input.batch`` is populated."""
 
+    def on_step_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires after each training step. ``callback_input.batch`` and ``.metrics`` are populated."""
 
-_EVENTS = (
-    "on_train_start",
-    "on_train_end",
-    "on_epoch_start",
-    "on_epoch_end",
-    "on_step_start",
-    "on_step_end",
-    "on_eval_start",
-    "on_eval_end",
-    "on_save",
-    "on_log",
-)
+    def on_eval_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires before an evaluation pass."""
+
+    def on_eval_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires after an evaluation pass. ``callback_input.metrics`` holds the eval metrics."""
+
+    def on_save(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires after a checkpoint is written. ``callback_input.ckpt_path`` is the folder path."""
+
+    def on_log(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        """Fires before metrics are committed to the tracker. Mutate ``callback_input.logs`` to add fields."""
 
 
 class CallbackHandler(TrainingCallback):
@@ -126,14 +131,32 @@ class CallbackHandler(TrainingCallback):
         for cb in self.callbacks:
             getattr(cb, name)(trainer, callback_input, control)
 
+    def on_train_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_train_start", trainer, callback_input, control)
 
-def _make_dispatch_method(event_name: str):
-    def _event(self: CallbackHandler, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
-        self._dispatch(event_name, trainer, callback_input, control)
+    def on_train_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_train_end", trainer, callback_input, control)
 
-    _event.__name__ = event_name
-    return _event
+    def on_epoch_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_epoch_start", trainer, callback_input, control)
 
+    def on_epoch_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_epoch_end", trainer, callback_input, control)
 
-for _event_name in _EVENTS:
-    setattr(CallbackHandler, _event_name, _make_dispatch_method(_event_name))
+    def on_step_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_step_start", trainer, callback_input, control)
+
+    def on_step_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_step_end", trainer, callback_input, control)
+
+    def on_eval_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_eval_start", trainer, callback_input, control)
+
+    def on_eval_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_eval_end", trainer, callback_input, control)
+
+    def on_save(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_save", trainer, callback_input, control)
+
+    def on_log(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        self._dispatch("on_log", trainer, callback_input, control)

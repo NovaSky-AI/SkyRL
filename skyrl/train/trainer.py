@@ -243,7 +243,7 @@ class RayPPOTrainer:
         self._fire("on_train_start")
 
         # Eval before training. Wrapped in eval callbacks + on_log so that e.g.
-        # EarlyStopping or best-checkpoint callbacks see the baseline reading.
+        # a best-checkpoint callback sees the baseline reading.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             self._fire("on_eval_start")
             with Timer("eval", self.all_timings):

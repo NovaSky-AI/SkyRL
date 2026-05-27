@@ -35,5 +35,5 @@ uv run --isolated --extra fsdp \
     logger=console \
     project_name=skyrl_sft_callbacks \
     run_name=skyrl_sft_callbacks_run \
-    ckpt_path="" \
+    ckpt_interval=0 \
     "$@"
