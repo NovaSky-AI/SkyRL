@@ -80,7 +80,7 @@ run: |
       trainer.algorithm.advantage_estimator="grpo" \
       trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
       trainer.placement.colocate_all=true \
-      trainer.strategy=fsdp2 \
+      trainer.strategy=fsdp \
       trainer.placement.policy_num_gpus_per_node="$SKYPILOT_NUM_GPUS_PER_NODE" \
       trainer.placement.ref_num_gpus_per_node="$SKYPILOT_NUM_GPUS_PER_NODE" \
       trainer.placement.ref_num_nodes="$SKYPILOT_NUM_NODES" \

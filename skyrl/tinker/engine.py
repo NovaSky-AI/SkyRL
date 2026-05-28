@@ -17,6 +17,7 @@ from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
+    EngineStateDB,
     FutureDB,
     ModelDB,
     RequestStatus,
@@ -161,12 +162,18 @@ def prepare_model_pass_batch(
     )
 
 
-def get_backend_classes(backend_name: str):
+def get_backend_classes(backend_name: str, use_ray: bool = False):
     """Lazy import backends to avoid importing unused backend dependencies (e.g., JAX, Ray)."""
     if backend_name == "jax":
-        from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+        if use_ray:
+            from skyrl.backends.jax import JaxBackendConfig
+            from skyrl.backends.ray_jax import RayJaxBackend
 
-        return JaxBackend, JaxBackendConfig
+            return RayJaxBackend, JaxBackendConfig
+        else:
+            from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+
+            return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
         from skyrl.backends.skyrl_train_backend import (
             FSDPBackendOverrides,
@@ -242,9 +249,17 @@ class TinkerEngine:
         enable_sqlite_wal(self.db_engine)
 
         # Initialize the backend (handles model state, computation, and adapter management)
-        backend_class, backend_config_class = get_backend_classes(config.backend)
+        use_ray = config.backend_config.get("use_ray", False)
+        backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
+
+        # Backends that support async sample routing notify us when their
+        # inference endpoint changes; we persist it to EngineStateDB so the
+        # API process can forward sample requests directly. Backends stay
+        # DB-free; only the engine owns the connection.
+        if hasattr(self.backend, "set_inference_state_publisher"):
+            self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
@@ -255,6 +270,20 @@ class TinkerEngine:
     def metrics(self) -> types.EngineMetrics:
         """Pass-through to backend metrics for backwards compatibility."""
         return self.backend.metrics
+
+    def _write_inference_state_to_db(self, proxy_url: str | None) -> None:
+        """Upsert the singleton EngineStateDB row.
+
+        Wired into the backend via set_inference_state_publisher so the API
+        process can resolve the engine-managed vLLM URL on the async sample
+        routing path. ``proxy_url=None`` clears the row (post-teardown).
+        """
+        with Session(self.db_engine) as session:
+            row = session.get(EngineStateDB, 1) or EngineStateDB(singleton_id=1)
+            row.inference_proxy_url = proxy_url
+            row.updated_at = datetime.now(timezone.utc)
+            session.add(row)
+            session.commit()
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):

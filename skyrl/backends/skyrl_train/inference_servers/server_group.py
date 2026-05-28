@@ -11,6 +11,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
+    SERVER_PORT_STRIDE,
     ServerInfo,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
@@ -184,7 +185,7 @@ class ServerGroup:
 
             actor = ServerActorClass.remote(
                 self._cli_args,
-                self._start_port + server_idx,
+                self._start_port + server_idx * SERVER_PORT_STRIDE,
                 server_idx=server_idx,
                 bundle_indices=bundle_indices,
                 dp_size=self._num_servers if self._enable_dp else -1,

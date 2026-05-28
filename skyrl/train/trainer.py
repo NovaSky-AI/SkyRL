@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
@@ -66,7 +67,14 @@ from skyrl.train.utils import (
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
+from skyrl.train.utils.callbacks import (
+    CallbackHandler,
+    CallbackInput,
+    TrainingCallback,
+    TrainingControl,
+)
 from skyrl.train.utils.logging_utils import log_example
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -81,6 +89,7 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
 class RayPPOTrainer:
@@ -94,6 +103,7 @@ class RayPPOTrainer:
         generator: GeneratorInterface,
         colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
+        callbacks: Optional[List[TrainingCallback]] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
@@ -118,6 +128,12 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.global_step = 0
 
+        self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
+            VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
+        )
+
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
+
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
         self.critic_model: Optional[PPORayActorGroup] = None
@@ -129,7 +145,37 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
+
+        self._callback_handler = CallbackHandler(callbacks)
+        self._training_control = TrainingControl()
+        self._current_epoch: int = 0
+
         configure_ray_worker_logging()
+
+        self._num_training_gpus = (
+            cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        )
+
+    def add_callback(self, callback: TrainingCallback) -> None:
+        """Register a callback. Events fired after this call reach the new callback."""
+        self._callback_handler.add(callback)
+
+    def _build_callback_input(self, **fields) -> CallbackInput:
+        """Snapshot loop counters + per-event fields into a CallbackInput."""
+        steps_per_epoch = len(self.train_dataloader) if self.train_dataloader is not None else 0
+        total_steps = self.total_training_steps or 0
+        return CallbackInput(
+            global_step=self.global_step,
+            epoch=self._current_epoch,
+            total_steps=total_steps,
+            steps_per_epoch=steps_per_epoch,
+            **fields,
+        )
+
+    def _fire(self, event_name: str, **fields) -> None:
+        """Build a CallbackInput and dispatch the given event to all callbacks."""
+        cb_input = self._build_callback_input(**fields)
+        getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
     @property
     def has_critic(self) -> bool:
@@ -182,6 +228,9 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
@@ -195,11 +244,23 @@ class RayPPOTrainer:
         with Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
-        # Eval before training
+        # Compute start_epoch up-front so callback metadata is ready before
+        # any event fires (including the baseline eval below).
+        start_epoch = self.global_step // len(self.train_dataloader)
+        self._current_epoch = start_epoch
+        self._training_control.reset()
+
+        self._fire("on_train_start")
+
+        # Eval before training. Wrapped in eval callbacks + on_log so that e.g.
+        # a best-checkpoint callback sees the baseline reading.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+            self._fire("on_eval_start")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+            self._fire("on_eval_end", metrics=eval_metrics)
+            self._fire("on_log", logs=eval_metrics)
+            self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -207,10 +268,23 @@ class RayPPOTrainer:
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
+
+        # booleans tracking whether we save ckpts
+        # as well as hf model at step end
+        will_save_ckpts = False
+        hf_model_save = False
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
+            self._current_epoch = epoch
+            self._fire("on_epoch_start")
+            # ``step_started`` tracks the on_step_start/on_step_end pairing taking
+            # dynamic-sampling into account (which span multiple inner iterations
+            # before completing a logical step).
+            step_started = False
             for _, rand_prompts in enumerate(self.train_dataloader):
+                if not step_started:
+                    self._fire("on_step_start")
+                    step_started = True
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -295,16 +369,31 @@ class RayPPOTrainer:
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
+                    self._fire("on_step_end", batch=training_input, metrics=status)
+                    step_started = False
+
+                    # Capture callback-driven triggers, then reset.
+                    force_save = self._training_control.should_save
+                    force_eval = self._training_control.should_evaluate
+                    self._training_control.should_save = False
+                    self._training_control.should_evaluate = False
+
                     # 8. conditionally save checkpoints and hf model
                     is_epoch_end = self.global_step % len(self.train_dataloader) == 0
-                    if self.cfg.trainer.ckpt_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                            with Timer("save_checkpoints", self.all_timings):
-                                self.save_checkpoints()
-                    if self.cfg.trainer.hf_save_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                            with Timer("save_hf_model", self.all_timings):
-                                self.save_models()
+                    hf_model_save = self.cfg.trainer.hf_save_interval > 0 and (
+                        is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                    )
+                    ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+                        is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
+                    )
+                    will_save_ckpts = force_save or ckpt_interval_save
+                    if will_save_ckpts:
+                        with Timer("save_checkpoints", self.all_timings):
+                            ckpt_path = self.save_checkpoints()
+                        self._fire("on_save", ckpt_path=ckpt_path)
+                    if hf_model_save:
+                        with Timer("save_hf_model", self.all_timings):
+                            self.save_models()
 
                     # 9. conditionally sync policy and ref at the end of the epoch
                     if (
@@ -322,20 +411,38 @@ class RayPPOTrainer:
 
                 # 11. set logs
                 logger.info(status)
+                # Throughput metrics
+                train_time = self.all_timings.get("train_critic_and_policy", 0.0)
+                if train_time > 0 and training_input.get("attention_mask") is not None:
+                    total_tokens = int(training_input["attention_mask"].sum().item())
+                    self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
+                        train_time * self._num_training_gpus
+                    )
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                if self.cfg.trainer.eval_interval > 0 and (
+                interval_eval = self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
-                ):
+                )
+                if force_eval or interval_eval:
+                    self._fire("on_eval_start")
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
+                    self._fire("on_eval_end", metrics=eval_metrics)
 
                 log_payload = {
                     **self.all_metrics,
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
+                if self._vllm_metrics_scraper is not None:
+                    log_payload.update(await self._vllm_metrics_scraper.sample())
+
+                if self._ray_gpu_monitor is not None:
+                    log_payload.update(self._ray_gpu_monitor.flush())
+
+                self._fire("on_log", logs=log_payload)
+
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 self.all_timings = {}
@@ -347,19 +454,35 @@ class RayPPOTrainer:
 
                 del training_input, generator_output
 
+            self._fire("on_epoch_end")
+
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
 
+        # Decrement global step by 1 to stop at the last global step
+        # We use the global step value in callbacks when training finishes,
+        # as well as for a final checkpoint save
+        self.global_step -= 1
+
         # Safety net: always save final checkpoint at end of training.
-        if self.cfg.trainer.ckpt_interval > 0:
+        # Skip if we already saved at the last step
+        if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
             with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
+                ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
-        if self.cfg.trainer.hf_save_interval > 0:
+            self._fire("on_save", ckpt_path=ckpt_path)
+        if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.aclose()
+
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
+
+        self._fire("on_train_end")
         self.tracker.finish()
         logger.info("Training done!")
 
@@ -986,17 +1109,17 @@ class RayPPOTrainer:
         # Critic forward (dispatch handles offload/backload automatically)
         if self.has_critic:
             critic_output = self.dispatch.forward("critic", data_fwd_pass)
-            values = critic_output["output"]
+            values = loss_fn_outputs_to_tensor(critic_output.loss_fn_outputs, key="values")
 
         # Ref forward
         if self.ref_model is not None:
             ref_output = self.dispatch.forward("ref", data_fwd_pass)
-            base_log_probs = ref_output["output"]
+            base_log_probs = loss_fn_outputs_to_tensor(ref_output.loss_fn_outputs, key="logprobs")
             self.dispatch.empty_cache("ref")
 
         # Policy forward
         policy_output = self.dispatch.forward("policy", data_fwd_pass)
-        action_log_probs = policy_output["output"]
+        action_log_probs = loss_fn_outputs_to_tensor(policy_output.loss_fn_outputs, key="logprobs")
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()
@@ -1019,10 +1142,14 @@ class RayPPOTrainer:
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
 
+            logprobs_diff_max = logprobs_diff.max().item()
+            logprobs_diff_min = logprobs_diff.min().item()
             logprobs_diff_mean = logprobs_diff.mean().item()
             logprobs_diff_std = logprobs_diff.std().item()
             self.all_metrics.update(
                 {
+                    "policy/rollout_train_logprobs_abs_diff_max": logprobs_diff_max,
+                    "policy/rollout_train_logprobs_abs_diff_min": logprobs_diff_min,
                     "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
                     "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
                 }
@@ -1151,7 +1278,7 @@ class RayPPOTrainer:
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
                 status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
-                for k, v in status.items():
+                for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
@@ -1160,8 +1287,6 @@ class RayPPOTrainer:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
-        # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
-        all_metrics.pop("loss_fn_outputs", None)
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
         return reduced_metrics
 
@@ -1264,9 +1389,10 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> str:
         """
-        Save the model, optimizer, and training states to disk.
+        Save the model, optimizer, and training states to disk. Returns the
+        checkpoint folder path.
 
         Dispatch handles offload/backload automatically for all colocation configurations.
         """
@@ -1314,6 +1440,8 @@ class RayPPOTrainer:
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):
             self._cleanup_old_checkpoints()
+
+        return global_step_folder
 
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:

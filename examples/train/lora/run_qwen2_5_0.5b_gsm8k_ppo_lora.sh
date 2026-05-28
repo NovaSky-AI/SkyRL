@@ -23,7 +23,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.lora.alpha=32 \
   trainer.critic.model.lora.rank=32 \
   trainer.critic.model.lora.alpha=32 \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \

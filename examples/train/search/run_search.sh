@@ -76,7 +76,7 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.placement.policy_num_gpus_per_node=8 \

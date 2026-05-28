@@ -1,0 +1,72 @@
+name: Tinker-SkyRL-Train-Backend-GPU
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ci/anyscale_tinker_skyrl_train_backend_gpu.yaml'
+      - 'ci/gpu_ci_run_tinker_skyrl_train_backend.sh'
+      - 'skyrl/backends/skyrl_train/workers/megatron/**'
+      - 'skyrl/backends/skyrl_train/workers/worker_dispatch.py'
+      - 'skyrl/backends/skyrl_train_backend.py'
+      - 'skyrl/tinker/**'
+      - 'tests/tinker/skyrl_train/**'
+      - 'pyproject.toml'
+      - '!docs/**'
+      - '!examples/**'
+      - '.github/workflows/tinker_skyrl_train_backend_gpu.yaml'
+  pull_request_target:
+    types: [labeled]
+  workflow_dispatch:
+
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+jobs:
+
+  tinker_skyrl_train_backend_gpu_tests:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'run_tinker_skyrl_train_backend_gpu_ci') &&
+        (
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR'
+        )
+      )
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install basic dependencies
+        run: uv pip install anyscale==0.24.79 typer==0.9.0
+      # Run tests
+      - name: GPU tests
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: |
+          anyscale job submit -f ci/anyscale_tinker_skyrl_train_backend_gpu.yaml --timeout 5000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name tinker-skyrl-train-backend-gpu --timeout 5000

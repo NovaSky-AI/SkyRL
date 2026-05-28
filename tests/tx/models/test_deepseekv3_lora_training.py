@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 from huggingface_hub import snapshot_download
-from transformers import PretrainedConfig
+from transformers import AutoConfig
 
 from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.lora import init_lora_adapter
@@ -19,7 +19,7 @@ from tests.tx.models.lora_test_utils import (
 
 def test_lora_training_moe_rank_normalized():
     base_model = "yujiepan/deepseek-v3-tiny-random"
-    base_config = PretrainedConfig.from_pretrained(base_model, trust_remote_code=True)
+    base_config = AutoConfig.from_pretrained(base_model, trust_remote_code=True)
     config = DeepseekV3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
@@ -100,7 +100,7 @@ def test_lora_training_moe_rank_normalized():
 
 def test_lora_training_high_rank():
     base_model = "yujiepan/deepseek-v3-tiny-random"
-    base_config = PretrainedConfig.from_pretrained(base_model, trust_remote_code=True)
+    base_config = AutoConfig.from_pretrained(base_model, trust_remote_code=True)
     config = DeepseekV3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])

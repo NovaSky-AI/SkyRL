@@ -1,0 +1,139 @@
+---
+title: "Inference Architecture"
+---
+
+This page explains how SkyRL's inference engine separates data and control planes, and how weight sync works during training. We design the architecture of SkyRL's HTTP-based inference implementation below.
+
+<Callout type="info">
+The feature flag `_SKYRL_USE_NEW_INFERENCE` gates this codepath. It defaults to `1` (on); set `_SKYRL_USE_NEW_INFERENCE=0` to fall back to the legacy path that uses vLLM engines wrapped via Ray actors. The flag will be removed once the legacy path is deleted.
+</Callout>
+
+## System Architecture
+
+The system is simple, consisting of 3 pieces:
+
+- `RemoteInferenceClient` (`inference_servers/remote_inference_client.py`) — a pickle-safe `@dataclass` HTTP client. It is the single entry point trainers use to talk to inference.
+- `VLLMRouter` (`inference_servers/vllm_router.py`) — a session-aware load balancer used for data-plane traffic. It is a process wrapper around `vllm_router.Router`.
+- `vLLM API servers` — off-the-shelf vLLM servers, one per replica, started and managed via `ServerGroup` and `VLLMServerActor` Ray actors.
+
+```
+                  ┌─────────────────────────┐
+                  │        Trainer          │
+                  └────────────┬────────────┘
+                               │
+                  ┌────────────▼────────────┐
+                  │  RemoteInferenceClient  │
+                  └─────┬─────────────┬─────┘
+        data plane      │             │      control plane
+        (routed)        │             │      (fan-out)
+                  ┌─────▼─────┐  ┌────▼─────────────────┐
+                  │ VLLMRouter│  │  vLLM API servers    │
+                  └─────┬─────┘  │  (one per replica)   │
+                        │        └──────────────────────┘
+                        └──────────►  (same servers)
+```
+
+## Data Plane vs. Control Plane
+
+`RemoteInferenceClient` holds two URL types:
+
+- `proxy_url` — a single endpoint that points at `VLLMRouter` (or any external data-plane router). Used for routed, load-balanced traffic: `/v1/completions`, `/v1/chat/completions`, `/v1/chat/completions/render`, the SkyRL `generate` endpoint, `tokenize`, and `detokenize`.
+- `server_urls` — the list of backend vLLM server URLs. Used for fan-out: `/pause`, `/resume`, `/sleep`, `/wake_up`, and all weight-sync endpoints.
+
+The split exists because generation scales out via routing (the router picks a backend per request and can be session-sticky), while control operations like pause and weight update must hit *every* replica. This also lets SkyRL plug in an external router that only understands the data plane.
+
+## Generation
+
+`client.generate(input_batch, model=...)` sends each prompt as a separate POST to `proxy_url`. Requests are issued concurrently (capped by `SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines`) and the router distributes them across backends; an optional `X-Session-ID` header drives session-aware routing. `chat_completion`, `completion`, and `sample` are thin wrappers over the same routed proxy.
+
+## Pause / Resume
+
+We use the native `/pause` and `/resume` APIs in vLLM:
+
+- `POST /pause?mode={abort|wait|keep}&clear_cache=...`
+- `POST /resume`
+
+There are three `PauseMode` values:
+
+| Mode | In-flight requests | Resume behavior |
+|------|--------------------|-----------------|
+| `abort` | Aborted immediately; client gets partial completion with `finish_reason="abort"` | Caller must retry with accumulated context |
+| `wait` | Scheduler waits for in-flight to finish; new requests queue | New requests resume after `/resume` |
+| `keep` | Scheduler **freezes in-flight requests in place**; KV cache is preserved; new requests queue | Frozen requests pick up exactly where they left off after `/resume` |
+
+During weight sync in non-colocated mode SkyRL calls `/pause?mode=keep`, runs the weight update, then `/resume`. Rollouts that were in flight are preserved in the scheduler and continue from the same token position with the new policy.
+
+## Weight Sync APIs
+
+SkyRL uses the native weight syncing APIs in vLLM, with the following four-stage protocol:
+
+- `POST /init_weight_transfer_engine` — Establishes the communication channel between the trainer and inference workers.
+- `POST /start_weight_update` — Starts a weight update.
+- `POST /update_weights` — Updates all or a subset of the weights. SkyRL uses chunked weight transfer for efficiency.
+- `POST /finish_weight_update` — Finishes the current weight update.
+
+<Callout type="info">
+For colocated training, SkyRL currently uses chunked transfers with CUDA IPC handles and currently implements a [custom `Worker` extension](https://github.com/NovaSky-AI/SkyRL/blob/fb87f35dfe9f74f71445da60c79549773b15ba5e/skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py) as a transitional implementation, pending [vllm-project/vllm#39212](https://github.com/vllm-project/vllm/issues/39212). We plan to migrate to the native APIs in the next vLLM release.
+</Callout>
+
+SkyRL implements two transfer strategies in `skyrl/backends/skyrl_train/weight_sync/`:
+
+- **`BroadcastTransferStrategy`** (`broadcast_strategy.py`) — used for non-colocated training. Tensor data is broadcast over NCCL from trainer rank 0 to all inference workers, concurrently with `/update_weights` HTTP calls that ship the metadata. This is used in combination with `/pause?mode=keep` and `/resume` so that in-flight rollouts are paused correctly during the sync.
+- **`CudaIpcTransferStrategy`** (`cuda_ipc_strategy.py`) — used for colocated training where the trainer and inference engines share GPUs. Weights are exchanged via CUDA IPC handles. Combined with `/sleep` and `/wake_up` for memory management — the inference engine sleeps to free VRAM during training, then wakes for rollouts.
+
+Endpoint summary:
+
+| Endpoint | Plane | Purpose |
+|----------|-------|---------|
+| `/init_weight_transfer_engine` | fan-out | One-time communicator setup |
+| `/start_weight_update` * | fan-out | Begin a chunked update |
+| `/update_weights` * | fan-out | Send a tensor chunk |
+| `/finish_weight_update` * | fan-out | Commit the update |
+| `/pause`, `/resume` | fan-out | Generation control |
+| `/sleep`, `/wake_up` | fan-out | Colocated memory management |
+| `/v1/completions`, `/v1/chat/completions`, generate | routed | Generation |
+
+\* Currently routed via `/collective_rpc`; see the callout above.
+
+## End-to-end Weight Sync Flow
+
+**Non-colocated mode (NCCL broadcast):**
+
+```
+trainer step done
+       │
+       ▼
+client.pause(mode="keep")        ──►  in-flight rollouts frozen, KV cache kept
+       │
+       ▼
+NCCL broadcast (rank 0 → engines)
+   +  POST /update_weights (concurrent)   ──►  N chunks
+       │
+       ▼
+client.resume()                  ──►  frozen requests thaw, continue
+       │
+       ▼
+rollouts proceed on new policy
+```
+
+**Colocated mode (CUDA IPC):**
+
+```
+trainer step done
+       │
+       ▼
+client.wake_up(tags=["weights"]) ──►  inference loads weight buffers
+       │
+       ▼
+POST /start_weight_update
+       │
+       ▼
+for each chunk:
+   pack tensors → CUDA IPC handle → POST /update_weights
+       │
+       ▼
+POST /finish_weight_update
+       │
+       ▼
+client.wake_up(tags=["kv_cache"]) ──►  KV cache restored, ready to serve
+```

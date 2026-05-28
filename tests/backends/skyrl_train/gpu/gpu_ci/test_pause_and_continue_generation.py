@@ -48,7 +48,7 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
         cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "fsdp"
         sampling_params = {
             "max_tokens": 2048,
             "stop": None,
@@ -195,7 +195,7 @@ async def test_continue_generation_generate_vllm_engine_generation(ray_init_fixt
     cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
     cfg.trainer.placement.colocate_all = True
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     sampling_params = {
         "max_tokens": 2048,
         "stop": None,
@@ -288,7 +288,7 @@ async def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
     cfg.trainer.placement.colocate_all = True
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     sampling_params = {
         "max_tokens": 64,
         "stop": None,

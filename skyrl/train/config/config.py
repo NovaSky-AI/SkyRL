@@ -11,6 +11,7 @@ import os
 import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
 import yaml
@@ -60,6 +61,16 @@ class SkyRLLoraConfig(BaseConfig):
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
+
+    max_loras: int = 1
+    """Maximum number of LoRA adapters that can be active concurrently in a
+    single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
+    multi-tenant LoRA serving via ``RemoteInferenceClient.load_lora_adapter``."""
+
+    max_cpu_loras: Optional[int] = None
+    """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
+    ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
+    >= ``max_loras`` if explicitly set."""
 
 
 @dataclass
@@ -157,10 +168,17 @@ class MegatronConfig(BaseConfig):
     # MoE runtime configuration flags
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
+    """Set to "aux_loss", "seq_aux_loss", or "global_aux_loss" to enable aux loss-based load balancing and logging."""
+    moe_aux_loss_coeff: float = 0.0
+    """Scaling coefficient for the moe load balancing loss if moe_router_load_balancing_type is not 'none'. Will disable aux loss in megatron-core if set to 0."""
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
     moe_enable_routing_replay: bool = False
+    moe_per_layer_logging: bool = False
+    """Enable per-layer logging of MoE metrics (i.e. per layer aux losses)."""
+    moe_router_dtype: str = "fp32"
+    """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
@@ -176,6 +194,18 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+
+    def __post_init__(self):
+        # Backfill defaults for any keys the user didn't override so an override dict
+        # doesn't have to repeat every default just to set one value.
+        if self.transformer_config_kwargs is None:
+            self.transformer_config_kwargs = {}
+        for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
+            self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
+        if self.optimizer_config_kwargs is None:
+            self.optimizer_config_kwargs = {}
+        for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
+            self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +492,7 @@ class InferenceEngineConfig(BaseConfig):
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
     but this may affect convergence for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
-    enable_ray_prometheus_stats: bool = False
+    enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
     max_num_seqs: int = 1024
@@ -589,7 +619,7 @@ class EnvironmentConfig(BaseConfig):
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     sequence_parallel_backend: str = "ulysses"
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     ref: RefConfig = field(default_factory=RefConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
@@ -638,17 +668,36 @@ class TrainerConfig(BaseConfig):
     project_name: str = "skyrl"
     run_name: str = "test_run"
     logger: str = "wandb"
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     log_example_interval: int = 1
     """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
+    logprobs_chunk_size: Optional[int] = 1024
+    """Chunk size along the sequence dimension when computing log-probs from logits.
+    This lowers peak GPU memory at the cost of ~2x wall-clock time.
+    ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
+    See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
+
+        if self.logprobs_chunk_size is not None and (
+            not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
+        ):
+            raise ValueError(
+                f"logprobs_chunk_size must be a positive integer or None, got {self.logprobs_chunk_size!r}."
+            )
+        if self.logprobs_chunk_size is None and self.strategy != "megatron":
+            raise ValueError(
+                "logprobs_chunk_size=None (no chunking) is only supported with the Megatron backend. "
+                f"Set a positive integer for strategy={self.strategy!r}."
+            )
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
@@ -663,11 +712,11 @@ def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
         raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
 
 
-def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
-    """Extract the concrete dataclass type from a type annotation.
+def _resolve_class_type(type_annotation: Any) -> Optional[Type]:
+    """Extract the concrete non-plain class type from a type annotation.
 
     Handles plain types, Optional[T], Union[T, None], and Annotated[T, ...].
-    Returns None if no dataclass type can be resolved.
+    Returns None if no dataclass or Enum type can be resolved.
     """
     origin = typing.get_origin(type_annotation)
 
@@ -676,16 +725,18 @@ def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
         for arg in typing.get_args(type_annotation):
             if arg is type(None):
                 continue
-            resolved = _resolve_dataclass_type(arg)
+            resolved = _resolve_class_type(arg)
             if resolved is not None:
                 return resolved
         return None
 
     if origin is Annotated:
-        return _resolve_dataclass_type(typing.get_args(type_annotation)[0])
+        return _resolve_class_type(typing.get_args(type_annotation)[0])
 
     # Plain class check
-    if isinstance(type_annotation, type) and dataclasses.is_dataclass(type_annotation):
+    if isinstance(type_annotation, type) and (
+        dataclasses.is_dataclass(type_annotation) or issubclass(type_annotation, Enum)
+    ):
         return type_annotation
 
     return None
@@ -714,9 +765,14 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
         if f.name not in d:
             continue
         value = d[f.name]
-        nested_cls = _resolve_dataclass_type(f.type)
-        if nested_cls is not None and isinstance(value, dict):
-            kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+        nested_cls = _resolve_class_type(f.type)
+        if nested_cls is not None:
+            if isinstance(value, dict) and dataclasses.is_dataclass(nested_cls):
+                kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+            elif issubclass(nested_cls, Enum):
+                kwargs[f.name] = nested_cls(value)
+            else:
+                kwargs[f.name] = value
         else:
             # Primitives, None, lists, raw dicts, already-constructed objects
             kwargs[f.name] = value
@@ -775,9 +831,6 @@ class SkyRLTrainConfig(BaseConfig):
         Parses CLI arguments and builds a typed config. Dataclass field defaults
         are used for any values not specified on the command line.
 
-        Supports both new-style config paths (e.g., generator.inference_engine.backend)
-        and legacy YAML-style paths (e.g., generator.backend) for backward compatibility.
-
         Args:
             args: Either a list of CLI arguments in 'key.path=value' format, or a dict
                   mapping dot-notation keys to values.
@@ -791,14 +844,11 @@ class SkyRLTrainConfig(BaseConfig):
             ValueError: If an argument uses the unsupported '+' prefix.
         """
         if isinstance(args, dict):
-            args = [f"{k}={v}" for k, v in args.items()]
-
-        from skyrl.train.config.legacy import (
-            is_legacy_config,
-            translate_legacy_config,
-            warn_legacy_config,
-        )
-        from skyrl.train.config.utils import get_legacy_config
+            # OmegaConf's CLI parser only treats "null" as None; Python's
+            # None stringifies to "None" which is parsed as the literal
+            # string. Map None -> "null" so JSON-style overrides survive
+            # the round-trip through OmegaConf.from_cli below.
+            args = [f"{k}=null" if v is None else f"{k}={v}" for k, v in args.items()]
 
         # Check for unsupported '+' prefix
         for arg in args:
@@ -808,26 +858,7 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
-
-        # Try new format first
-        try:
-            return cls.from_dict_config(overrides)
-        except ValueError:
-            # Fall back to legacy format: load base YAML, merge overrides, translate
-            try:
-                base_cfg = get_legacy_config()
-                merged = OmegaConf.merge(base_cfg, overrides)
-                merged_dict = OmegaConf.to_container(merged, resolve=True)
-
-                if is_legacy_config(merged_dict):
-                    warn_legacy_config()
-                    translated = translate_legacy_config(merged_dict)
-                    return build_nested_dataclass(cls, translated)
-            except Exception:
-                pass  # Legacy translation failed, re-raise original error
-
-            # Re-raise original error if not a legacy config issue
-            raise
+        return cls.from_dict_config(overrides)
 
 
 def make_config(

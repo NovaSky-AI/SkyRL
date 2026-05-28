@@ -17,8 +17,9 @@ DATA_DIR="$HOME/data/searchR1"
 : "${MINI_BATCH_SIZE:=256}"
 : "${CKPT_INTERVAL:=40}"
 
-TIS_TYPE=token
-TIS_IMP_RATIO_CAP=2.0
+SEQUENCE_MASK_METRIC=geometric
+GEO_MASK_HIGH=1.01
+GEO_MASK_LOW=0.99
 
 # Configurable knobs with defaults
 : "${USE_CONVERSATION_MULTI_TURN:=true}"
@@ -43,7 +44,7 @@ if [ "$STEP_WISE" = "true" ]; then
 fi
 
 
-RUN_NAME=skyrl-search_4turns_maxgeneratelen_500-fully-async-TIS_2.0-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
+RUN_NAME=skyrl-search_4turns_maxgeneratelen_500-fully-async-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
 
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.train_data="['${DATA_DIR}/train.parquet']" \
@@ -56,11 +57,12 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
-  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
+  trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
+  trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=false \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
   trainer.placement.policy_num_gpus_per_node=4 \

@@ -61,7 +61,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.inference_engine_cfg = inference_engine_cfg
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
-        # than the actual model path. See ppo_base_config.yaml for details.
+        # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
         served_model_name = inference_engine_cfg.served_model_name
         if served_model_name is not None:
             self.model_name = served_model_name
@@ -89,7 +89,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in self.engines]
         return await asyncio.gather(*awaitables)
 
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(
+        self,
+        input_batch: InferenceEngineInput,
+        model: Optional[str] = None,
+    ) -> InferenceEngineOutput:
+
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")

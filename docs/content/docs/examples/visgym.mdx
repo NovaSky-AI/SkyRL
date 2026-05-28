@@ -129,7 +129,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   python examples/train/visgym/entrypoint.py \
   --env_variant sft \
   trainer.policy.model.path="$MODEL_PATH" \         # SFT checkpoint
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   # VLM flags
   generator.vision_language_generator=true \
   generator.batched=false \
@@ -149,7 +149,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   python examples/train/visgym/entrypoint.py \
   --env_variant instruct \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   # Same VLM flags as above
   generator.vision_language_generator=true \
   generator.batched=false \
