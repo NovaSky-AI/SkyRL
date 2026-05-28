@@ -385,7 +385,10 @@ class MegatronWorker:
         # overridden by transformer_config_kwargs if needed.
         provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
         provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
+<<<<<<< HEAD
         provider.moe_aux_loss_coeff = megatron_config.moe_aux_loss_coeff
+=======
+>>>>>>> 18f0ac7d7576a061be643c0b775621a8d4f6b547
         provider.moe_router_dtype = megatron_config.moe_router_dtype
         provider.moe_grouped_gemm = megatron_config.moe_grouped_gemm
         if megatron_config.moe_router_score_function is not None:

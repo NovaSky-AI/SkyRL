@@ -708,8 +708,8 @@ class SFTTrainer:
             use_fast=not self.cfg.trainer.disable_fast_tokenizer,
             padding_side="left",
         )
-        self._init_workers()
         self._init_tracker()
+        self._init_workers()
 
     def _init_workers(self):
         """Create PPORayActorGroup and WorkerDispatch.
