@@ -145,3 +145,41 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: python -m integrations.fleet.auto_train status || true
+
+      - name: Best-effort cluster cleanup
+        if: always()
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          # Sky-launched clusters get names like sky-XXXX-runner. Best-effort
+          # teardown of anything sky still knows about on this runner. Also
+          # nukes GCP instances directly via gcloud (the cluster path that
+          # bit us on 2026-05-26: training failed, --down didn't trigger
+          # because sky launch was still mid-retry, runner died, 4 H200:8
+          # spot instances stayed up burning ~$100/hr).
+          set +e
+          echo "=== sky status ==="
+          sky status 2>&1 | tail -30 || true
+          echo
+          # 1. sky down everything sky knows about (paranoid: -y to all)
+          CLUSTERS=$(sky status --refresh 2>/dev/null | awk '/^sky-[a-z0-9]+-runner/ {print $1}')
+          for c in $CLUSTERS; do
+            echo "Tearing down sky cluster: $c"
+            sky down "$c" -y 2>&1 | tail -5 || true
+          done
+          # 2. Belt-and-suspenders: nuke any sky-*-runner-* GCP instances directly
+          echo "=== GCP sky-* instances ==="
+          gcloud compute instances list \
+            --project=fleet-compute-489000 \
+            --filter="name~'^sky-[a-z0-9]+-runner-'" \
+            --format="value(name,zone)" 2>&1 || true
+          gcloud compute instances list \
+            --project=fleet-compute-489000 \
+            --filter="name~'^sky-[a-z0-9]+-runner-'" \
+            --format="csv[no-heading](name,zone)" 2>/dev/null | while IFS=, read name zone; do
+              [ -z "$name" ] && continue
+              echo "Deleting GCP instance: $name in $zone"
+              gcloud compute instances delete "$name" --zone="$zone" \
+                --project=fleet-compute-489000 --quiet 2>&1 | tail -2 || true
+            done
+          echo "Cleanup done."

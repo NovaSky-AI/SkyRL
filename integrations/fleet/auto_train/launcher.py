@@ -43,6 +43,14 @@ def build_launch_command(
     for k, v in env_vars.items():
         cmd.extend(["--env", f"{k}={v}"])
     cmd.extend(["--retry-until-up", "-y"])
+    # --down: terminate the cluster after the run script exits (success or
+    # failure). Without this, sky launch leaves the cluster up for debug, and
+    # when the run script fails (as it did 2026-05-26 with LocalRayletDiedError)
+    # we orphan ~$50/hr H200:8 nodes. Note: this does NOT help with the GH
+    # workflow timeout case (sky launch blocks; if the runner is killed mid-
+    # launch, --down never fires). For that, the workflow has a best-effort
+    # cleanup step that runs on always().
+    cmd.append("--down")
     if extra_sky_args:
         cmd.extend(extra_sky_args)
     return cmd

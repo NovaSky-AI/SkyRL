@@ -199,8 +199,21 @@ def cmd_trigger(args: argparse.Namespace) -> int:
             logger.info("Capping to first %d datasets (newest-first)", args.max_datasets)
             new_datasets = new_datasets[: args.max_datasets]
 
+        # Fail-fast: after the first launch failure we stop processing more
+        # datasets in this tick. Otherwise a single bad cluster path (e.g.
+        # GCP H200 spot Ray crashes) would burn ~$100/hr * N as we walk the
+        # max_datasets cap. The next cron tick can retry.
+        # Gate skips (below threshold), modality-skips, and NotImplementedError
+        # paths return 0 and do NOT trigger fail-fast.
         exit_code = 0
+        launch_failed = False
         for dataset in new_datasets:
+            if launch_failed:
+                logger.warning(
+                    "Stopping early: a prior launch in this tick failed. "
+                    "Remaining datasets will be picked up on the next cron tick."
+                )
+                break
             modalities = get_dataset_modalities(client, dataset.id)
             if not modalities:
                 logger.info("No supported tasks in %s; marking seen", dataset.dataset_key)
@@ -222,6 +235,12 @@ def cmd_trigger(args: argparse.Namespace) -> int:
                 if rc != 0:
                     dataset_ok = False
                     exit_code = rc
+                    # rc=2 is smoke-test failure (no cluster cost). Other
+                    # non-zero values mean we attempted a sky launch and it
+                    # failed, possibly leaving a cluster up. Fail-fast.
+                    if rc != 2:
+                        launch_failed = True
+                        break
             # Only mark the dataset 'seen' if every modality landed in
             # processed_pairs (success or expected skip). Otherwise we leave
             # it unseen so the next tick retries the failed modalities.
