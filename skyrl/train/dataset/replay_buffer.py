@@ -74,6 +74,7 @@ class Experience:
     metadata: Optional[Dict[str, Any]] = None
     pixel_values: Optional[TensorList] = None
     image_grid_thw: Optional[TensorList] = None
+    extras: Optional[Dict[str, Any]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -102,6 +103,8 @@ class Experience:
             self.pixel_values = self.pixel_values.to(device)
         if self.image_grid_thw is not None:
             self.image_grid_thw = self.image_grid_thw.to(device)
+        if self.extras is not None:
+            self.extras = {key: to(value, device) for key, value in self.extras.items()}
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)

@@ -711,10 +711,16 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
+        aux_policy_loss_context = self.get_aux_policy_loss_context(data)
+
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
             microbatch_weight = micro_batch_size / len(data)
             metrics = self._forward_backward_micro(
-                micro_batch, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+                micro_batch,
+                microbatch_weight,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                aux_policy_loss_context=aux_policy_loss_context,
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
@@ -737,12 +743,29 @@ class PolicyWorkerBase(Worker):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
+    def get_aux_policy_loss_context(self, data: TrainingInputBatch) -> Dict[str, Any]:
+        return {}
+
+    def compute_aux_policy_loss(
+        self,
+        *,
+        action_log_probs: torch.Tensor,
+        policy_loss: torch.Tensor,
+        experience: Experience,
+        loss_config: Any,
+        microbatch_weight: float,
+        grad_sum_correction_factor: float,
+        aux_policy_loss_context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[torch.Tensor], Dict[str, Any]]:
+        return None, {}
+
     def _forward_backward_micro(
         self,
         experience: Experience,
         microbatch_weight: float,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        aux_policy_loss_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
@@ -901,6 +924,17 @@ class PolicyWorkerBase(Worker):
             # NOTE: The KL and entropy loss terms are not pre-scaled,
             # so we just average them across microbatches and DP workers.
             loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term) * microbatch_weight
+            aux_policy_loss, aux_policy_metrics = self.compute_aux_policy_loss(
+                action_log_probs=action_log_probs,
+                policy_loss=policy_loss,
+                experience=experience,
+                loss_config=loss_config,
+                microbatch_weight=microbatch_weight,
+                grad_sum_correction_factor=grad_sum_correction_factor,
+                aux_policy_loss_context=aux_policy_loss_context,
+            )
+            if aux_policy_loss is not None:
+                loss = loss + aux_policy_loss
             unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
@@ -934,6 +968,14 @@ class PolicyWorkerBase(Worker):
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
+            for k, v in aux_policy_metrics.items():
+                if v is None:
+                    continue
+                status_key = k[len("status/") :] if k.startswith("status/") else "loss_metrics/" + k
+                if hasattr(v, "detach"):
+                    status[status_key] = v.detach().item()
+                else:
+                    status[status_key] = v
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 

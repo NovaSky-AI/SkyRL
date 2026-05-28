@@ -384,6 +384,7 @@ class RemoteInferenceClient:
 
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
+        skip_detokenize = bool(input_batch.get("skip_detokenize", False))
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -425,7 +426,10 @@ class RemoteInferenceClient:
                 return (await self.detokenize([token_ids]))[0]
 
         raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
-        responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
+        if skip_detokenize:
+            responses = [""] * len(raw_results)
+        else:
+            responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
         rollout_expert_indices = [r.get("routed_experts") for r in raw_results]
         has_routed_experts = any(x is not None for x in rollout_expert_indices)

@@ -502,6 +502,8 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
         unpadded_batch.metadata["pad_size"] = 0
         return unpadded_batch
 
+    zero_pad_keys = set((unpadded_batch.metadata or {}).get("zero_pad_keys", []))
+
     # Pad each tensor depending on its type.
     new_tensors = {}
     for key, tensor in unpadded_batch.items():
@@ -513,8 +515,8 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             assert len(tensor) > 0, f"Cannot pad empty TensorList field {key!r}"
             padding = TensorList([tensor[0].clone() for _ in range(pad_size)])
             new_tensors[key] = TensorList.cat([tensor, padding])
-        elif key == "loss_mask":
-            # Ensures that padding tensors don't count towards the loss
+        elif key == "loss_mask" or key in zero_pad_keys:
+            # Ensures that padding tensors don't count towards losses.
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
