@@ -1277,7 +1277,7 @@ class SFTTrainer:
         micro_batch = self.sft_cfg.micro_train_batch_size_per_gpu
         if per_dp_batch % micro_batch != 0:
             raise ValueError(
-                f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
+                f"batch_size ({self.sft_cfg.batch_size}) / dp_size ({dp_size}) must be divisible by "
                 f"micro_train_batch_size_per_gpu ({micro_batch})"
             )
 
