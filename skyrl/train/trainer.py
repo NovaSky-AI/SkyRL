@@ -137,6 +137,10 @@ class RayPPOTrainer:
         self.dispatch: WorkerDispatch = None
         configure_ray_worker_logging()
 
+        self._num_training_gpus = (
+            cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        )
+
     @property
     def has_critic(self) -> bool:
         """Check if critic model is configured."""
@@ -328,6 +332,13 @@ class RayPPOTrainer:
 
                 # 11. set logs
                 logger.info(status)
+                # Throughput metrics
+                train_time = self.all_timings.get("train_critic_and_policy", 0.0)
+                if train_time > 0 and training_input.get("attention_mask") is not None:
+                    total_tokens = int(training_input["attention_mask"].sum().item())
+                    self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
+                        train_time * self._num_training_gpus
+                    )
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 if self.cfg.trainer.eval_interval > 0 and (
