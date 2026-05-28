@@ -764,7 +764,7 @@ class SFTTrainer:
         self.tracker = Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
-            backends=self.cfg.trainer.logger,
+            backend=self.cfg.trainer.logger,
             config=self.sft_cfg,
         )
 

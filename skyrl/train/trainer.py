@@ -67,7 +67,6 @@ from skyrl.train.utils import (
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
-from skyrl.train.utils.logging_utils import log_example
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -82,6 +81,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
+from skyrl.train.utils.trajectory_logging import TrajectoryLogger, pretty_print_example
 from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
@@ -126,6 +126,9 @@ class RayPPOTrainer:
         )
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
+
+        # trajectory logger is installed after construction if needed
+        self.trajectory_logger: TrajectoryLogger = None
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -180,6 +183,8 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_logger=self.trajectory_logger,
+                tracker=self.tracker,
             )
         else:
             eval_metrics = await evaluate(
@@ -188,6 +193,8 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_logger=self.trajectory_logger,
+                tracker=self.tracker,
             )
         return eval_metrics
 
@@ -268,16 +275,29 @@ class RayPPOTrainer:
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
-                    # 2. print example just for debugging
-                    log_interval = self.cfg.trainer.log_example_interval
-                    if log_interval > 0 and self.global_step % log_interval == 0:
+                    # 2.1 print example just for debugging
+                    print_interval = self.cfg.trainer.print_example_interval
+                    if print_interval > 0 and self.global_step % print_interval == 0:
                         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                        log_example(
+                        pretty_print_example(
                             logger,
                             prompt=generator_input["prompts"][0],
                             response=vis,
                             reward=generator_output["rewards"][0],
                         )
+                    # 2.2 Optionally upload up to `num_logger_train_samples` samples to tracker
+                    if self.trajectory_logger is not None:
+                        with Timer("log_train_results"):
+                            self.trajectory_logger.log(
+                                tracker=self.tracker,
+                                num_samples=self.cfg.trainer.num_logger_train_samples,
+                                prompts=generator_input["prompts"],
+                                generator_output=generator_output,
+                                tokenizer=self.tokenizer,
+                                global_step=self.global_step,
+                                wandb_key="trajectories/train",
+                                include_idx=False,
+                            )
 
                     # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):

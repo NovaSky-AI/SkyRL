@@ -669,8 +669,21 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
-    log_example_interval: int = 1
-    """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
+    print_example_interval: int = 1
+    """Pretty-print an example prompt/response/reward to stdout every N
+    training steps; ``0``/``-1`` disables. Renamed from ``log_example_interval``."""
+    num_logger_eval_samples: int = -1
+    """Number of evaluation trajectory (prompt, response, score) tuples to upload to a wandb
+    table on each eval. ``-1`` (default) or ``0`` disables. When positive,
+    up to this many samples are taken from the start of each eval pass and
+    logged via :class:`TrajectoryLogger`. Column count is fixed
+    by the first call, so keep the eval set size and this value stable."""
+    num_logger_train_samples: int = -1
+    """Number of training trajectory (prompt, response, score) tuples to upload to a wandb
+    table on each training step. ``-1`` (default) or ``0`` disables. When positive,
+    up to this many samples are taken from the start of each training step and
+    logged via :class:`TrajectoryLogger`. Column count is fixed
+    by the first call, so keep the training set size and this value stable."""
     logprobs_chunk_size: Optional[int] = 1024
     """Chunk size along the sequence dimension when computing log-probs from logits.
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
