@@ -19,7 +19,7 @@
 from collections import defaultdict
 from enum import StrEnum
 from functools import wraps
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Iterable, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -342,6 +342,50 @@ class BaseFunctionRegistry:
         return cls._functions[name]
 
     @classmethod
+    def get_local(cls, name: Union[str, StrEnum]) -> Callable:
+        """Get a function from the local process registry without syncing with Ray."""
+        if isinstance(name, StrEnum):
+            name = name.value
+
+        if name not in cls._functions:
+            available = list(cls._functions.keys())
+            raise ValueError(f"Unknown local {cls._function_type.lower()} '{name}'. Available locally: {available}")
+        return cls._functions[name]
+
+    @classmethod
+    def snapshot_serialized(
+        cls,
+        names: Optional[Iterable[Union[str, StrEnum]]] = None,
+        *,
+        sync_with_actor: bool = True,
+    ) -> dict[str, bytes]:
+        """Create a serialized registry snapshot for worker-local installation.
+
+        This is intended for driver/control paths. When requested, it may sync with
+        the named Ray actor before serializing, but the resulting snapshot can be
+        installed in workers without any Ray actor calls.
+        """
+        if sync_with_actor and ray.is_initialized():
+            cls.sync_with_actor()
+
+        if names is None:
+            function_names = list(cls._functions.keys())
+        else:
+            function_names = [name.value if isinstance(name, StrEnum) else name for name in names]
+
+        return {name: cloudpickle.dumps(cls.get_local(name)) for name in function_names}
+
+    @classmethod
+    def install_serialized(cls, snapshot: Mapping[str, bytes]) -> None:
+        """Install a serialized registry snapshot locally without syncing with Ray."""
+        for name, func_serialized in snapshot.items():
+            try:
+                cls._functions[name] = cloudpickle.loads(func_serialized)
+            except Exception as e:
+                logger.error(f"Error deserializing {name} into local {cls._function_type} registry: {e}")
+                raise e
+
+    @classmethod
     def list_available(cls) -> List[str]:
         """List all registered functions."""
         # Try to sync with actor first if Ray is available
@@ -472,24 +516,32 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     _function_type = "policy loss"
 
     @classmethod
+    def _default_policy_losses(cls) -> dict[str, tuple[PolicyLossType, Callable]]:
+        return {
+            "regular": (PolicyLossType.REGULAR, ppo_policy_loss),
+            "dual_clip": (PolicyLossType.DUAL_CLIP, ppo_policy_loss),
+            "gspo": (PolicyLossType.GSPO, gspo_policy_loss),
+            "clip_cov": (PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov),
+            "kl_cov": (PolicyLossType.KL_COV, compute_policy_loss_kl_cov),
+            "sapo": (PolicyLossType.SAPO, sapo_policy_loss),
+            "cross_entropy": (PolicyLossType.CROSS_ENTROPY, cross_entropy_loss),
+            "importance_sampling": (PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss),
+            "rollout_is": (PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss),
+        }
+
+    @classmethod
     def repopulate_registry(cls):
         """Repopulate the registry with default policy loss functions."""
         pl_avail = set(cls.list_available())
-        pl_types = {
-            "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
-            "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
-            "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
-            "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
-            "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
-            "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
-            "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
-            "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
-            "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
-        }
-
-        for pl_name, (pl_type, pl_func) in pl_types.items():
+        for pl_name, (pl_type, pl_func) in cls._default_policy_losses().items():
             if pl_name not in pl_avail:
                 cls.register(pl_type, pl_func)
+
+    @classmethod
+    def repopulate_local_registry(cls):
+        """Install default policy losses locally without syncing with Ray."""
+        for pl_name, (_, pl_func) in cls._default_policy_losses().items():
+            cls._functions.setdefault(pl_name, pl_func)
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
@@ -527,6 +579,12 @@ def sync_registries():
     PolicyLossRegistry.sync_with_actor()
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
+
+
+def snapshot_policy_loss_registry_for_workers() -> dict[str, bytes]:
+    """Snapshot policy losses so workers can look them up without actor sync."""
+    PolicyLossRegistry.repopulate_local_registry()
+    return PolicyLossRegistry.snapshot_serialized(sync_with_actor=True)
 
 
 @register_policy_loss(PolicyLossType.REGULAR)

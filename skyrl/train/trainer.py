@@ -518,6 +518,9 @@ class RayPPOTrainer:
         pg = None
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        policy_worker_init_kwargs = {
+            "policy_loss_registry_snapshot": ppo_utils.snapshot_policy_loss_registry_for_workers(),
+        }
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -545,6 +548,7 @@ class RayPPOTrainer:
                 colocate_all=True,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 record_memory=cfg.trainer.policy.record_memory,
+                worker_init_kwargs=policy_worker_init_kwargs,
             )
             if use_ref_model:
                 assert (
@@ -607,6 +611,7 @@ class RayPPOTrainer:
                 num_gpus_per_actor=0.75 if pg else 1,
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+                worker_init_kwargs=policy_worker_init_kwargs,
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
