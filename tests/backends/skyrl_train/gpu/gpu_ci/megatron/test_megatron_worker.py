@@ -492,6 +492,7 @@ async def test_megatron_train(
         cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
         cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "seq_aux_loss"
+        cfg.trainer.policy.megatron_config.moe_aux_loss_coeff = 0.000001
         cfg.trainer.policy.megatron_config.moe_per_layer_logging = True
 
     # set batch sizes correctly
