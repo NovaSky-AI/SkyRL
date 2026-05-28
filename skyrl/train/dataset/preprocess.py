@@ -190,6 +190,36 @@ def convert_prompts_responses_to_batch_tensors(
     )
 
 
+def compute_prompt_boundaries(uids: List[str]) -> List[Tuple[int, int]]:
+    """Compute per-prompt ``(start, end)`` slices from a flat ``uids`` list.
+
+    Args:
+        uids: List of uids, representing which prompt each sequence belongs to. Consecutive
+            equal entries belong to the same prompt (same assumption as
+            ``compute_prompt_mini_batch_boundaries``).
+
+    Returns:
+        List of (start, end) indices, one per prompt, in order. Works for both step-wise
+        (variable sequences per prompt) and non-step-wise training.
+
+    Example: uids = ["p0", "p0", "p1", "p1", "p1"] -> [(0, 2), (2, 5)]
+    """
+    boundaries: List[Tuple[int, int]] = []
+    seen_uids: set[str] = set()
+    start = 0
+    for i in range(1, len(uids)):
+        if uids[i] != uids[i - 1]:
+            assert (
+                uids[i] not in seen_uids
+            ), f"uid {uids[i]!r} appears in non-contiguous positions at index {i}. Full uids: {uids}"
+            seen_uids.add(uids[i - 1])
+            boundaries.append((start, i))
+            start = i
+    if uids:
+        boundaries.append((start, len(uids)))
+    return boundaries
+
+
 def compute_prompt_mini_batch_boundaries(
     uids: List[str],
     mini_batch_size: int,
