@@ -161,6 +161,8 @@ class SFTConfig(BaseConfig):
     run_name: str = "skyrl_sft_run"
     ckpt_path: str = ""
     ckpt_interval: int = 0  # <= 0 -> no checkpointing
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir

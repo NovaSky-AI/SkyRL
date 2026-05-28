@@ -491,6 +491,10 @@ async def test_megatron_train(
         cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
         cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
+        cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "seq_aux_loss"
+        cfg.trainer.policy.megatron_config.moe_aux_loss_coeff = 0.000001
+        cfg.trainer.policy.megatron_config.moe_per_layer_logging = True
+
     # set batch sizes correctly
     cfg.trainer.train_batch_size = batch_size
     cfg.trainer.policy_mini_batch_size = gpus_per_node
@@ -529,7 +533,14 @@ async def test_megatron_train(
         assert "policy_entropy" in result.metrics
         for k, v in result.metrics.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
-
+        if ep > 1:
+            assert "seq_load_balancing_loss" in result.metrics, "Load balancing loss should be present"
+            assert (
+                "moe/seq_load_balancing_loss_layer_0" in result.metrics
+            ), "Load balancing loss layer 0 should be present"
+            assert (
+                "moe/seq_load_balancing_loss_layer_1" in result.metrics
+            ), "Load balancing loss layer 1 should be present"
     ray.shutdown()
     ray_init_for_tests()
 

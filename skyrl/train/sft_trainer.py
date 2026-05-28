@@ -61,6 +61,7 @@ from skyrl.train.utils.callbacks import (
     TrainingCallback,
     TrainingControl,
 )
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -702,6 +703,8 @@ class SFTTrainer:
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
+        self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
@@ -726,8 +729,8 @@ class SFTTrainer:
             use_fast=not self.cfg.trainer.disable_fast_tokenizer,
             padding_side="left",
         )
-        self._init_workers()
         self._init_tracker()
+        self._init_workers()
 
     def _init_workers(self):
         """Create PPORayActorGroup and WorkerDispatch.
@@ -1321,6 +1324,8 @@ class SFTTrainer:
             f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
         )
 
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
         for step in range(num_steps):
             all_timings: dict[str, float] = {}
 
@@ -1336,10 +1341,13 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
             self.tracker.log(log_dict, step=step, commit=True)
             logger.info(
@@ -1422,6 +1430,9 @@ class SFTTrainer:
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
 
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Tracks whether the most recent in-loop iteration saved a checkpoint
         # (either via the ckpt_interval or via a callback-driven ``should_save``).
         did_save_last_step = False
@@ -1481,11 +1492,14 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
             self._fire("on_step_end", batch=batch, metrics=step_result)
 
@@ -1673,5 +1687,7 @@ class SFTTrainer:
         within the task would be incorrect.  The head-node process owns
         the Ray lifecycle.
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
         if self.tracker is not None:
             self.tracker.finish()

@@ -26,6 +26,8 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
+    get_model_config,
+    get_moe_metrics,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -383,6 +385,8 @@ class MegatronWorker:
         # overridden by transformer_config_kwargs if needed.
         provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
         provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
+        provider.moe_aux_loss_coeff = megatron_config.moe_aux_loss_coeff
+        provider.moe_router_dtype = megatron_config.moe_router_dtype
         provider.moe_grouped_gemm = megatron_config.moe_grouped_gemm
         if megatron_config.moe_router_score_function is not None:
             provider.moe_router_score_function = megatron_config.moe_router_score_function
@@ -871,6 +875,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+
+        # Collect MoE aux metrics averaged across microbatches (all-reduced across ranks
+        # inside get_moe_metrics) aggregating after per-microbatch scalar metrics.
+        total_num_microbatches = len(micro_buffer)
+        model_config = get_model_config(self.actor_module[0])
+        num_moe_experts = getattr(model_config, "num_moe_experts", None)
+        moe_metrics: Dict[str, Any] = {}
+        if num_moe_experts is not None and num_moe_experts > 1:
+            moe_loss_scale = 1.0 / max(1, total_num_microbatches)
+            moe_metrics = get_moe_metrics(
+                loss_scale=moe_loss_scale,
+                per_layer_logging=self.cfg.policy.megatron_config.moe_per_layer_logging,
+            )
+            # moe_metrics will only be non-empty if "moe_router_load_balancing_type" is set to "aux_loss", "seq_aux_loss", or "global_aux_loss"
+            if moe_metrics:
+                for k, v in moe_metrics.items():
+                    status[k] = v
 
         clear_router_replay()
 

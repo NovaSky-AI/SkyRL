@@ -74,6 +74,7 @@ from skyrl.train.utils.callbacks import (
     TrainingControl,
 )
 from skyrl.train.utils.logging_utils import log_example
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -131,6 +132,8 @@ class RayPPOTrainer:
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
 
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
+
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
         self.critic_model: Optional[PPORayActorGroup] = None
@@ -148,6 +151,10 @@ class RayPPOTrainer:
         self._current_epoch: int = 0
 
         configure_ray_worker_logging()
+
+        self._num_training_gpus = (
+            cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        )
 
     def add_callback(self, callback: TrainingCallback) -> None:
         """Register a callback. Events fired after this call reach the new callback."""
@@ -221,6 +228,9 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
@@ -401,6 +411,13 @@ class RayPPOTrainer:
 
                 # 11. set logs
                 logger.info(status)
+                # Throughput metrics
+                train_time = self.all_timings.get("train_critic_and_policy", 0.0)
+                if train_time > 0 and training_input.get("attention_mask") is not None:
+                    total_tokens = int(training_input["attention_mask"].sum().item())
+                    self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
+                        train_time * self._num_training_gpus
+                    )
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 interval_eval = self.cfg.trainer.eval_interval > 0 and (
@@ -420,7 +437,12 @@ class RayPPOTrainer:
                 }
                 if self._vllm_metrics_scraper is not None:
                     log_payload.update(await self._vllm_metrics_scraper.sample())
+
+                if self._ray_gpu_monitor is not None:
+                    log_payload.update(self._ray_gpu_monitor.flush())
+
                 self._fire("on_log", logs=log_payload)
+
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 self.all_timings = {}
@@ -456,6 +478,10 @@ class RayPPOTrainer:
                 logger.info("Saved final model.")
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
+
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
+
         self._fire("on_train_end")
         self.tracker.finish()
         logger.info("Training done!")
@@ -1116,10 +1142,14 @@ class RayPPOTrainer:
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
 
+            logprobs_diff_max = logprobs_diff.max().item()
+            logprobs_diff_min = logprobs_diff.min().item()
             logprobs_diff_mean = logprobs_diff.mean().item()
             logprobs_diff_std = logprobs_diff.std().item()
             self.all_metrics.update(
                 {
+                    "policy/rollout_train_logprobs_abs_diff_max": logprobs_diff_max,
+                    "policy/rollout_train_logprobs_abs_diff_min": logprobs_diff_min,
                     "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
                     "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
                 }
