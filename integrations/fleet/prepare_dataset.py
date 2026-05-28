@@ -304,6 +304,14 @@ def prepare_fleet_dataset(
         env_key = task.get("env_key") or task.get("env_id") or "unknown"
         tasks_by_env[env_key].append(task)
 
+    # The per-env cap exists to prevent one dominant env from skewing a
+    # multi-env training mix. For a single-env dataset it would kill 80%
+    # of the data (e.g. 60 train -> 12, below train_batch_size 16).
+    # Disable the cap in that case.
+    if len(tasks_by_env) <= 1:
+        print(f"Single-env dataset detected ({list(tasks_by_env.keys())}); disabling per-env cap")
+        max_env_ratio = 1.0
+
     # Collect per-env metadata: representative env_variables and env_variable_keys
     # (mirrors original SkyRL fork's _collect_env_metadata)
     env_metadata: Dict[str, Dict[str, Any]] = {}
