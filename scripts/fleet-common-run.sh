@@ -105,6 +105,10 @@ export TMPDIR="/tmp"
 export RAY_TMPDIR="$RAY_TMPDIR"
 export HF_HOME="/tmp/hf_cache"
 mkdir -p "$HF_HOME"
+# Triton's JIT cache must also be LOCAL: shared NFS causes ESTALE during
+# concurrent kernel compilation across nodes (errno 116, "Stale file handle").
+export TRITON_CACHE_DIR="/tmp/triton_cache"
+mkdir -p "$TRITON_CACHE_DIR"
 
 TASKS_FILE="${DATA_ROOT}/data/fleet/tasks_${MODALITY}.json"
 DATA_DIR="${DATA_ROOT}/data/fleet/${DATA_DIR_NAME}"
