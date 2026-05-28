@@ -159,6 +159,8 @@ class SFTConfig(BaseConfig):
     logger: str = "console"  # "console" or "wandb"
     project_name: str = "skyrl_sft"
     run_name: str = "skyrl_sft_run"
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     ckpt_path: str = ""  # empty string = no checkpointing
     ckpt_interval: int = 0
     max_ckpts_to_keep: int = -1

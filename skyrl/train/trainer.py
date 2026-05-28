@@ -68,6 +68,7 @@ from skyrl.train.utils import (
     trainer_utils,
 )
 from skyrl.train.utils.logging_utils import log_example
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -123,6 +124,8 @@ class RayPPOTrainer:
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
+
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -188,6 +191,9 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
@@ -344,6 +350,8 @@ class RayPPOTrainer:
                 }
                 if self._vllm_metrics_scraper is not None:
                     log_payload.update(await self._vllm_metrics_scraper.sample())
+                if self._ray_gpu_monitor is not None:
+                    log_payload.update(self._ray_gpu_monitor.flush())
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 self.all_timings = {}
@@ -370,6 +378,8 @@ class RayPPOTrainer:
                 logger.info("Saved final model.")
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
         self.tracker.finish()
         logger.info("Training done!")
 

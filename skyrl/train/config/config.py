@@ -644,6 +644,8 @@ class TrainerConfig(BaseConfig):
     project_name: str = "skyrl"
     run_name: str = "test_run"
     logger: str = "wandb"
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
