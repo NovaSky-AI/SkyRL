@@ -16,6 +16,8 @@ Cluster-wide averages (single line per metric)
 ray/gpu.util.avg                         Average GPU utilization across all GPUs
 ray/gpu.mem_used_gb.avg                  Average GPU memory used across all GPUs
 ray/cpu_ram_used_gb.avg                  Average CPU RAM used across all nodes
+
+Inspired by: https://github.com/NVIDIA-NeMo/RL/blob/65683e0f071031a3b64b1dd44a6f2a5c97452597/nemo_rl/utils/logger.py#L478
 """
 
 import threading
@@ -164,18 +166,20 @@ class RayGpuMonitor:
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
                 logger.debug(f"RayGpuMonitor: failed to scrape {url}: {exc}")
                 continue
-
-            parsed = parse_metrics_text(resp.text)
-            for (name, labels), value in parsed.items():
-                labels_dict = dict(labels)
-                if name == _GPU_UTIL:
-                    gpu_idx = labels_dict.get("GpuIndex", "0")
-                    result[f"node.{node_idx}.gpu.{gpu_idx}.util"] = value
-                elif name == _GPU_MEM:
-                    gpu_idx = labels_dict.get("GpuIndex", "0")
-                    # Ray reports gram_used in MB; convert to GB.
-                    result[f"node.{node_idx}.gpu.{gpu_idx}.mem_used_gb"] = value / 1024.0
-                elif name == _RAM_USED:
-                    # Ray reports mem_used in bytes; convert to GB (host CPU RAM utilized).
-                    result[f"node.{node_idx}.cpu_ram_used_gb"] = value / (1024**3)
+            try:
+                parsed = parse_metrics_text(resp.text)
+                for (name, labels), value in parsed.items():
+                    labels_dict = dict(labels)
+                    if name == _GPU_UTIL:
+                        gpu_idx = labels_dict.get("GpuIndex", "0")
+                        result[f"node.{node_idx}.gpu.{gpu_idx}.util"] = value
+                    elif name == _GPU_MEM:
+                        gpu_idx = labels_dict.get("GpuIndex", "0")
+                        # Ray reports gram_used in MB; convert to GB.
+                        result[f"node.{node_idx}.gpu.{gpu_idx}.mem_used_gb"] = value / 1024.0
+                    elif name == _RAM_USED:
+                        # Ray reports mem_used in bytes; convert to GB (host CPU RAM utilized).
+                        result[f"node.{node_idx}.cpu_ram_used_gb"] = value / (1024**3)
+            except Exception as exc:
+                logger.debug(f"RayGpuMonitor: failed to scrape or parse {url}: {exc}")
         return result
