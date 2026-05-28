@@ -1,6 +1,8 @@
 """Shared test utilities and fixtures for tinker tests."""
 
 import time
+import urllib.error
+import urllib.request
 from typing import Callable
 
 
@@ -16,3 +18,11 @@ def wait_for_condition(
             return True
         time.sleep(poll_interval_sec)
     return False
+
+
+def api_server_is_up(port: int) -> bool:
+    try:
+        urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
+        return True
+    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
+        return False

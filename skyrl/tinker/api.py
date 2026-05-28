@@ -594,6 +594,10 @@ class SampleRequest(BaseModel):
         if self.sampling_session_id is not None:
             if self.seq_id is None:
                 raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
+            if ":" in self.sampling_session_id:
+                raise ValueError(
+                    f"sampling_session_id must not contain ':' (the routing-key delimiter), got {self.sampling_session_id!r}"
+                )
             return self
         if (self.base_model is None) == (self.model_path is None):
             raise ValueError(
@@ -1087,6 +1091,8 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
             prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
+            seq_id=request.seq_id,
+            sampling_session_id=request.sampling_session_id,
         ),
     )
 

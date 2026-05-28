@@ -120,7 +120,13 @@ class ExternalInferenceClient:
             "return_token_ids": True,
         }
 
-        response = await http_client.post("/completions", json=payload)
+        # Pass X-Session-ID for deterministic routing
+        headers = {}
+        session_id = types.make_routing_session_id(request.sampling_session_id, request.seq_id)
+        if session_id is not None:
+            headers["X-Session-ID"] = session_id
+
+        response = await http_client.post("/completions", json=payload, headers=headers)
         response.raise_for_status()
         result = response.json()
 
