@@ -56,8 +56,51 @@ def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
 
 
 # TODO: Add a test for validation
+_VLLM_DEVICE_CONFIG_PATCHED = False
+
+
+def _ensure_vllm_cuda_platform_stub() -> None:
+    """Force ``DeviceConfig`` to behave as if running on CUDA in the driver.
+
+    Building vLLM's CLI args runs ``_compute_kwargs(VllmConfig)``, which
+    materializes the default for the ``device_config`` field by calling
+    ``DeviceConfig()``. With ``device="auto"``, ``DeviceConfig.__post_init__``
+    reads ``current_platform.device_type``; on a no-GPU driver (e.g. the Ray
+    head node hosting the Tinker engine subprocess), NVML detection fails and
+    the platform resolves to ``UnspecifiedPlatform``, causing
+    ``RuntimeError("Failed to infer device type")``. The actor process imports
+    vLLM fresh on a GPU node and detects CUDA normally, so this only needs to
+    satisfy CLI-args building in the driver.
+
+    Monkey-patching ``DeviceConfig.__post_init__`` is the most reliable
+    intervention: it doesn't depend on whether module-level ``__setattr__``
+    hooks are honored by the running Python or how vLLM's lazy
+    ``current_platform`` accessor is cached across submodules.
+    """
+    global _VLLM_DEVICE_CONFIG_PATCHED
+    if _VLLM_DEVICE_CONFIG_PATCHED:
+        return
+
+    import torch
+    from vllm.config.device import DeviceConfig
+
+    original_post_init = DeviceConfig.__post_init__
+
+    def _patched_post_init(self) -> None:
+        if self.device == "auto":
+            self.device_type = "cuda"
+            self.device = torch.device("cuda")
+            return
+        original_post_init(self)
+
+    DeviceConfig.__post_init__ = _patched_post_init
+    _VLLM_DEVICE_CONFIG_PATCHED = True
+
+
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
+    _ensure_vllm_cuda_platform_stub()
+
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import FrontendArgs
