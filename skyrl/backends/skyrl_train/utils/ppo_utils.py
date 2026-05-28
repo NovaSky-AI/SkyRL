@@ -1004,6 +1004,7 @@ def apply_loss_reduction_to_advantages_minibatch(
     loss_reduction: str,
     micro_batch_size: int,
     max_seq_len: int,
+    prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
 ) -> torch.Tensor:
     """Scale advantages so that summing produces the desired loss reduction.
 
@@ -1011,9 +1012,12 @@ def apply_loss_reduction_to_advantages_minibatch(
         advantages: Advantage tensor of shape (minibatch_size, seq_len).
             For step-wise training, minibatch_size can be variable.
         loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
-        loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "seq_mean_token_sum_norm".
+        loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean",
+            "seq_mean_token_sum_norm", "prompt_mean".
         micro_batch_size: Number of sequences per micro-batch
         max_seq_len: Maximum sequence length.
+        prompt_boundaries: Mini-batch-relative (start, end) slices grouping the sequences of
+            each prompt. Required for "prompt_mean"; ignored otherwise.
 
     Returns:
         Scaled advantages tensor.
@@ -1046,6 +1050,18 @@ def apply_loss_reduction_to_advantages_minibatch(
     # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
     elif loss_reduction == "seq_mean_token_sum_norm":
         normalized_advantages = advantages / (batch_size * max_seq_len)
+
+    # Option 4: Prompt level mean - token mean within each prompt, then average over all prompts.
+    # A "prompt" is a group of sequences sharing the same prompt (e.g. the n_samples_per_prompt
+    # GRPO responses). Scale token [i, t] in prompt p by 1 / (num_prompts * tokens_in_prompt_p)
+    # so that summing the per-token policy loss yields mean_p(token_mean within prompt p).
+    elif loss_reduction == "prompt_mean":
+        if prompt_boundaries is None:
+            raise ValueError("`prompt_mean` loss reduction requires `prompt_boundaries`")
+        num_prompts = len(prompt_boundaries)
+        for p_start, p_end in prompt_boundaries:
+            prompt_tokens = loss_mask[p_start:p_end].sum().clamp(min=1)
+            normalized_advantages[p_start:p_end] = advantages[p_start:p_end] / (num_prompts * prompt_tokens)
 
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
