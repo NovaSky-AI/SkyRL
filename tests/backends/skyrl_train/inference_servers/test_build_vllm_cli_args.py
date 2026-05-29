@@ -1,13 +1,16 @@
 """Tests for build_vllm_cli_args on GPU-less hosts."""
 
-import vllm.platforms
-from vllm.platforms.interface import UnspecifiedPlatform
+import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.train.config import SkyRLTrainConfig
 
 
+@pytest.mark.vllm
 def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
+    import vllm.platforms
+    from vllm.platforms.interface import UnspecifiedPlatform
+
     # Simulate the GPU-less Ray head-node case: vLLM resolves current_platform
     # to UnspecifiedPlatform (device_type == ""), so AsyncEngineArgs.add_cli_args
     # walks VllmConfig defaults, instantiates DeviceConfig() and its
