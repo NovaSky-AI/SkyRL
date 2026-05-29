@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SUPPORTED_MODALITIES: tuple[str, ...] = ("tool_use", "browser_use")
+SUPPORTED_MODALITIES: tuple[str, ...] = ("tool_use", "browser_use", "computer_use")
 
 # S3
 S3_DATASET_BUCKET = "fleet-internal-datasets"
@@ -18,10 +18,18 @@ COMPUTER_USE_ENV_PREFIX = "fos-"
 # Excluded envs (from v6 pipeline: broken or unsuitable for training)
 EXCLUDED_ENVS: frozenset[str] = frozenset({"google-maps", "carlisle"})
 
-# Modality -> SkyPilot task YAML (relative to repo root)
+# Modality -> SkyPilot task YAML (relative to repo root).
+#
+# fos-* computer_use envs use the SAME VL YAML as browser_use. Both are
+# MCP-based, single-container, VL-policy. The only runtime difference is
+# image_type: OpenEnv's FleetTaskEnv auto-sets image_type="mcp" when
+# task_modality == "computer_use" (which exposes the `computer` tool on
+# port 8081). gym-anything CUA is a separate two-VM pipeline and is NOT
+# what fos-* tasks are.
 MODALITY_YAML_MAP: dict[str, str] = {
     "tool_use": "tasks/openenv-fleet-grpo-qwen3_5-35b.yaml",
     "browser_use": "tasks/openenv-fleet-grpo-vl.yaml",
+    "computer_use": "tasks/openenv-fleet-grpo-vl.yaml",
 }
 
 # Fields written to the OpenEnv JSON (must match what fleet-common-setup.sh
@@ -45,9 +53,22 @@ SMOKE_RETRIES = 3
 
 # Minimum task count for an auto-launch. Datasets below this fail with
 # "dataset should be at least as large as train_batch_size" once training
-# starts. SkyRL train_batch_size defaults to 16, and the 20% eval split
-# pulls capacity out of train. 50 gives a reasonable margin.
-MIN_TASKS_TO_LAUNCH = 50
+# starts.
+#
+# Empirical floor (validated 2026-05-28 with airflow_synthetic_pipeline,
+# 74 single-env tasks):
+#   total_tasks
+#     -> 0.80 * total                       (20% eval split, MAX_EVAL=20/env)
+#     -> 0.20 * train                       (MAX_ENV_TRAIN_RATIO in
+#                                            prepare_dataset.py: any single
+#                                            env capped at 20% of train)
+#     = 0.16 * total_tasks effective train
+#   need >= train_batch_size (16) => total_tasks >= 100
+#
+# 100 is the minimum that survives the single-env case. 50 is enough for
+# multi-env datasets where the per-env cap doesn't bind, but the trigger
+# can't tell ahead of time. Pick the conservative bound.
+MIN_TASKS_TO_LAUNCH = 100
 
 # Slack
 SLACK_CHANNEL_DEFAULT = "#fleet-training-runs"

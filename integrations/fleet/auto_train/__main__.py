@@ -84,14 +84,6 @@ def _process_one(
     """Returns 0 on success, non-zero on failure (still marks processed if appropriate)."""
     dataset_key = dataset.dataset_key
 
-    if modality == "computer_use":
-        # Real fos-* computer_use; we don't have a training YAML
-        modalities = get_dataset_modalities(client, dataset.id)
-        notify_not_implemented(dataset_key, modality, modalities.get("computer_use", 0))
-        state.mark_processed(dataset_key, modality)
-        logger.warning("Skipping unsupported modality %s for %s", modality, dataset_key)
-        return 0
-
     if modality not in SUPPORTED_MODALITIES:
         logger.warning("Unknown modality %s for %s; skipping", modality, dataset_key)
         return 0

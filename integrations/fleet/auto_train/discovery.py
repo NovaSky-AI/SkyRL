@@ -135,26 +135,41 @@ def fetch_task_records(client: httpx.Client, task_ids: list[str]) -> list[dict]:
 
 
 def resolve_modality(raw_modality: str | None, env_key: str | None) -> str | None:
-    """Apply the fos-* override.
+    """Resolve effective modality from (raw_modality, env_key).
 
-    The Supabase task_modality field is unreliable: tasks marked 'computer_use'
-    are actually 'browser_use' unless the env_key starts with 'fos-' (true
-    desktop). Returns None for unsupported modalities (excluded envs, missing
-    fields, etc.).
+    Rules:
+      - fos-* env_key is deterministically computer_use (Fleet OS desktop apps).
+        This overrides any DB label, since the env identity is ground truth.
+        Inverse: 80% of fos-* tasks ARE labeled computer_use in DB; 18% are
+        NULL; we infer the NULL case from env_key.
+      - For non-fos envs, trust the DB label, with one override: 'computer_use'
+        on a non-fos env actually means browser_use (v6 'DB-is-wrong' rule;
+        sentry/jira/amazon/etc. labeled computer_use are really browser_use).
+      - Returns None for excluded envs, missing fields, or unknown labels
+        we can't infer.
     """
-    if not raw_modality or not env_key:
+    if not env_key:
         return None
     if env_key in EXCLUDED_ENVS:
         return None
+
+    is_fos = env_key.startswith(COMPUTER_USE_ENV_PREFIX)
+
+    # fos-* envs are computer_use by env identity, regardless of label.
+    if is_fos:
+        return "computer_use"
+
+    if not raw_modality:
+        # Non-fos env with NULL modality: we can't reliably infer.
+        return None
+
     m = raw_modality.strip().lower()
     if m == "tool_use":
         return "tool_use"
     if m == "browser_use":
         return "browser_use"
     if m == "computer_use":
-        if env_key.startswith(COMPUTER_USE_ENV_PREFIX):
-            # real desktop computer_use, not supported yet
-            return "computer_use"
+        # Non-fos env labeled computer_use → really browser_use (v6 rule).
         return "browser_use"
     return None
 
