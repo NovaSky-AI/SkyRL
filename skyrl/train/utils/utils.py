@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -976,15 +977,30 @@ def peer_access_supported(max_num_gpus_per_node: int):
 
 
 def update_model_config(module_config, override_config_kwargs):
-    """Update the module config with the override_config_kwargs.
+    """Return a copy of ``module_config`` with ``override_config_kwargs`` applied.
+
+    The returned config is a deep copy, so the caller's input is left
+    unmodified. Nested dict values in ``override_config_kwargs`` recurse into
+    the corresponding sub-config attribute (which is already part of the deep
+    copy, so the recursion mutates the copy in place).
 
     Args:
         module_config: The module config from Huggingface Transformers.
         override_config_kwargs: The kwargs to override the module config.
+
+    Returns:
+        A new module config with the overrides applied.
     """
+    new_config = deepcopy(module_config)
+    _apply_overrides_in_place(new_config, override_config_kwargs)
+    return new_config
+
+
+def _apply_overrides_in_place(module_config, override_config_kwargs):
+    """Apply override kwargs to ``module_config`` in place (used for sub-configs)."""
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
-            update_model_config(getattr(module_config, key), val)
+            _apply_overrides_in_place(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
 
