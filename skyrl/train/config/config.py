@@ -188,7 +188,7 @@ class MegatronConfig(BaseConfig):
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
-    empty_cuda_cache: Optional[bool] = None
+    empty_cuda_cache: Optional[bool] = True
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
