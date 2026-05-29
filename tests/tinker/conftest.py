@@ -22,7 +22,7 @@ def wait_for_condition(
 
 def api_server_is_up(port: int) -> bool:
     try:
-        urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/healthz", timeout=2).read()
         return True
     except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
         return False
