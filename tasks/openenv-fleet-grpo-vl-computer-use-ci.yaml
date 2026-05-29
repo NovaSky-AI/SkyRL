@@ -1,0 +1,87 @@
+# Fleet VL CI Training - Qwen3.5-9B computer_use (1 epoch)
+#
+# CI variant of openenv-fleet-grpo-vl.yaml scoped to computer_use:
+#   - NUM_EPOCHS: 1 (was 10)
+#   - MODALITY: computer_use (fos-* desktop apps)
+#   - Same training pipeline as browser_use (VL model, MCP). OpenEnv's
+#     FleetTaskEnv auto-sets image_type="mcp" when task_modality ==
+#     "computer_use", exposing the `computer` tool on port 8081.
+#   - Used by integrations/fleet/auto_train for scheduled launches
+#
+# Usage:
+#   bash scripts/fleet-launch.sh tasks/openenv-fleet-grpo-vl-computer-use-ci.yaml \
+#     --env DATA_VERSION=<dataset_key> \
+#     --env FLEET_API_KEY=... --env WANDB_API_KEY=... \
+#     --env AWS_ACCESS_KEY_ID=... --env AWS_SECRET_ACCESS_KEY=... \
+#     --retry-until-up --down -y
+#
+# IMPORTANT: pass --down on the sky launch command so the cluster is
+# terminated when the run script exits. The auto_train launcher already
+# does this; only relevant for manual launches.
+
+name: fleet-vl-grpo-qwen3-5-9b-computer-use-ci
+
+resources:
+  disk_size: 750
+  ordered:
+    # RunPod Slurm cluster (reserved H200s, no preemption)
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster-y8puzql3juawue
+    # RunPod on-demand (API provisioned)
+    - accelerators: H200:8
+      cloud: runpod
+      ports: 6479
+    # GCP fallback
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      ports: 6479
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    # Other providers
+    - accelerators: H200:8
+      cloud: lambda
+      ports: 6479
+    - accelerators: H200:8
+      cloud: nebius
+      ports: 6479
+    - accelerators: H200-SXM:8
+      cloud: vast
+      ports: 6479
+
+num_nodes: 2
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
+  ref: main
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v6"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "computer_use"
+  MAX_TURNS: 80
+  MAX_INPUT_LENGTH: 80000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 1
+  RUN_ID: ""
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+
+run: |
+  bash scripts/fleet-vl-run.sh
