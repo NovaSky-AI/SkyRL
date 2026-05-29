@@ -34,10 +34,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Auto-detect data root: /workspace if writable (RunPod), else $HOME (GCP, Lambda, etc.)
+# Auto-detect data root: /workspace if writable (RunPod), else $HOME.
+# On shared /workspace (Slurm), scope by sky cluster name so concurrent runs
+# with the same MODALITY don't stomp on each other's prepared parquet files.
 if [ -z "$DATA_ROOT" ]; then
   if [ -d "/workspace" ] && [ -w "/workspace" ]; then
-    DATA_ROOT="/workspace"
+    SCRIPT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    CLUSTER_ID="$(echo "$SCRIPT_ABS" | sed -n 's|.*/.sky_clusters/\([^/]*\)/.*|\1|p')"
+    if [ -n "$CLUSTER_ID" ]; then
+      DATA_ROOT="/workspace/clusters/${CLUSTER_ID}"
+    else
+      DATA_ROOT="/workspace"
+    fi
   else
     DATA_ROOT="$HOME"
   fi
