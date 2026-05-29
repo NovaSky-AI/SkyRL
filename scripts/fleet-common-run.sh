@@ -216,6 +216,23 @@ elif [ "$FM_STATUS" != "active" ]; then
   fi
 fi
 
+# --- Non-GCP: apply InfiniBand configuration written by setup-slurm.sh ---
+# On GCP the gIB shim handles NCCL above. On RunPod/Slurm we source the env
+# file that setup-slurm.sh wrote with validated HCAs and the training interface.
+if [ "$ON_GCP" = false ]; then
+  _RDMA_LIB=/workspace/rdma_libs
+  if [ -d "$_RDMA_LIB" ]; then
+    export LD_LIBRARY_PATH="${_RDMA_LIB}:${_RDMA_LIB}/libibverbs:${LD_LIBRARY_PATH:-}"
+  fi
+  if [ -f /workspace/nccl_ib.env ]; then
+    # shellcheck source=/dev/null
+    source /workspace/nccl_ib.env
+    echo "[NCCL/IB] Loaded /workspace/nccl_ib.env: HCA=${NCCL_IB_HCA:-none} IFNAME=${NCCL_SOCKET_IFNAME:-unset}"
+  else
+    echo "[NCCL/IB] /workspace/nccl_ib.env not found — run setup-slurm.sh to configure IB"
+  fi
+fi
+
 # --- Ray cluster setup (multi-node aware) ---
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 export RAY_object_store_memory=10000000000
