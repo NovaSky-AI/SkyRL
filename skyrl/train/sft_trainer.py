@@ -55,6 +55,13 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.callbacks import (
+    CallbackHandler,
+    CallbackInput,
+    TrainingCallback,
+    TrainingControl,
+)
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -680,7 +687,12 @@ class SFTTrainer:
         trainer.shutdown()
     """
 
-    def __init__(self, cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig | None = None):
+    def __init__(
+        self,
+        cfg: SFTConfig,
+        skyrl_cfg: SkyRLTrainConfig | None = None,
+        callbacks: Optional[list[TrainingCallback]] = None,
+    ):
         self.sft_cfg = cfg
         # Accept a pre-built bridge config to avoid redundant rebuilds.
         # When not provided (e.g. standalone usage), build it here.
@@ -691,6 +703,15 @@ class SFTTrainer:
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
+        self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
+
+        self._callback_handler = CallbackHandler(callbacks)
+        self._training_control = TrainingControl()
+        # Loop metadata used to build CallbackInput. Populated in train().
+        self._total_steps: int = 0
+        self._steps_per_epoch: int = 0
+        self._current_epoch: int = 0
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -708,8 +729,8 @@ class SFTTrainer:
             use_fast=not self.cfg.trainer.disable_fast_tokenizer,
             padding_side="left",
         )
-        self._init_workers()
         self._init_tracker()
+        self._init_workers()
 
     def _init_workers(self):
         """Create PPORayActorGroup and WorkerDispatch.
@@ -764,6 +785,26 @@ class SFTTrainer:
             backends=self.cfg.trainer.logger,
             config=self.sft_cfg,
         )
+
+    def add_callback(self, callback: TrainingCallback) -> None:
+        """Register a callback. Can be called anytime; events fired after this
+        call will reach the new callback."""
+        self._callback_handler.add(callback)
+
+    def _build_callback_input(self, **fields) -> CallbackInput:
+        """Snapshot loop counters + per-event fields into a CallbackInput."""
+        return CallbackInput(
+            global_step=self.global_step,
+            epoch=self._current_epoch,
+            total_steps=self._total_steps,
+            steps_per_epoch=self._steps_per_epoch,
+            **fields,
+        )
+
+    def _fire(self, event_name: str, **fields) -> None:
+        """Build a CallbackInput and dispatch the given event to all callbacks."""
+        cb_input = self._build_callback_input(**fields)
+        getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
     # ------------------------------------------------------------------ #
     # Data
@@ -1236,7 +1277,7 @@ class SFTTrainer:
         micro_batch = self.sft_cfg.micro_train_batch_size_per_gpu
         if per_dp_batch % micro_batch != 0:
             raise ValueError(
-                f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
+                f"batch_size ({self.sft_cfg.batch_size}) / dp_size ({dp_size}) must be divisible by "
                 f"micro_train_batch_size_per_gpu ({micro_batch})"
             )
 
@@ -1283,6 +1324,8 @@ class SFTTrainer:
             f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
         )
 
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
         for step in range(num_steps):
             all_timings: dict[str, float] = {}
 
@@ -1298,10 +1341,13 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
             self.tracker.log(log_dict, step=step, commit=True)
             logger.info(
@@ -1330,25 +1376,15 @@ class SFTTrainer:
         if eval_tokenized is not None:
             logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
 
-        # Baseline eval before training begins (logged at step 0).
-        # Wandb's step counter starts at 0; the training loop's first commit
-        # advances it to >=1, so step=0 here does not conflict with later steps.
-        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
-            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
-            self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
-            logger.info(
-                f"Baseline eval before training: "
-                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                f"over {num_eval_batches} batches"
-            )
-
         batch_size = self.sft_cfg.batch_size
+
+        # steps_per_epoch is always derived from the data; callbacks rely on it.
+        steps_per_epoch = max(1, ceil(len(tokenized) / batch_size))
 
         # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
         if self.sft_cfg.num_steps is not None:
             num_steps = self.sft_cfg.num_steps
         else:
-            steps_per_epoch = ceil(len(tokenized) / batch_size)
             num_steps = self.sft_cfg.num_epochs * steps_per_epoch
             logger.info(
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
@@ -1381,12 +1417,49 @@ class SFTTrainer:
             rng.shuffle(tokenized)
         current_epoch = start_epoch
 
-        # SkyRL starts counting at step 1
-        self.global_step = start_step + 1 if start_step > 0 else 1
+        # Initialize `global_step`
+        self.global_step = start_step
+
+        # Publish loop metadata so CallbackInput can be built consistently.
+        self._total_steps = num_steps
+        self._steps_per_epoch = steps_per_epoch
+        self._current_epoch = current_epoch
+        self._training_control.reset()
 
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
+
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
+        # Tracks whether the most recent in-loop iteration saved a checkpoint
+        # (either via the ckpt_interval or via a callback-driven ``should_save``).
+        did_save_last_step = False
+
+        self._fire("on_train_start")
+
+        # Baseline eval before training begins (logged at step 0).
+        # Wandb's step counter starts at 0; the training loop's first commit
+        # advances it to >=1, so step=0 here does not conflict with later steps.
+        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+            self._fire("on_eval_start")
+            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+            self._fire("on_eval_end", metrics=eval_metrics)
+            baseline_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+            self._fire("on_log", logs=baseline_log)
+            self.tracker.log(baseline_log, step=self.global_step, commit=True)
+            logger.info(
+                f"Baseline eval before training: "
+                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"over {num_eval_batches} batches"
+            )
+
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
+        self._fire("on_epoch_start")
+        epoch_in_progress = True
+
         while self.global_step <= num_steps:
             all_timings: dict[str, float] = {}
 
@@ -1401,6 +1474,8 @@ class SFTTrainer:
                     else:
                         batch_examples = tokenized[start_idx:end_idx]
                     batch = self.collate_batch(batch_examples, batch_size=batch_size)
+
+                self._fire("on_step_start", batch=batch)
 
                 # Training step
                 step_result = self.train_step(batch, self.global_step)
@@ -1417,22 +1492,35 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
-            # Checkpoint at regular intervals
-            if (
-                self.sft_cfg.ckpt_path
-                and self.sft_cfg.ckpt_interval > 0
+            self._fire("on_step_end", batch=batch, metrics=step_result)
+
+            # Capture callback-driven triggers, then reset so they only fire once.
+            force_save = self._training_control.should_save
+            force_eval = self._training_control.should_evaluate
+            self._training_control.should_save = False
+            self._training_control.should_evaluate = False
+
+            # Checkpoint: interval-driven or callback-requested.
+            interval_save = (
+                self.sft_cfg.ckpt_interval > 0
                 and self.global_step > 0
                 and self.global_step % self.sft_cfg.ckpt_interval == 0
-            ):
+            )
+            did_save_last_step = force_save or interval_save
+            if did_save_last_step:
                 with Timer("save_checkpoint", all_timings):
-                    self.save_checkpoint()
+                    ckpt_path = self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+                self._fire("on_save", ckpt_path=ckpt_path)
 
             # HF export at regular intervals
             if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
@@ -1442,25 +1530,21 @@ class SFTTrainer:
 
             eval_metrics = None
             num_eval_batches: int | None = None
-            # Eval fires at step N where N % eval_interval == 0 and N > 0.
-            # The first iteration of this loop runs as global_step=1 (the
-            # initial increment happens before this block on resume), so a
-            # baseline eval at step 0 is not currently produced by the
-            # training loop. If a step-0 baseline is needed, it would have to
-            # be evaluated before entering the training loop and logged
-            # separately.
-            if (
-                eval_tokenized is not None
-                and self.sft_cfg.eval_interval > 0
-                and self.global_step % self.sft_cfg.eval_interval == 0
-            ):
+            # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
+            # whenever a callback set ``control.should_evaluate``.
+            interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
+            if eval_tokenized is not None and (force_eval or interval_eval):
+                self._fire("on_eval_start")
                 with Timer("eval", all_timings):
                     eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                     log_dict["timing/eval"] = all_timings["eval"]
 
             log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
+            # Callbacks may mutate log_dict in place via on_log.
+            self._fire("on_log", logs=log_dict)
             self.tracker.log(log_dict, step=self.global_step, commit=True)
 
             if self.global_step % 5 == 0:
@@ -1477,22 +1561,33 @@ class SFTTrainer:
             # Check for epoch boundary and reshuffle
             epoch = (self.global_step * batch_size) // len(tokenized)
             if epoch > current_epoch:
+                self._fire("on_epoch_end")
+                epoch_in_progress = False
                 for _ in range(epoch - current_epoch):
                     rng.shuffle(tokenized)
                 current_epoch = epoch
+                self._current_epoch = epoch
+                if self.global_step + 1 <= num_steps:
+                    self._fire("on_epoch_start")
+                    epoch_in_progress = True
 
             self.global_step += 1
         self.global_step = min(self.global_step, num_steps)
 
-        # Save final checkpoint (if checkpointing is enabled)
-        if self.sft_cfg.ckpt_path:
+        # Pair the leading on_epoch_start: fire on_epoch_end if we exited the
+        # loop mid-epoch
+        if epoch_in_progress:
+            self._fire("on_epoch_end")
+            epoch_in_progress = False
+
+        # Save final checkpoint (if checkpointing is enabled). Skip if the last
+        # in-loop iteration already saved (either via ckpt_interval or via a
+        # callback-driven force-save) so we don't double-save.
+        if self.sft_cfg.ckpt_path and not did_save_last_step:
             final_step = num_steps
-            already_saved = (
-                self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
-            )
-            if not already_saved:
-                logger.info(f"Saving final checkpoint at step {final_step}")
-                self.save_checkpoint()
+            logger.info(f"Saving final checkpoint at step {final_step}")
+            ckpt_path = self.save_checkpoint()
+            self._fire("on_save", ckpt_path=ckpt_path)
 
         # Save final HF model if enabled (only if not already saved at last step)
         if self.sft_cfg.hf_save_interval > 0:
@@ -1518,11 +1613,14 @@ class SFTTrainer:
             if not already_ran:
                 final_eval_step = num_steps + 1
                 eval_timings: dict[str, float] = {}
+                self._fire("on_eval_start")
                 with Timer("eval", eval_timings):
                     eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
                     eval_log["timing/eval"] = eval_timings["eval"]
+                    self._fire("on_log", logs=eval_log)
                     self.tracker.log(eval_log, step=final_eval_step, commit=True)
                     logger.info(
                         f"Final eval at step {final_eval_step}: "
@@ -1530,10 +1628,11 @@ class SFTTrainer:
                         f"over {num_eval_batches} batches"
                     )
 
+        self._fire("on_train_end")
         logger.info("SFT training complete!")
 
-    def save_checkpoint(self):
-        """Save a checkpoint at the given step."""
+    def save_checkpoint(self) -> str:
+        """Save a checkpoint at the given step. Returns the checkpoint folder path."""
         step = self.global_step
         global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
@@ -1559,6 +1658,7 @@ class SFTTrainer:
 
         # Clean up old checkpoints after successful save
         cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
+        return global_step_folder
 
     def save_hf_model(self):
         """Save policy weights in HuggingFace format.
@@ -1587,5 +1687,7 @@ class SFTTrainer:
         within the task would be incorrect.  The head-node process owns
         the Ray lifecycle.
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
         if self.tracker is not None:
             self.tracker.finish()

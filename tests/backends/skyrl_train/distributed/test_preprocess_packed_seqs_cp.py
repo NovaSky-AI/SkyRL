@@ -46,18 +46,23 @@ _MEGATRON_MODULES = [
     "megatron.core.transformer",
     "megatron.core.transformer.module",
     "megatron.core.utils",
+    "megatron.core.transformer.moe.moe_utils",
 ]
 
 _mock_modules: dict[str, ModuleType] = {}
 for _name in _MEGATRON_MODULES:
     _mock_modules[_name] = ModuleType(_name)
 
+# NOTE: overall this mocking is pretty brittle, we should just import guard in the source file
 _mock_modules["megatron.core"].parallel_state = _mock_modules["megatron.core.parallel_state"]
 _mock_modules["megatron.core.packed_seq_params"].PackedSeqParams = _PackedSeqParams
 _mock_modules["megatron.core.distributed"].DistributedDataParallel = MagicMock
 _mock_modules["megatron.core.optimizer"].ChainedOptimizer = MagicMock
 _mock_modules["megatron.core.transformer.module"].Float16Module = MagicMock
 _mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
+_mock_modules["megatron.core.transformer.moe.moe_utils"].clear_aux_losses_tracker = MagicMock()
+_mock_modules["megatron.core.transformer.moe.moe_utils"].reduce_aux_losses_tracker_across_ranks = MagicMock()
+_mock_modules["megatron.core.transformer.moe.moe_utils"].get_moe_layer_wise_logging_tracker = MagicMock()
 sys.modules.update(_mock_modules)
 
 
