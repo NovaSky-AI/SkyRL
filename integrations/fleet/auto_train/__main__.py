@@ -20,7 +20,7 @@ from .discovery import (
     get_dataset_modalities,
     list_active_datasets,
 )
-from .exporter import build_openenv_tasks, export_to_s3
+from .exporter import apply_export_cap, build_openenv_tasks, export_to_s3
 from .launcher import launch_training
 from .notify import (
     notify_below_threshold,
@@ -130,6 +130,10 @@ def _process_one(
             logger.error("Smoke failed for %s/%s, NOT launching", dataset_key, modality)
             # Do NOT mark processed; retry on next tick
             return 2
+
+    # Cap to bound training time. Deterministic per dataset_key so re-runs
+    # of the same dataset always export the same subset.
+    tasks = apply_export_cap(tasks, dataset_key)
 
     # Export
     if dry_run:

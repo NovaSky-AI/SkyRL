@@ -14,8 +14,12 @@ import boto3
 import httpx
 from botocore.config import Config
 
+import hashlib
+import random as _random
+
 from .config import (
     AWS_DEFAULT_REGION,
+    MAX_EXPORT_TASKS,
     OPENENV_FIELDS,
     S3_DATASET_BUCKET,
     S3_DATASET_PATH_TEMPLATE,
@@ -172,6 +176,32 @@ def build_openenv_tasks(
     return out
 
 
+def apply_export_cap(
+    tasks: list[dict],
+    dataset_key: str,
+    cap: int = MAX_EXPORT_TASKS,
+) -> list[dict]:
+    """If len(tasks) > cap, deterministically downsample to cap tasks.
+
+    Seeded by dataset_key so the same dataset always selects the same subset.
+    Tasks are sorted by task_key before sampling to make the seed order
+    independent of the upstream Supabase query order.
+
+    Returns the (possibly downsampled) list.
+    """
+    if cap <= 0 or len(tasks) <= cap:
+        return tasks
+    sorted_tasks = sorted(tasks, key=lambda t: t.get("task_key", ""))
+    seed = int(hashlib.sha256(dataset_key.encode("utf-8")).hexdigest()[:16], 16)
+    rng = _random.Random(seed)
+    sampled = rng.sample(sorted_tasks, cap)
+    logger.info(
+        "Capped %s: %d -> %d tasks (seeded by dataset_key)",
+        dataset_key, len(tasks), cap,
+    )
+    return sampled
+
+
 def _s3_client():
     return boto3.client(
         "s3",
@@ -213,5 +243,6 @@ def export_dataset(
             f"No exportable tasks for {dataset_key}/{modality} "
             "(check prompt/verifier coverage)"
         )
+    tasks = apply_export_cap(tasks, dataset_key)
     uri = export_to_s3(tasks, dataset_key, modality, bucket=bucket)
     return uri, len(tasks)

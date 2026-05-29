@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 SUPPORTED_MODALITIES: tuple[str, ...] = ("tool_use", "browser_use", "computer_use")
 
 # S3
@@ -69,6 +71,12 @@ SMOKE_RETRIES = 3
 # multi-env datasets where the per-env cap doesn't bind, but the trigger
 # can't tell ahead of time. Pick the conservative bound.
 MIN_TASKS_TO_LAUNCH = 100
+
+# Maximum tasks per (dataset, modality) to export to S3 + train on. Larger
+# datasets get deterministically downsampled (seeded by dataset_key) so each
+# CI tick has bounded training time regardless of how big the source dataset
+# is. Override per-run via AUTO_TRAIN_MAX_EXPORT_TASKS env var.
+MAX_EXPORT_TASKS = int(os.environ.get("AUTO_TRAIN_MAX_EXPORT_TASKS", "200"))
 
 # Slack
 SLACK_CHANNEL_DEFAULT = "#fleet-training-runs"
