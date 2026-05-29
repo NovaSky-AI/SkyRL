@@ -91,6 +91,21 @@ class FleetPPOExp(BasePPOExp):
 
         asyncio.run(trainer.train())
 
+        # Block until pending S3 uploads complete. Without this, the trainer's
+        # final save_checkpoints() at end-of-training queues uploads to a
+        # ThreadPoolExecutor that gets killed when Ray cleans up this actor.
+        # For long runs with many steps this is fine (per-step uploads have
+        # time to drain), but for short single-epoch CI runs the final save
+        # is often the only checkpoint and it lands AFTER the loop exits.
+        uploader = getattr(trainer, "_s3_uploader", None)
+        if uploader is not None:
+            logger.info("Waiting for pending S3 uploads to complete...")
+            try:
+                uploader.wait_for_uploads()
+                logger.info("All S3 uploads complete.")
+            except Exception as e:
+                logger.warning(f"S3 upload wait failed: {e}")
+
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):
