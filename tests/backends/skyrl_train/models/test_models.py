@@ -72,10 +72,10 @@ def test_flash_attention_sequence_unpacking(input_ids, attention_mask, position_
 @pytest.mark.parametrize("bf16", [True, False])
 def test_meta_init_keeps_non_persistent_buffers_fp32(bf16: bool) -> None:
     """Meta-init casts params and persistent buffers to the target dtype while leaving
-    non-persistent buffers (e.g. `Qwen3RotaryEmbedding.inv_freq`) at fp32."""
+    non-persistent buffers (rotary `inv_freq`) at fp32."""
     target_dtype = torch.bfloat16 if bf16 else torch.float32
     wrapper = HFModelWrapper(
-        "Qwen/Qwen3-0.6B",  # any rotary model works
+        "llamafactory/tiny-random-Llama-3",  # any model with a rotary `inv_freq` buffer
         bf16=bf16,
         meta_init=True,  # We're exercising the non-rank-0 meta path
     )
@@ -88,4 +88,4 @@ def test_meta_init_keeps_non_persistent_buffers_fp32(bf16: bool) -> None:
         assert buf.dtype == torch.float32, f"non-persistent buffer {name} is {buf.dtype}, expected fp32"
         if name.endswith("inv_freq"):
             inv_freq_seen = True
-    assert inv_freq_seen, "expected at least one inv_freq buffer in Qwen3"
+    assert inv_freq_seen, "expected at least one inv_freq buffer in the model"

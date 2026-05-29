@@ -12,7 +12,12 @@ from skyrl.backends.skyrl_train.distributed.utils import get_free_port
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPRefWorkerBase
 from skyrl.train.config import AlgorithmConfig, RefConfig, TrainerConfig
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"  # Small placeholder model with a non-persistent rotary inv_freq buffer
+# Use a model that does not tie its embeddings (shares one weight tensor between
+# the input embedding and the output `lm_head`), since `FSDPRefWorkerBase.init_model`
+# gates meta-init on `not tie_word_embeddings`, leading to a 'tied' model (e.g. Qwen3-0.6B)
+# skipping meta-init entirely, so it can't catch the regression we're testing against
+# https://github.com/huggingface/transformers/blob/v5.8.0/src/transformers/modeling_utils.py#L2582
+MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 SERVER_HOST = "127.0.0.1"
 WORLD_SIZE = 2
 SP_SIZE = 2
@@ -78,6 +83,11 @@ def test_meta_init_inv_freq_finite_under_sp(bf16: bool) -> None:
     for rank, records in enumerate(inv_freq_records):
         assert records, f"rank {rank}: no inv_freq buffers found — test expects a model with rotary embeddings"
         for record in records:
+            assert record["dtype"] == "torch.float32", (
+                f"rank {rank}: {record['name']} is {record['dtype']} after FSDP init, expected fp32 "
+                f"(non-rank-0 meta-init cast it to bf16, diverging from rank-0's fp32). Checked in addition to "
+                f"the finiteness assert below, which a finite-but-garbage value (e.g. ~2e7) would pass."
+            )
             assert record["n_nan"] == 0, (
                 f"rank {rank}: {record['name']} non-finite after FSDP init "
                 f"(n_nan={record['n_nan']}, dtype={record['dtype']}, first5={record['first5']})"
