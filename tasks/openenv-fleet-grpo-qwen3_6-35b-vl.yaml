@@ -13,27 +13,13 @@ resources:
   disk_size: 750
   memory: 1500+
   ordered:
-    # RunPod Slurm cluster (reserved H200s, no preemption)
+    # RunPod Slurm cluster only (reserved H200s with proper RDMA / gIB).
+    # GCP a3-ultragpu fallback removed: the DL image we tested
+    # (common-cu128-ubuntu-2204-nvidia-570-v20260305) lacks RDMA kernel
+    # modules, causing "No RDMA devices" and raylet death on multi-node.
     - accelerators: H200:8
       cloud: slurm
       region: runpod-cluster-y8puzql3juawue
-    # RunPod on-demand (API provisioned)
-    - accelerators: H200:8
-      cloud: runpod
-      ports: 6479
-    # GCP fallback
-    - accelerators: H200:8
-      cloud: gcp
-      use_spot: true
-      ports: 6479
-      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
-    # Other providers
-    - accelerators: H200:8
-      cloud: lambda
-      ports: 6479
-    - accelerators: H200:8
-      cloud: nebius
-      ports: 6479
 
 num_nodes: 4
 
