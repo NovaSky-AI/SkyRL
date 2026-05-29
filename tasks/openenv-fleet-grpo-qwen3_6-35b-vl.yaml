@@ -1,0 +1,78 @@
+# Fleet Qwen3.6-35B-A3B VL Browser-Use GRPO Training via SkyPilot
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_6-35b-vl.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Qwen3.6-35B-A3B (MoE, 35B total / 3B active) with native vision-language
+# (early-fusion multimodal). Same hybrid GatedDeltaNet + sparse MoE architecture
+# as Qwen3.5-35B-A3B, so reuses fleet-35b-vl-run.sh with MODEL_PATH override.
+#
+# Multi-node (4-node, 32 GPUs total): 8x H200 per node, TP=2
+
+name: fleet-qwen36-35b-vl-grpo-browser-use
+
+resources:
+  disk_size: 750
+  memory: 1500+
+  ordered:
+    # RunPod Slurm cluster (reserved H200s, no preemption)
+    - accelerators: H200:8
+      cloud: slurm
+      region: runpod-cluster-y8puzql3juawue
+    # RunPod on-demand (API provisioned)
+    - accelerators: H200:8
+      cloud: runpod
+      ports: 6479
+    # GCP fallback
+    - accelerators: H200:8
+      cloud: gcp
+      use_spot: true
+      ports: 6479
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    # Other providers
+    - accelerators: H200:8
+      cloud: lambda
+      ports: 6479
+    - accelerators: H200:8
+      cloud: nebius
+      ports: 6479
+
+num_nodes: 4
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL-Fleet.git
+  ref: main
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  DATA_VERSION: "v6"
+  ENV_KEYS: ""
+  DIFFICULTY: ""
+  MODALITY: "browser_use"
+  MAX_TURNS: 80
+  MAX_INPUT_LENGTH: 80000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 10
+  RUN_ID: ""
+  MAX_TASKS: ""
+  RESUME_RUN_NAME: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  # TP=2 -> 16 engines (each uses 2 GPUs) to match 32 policy GPUs with colocate_all
+  NUM_INFERENCE_ENGINES: 16
+  # Qwen3.6 overrides (reuses fleet-35b-vl-run.sh)
+  MODEL_PATH: "Qwen/Qwen3.6-35B-A3B"
+  MODEL_TAG: "qwen36"
+
+setup: |
+  bash scripts/fleet-common-setup.sh \
+    --openenv-branch deniz/fleet_client \
+    --extra-setup scripts/fleet-qwen35-extra-setup.sh
+
+run: |
+  bash scripts/fleet-35b-vl-run.sh

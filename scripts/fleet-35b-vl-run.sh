@@ -25,6 +25,8 @@ export LOGGER="${LOGGER:-wandb}"
 export INFERENCE_BACKEND="${INFERENCE_BACKEND:-vllm}"
 export DATA_VERSION="${DATA_VERSION:-v6}"
 export MODALITY="${MODALITY:-browser_use}"
+export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-35B-A3B}"
+export MODEL_TAG="${MODEL_TAG:-qwen35}"
 export NUM_EPOCHS="${NUM_EPOCHS:-10}"
 export MAX_TURNS="${MAX_TURNS:-80}"
 export MAX_INPUT_LENGTH="${MAX_INPUT_LENGTH:-80000}"
@@ -51,7 +53,7 @@ bash scripts/fleet-common-run.sh \
   environment.skyrl_gym.fleet_task.partial_reward=true \
   environment.skyrl_gym.fleet_task.enable_hints=false \
   trainer.algorithm.advantage_estimator=grpo \
-  trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
+  trainer.policy.model.path="$MODEL_PATH" \
   trainer.policy.language_model_only=false \
   trainer.ref.language_model_only=false \
   generator.inference_engine.language_model_only=false \
@@ -101,9 +103,9 @@ bash scripts/fleet-common-run.sh \
   generator.trajectory_timeout_seconds=900 \
   trainer.logger="$LOGGER" \
   trainer.project_name="fleet-browser-use-grpo" \
-  trainer.run_name="fleet_qwen35_35b_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+  trainer.run_name="fleet_${MODEL_TAG}_35b_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_35b_${MODALITY}" \
+  trainer.ckpt_path="$HOME/ckpts/fleet_${MODEL_TAG}_35b_${MODALITY}" \
   trainer.export_path="$HOME/exports" \
   trainer.dump_data_batch=true \
   "$@"
