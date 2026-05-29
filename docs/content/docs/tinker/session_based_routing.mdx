@@ -1,0 +1,70 @@
+---
+title: "Session-based Routing"
+---
+
+SkyRL's Tinker server forwards a stable routing key with every sample request so `vllm-router` can pin a logical request — including all of its `num_samples` expansions and any retries — to a single inference backend. This keeps the prefix cache warm across the turns of one rollout and across retries of one request, while still spreading distinct requests across backends.
+
+## Routing key
+
+For each `/api/v1/asample` call, the server computes:
+
+```
+X-Session-ID = "<sampling_session_id>:<seq_id>"
+```
+
+- `sampling_session_id` is per-client, assigned by `service_client.create_sampling_client()` (or `training_client.save_weights_and_get_sampling_client()`).
+- `seq_id` is per-request within the session. The Tinker SDK auto-bumps it on every `SamplingClient.sample(...)` call.
+
+The key is emitted on both sample dispatch paths:
+
+- `SkyRLTrainBackend._sample_with_remote_client` sets `session_id` on the engine-client payload (the engine subprocess path used in colocated mode).
+- `SkyRLTrainInferenceForwardingClient._forward` sets `X-Session-ID` directly on the `POST /v1/completions` request to vllm-router (the async-forwarding path used in non-colocated mode).
+
+If either `sampling_session_id` or `seq_id` is absent (e.g. direct base-model sampling without an SDK session), the header is omitted and vllm-router falls back to plain load-balancing.
+
+## When you'd care
+
+- **Multi-turn rollouts.** Reuse the same `seq_id` across all turns of one trajectory so they land on the same backend and the second turn hits the prefix cache from the first.
+- **Retries.** A retried sample request inherits the original `seq_id` and therefore the original routing key, so it returns to the same backend.
+- **`num_samples > 1`.** All N samples of one request already share a routing key (same `seq_id` on the server) — they co-locate on one backend automatically.
+
+## Driving it explicitly from a client
+
+The standard `SamplingClient.sample(...)` API auto-bumps `seq_id` on each call and doesn't expose it to the user. To pin a trajectory's turns to one backend you need caller-controlled `seq_id`, which means bypassing `SamplingClient.sample` and dispatching a raw `SampleRequest` via the low-level `client.sampling.asample` (where `client` is obtained from `holder.aclient(...)`).
+
+A runnable demo lives at [`examples/tinker/session_based_routing/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/session_based_routing). It starts a SkyRL Tinker server, runs N parallel trajectories each over T turns where every turn reuses `seq_id=trajectory_idx`, and prints the routing key on dispatch:
+
+```bash
+# Terminal 1
+bash examples/tinker/session_based_routing/run_tinker_server.sh
+
+# Terminal 2
+TINKER_API_KEY=tml-dummy uv run --extra tinker --with torch --with transformers \
+    python examples/tinker/session_based_routing/sample_session_routing_demo.py \
+    --num-trajectories 4 --turns 3
+```
+
+You should see the client and server agree 1:1 on the routing key for every dispatch:
+
+```
+client: dispatch routing-key=sampling_<id>:<seq_id>
+server: [sticky-routing] dispatch idx=<i> model=<...> session_id=sampling_<id>:<seq_id>
+```
+
+
+The `vllm-router` logs can also be inspected to confirm that requests with the same session ID land on the same worker (`sampling_33680dc2:1` consistently maps to `:8001`, `sampling_33680dc2:0` to `:8300`):
+
+```text
+# /tmp/skyrl-logs/router-xxx.log
+INFO consistent_hash: Hash key 'header:x-session-id:sampling_33680dc2:1' mapped to worker: http://10.206.0.28:8001
+INFO consistent_hash: Consistent hash routing: key='header:x-session-id:sampling_33680dc2:1' -> worker='http://10.206.0.28:8001' (index=2)
+INFO consistent_hash: Found session key in header 'x-session-id': sampling_33680dc2:0
+INFO consistent_hash: Extracted hash key: header:x-session-id:sampling_33680dc2:0
+INFO consistent_hash: Hash key 'header:x-session-id:sampling_33680dc2:0' mapped to worker: http://10.206.0.28:8300
+INFO consistent_hash: Consistent hash routing: key='header:x-session-id:sampling_33680dc2:0' -> worker='http://10.206.0.28:8300' (index=3)
+INFO consistent_hash: Found session key in header 'x-session-id': sampling_33680dc2:1
+INFO consistent_hash: Extracted hash key: header:x-session-id:sampling_33680dc2:1
+INFO consistent_hash: Hash key 'header:x-session-id:sampling_33680dc2:1' mapped to worker: http://10.206.0.28:8001
+```
+
+See the example's [`sample_session_routing_demo.py`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/session_based_routing/sample_session_routing_demo.py) for more details.
