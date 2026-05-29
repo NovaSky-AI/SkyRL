@@ -63,7 +63,7 @@ bash scripts/fleet-common-run.sh \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
-  trainer.max_prompt_length=2048 \
+  trainer.max_prompt_length=4096 \
   generator.max_input_length=$MAX_INPUT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   generator.sampling_params.temperature=0.9 \
