@@ -4,7 +4,7 @@ Drives the real Tinker SDK against a CPU API server (jax backend, tiny model)
 and checks that the SDK-issued sampling_session_id + seq_id become the routing
 key (X-Session-ID) on both sample dispatch paths:
 
-- in-process: ``asample`` persists the ids on ``SampleInput`` and
+- default: ``asample`` persists the ids on ``SampleInput`` and
   ``prepare_sample_batch`` derives the key that ``_sample_with_remote_client``
   forwards to the inference engine.
 - external: the forwarded ``/v1/completions`` request carries the
@@ -127,7 +127,7 @@ def _latest_sample_input(db_path: str) -> types.SampleInput:
 
 
 def test_in_process_threads_session_ids_to_sample_input():
-    """In-process path: asample persists the SDK's sampling_session_id + seq_id,
+    """Default path: asample persists the SDK's sampling_session_id + seq_id,
     and prepare_sample_batch derives the routing key handed to the engine."""
     port = 8021
     with tempfile.TemporaryDirectory() as db_dir:
