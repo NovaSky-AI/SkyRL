@@ -594,10 +594,6 @@ class SampleRequest(BaseModel):
         if self.sampling_session_id is not None:
             if self.seq_id is None:
                 raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
-            if ":" in self.sampling_session_id:
-                raise ValueError(
-                    f"sampling_session_id must not contain ':' (the routing-key delimiter), got {self.sampling_session_id!r}"
-                )
             return self
         if (self.base_model is None) == (self.model_path is None):
             raise ValueError(
@@ -1056,6 +1052,12 @@ async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
+    if request.sampling_session_id is not None and ":" in request.sampling_session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
+        )
+
     base_model, model_path = await get_sampling_model(request, session)
 
     if base_model:

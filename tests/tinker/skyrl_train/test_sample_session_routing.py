@@ -13,9 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-# SkyRL-Train backend pulls in ray/vllm (fsdp/megatron extras); skip otherwise.
-skyrl_train_backend = pytest.importorskip("skyrl.backends.skyrl_train_backend")
+# ``ray`` ships with fsdp/megatron (and the standalone skyrl-train extra) but
+# not with the dev+jax+tinker CPU CI image, so it cleanly gates collection.
+pytest.importorskip("ray")
 
+from skyrl.backends import skyrl_train_backend  # noqa: E402
+from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend  # noqa: E402
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
 
@@ -60,7 +63,7 @@ def test_sample_with_remote_client_sets_session_id(monkeypatch):
         _inference_engine_client=spy,
         _aggregate_sample_results=lambda prepared_batch, outputs: {},
     )
-    sample = skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client
+    sample = SkyRLTrainBackend._sample_with_remote_client
 
     batch_with_session = prepare_sample_batch(
         {"req": ("", _sample_input(sampling_session_id="sampling_abcd", seq_id=7))}

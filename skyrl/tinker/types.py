@@ -317,8 +317,7 @@ class PreparedSampleBatch(BaseModel):
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
     all_checkpoint_paths: list[str]
-    # Derived routing key (make_routing_session_id) per sample; None when the
-    # request carried no sampling session. Set as X-Session-ID downstream.
+    # Routing key per sample
     all_session_ids: list[str | None]
 
     # Whether any request needs prompt logprobs

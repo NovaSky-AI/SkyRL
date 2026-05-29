@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from cloudpathlib import AnyPath
@@ -12,6 +13,9 @@ from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack
+
+if TYPE_CHECKING:
+    from skyrl.tinker.api import SampleRequest
 
 
 def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None:
@@ -78,7 +82,7 @@ class ExternalInferenceClient:
 
     async def _forward_to_engine(
         self,
-        request,
+        request: "SampleRequest",
         model_id: str,
         checkpoint_id: str,
         http_client: httpx.AsyncClient,
