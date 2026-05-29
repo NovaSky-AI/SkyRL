@@ -54,9 +54,6 @@ bash scripts/fleet-common-run.sh \
   environment.skyrl_gym.fleet_task.enable_hints=false \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="$MODEL_PATH" \
-  trainer.policy.language_model_only=false \
-  trainer.ref.language_model_only=false \
-  generator.inference_engine.language_model_only=false \
   trainer.flash_attn=false \
   trainer.loss_chunk_size=4096 \
   trainer.use_sample_packing=false \
