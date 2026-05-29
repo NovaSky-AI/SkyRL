@@ -15,11 +15,6 @@ X-Session-ID = "<sampling_session_id>:<seq_id>"
 - `sampling_session_id` is per-client, assigned by `service_client.create_sampling_client()` (or `training_client.save_weights_and_get_sampling_client()`).
 - `seq_id` is per-request within the session. The Tinker SDK auto-bumps it on every `SamplingClient.sample(...)` call.
 
-The key is emitted on both sample dispatch paths:
-
-- `SkyRLTrainBackend._sample_with_remote_client` sets `session_id` on the engine-client payload (the engine subprocess path used in colocated mode).
-- `SkyRLTrainInferenceForwardingClient._forward` sets `X-Session-ID` directly on the `POST /v1/completions` request to vllm-router (the async-forwarding path used in non-colocated mode).
-
 If either `sampling_session_id` or `seq_id` is absent (e.g. direct base-model sampling without an SDK session), the header is omitted and vllm-router falls back to plain load-balancing.
 
 ## When you'd care
@@ -30,9 +25,9 @@ If either `sampling_session_id` or `seq_id` is absent (e.g. direct base-model sa
 
 ## Driving it explicitly from a client
 
-The standard `SamplingClient.sample(...)` API auto-bumps `seq_id` on each call and doesn't expose it to the user. To pin a trajectory's turns to one backend you need caller-controlled `seq_id`, which means bypassing `SamplingClient.sample` and dispatching a raw `SampleRequest` via the low-level `client.sampling.asample` (where `client` is obtained from `holder.aclient(...)`).
+The standard `SamplingClient.sample(...)` API auto-bumps `seq_id` on each call and doesn't expose it to the user. To pin a trajectory's turns to one backend you need caller-controlled `seq_id`. This means bypassing `SamplingClient.sample` and dispatching a raw `SampleRequest` via the low-level `client.sampling.asample` API.
 
-A runnable demo lives at [`examples/tinker/session_based_routing/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/session_based_routing). It starts a SkyRL Tinker server, runs N parallel trajectories each over T turns where every turn reuses `seq_id=trajectory_idx`, and prints the routing key on dispatch:
+An example for configuring this is at [`examples/tinker/session_based_routing/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/session_based_routing). It starts a SkyRL Tinker server, runs N parallel trajectories each over T turns where every turn reuses `seq_id=trajectory_idx`, and prints the routing key on dispatch:
 
 ```bash
 # Terminal 1
