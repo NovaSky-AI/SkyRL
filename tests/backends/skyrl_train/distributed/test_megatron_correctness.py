@@ -328,9 +328,7 @@ class TestSaveHFModelArtifacts:
     def test_rank0_calls_save_artifacts_before_save_hf_configs(self):
         strategy = self._build_strategy(is_rank_0=True)
         bridge, model = self._build_bridge_and_model()
-        io_patch, dist_patch, _io_mock, _dist_mock = self._patch_module_io(
-            work_dir="/tmp/work"
-        )
+        io_patch, dist_patch, _io_mock, _dist_mock = self._patch_module_io(work_dir="/tmp/work")
 
         parent = MagicMock()
         parent.attach_mock(bridge.save_hf_weights, "save_hf_weights")
@@ -338,15 +336,11 @@ class TestSaveHFModelArtifacts:
         parent.attach_mock(strategy.save_hf_configs, "save_hf_configs")
 
         with io_patch, dist_patch:
-            strategy.save_hf_model(
-                bridge=bridge, model=model, output_dir="/out", tokenizer="tok"
-            )
+            strategy.save_hf_model(bridge=bridge, model=model, output_dir="/out", tokenizer="tok")
 
         bridge.save_hf_weights.assert_called_once_with(model.actor_module, "/tmp/work")
         bridge.hf_pretrained.save_artifacts.assert_called_once_with("/tmp/work")
-        strategy.save_hf_configs.assert_called_once_with(
-            strategy.hf_config, "/tmp/work", "tok"
-        )
+        strategy.save_hf_configs.assert_called_once_with(strategy.hf_config, "/tmp/work", "tok")
 
         call_order = [c[0] for c in parent.mock_calls]
         assert call_order == ["save_hf_weights", "save_artifacts", "save_hf_configs"]
@@ -354,14 +348,10 @@ class TestSaveHFModelArtifacts:
     def test_non_rank0_skips_save_artifacts_and_save_hf_configs(self):
         strategy = self._build_strategy(is_rank_0=False)
         bridge, model = self._build_bridge_and_model()
-        io_patch, dist_patch, _io_mock, _dist_mock = self._patch_module_io(
-            work_dir="/tmp/work"
-        )
+        io_patch, dist_patch, _io_mock, _dist_mock = self._patch_module_io(work_dir="/tmp/work")
 
         with io_patch, dist_patch:
-            strategy.save_hf_model(
-                bridge=bridge, model=model, output_dir="/out", tokenizer="tok"
-            )
+            strategy.save_hf_model(bridge=bridge, model=model, output_dir="/out", tokenizer="tok")
 
         bridge.save_hf_weights.assert_called_once_with(model.actor_module, "/tmp/work")
         bridge.hf_pretrained.save_artifacts.assert_not_called()
