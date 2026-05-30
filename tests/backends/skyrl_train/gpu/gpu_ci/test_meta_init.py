@@ -12,12 +12,15 @@ from skyrl.backends.skyrl_train.distributed.utils import get_free_port
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPRefWorkerBase
 from skyrl.train.config import AlgorithmConfig, RefConfig, TrainerConfig
 
-# Use a model that does not tie its embeddings (shares one weight tensor between
-# the input embedding and the output `lm_head`), since `FSDPRefWorkerBase.init_model`
-# gates meta-init on `not tie_word_embeddings`, leading to a 'tied' model (e.g. Qwen3-0.6B)
-# skipping meta-init entirely, so it can't catch the regression we're testing against
+# "Tied" word embeddings share one weight tensor between the input embedding and the output `lm_head`:
 # https://github.com/huggingface/transformers/blob/v5.8.0/src/transformers/modeling_utils.py#L2582
-MODEL_NAME = "llamafactory/tiny-random-Llama-3"
+# This test needs a model that is both non-tied and has a realistic head_dim:
+# - Non-tied: `FSDPRefWorkerBase.init_model` gates meta-init on `not tie_word_embeddings`, so a
+#   tied model (e.g. Qwen3-0.6B) skips meta-init entirely and can't reproduce the bug.
+# - Realistic head_dim (e.g. Qwen3-8B's 128): with that many frequencies,
+#   the bf16 `inv_freq` ends up holding a NaN and the forward NaNs with SP>1;
+#   a tiny head_dim (e.g. 4) only shows the dtype change (bf16 vs fp32), not a NaN.
+MODEL_NAME = "Qwen/Qwen3-8B"
 SERVER_HOST = "127.0.0.1"
 WORLD_SIZE = 2
 SP_SIZE = 2
@@ -79,21 +82,26 @@ def test_meta_init_inv_freq_finite_under_sp(bf16: bool) -> None:
     ray.get([a.init_worker_process_group.remote() for a in actors])
     ray.get([a.init_model.remote(MODEL_NAME) for a in actors])
 
+    # What we're protecting against: NaN logits with SP>1.
+    # Non-rank-0's `inv_freq` is cast to bf16 and ends up holding a NaN,
+    # which poisons the SP-coupled attention so every rank's forward produces NaN logits
+    sequences = torch.randint(10, 10_000, (1, SEQ_LEN), dtype=torch.long)
+    nan_counts = ray.get([a.forward_and_count_nan.remote(sequences) for a in actors])
+    for rank, n_nan in enumerate(nan_counts):
+        assert n_nan == 0, f"rank {rank}: log_probs has {n_nan} NaN positions under SP={SP_SIZE} (bf16={bf16})"
+
+    # Also assert the dtype: the unfixed meta-init casts non-rank-0's buffers
+    # (including `inv_freq`) to bf16, but the forward only NaNs when those bf16 values include a NaN,
+    # so this dtype assertion catches the bad cast even where the forward stays finite
     inv_freq_records = ray.get([a.record_inv_freq.remote() for a in actors])
     for rank, records in enumerate(inv_freq_records):
-        assert records, f"rank {rank}: no inv_freq buffers found — test expects a model with rotary embeddings"
+        assert records, f"rank {rank}: test expects a model with rotary embeddings, but found no inv_freq buffers"
         for record in records:
             assert record["dtype"] == "torch.float32", (
-                f"rank {rank}: {record['name']} is {record['dtype']} after FSDP init, expected fp32 "
-                f"(non-rank-0 meta-init cast it to bf16, diverging from rank-0's fp32). Checked in addition to "
-                f"the finiteness assert below, which a finite-but-garbage value (e.g. ~2e7) would pass."
+                f"rank {rank}: {record['name']} is {record['dtype']} after FSDP init, "
+                f"expected fp32 (cast to bf16 by meta-init, diverging from rank-0)"
             )
             assert record["n_nan"] == 0, (
                 f"rank {rank}: {record['name']} non-finite after FSDP init "
                 f"(n_nan={record['n_nan']}, dtype={record['dtype']}, first5={record['first5']})"
             )
-
-    sequences = torch.randint(10, 10_000, (1, SEQ_LEN), dtype=torch.long)
-    nan_counts = ray.get([a.forward_and_count_nan.remote(sequences) for a in actors])
-    for rank, n_nan in enumerate(nan_counts):
-        assert n_nan == 0, f"rank {rank}: log_probs has {n_nan} NaN positions under SP={SP_SIZE} (bf16={bf16})"
