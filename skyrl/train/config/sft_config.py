@@ -273,8 +273,6 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError("use_minibatch_packing=True is only supported with strategy='megatron'.")
         if not cfg.use_sample_packing:
             raise ValueError("use_minibatch_packing=True requires use_sample_packing=True.")
-        if cfg.megatron_config.context_parallel_size > 1:
-            raise ValueError("use_minibatch_packing=True does not support context_parallel_size > 1 in v1.")
         if cfg.max_length is None:
             raise ValueError("use_minibatch_packing=True requires max_length to be set (it is the bin capacity).")
 

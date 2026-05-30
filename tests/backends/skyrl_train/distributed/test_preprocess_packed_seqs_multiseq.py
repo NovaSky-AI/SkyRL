@@ -226,3 +226,151 @@ class TestSubSeqLengths:
         assert params.cu_seqlens_q.tolist() == [0, 2, 5, 9, 11]
         assert packed.shape == (1, 11)
         assert packed[0].tolist() == [1, 2, 3, 4, 5, 10, 11, 12, 13, 20, 21]
+
+
+class TestMultiSeqCPRoundTrip:
+    """preprocess -> (identity model) -> postprocess round-trip with CP > 1.
+
+    The CP zigzag in preprocess_packed_seqs and the un-zigzag in
+    postprocess_packed_seqs are pure index manipulation, so they can be
+    exercised on CPU by mocking the context-parallel rank/world-size and the
+    all_gather collective. We simulate an *identity* model: each CP rank's
+    "model output" is exactly the CP-sharded buffer that preprocess hands it.
+    Reassembling all ranks' outputs through postprocess must recover the same
+    full THD layout that the (tested) cp_size==1 path produces.
+    """
+
+    @staticmethod
+    def _build_batch(tp_size, cp_size, sub_seq_lengths, seq_len=64):
+        """Build (input_ids, attention_mask) whose row layout matches the
+        SFTTrainerWithPacking collator: each sub-seq padded to align_size,
+        laid out back-to-back from column 0. Real tokens get unique nonzero
+        ids so reassembly is exactly verifiable.
+        """
+        align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+
+        def round_up(x, m):
+            return ((x + m - 1) // m) * m
+
+        batch_size = len(sub_seq_lengths)
+        input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
+        attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
+        next_tok = 1
+        for r, lens in enumerate(sub_seq_lengths):
+            offset = 0
+            for length in lens:
+                ids = torch.arange(next_tok, next_tok + length, dtype=torch.long)
+                next_tok += length
+                input_ids[r, offset : offset + length] = ids
+                attention_mask[r, offset : offset + length] = True
+                offset += round_up(length, align_size)
+        return input_ids, attention_mask
+
+    def _run_roundtrip(self, tp_size, cp_size, sub_seq_lengths):
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+            postprocess_packed_seqs,
+            preprocess_packed_seqs,
+        )
+
+        input_ids, attention_mask = self._build_batch(tp_size, cp_size, sub_seq_lengths)
+        batch_size, seq_len = input_ids.shape
+
+        # ---- ground truth: the full (un-sharded) padded THD layout ----
+        # Under the identity model, postprocess must reassemble each row's
+        # sub-seqs (each padded to align_size) back-to-back from column 0 with
+        # the rest zero. ``_build_batch`` already produces exactly that layout
+        # in ``input_ids`` (the same row layout the SFTTrainerWithPacking
+        # collator emits), so the row buffer is just input_ids cast to float.
+        # NOTE: we deliberately do NOT use the cp_size==1 path as ground truth
+        # here -- the cp==1 align_size is ``tp_size`` whereas the cp>1
+        # align_size is ``tp_size*cp_size*2``, so the two assume *different*
+        # intra-row sub-seq offsets and are not directly comparable. The
+        # analytic layout below is align_size-consistent and a stronger target.
+        gt = input_ids.to(torch.float32)
+
+        # ---- CP > 1: preprocess each rank, gather, postprocess ----
+        per_rank_out = []
+        params_cp = None
+        for cp_rank in range(cp_size):
+            with patch(
+                "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
+                _mock_mpu(tp_size=tp_size, cp_size=cp_size, cp_rank=cp_rank),
+            ):
+                packed_r, params_r = preprocess_packed_seqs(
+                    input_ids, attention_mask, pre_process=True, sub_seq_lengths=sub_seq_lengths
+                )
+            per_rank_out.append(packed_r.to(torch.float32))
+            params_cp = params_r  # cu_seqlens are global, identical across ranks
+
+        # Every rank's local buffer must be the same length (== total/cp).
+        for r in range(1, cp_size):
+            assert per_rank_out[r].shape == per_rank_out[0].shape
+
+        # postprocess on the local (cp_rank=0) output; all_gather supplies the
+        # other ranks' outputs. Run it under cp_rank=0's mpu.
+        with patch(
+            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
+            _mock_mpu(tp_size=tp_size, cp_size=cp_size, cp_rank=0),
+        ):
+
+            def _fake_all_gather(output_list, _tensor, group=None):
+                for j in range(cp_size):
+                    output_list[j].copy_(per_rank_out[j])
+
+            with patch(
+                "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.torch.distributed.all_gather",
+                side_effect=_fake_all_gather,
+            ):
+                recovered = postprocess_packed_seqs(
+                    per_rank_out[0],
+                    params_cp,
+                    attention_mask,
+                    batch_size,
+                    seq_len,
+                    post_process=True,
+                    sub_seq_lengths=sub_seq_lengths,
+                )
+
+        return gt, recovered
+
+    def test_roundtrip_recovers_full_layout_cp2(self):
+        # tp=1, cp=2 -> align_size=4. Sub-seq lengths chosen so each row has
+        # multiple sub-seqs of differing lengths.
+        gt, recovered = self._run_roundtrip(tp_size=1, cp_size=2, sub_seq_lengths=[[6, 5], [7, 3]])
+        assert torch.equal(recovered, gt), (
+            "CP=2 multi-subseq un-zigzag did not recover the full padded THD layout.\n"
+            f"gt=\n{gt}\nrecovered=\n{recovered}"
+        )
+
+    def test_roundtrip_recovers_full_layout_tp2_cp2(self):
+        # tp=2, cp=2 -> align_size=8.
+        gt, recovered = self._run_roundtrip(tp_size=2, cp_size=2, sub_seq_lengths=[[5, 9], [3, 6]])
+        assert torch.equal(recovered, gt)
+
+    def test_roundtrip_cp4(self):
+        # tp=1, cp=4 -> align_size=8. Exercises >2 CP ranks so the per-rank
+        # zigzag chunk assignment (ranks 0..3 hold chunks {0,7},{1,6},{2,5},{3,4})
+        # is genuinely tested, not just the symmetric cp=2 case.
+        gt, recovered = self._run_roundtrip(tp_size=1, cp_size=4, sub_seq_lengths=[[10, 6], [13, 3]])
+        assert torch.equal(recovered, gt)
+
+    def test_roundtrip_single_subseq_per_row_cp2(self):
+        # Degenerate multi-subseq (one sub-seq per row) must also round-trip
+        # and recover the full padded layout.
+        gt, recovered = self._run_roundtrip(tp_size=1, cp_size=2, sub_seq_lengths=[[7], [10]])
+        assert torch.equal(recovered, gt)
+
+    def test_roundtrip_recovers_original_tokens_cp2(self):
+        # Strongest check: hard-coded expected token ids at known slots, so a
+        # wrong un-zigzag that happens to be self-consistent with a wrong
+        # preprocess would still be caught.
+        tp_size, cp_size = 1, 2
+        sub_seq_lengths = [[6, 5], [7, 3]]
+        _, recovered = self._run_roundtrip(tp_size, cp_size, sub_seq_lengths)
+
+        # align_size=4: row0 = [1..6, 0,0, 7..11, 0,0,0]; row1 = [12..18, 0, 19,20,21, 0].
+        assert recovered[0, 0:6].tolist() == [1.0, 2, 3, 4, 5, 6]
+        assert recovered[0, 6:8].tolist() == [0.0, 0.0]  # alignment pad
+        assert recovered[0, 8:13].tolist() == [7.0, 8, 9, 10, 11]
+        assert recovered[1, 0:7].tolist() == [12.0, 13, 14, 15, 16, 17, 18]
+        assert recovered[1, 8:11].tolist() == [19.0, 20, 21]

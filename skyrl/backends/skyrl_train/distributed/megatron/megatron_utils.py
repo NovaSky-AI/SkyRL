@@ -479,8 +479,7 @@ def postprocess_packed_seqs(
     Two modes (mirroring :func:`preprocess_packed_seqs`):
 
     - ``sub_seq_lengths is None`` (default): each batch row corresponds to a
-      single ``cu_seqlens`` segment. The legacy SkyRL behavior used by the
-      RL path and the existing un-packed SFT path.
+      single ``cu_seqlens`` segment.
     - ``sub_seq_lengths is not None``: each batch row may contain multiple
       sub-sequences concatenated end-to-end (controller-side mini-batch
       packing). ``cu_seqlens_q_padded`` then has one entry **per sub-seq**,
@@ -545,13 +544,41 @@ def postprocess_packed_seqs(
                 row_len = end_idx - start_idx
                 output_new[i, :row_len] = output[0][start_idx:end_idx]
                 continue
-            # CP > 1 multi-subseq is out-of-scope (banned in v1 by
-            # SFTTrainerWithPacking validation). Defensive raise so a future
-            # CP+packing path forces a deliberate implementation.
-            raise NotImplementedError(
-                "postprocess_packed_seqs does not yet support sub_seq_lengths "
-                "with cp_size > 1 (controller-side packing currently bans CP > 1)."
-            )
+            # ----------------------------------------------------------------
+            # CP > 1, multi-subseq: un-zigzag each cu_seqlens segment (sub-seq)
+            # independently and write its FULL padded slab (sub-seq tokens +
+            # this sub-seq's own alignment pad) back-to-back into output_new[i],
+            # starting at column 0.
+            #
+            # ``cu_padded_cpu`` carries one entry PER SUB-SEQ here, so
+            # ``cu_padded_cpu[seg]`` is the sub-seq's global (un-sharded) THD
+            # start. Each CP rank's local buffer holds 1/cp_size of every
+            # segment, so the per-rank start is ``cu_padded_cpu[seg] // cp_size``
+            # (identical bookkeeping to preprocess_packed_seqs).
+            row_global_start = cu_padded_cpu[row_first_sub]
+            for seg in range(row_first_sub, row_last_sub_exclusive):
+                s_len_padded_chunk = (cu_padded_cpu[seg + 1] - cu_padded_cpu[seg]) // cp_size
+                half_seqlen = s_len_padded_chunk // 2
+                s_len_padded = s_len_padded_chunk * cp_size
+                # This segment's start in each rank's CP-sharded local buffer.
+                packed_start_idx = cu_padded_cpu[seg] // cp_size
+                # Destination column of this segment within row i's output
+                # buffer: its global THD offset relative to the row start.
+                # (== sum of preceding sub-seqs' padded lengths in this row,
+                # matching the collator's row_offset layout.)
+                dest_off = cu_padded_cpu[seg] - row_global_start
+                tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
+                for j in range(cp_size):
+                    o = output_list[j][0]
+                    # Rank j held chunk j (front half of its slab) and chunk
+                    # 2*cp_size-1-j (back half of its slab) for THIS segment.
+                    o0, o1 = (
+                        o[packed_start_idx : packed_start_idx + half_seqlen],
+                        o[packed_start_idx + half_seqlen : packed_start_idx + s_len_padded_chunk],
+                    )
+                    tmp[j * half_seqlen : (j + 1) * half_seqlen] = o0
+                    tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
+                output_new[i, dest_off : dest_off + s_len_padded] = tmp
 
         return output_new
 
@@ -650,6 +677,8 @@ def get_model_config(model):
 
 def broadcast_object_across_pp_ranks(obj):
     """Broadcast an object across pipeline parallel ranks.
+
+    From Nemo-RL: https://github.com/NVIDIA-NeMo/RL/blob/0a769cc3553a265dd1ca4648de0a7d0b1ad5ece6/nemo_rl/models/policy/megatron_policy_worker.py#L136
 
     This utility function handles broadcasting an object from the rank that owns it
     to all other pipeline parallel ranks. If only one rank has the object (non-None),

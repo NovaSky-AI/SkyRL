@@ -426,7 +426,14 @@ class MegatronModelWrapper:
             # inside every row of the micro-batch (controller-side mini-batch
             # packing). preprocess_packed_seqs uses it to emit cu_seqlens
             # entries covering all sub-seqs, not one per row.
-            sub_seq_lengths = batch.get("sub_seq_lengths")
+            #
+            # It arrives as a ``TensorList`` data field (one 1-D int tensor per
+            # row, sharded per-DP rank by MeshDispatch). The consumers
+            # ``preprocess/postprocess_packed_seqs`` are typed
+            # ``list[list[int]]``, so convert tensors -> python lists here at
+            # the forward_step boundary, keeping those signatures unchanged.
+            sub_seq_lengths_field = batch.get("sub_seq_lengths")
+            sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
 
             if self.use_sample_packing:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(

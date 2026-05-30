@@ -1,26 +1,23 @@
 """Collator -> preprocess -> postprocess round-trip tests for packed SFT.
 
-These tests close the specific gap called out in Reviewer-1's verdict:
-the 34 packing-related tests that existed prior to this file did not
-exercise the *collator output -> preprocess -> postprocess* round-trip
-with multi-subseq rows under both ``mbs > 1`` and ``tp_size > 1``. The
-two correctness bugs that the reviewer found live exactly at the
-interfaces between those steps:
+These tests exercise the *collator output -> preprocess -> postprocess*
+round-trip with multi-subseq rows under both ``mbs > 1`` and
+``tp_size > 1``, asserting the invariants at the interfaces between those
+steps:
 
-  Bug #1 (postprocess) — when ``cu_seqlens_q_padded`` enumerates one
-    entry per *sub-seq* (not per row), iterating over batch rows
-    using ``cu_padded_cpu[i]`` reads from the wrong THD offset for
-    every row ``i > 0`` whose predecessors contained > 1 sub-seq.
+  postprocess — when ``cu_seqlens_q_padded`` enumerates one entry per
+    *sub-seq* (not per row), each batch row must round-trip from THD
+    offset ``cu_padded_cpu[row_start(i)]``, so a row whose predecessors
+    contained > 1 sub-seq reads from the correct offset.
 
-  Bug #2 (preprocess) — the controller-side collator advances
+  preprocess — the controller-side collator advances
     ``row_offset += round_up(s, align_size)`` between sub-seqs in the
-    same row. ``preprocess_packed_seqs`` was advancing by the un-padded
-    length, so for ``tp_size > 1`` and multi-subseq rows it read
-    sub-seq ``i > 0`` starting inside the TP-alignment pad gap of
-    sub-seq ``i - 1``.
+    same row. ``preprocess_packed_seqs`` advances by the same padded
+    length, so for ``tp_size > 1`` and multi-subseq rows sub-seq
+    ``i > 0`` starts past the TP-alignment pad gap of sub-seq ``i - 1``.
 
 The configuration here (``mbs=2``, ``tp_size=4``, two multi-subseq rows
-with sub-seq lengths ``[7, 5]`` and ``[3, 11]``) hits both bugs at once.
+with sub-seq lengths ``[7, 5]`` and ``[3, 11]``) exercises both at once.
 
 Run with:
   uv run --extra dev --extra megatron -- pytest \
@@ -220,10 +217,9 @@ class TestRoundTrip:
             )
 
         recovered = recovered.squeeze(-1)
-        # Both rows should round-trip to their original collator layout
-        # (including TP-alignment pads). Without the Bug #1 fix, row 1 would
-        # read from THD offset 8 instead of 16, mixing row 0's sub-seq 1
-        # tokens into row 1's recovered output.
+        # Both rows round-trip to their original collator layout (including
+        # TP-alignment pads). Row 1 reads from THD offset cu_padded[row_start(1)]
+        # = 16 (not 8), so row 0's sub-seq 1 tokens stay out of row 1's output.
         assert recovered[0].tolist() == sequences[0].float().tolist()
         assert recovered[1].tolist() == sequences[1].float().tolist()
 

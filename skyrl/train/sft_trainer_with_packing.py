@@ -5,13 +5,13 @@ bins of capacity ``max_length``, the bin count is rounded up to a multiple
 of ``dp_size`` (so every DP rank gets the same number of micro-batches),
 and each bin becomes one row of the resulting :class:`TrainingInputBatch`.
 
-The packed rows carry a per-row ``sub_seq_lengths`` list inside
-``TrainingInputBatch.metadata`` so the worker's
-:func:`preprocess_packed_seqs` can enumerate every sub-sequence in the
-``cu_seqlens`` it emits.
+The packed rows carry a per-row ``sub_seq_lengths`` field inside
+``TrainingInputBatch`` data (a :class:`TensorList`, one 1-D int tensor per
+bin) so the worker's :func:`preprocess_packed_seqs` can enumerate every
+sub-sequence in the ``cu_seqlens`` it emits. Being a data field (not
+metadata), ``MeshDispatch`` shards it per-DP rank automatically.
 
-Megatron backend only. CP > 1 is not supported in v1
-(`prompts/implement.md` scopes it out).
+Megatron backend only.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from typing import List
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
-    get_packer,
+    make_seq_packer,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.train.config.sft_config import SFTConfig
 from skyrl.train.sft_trainer import SFTTrainer
 
@@ -58,11 +58,6 @@ class SFTTrainerWithPacking(SFTTrainer):
             )
         if not getattr(self.sft_cfg, "use_minibatch_packing", False):
             raise ValueError("SFTTrainerWithPacking was instantiated but use_minibatch_packing=False.")
-        if self.sft_cfg.megatron_config.context_parallel_size > 1:
-            raise ValueError(
-                "use_minibatch_packing=True does not support context_parallel_size > 1 in v1. "
-                "Disable packing or set context_parallel_size=1."
-            )
 
     # ------------------------------------------------------------------ #
     # Data path
@@ -97,7 +92,7 @@ class SFTTrainerWithPacking(SFTTrainer):
            inside ``MeshDispatch.dispatch`` because we lay out bins in
            shard-major order: shard 0 rows first, then shard 1, etc).
         4. Build the per-bin packed row tensors and the per-row
-           ``sub_seq_lengths`` metadata.
+           ``sub_seq_lengths`` data field (a :class:`TensorList`).
         """
         # When eval calls collate_batch with a chunk of the eval set, we fall
         # back to the inherited un-packed collate path. Packing only fires on
@@ -111,7 +106,18 @@ class SFTTrainerWithPacking(SFTTrainer):
 
         tp_size = self.sft_cfg.megatron_config.tensor_model_parallel_size
         pp_size = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-        align_size = tp_size
+        cp_size = self.sft_cfg.megatron_config.context_parallel_size
+        # Each sub-seq's padded length must satisfy two divisibility
+        # constraints, which is why ``align_size`` carries both factors:
+        #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
+        #     dim, so each segment must be divisible by ``tp_size``.
+        #   - Context Parallelism splits each segment into ``2*cp_size`` equal
+        #     load-balanced causal chunks, so each segment must be divisible by
+        #     ``2*cp_size``.
+        # This MUST stay in lockstep with the worker's preprocess_packed_seqs
+        # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
+        # gather/scatter offsets silently corrupt loss/grads (no crash).
+        align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
 
         dp_size = self._dp_size()
 
@@ -146,7 +152,7 @@ class SFTTrainerWithPacking(SFTTrainer):
         # by ``packed_mbs``.
         packed_mbs = self._packed_micro_batch_size()
         bin_count_multiple = dp_size * packed_mbs
-        packer = get_packer(
+        packer = make_seq_packer(
             "first_fit_decreasing",
             bin_capacity=max_length,
             min_bin_count=bin_count_multiple,
@@ -250,7 +256,6 @@ class SFTTrainerWithPacking(SFTTrainer):
         # The total_nonpad we just counted matches sum(loss_mask). Verify in
         # debug logs only — too expensive on hot path for assert.
         if total_nonpad != int(loss_mask.sum().item()):
-            # Defensive: recount from the tensor (will diverge only on bugs).
             total_nonpad = int(loss_mask.sum().item())
 
         # ------------------------------------------------------------------
@@ -265,18 +270,28 @@ class SFTTrainerWithPacking(SFTTrainer):
         loss_mask.mul_(scale)
 
         # ------------------------------------------------------------------
-        # 6. Pack into TrainingInputBatch with sub_seq_lengths metadata
+        # 6. Pack into TrainingInputBatch with sub_seq_lengths data field
         # ------------------------------------------------------------------
+        # ``sub_seq_lengths`` is genuinely per-sample data: after FFD the
+        # batch's "sample" *is* a bin, so ``len(bin_subseq_lengths) == num_bins
+        # == batch_size``, co-indexed with ``sequences[r]``. We store it as a
+        # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
+        # pattern as ``image_grid_thw``) so ``MeshDispatch`` shards it per-DP
+        # rank automatically alongside ``sequences``/``attention_mask``,
+        # eliminating the worker-side per-rank slice. The two consumers
+        # ``preprocess/postprocess_packed_seqs`` still want ``list[list[int]]``,
+        # so a ``.tolist()`` happens at the ``forward_step`` boundary.
+        sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])
         batch = TrainingInputBatch(
             {
                 "sequences": sequences,
                 "attention_mask": attention_mask,
                 "loss_mask": loss_mask,
+                "sub_seq_lengths": sub_seq_lengths,
             }
         )
         batch.metadata = {
             "response_length": max_packed_len - 1,
-            "sub_seq_lengths": bin_subseq_lengths,
         }
         return batch
 

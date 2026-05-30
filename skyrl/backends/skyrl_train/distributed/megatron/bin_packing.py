@@ -1,13 +1,21 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 """Sequence packing algorithms for SkyRL SFT (Megatron backend).
 
-Only First-Fit-Decreasing (FFD) is shipped in v1; the abstract
-:class:`SequencePacker` base supports adding MFFD / FFShuffle / Concatenative
-later without touching call sites. The DP-symmetry knobs
-(``min_bin_count`` + ``bin_count_multiple``) and the empty-bin
-redistribution algorithm in :meth:`SequencePacker._adjust_bin_count` are the
-load-bearing pieces — they let the controller emit a bin count that is
-exactly a multiple of ``dp_size`` so every DP rank gets the same
-``num_microbatches``.
+The structure is based on NemoRL's sequence packing implementation
 """
 
 from __future__ import annotations
@@ -17,16 +25,13 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
 
-class PackingAlgorithm(enum.Enum):
-    """Supported sequence packing algorithms.
-
-    Only ``FIRST_FIT_DECREASING`` is implemented in v1.
-    """
+class PackingStrategy(enum.Enum):
+    """Supported sequence packing algorithms."""
 
     FIRST_FIT_DECREASING = "first_fit_decreasing"
 
 
-class SequencePacker(ABC):
+class SeqPacker(ABC):
     """Abstract base class for bin-packing algorithms.
 
     Sub-classes implement :meth:`_pack_implementation` which returns a list
@@ -122,7 +127,7 @@ class SequencePacker(ABC):
         return bins
 
 
-class FirstFitDecreasingPacker(SequencePacker):
+class FirstFitDecreasing(SeqPacker):
     """First-Fit-Decreasing (FFD).
 
     Sort sequences by length descending, place each in the first bin with
@@ -155,20 +160,20 @@ class FirstFitDecreasingPacker(SequencePacker):
 
 
 _PACKERS = {
-    PackingAlgorithm.FIRST_FIT_DECREASING: FirstFitDecreasingPacker,
+    PackingStrategy.FIRST_FIT_DECREASING: FirstFitDecreasing,
 }
 
 
-def get_packer(
-    algorithm: PackingAlgorithm | str,
+def make_seq_packer(
+    algorithm: PackingStrategy | str,
     bin_capacity: int,
     min_bin_count: Optional[int] = None,
     bin_count_multiple: Optional[int] = None,
-) -> SequencePacker:
-    """Factory returning a configured :class:`SequencePacker` instance.
+) -> SeqPacker:
+    """Factory returning a configured :class:`SeqPacker` instance.
 
     Args:
-        algorithm: Either a :class:`PackingAlgorithm` enum value or a
+        algorithm: Either a :class:`PackingStrategy` enum value or a
             case-insensitive string matching an enum name (e.g.
             ``"first_fit_decreasing"``).
         bin_capacity: Maximum tokens per bin.
@@ -179,13 +184,13 @@ def get_packer(
     """
     if isinstance(algorithm, str):
         try:
-            algorithm = PackingAlgorithm[algorithm.upper()]
+            algorithm = PackingStrategy[algorithm.upper()]
         except KeyError:
-            available = ", ".join(a.name for a in PackingAlgorithm)
+            available = ", ".join(a.name for a in PackingStrategy)
             raise ValueError(f"Unknown packing algorithm: {algorithm}. Available: {available}")
 
     if algorithm not in _PACKERS:
-        available = ", ".join(a.name for a in PackingAlgorithm)
+        available = ", ".join(a.name for a in PackingStrategy)
         raise ValueError(f"Unknown packing algorithm: {algorithm}. Available: {available}")
 
     return _PACKERS[algorithm](
