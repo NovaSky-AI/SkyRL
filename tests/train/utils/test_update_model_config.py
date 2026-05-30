@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/train/utils/test_utils.py
+uv run --isolated --extra dev pytest tests/train/utils/test_update_model_config.py
 """
 
 from copy import deepcopy
