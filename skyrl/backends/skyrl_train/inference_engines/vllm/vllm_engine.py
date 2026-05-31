@@ -344,6 +344,18 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "teardown_weight_receiver")
 
+    async def start_weight_update(self, is_checkpoint_format: bool = True):
+        engine = self._get_engine()
+        return await asyncio.to_thread(
+            engine.collective_rpc,
+            "start_weight_update",
+            args=(is_checkpoint_format,),
+        )
+
+    async def finish_weight_update(self):
+        engine = self._get_engine()
+        return await asyncio.to_thread(engine.collective_rpc, "finish_weight_update")
+
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
@@ -562,6 +574,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def _teardown_weight_receiver(self):
         engine = self._get_engine()
         return await engine.collective_rpc("teardown_weight_receiver")
+
+    async def start_weight_update(self, is_checkpoint_format: bool = True):
+        engine = self._get_engine()
+        return await engine.collective_rpc(
+            "start_weight_update",
+            args=(is_checkpoint_format,),
+        )
+
+    async def finish_weight_update(self):
+        engine = self._get_engine()
+        return await engine.collective_rpc("finish_weight_update")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests
