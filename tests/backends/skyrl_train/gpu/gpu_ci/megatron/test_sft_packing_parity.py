@@ -458,7 +458,7 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
         # Build the collated batch on the controller exactly as the trainer would.
         if packed:
             trainer = SFTTrainer(sft_cfg, skyrl_cfg=skyrl_cfg)
-            trainer.collator.tokenizer = tokenizer
+            trainer.collator = trainer._build_collator(tokenizer)
             collated = trainer.collate_batch(examples, batch_size=GLOBAL_BATCH_SIZE)
             # Recompute flat_bins + align_size deterministically (same FFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)

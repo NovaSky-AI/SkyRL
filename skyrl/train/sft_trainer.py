@@ -703,7 +703,7 @@ class SFTTrainer:
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
-        self.collator = self._build_collator()
+        self.collator = None  # built in setup() once the tokenizer is available
 
         self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
@@ -715,15 +715,14 @@ class SFTTrainer:
         self._steps_per_epoch: int = 0
         self._current_epoch: int = 0
 
-    def _build_collator(self):
+    def _build_collator(self, tokenizer):
         """Select the batch collator from the configured packing mode.
 
         ``PackedDataCollator`` performs controller-level FFD bin-packing
         (Megatron-only, ``use_sequence_packing=True``); ``DefaultCollator``
-        left-pads each example. Both are built from static config, so the
-        choice is fixed before workers are launched. The tokenizer is supplied
-        lazily (set in :meth:`setup`); the collator reads ``self.tokenizer`` at
-        call time. The packed config is validated here.
+        left-pads each example. The choice is fixed by static config; the
+        ``tokenizer`` is passed in by :meth:`setup` once it is available. The
+        packed config is validated here.
         """
         # Imported lazily to avoid a circular import: ``collators`` imports
         # ``collate_sft_batch`` from this module.
@@ -732,7 +731,7 @@ class SFTTrainer:
         if self.sft_cfg.use_sequence_packing:
             self._validate_packing_cfg()
             return PackedDataCollator(
-                tokenizer=None,
+                tokenizer=tokenizer,
                 max_tokens_per_microbatch=self.sft_cfg.resolved_bin_capacity(),
                 tp_size=self.sft_cfg.megatron_config.tensor_model_parallel_size,
                 pp_size=self.sft_cfg.megatron_config.pipeline_model_parallel_size,
@@ -742,7 +741,7 @@ class SFTTrainer:
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
             )
         return DefaultCollator(
-            tokenizer=None,
+            tokenizer=tokenizer,
             micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
         )
 
@@ -787,7 +786,7 @@ class SFTTrainer:
             use_fast=not self.cfg.trainer.disable_fast_tokenizer,
             padding_side="left",
         )
-        self.collator.tokenizer = self.tokenizer
+        self.collator = self._build_collator(self.tokenizer)
         self._init_tracker()
         self._init_workers()
 

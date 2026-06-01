@@ -340,7 +340,7 @@ class TestRoundTrip:
         trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
         tok = MagicMock()
         tok.pad_token_id = 0
-        trainer.collator.tokenizer = tok
+        trainer.collator = trainer._build_collator(tok)
 
         # 4 examples sized to force 2 bin rows each holding 2 sub-seqs.
         examples = [

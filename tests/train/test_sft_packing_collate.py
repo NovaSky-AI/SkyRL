@@ -42,16 +42,16 @@ def _make_collator(
         ),
     )
     # Avoid SFTTrainer.__init__ kicking off bridge config build by injecting
-    # a fake skyrl_cfg. The collator is built from config alone.
+    # a fake skyrl_cfg.
     from skyrl.train.config.sft_config import build_skyrl_config_for_sft
 
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
-    collator = trainer.collator
-    # Patch in a tokenizer with a pad_token_id.
+    # Build the collator with a mock tokenizer the way setup() does, but
+    # without the Ray/GPU worker init.
     tok = MagicMock()
     tok.pad_token_id = 0
-    collator.tokenizer = tok
+    collator = trainer._build_collator(tok)
     return collator
 
 
