@@ -96,7 +96,7 @@ stats to be enabled, and are sampled at 1% of blocks via
 Because it's a histogram, query it with `histogram_quantile` over the bucket
 rate — e.g. p95 block lifetime over a 5m window:
 
-```promql
+```text
 # p95 KV block lifetime
 histogram_quantile(
   0.95,
