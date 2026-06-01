@@ -76,13 +76,8 @@ The curated subset above is only what SkyRL forwards to wandb. Every metric the
 vLLM engine exports is still available on the same Ray metrics endpoints, so you
 can query anything vLLM emits — not just the keys in the table.
 
-The quickest way to see what's there is to curl an endpoint directly. Discover
-the URLs the scraper uses (one per alive Ray node) and inspect the raw
-Prometheus text:
-
-```bash
-curl -s http://<node-ip>:<MetricsExportPort>/metrics | grep vllm
-```
+To actually query these over time, point a Prometheus server at Ray's metrics
+endpoints (Ray exposes them for exactly this) and use PromQL.
 
 Names are sanitized on the way out: vLLM's `:` becomes `_`, and Ray's metrics
 agent prepends `ray_`. So vLLM's `vllm:kv_cache_usage_perc` is exported as
@@ -95,11 +90,18 @@ vLLM can emit KV-cache **residency** histograms — block lifetime (allocation �
 eviction), idle time before eviction, and reuse gaps. These are **off by
 default**; start the engine with `--kv-cache-metrics` (they also require log
 stats to be enabled, and are sampled at 1% of blocks via
-`--kv-cache-metrics-sample`). Once on, they show up as:
+`--kv-cache-metrics-sample`). Once on, the series are
+`ray_vllm_kv_block_lifetime_seconds_{sum,count,bucket}`.
 
-```bash
-curl -s http://<node-ip>:<MetricsExportPort>/metrics | grep kv_block_lifetime
-# ray_vllm_kv_block_lifetime_seconds_sum{...}
-# ray_vllm_kv_block_lifetime_seconds_count{...}
-# ray_vllm_kv_block_lifetime_seconds_bucket{le="...",...}
+Because it's a histogram, query it with `histogram_quantile` over the bucket
+rate — e.g. p95 block lifetime over a 5m window:
+
+```promql
+# p95 KV block lifetime
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(ray_vllm_kv_block_lifetime_seconds_bucket[5m])
+  )
+)
 ```
