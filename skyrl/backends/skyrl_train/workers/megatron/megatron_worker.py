@@ -610,7 +610,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # create optimizer (skipped for inference-only flows; Megatron's
         # DistributedOptimizer eagerly materializes fp32 master + AdamW state
         # on GPU, which OOMs large MoE models on memory-constrained nodes)
-        if self.cfg.policy.skip_optimizer_init:
+        if self.cfg.policy.inference_only_init:
             self.optimizer = None
             self.scheduler = None
         else:
@@ -915,7 +915,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             The gradient norm (before scaling, after clipping), or None if unavailable.
         """
         if self.optimizer is None:
-            raise RuntimeError("optim_step called but policy.skip_optimizer_init=True (no optimizer constructed)")
+            raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
         # Reset counter for next accumulation cycle
@@ -930,7 +930,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Get current learning rate from optimizer.
 
         Handles both regular optimizers and ChainedOptimizer. Returns None when
-        the worker was initialized with ``policy.skip_optimizer_init=True``.
+        the worker was initialized with ``policy.inference_only_init=True``.
         """
         if self.optimizer is None:
             return None
@@ -948,7 +948,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         Note: This bypasses the scheduler. The next scheduler.step() call
         will override this value unless the scheduler is configured for
-        constant LR. No-op when ``policy.skip_optimizer_init=True``.
+        constant LR. No-op when ``policy.inference_only_init=True``.
         """
         if self.optimizer is None:
             return

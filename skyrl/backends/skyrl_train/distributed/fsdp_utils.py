@@ -163,7 +163,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     # that are excluded from state_dict.  On non-rank-0 meta-init these are
     # still on the meta device with no data; rank 0 has the correct values.
     _sync_non_persistent_buffers(model, model.state_dict())
-    
+
     if cpu_offload:
         # Caller asked for CPU-resident params; the offload path is still
         # broken for FSDP2 but we leave the request explicit so a future fix

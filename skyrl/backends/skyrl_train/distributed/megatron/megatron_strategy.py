@@ -182,7 +182,7 @@ class MegatronStrategy(DistributedStrategy):
 
         The grad buffer belongs to the DDP-wrapped model, not the optimizer,
         so it is offloaded whenever ``offload_optimizer`` is requested even if
-        ``optimizer is None`` (e.g. ``policy.skip_optimizer_init=True`` flows).
+        ``optimizer is None`` (e.g. ``policy.inference_only_init=True`` flows).
         """
         if offload_model:
             offload_megatron_model_to_cpu(model)

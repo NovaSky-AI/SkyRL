@@ -250,16 +250,14 @@ class PolicyConfig(BaseConfig):
     """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
     Loads only the language model backbone using AutoModelForCausalLM."""
     inference_only_init: bool = False
-    """When True, initialize policy weights in bf16 instead of fp32. Only set this for
-    inference-only flows (forward + weight sync, no train_step) — it skips the fp32
-    master weights that FSDP mixed precision training requires, so it is NOT valid for
-    actual training. Use it on memory-constrained nodes where fp32 init would OOM
-    (e.g. large MoE on 4xH100)."""
-    skip_optimizer_init: bool = False
-    """When True, skip optimizer and LR-scheduler construction in the policy worker.
-    Use for inference-only flows (forward + weight sync, no train_step) — primarily
-    Megatron, where DistributedOptimizer eagerly materializes fp32 master + AdamW
-    state on GPU and OOMs large MoE models on memory-constrained nodes."""
+    """When True, set up the policy worker for inference-only flows (forward + weight
+    sync, no train_step), skipping the training-only state that would otherwise OOM
+    memory-constrained nodes (e.g. large MoE on 4xH100). NOT valid for actual training.
+    Backend-specific behavior:
+    - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
+      that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
+    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
+      materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass

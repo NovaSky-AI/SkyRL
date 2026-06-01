@@ -80,7 +80,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         "nemotron-3-nano" in model_name.lower()
     )
     if is_large_moe:
-        cfg.trainer.policy.skip_optimizer_init = True
+        cfg.trainer.policy.inference_only_init = True
     validate_cfg(cfg)
     return cfg
 
