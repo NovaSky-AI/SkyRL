@@ -163,17 +163,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     # that are excluded from state_dict.  On non-rank-0 meta-init these are
     # still on the meta device with no data; rank 0 has the correct values.
     _sync_non_persistent_buffers(model, model.state_dict())
-
-    # NOTE: removed the offload_fsdp2_model_to_cpu + load_fsdp2_model_to_gpu
-    # dance from verl PR #1667. That trick was meant to release reserved-but-
-    # unallocated cache memory, but for FSDP2 the offload is a no-op
-    # (`model.to("cpu")` doesn't move FSDPParam-managed storage) and the reload
-    # then *allocates a second copy*. Diagnostic on Qwen3.5-35B-A3B:
-    #   after set_model_state_dict: 32.71 GiB
-    #   after offload+empty_cache:  32.71 GiB (unchanged)
-    #   after load:                 65.42 GiB (doubled)
-    # set_model_state_dict already leaves us with exactly the shard on GPU;
-    # no clean-up is needed.
+    
     if cpu_offload:
         # Caller asked for CPU-resident params; the offload path is still
         # broken for FSDP2 but we leave the request explicit so a future fix

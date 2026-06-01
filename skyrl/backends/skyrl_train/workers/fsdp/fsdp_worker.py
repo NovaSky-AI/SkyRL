@@ -159,7 +159,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.bf16_init,
+            bf16=self.cfg.policy.inference_only_init,
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,
