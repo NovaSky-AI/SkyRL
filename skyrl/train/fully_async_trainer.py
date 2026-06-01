@@ -187,6 +187,16 @@ class _AsyncStalenessManager:
             self._stat.running -= 1
             self._cond.notify_all()
 
+    async def on_submission_cancelled(self) -> None:
+        """Undo acquire_submission_slot() when a worker is cancelled before completing generation.
+
+        This is expected at epoch boundaries when the trainer cancels in-flight workers.
+        """
+        async with self._cond:
+            self._stat.submitted -= 1
+            self._stat.running -= 1
+            self._cond.notify_all()
+
     async def notify_capacity_change(self, new_global_step: int) -> None:
         # Called when current_global_step changes (e.g., after a training step)
         async with self._cond:
@@ -606,8 +616,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 slot_acquired = False
         except asyncio.CancelledError:
             if "slot_acquired" in locals() and slot_acquired:
-                logger.error("Generation worker cancelled mid-flight (slot acquired). Exiting.")
-                os._exit(1)
+                await self._staleness_manager.on_submission_cancelled()
             return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
