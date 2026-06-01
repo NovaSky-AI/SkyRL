@@ -235,14 +235,14 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         if kwargs.get("pipeline_parallel_size", 1) > 1:
             raise ValueError(
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
-                "Please set `generator.async_engine=true` in your config."
+                "Please set `generator.inference_engine.async_engine=true` in your config."
             )
         # Pop enable_ray_prometheus_stats - only supported for async engine
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
         if enable_ray_prometheus_stats:
             logger.warning(
                 "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
-                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+                "Set `generator.inference_engine.async_engine=true` to enable Ray Prometheus stats logging."
             )
         return vllm.LLM(*args, **kwargs)
 
@@ -370,7 +370,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         model_path = kwargs.get("model")
-        # Use served_model_name if provided (from generator.served_model_name config),
+        # Use served_model_name if provided (from generator.inference_engine.served_model_name config),
         # otherwise fall back to model_path. This allows using a different model name
         # in HTTP endpoint requests than the actual model path.
         # See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
@@ -381,8 +381,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         models = OpenAIServingModels(engine, base_model_paths)
 
         # Build request logger for debugging (off by default).
-        # Enable via: generator.engine_init_kwargs.enable_log_requests=true
-        # Optionally limit logged chars: generator.engine_init_kwargs.max_log_len=256
+        # Enable via: generator.inference_engine.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: generator.inference_engine.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
             from vllm.entrypoints.logger import RequestLogger

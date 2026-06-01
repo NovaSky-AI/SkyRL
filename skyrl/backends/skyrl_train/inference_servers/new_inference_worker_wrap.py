@@ -28,6 +28,33 @@ Usage:
 
 import torch
 
+# Workaround for a vLLM layerwise-reload corruption affecting NemotronH/Mamba.
+# MambaMixer2 registers `conv_weights` as a non-persistent buffer that is a
+# view of `self.conv1d.weight.data` (shared storage). vLLM's reload code path
+# (model_executor/model_loader/reload/layerwise.py) materializes the buffer
+# into a fresh uninitialized GPU tensor and then runs
+# `kernel_conv_weights.data.copy_(fresh)` in `_copy_and_restore_kernel_tensors`.
+# Because the kernel buffer shares storage with `conv1d.weight.data`, this
+# writes garbage (NaN-bit-pattern bytes in bf16) into the conv1d weight,
+# corrupting all 23 Mamba layers after every weight sync.
+#
+# Adding "conv_weights" to vLLM's SKIP_TENSORS makes capture/restore/materialize
+# skip the buffer entirely, so the view stays intact and conv1d.weight is
+# preserved. Must be applied before `record_metadata_for_reloading` runs at
+# model construction; this module is imported by vLLM via
+# --worker-extension-cls before model init, so the import-time patch is
+# correctly ordered.
+# Remove this pending https://github.com/vllm-project/vllm/pull/42481 which should
+# be included in vLLM 0.21.0
+try:
+    from vllm.model_executor.model_loader.reload.meta import (
+        SKIP_TENSORS as _VLLM_SKIP_TENSORS,
+    )
+
+    _VLLM_SKIP_TENSORS.add("conv_weights")
+except ImportError:
+    pass
+
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 

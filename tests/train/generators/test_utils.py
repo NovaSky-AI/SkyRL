@@ -575,8 +575,80 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         """Test that invalid message role raises ValueError."""
         messages = [{"role": "system", "content": "You are a helpful assistant."}]
 
-        with pytest.raises(ValueError, match="Expected message role to be 'user' or 'assistant'"):
+        with pytest.raises(ValueError, match="Expected message role to be 'user', 'assistant', or 'tool'"):
             get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
+
+    # ------------------------------------------------------------------
+    # Tool-calling: tool turns are masked to 0; assistant tool_call turns
+    # are masked the same as regular assistant turns.
+    # ------------------------------------------------------------------
+    @pytest.mark.parametrize(
+        "model_name",
+        ["Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"],
+        ids=["qwen2_5", "qwen3"],
+    )
+    def test_tool_calling_loss_mask(self, model_name):
+        """Tool observation turns must be fully masked (0); assistant turns
+        with tool_calls must follow the standard assistant masking (gen prompt
+        0, generated tokens including EOS 1, post-EOS 0)."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather for a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        messages = [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": {"city": "Paris"}},
+                    }
+                ],
+            },
+            {"role": "tool", "content": '{"temp_c": 21, "conditions": "sunny"}'},
+            {"role": "assistant", "content": "It's 21C and sunny in Paris."},
+        ]
+
+        tokenizer_kwargs = {"tools": tools}
+        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+            messages, tokenizer, tokenizer_kwargs=tokenizer_kwargs
+        )
+        assert len(response_ids) == len(loss_mask)
+
+        # Check each message individually using the same fixed-base encoding.
+        generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+        cur = 0
+        for msg in messages:
+            msg_ids = encode_messages_subset([msg], tokenizer, tokenizer_kwargs=tokenizer_kwargs)
+            msg_mask = loss_mask[cur : cur + len(msg_ids)]
+
+            if msg["role"] in ("user", "tool"):
+                assert all(m == 0 for m in msg_mask), f"{msg['role']} message must be fully masked"
+            else:
+                # Assistant: header zero, generated (incl. EOS) ones, after-EOS zero.
+                assert msg_mask[: len(generation_prompt_ids)] == [0] * len(generation_prompt_ids)
+                assert tokenizer.eos_token_id in msg_ids
+                last_eos = len(msg_ids) - 1 - msg_ids[::-1].index(tokenizer.eos_token_id)
+                assert all(
+                    m == 1 for m in msg_mask[len(generation_prompt_ids) : last_eos + 1]
+                ), "assistant generated tokens must have mask 1"
+                if last_eos < len(msg_ids) - 1:
+                    assert all(m == 0 for m in msg_mask[last_eos + 1 :])
+            cur += len(msg_ids)
 
     def test_missing_logprobs_raises(self, qwen_tokenizer):
         """Test that missing logprobs for assistant message raises ValueError."""

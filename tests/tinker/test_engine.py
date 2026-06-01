@@ -7,7 +7,11 @@ from sqlmodel import Session, SQLModel
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
-from skyrl.tinker.engine import TinkerEngine, prepare_model_pass_batch
+from skyrl.tinker.engine import (
+    TinkerEngine,
+    prepare_model_pass_batch,
+    prepare_sample_batch,
+)
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -146,6 +150,34 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     assert batch.all_model_inputs == [datum.model_input]
     assert batch.all_values == [values]
     assert batch.all_returns == [returns]
+
+
+def test_prepare_sample_batch_session_ids():
+    """all_session_ids holds the derived routing key per expanded sample, and None when the request has no session."""
+    prompt = types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])])
+    sampling_params = types.SamplingParams(temperature=0.0, max_tokens=4, seed=0)
+
+    def sample_input(**kwargs):
+        return types.SampleInput(
+            base_model=BASE_MODEL,
+            prompt=prompt,
+            sampling_params=sampling_params,
+            num_samples=2,
+            checkpoint_id="",
+            prompt_logprobs=False,
+            **kwargs,
+        )
+
+    requests = {
+        "req_with_session": ("", sample_input(sampling_session_id="sampling_abcd", seq_id=3)),
+        "req_no_session": ("", sample_input()),
+    }
+
+    batch = prepare_sample_batch(requests)
+
+    assert len(batch.all_session_ids) == len(batch.all_model_inputs)
+    # num_samples=2 expands each request into two entries that share its key.
+    assert batch.all_session_ids == ["sampling_abcd:3", "sampling_abcd:3", None, None]
 
 
 @pytest.fixture()

@@ -124,10 +124,29 @@ class SFTConfig(BaseConfig):
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
 
     # ---- SFT-specific flat fields ----
-    strategy: str = "megatron"  # "megatron" or "fsdp2"
+    strategy: str = "megatron"  # "megatron" or "fsdp"
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
     messages_key: str = "messages"  # column name for chat-format datasets
+    tools_key: str = "tools"
+    """Column name holding per-row tool/function schemas for tool-calling datasets
+    (e.g. APIGen-MT, xLAM, ToolACE). May be a list[dict] or a JSON-encoded string.
+    Ignored if the column is absent from the dataset."""
+    system_key: str = "system"
+    """Column name holding a per-row system prompt to prepend when ``messages``
+    does not already start with a system turn. Ignored if absent."""
+
+    # ---- Evaluation dataset ----
+    eval_dataset_name: Optional[str] = None
+    """HuggingFace dataset name (or path) used to compute eval loss during training.
+    When ``None`` (default), eval is disabled."""
+    eval_dataset_split: str = "validation"
+    """Split of the eval dataset to load (e.g. ``"validation"``, ``"test[:500]"``)."""
+    eval_interval: int = 0
+    """Run eval every N training steps. Eval also runs once at the end of training
+    when an eval dataset is configured. ``0`` disables periodic eval."""
+    eval_before_train: bool = False
+    """If True, run a baseline eval pass before training begins (logged at step 0)."""
     max_length: Optional[int] = None
     """Maximum length of tokenized sequences. If specified, all sequences will be truncated to this value
     By default, no truncation is performed"""
@@ -140,8 +159,10 @@ class SFTConfig(BaseConfig):
     logger: str = "console"  # "console" or "wandb"
     project_name: str = "skyrl_sft"
     run_name: str = "skyrl_sft_run"
-    ckpt_path: str = ""  # empty string = no checkpointing
-    ckpt_interval: int = 0
+    ckpt_path: str = ""
+    ckpt_interval: int = 0  # <= 0 -> no checkpointing
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
@@ -153,6 +174,21 @@ class SFTConfig(BaseConfig):
     """Directory for HF-format exports. Defaults to ckpt_path/hf_exports if empty."""
 
     seed: int = 42
+
+    # ---- Data loading ----
+    num_workers: int = 8
+    """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+
+    # ---- Tokenized dataset caching ----
+    cache_dir: str = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "skyrl", "tokenized_datasets"
+    )
+    """Directory to cache tokenized datasets. For multi-node training, set this to an NFS-mounted path so all nodes can
+    share the cache."""
+    force_recache: bool = False
+    """If True, ignore existing cache and re-tokenize the dataset."""
+    disable_cache: bool = False
+    """If True, disable cache completely (always tokenize from scratch)."""
 
     # ---- Training target ----
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
@@ -171,7 +207,7 @@ class SFTConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
-_VALID_STRATEGIES = ("megatron", "fsdp2")
+_VALID_STRATEGIES = ("megatron", "fsdp")
 
 
 def validate_sft_cfg(cfg: SFTConfig) -> None:
@@ -180,6 +216,15 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     Only checks fields that are relevant to SFT training, unlike
     ``validate_cfg`` which includes RL-specific validations.
     """
+    if cfg.strategy == "fsdp2":
+        import warnings
+
+        warnings.warn(
+            "strategy='fsdp2' has been renamed to 'fsdp'; use 'fsdp' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cfg.strategy = "fsdp"
     if cfg.strategy not in _VALID_STRATEGIES:
         raise ValueError(f"Unknown strategy '{cfg.strategy}'. Must be one of {_VALID_STRATEGIES}.")
     if cfg.micro_train_batch_size_per_gpu <= 0:
@@ -197,6 +242,14 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("model.path must be set")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
+
+    # Eval config
+    if cfg.eval_interval < 0:
+        raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
+    if cfg.eval_interval > 0 and not cfg.eval_dataset_name:
+        raise ValueError("eval_interval > 0 requires eval_dataset_name to be set")
+    if cfg.eval_before_train and cfg.eval_dataset_name is None:
+        raise ValueError("eval_before_train=True requires eval_dataset_name to be set")
 
     #  checks for megatron
     if cfg.strategy == "megatron":
@@ -247,7 +300,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     # Parallelism configs -- direct assignment (same types)
     if sft_cfg.strategy == "megatron":
         cfg.trainer.policy.megatron_config = sft_cfg.megatron_config
-    if sft_cfg.strategy == "fsdp2":
+    if sft_cfg.strategy == "fsdp":
         cfg.trainer.policy.fsdp_config = sft_cfg.fsdp_config
 
     cfg.trainer.policy.sequence_parallel_size = sft_cfg.sequence_parallel_size

@@ -354,7 +354,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+        if self.cfg.trainer.strategy == "fsdp":
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                 CriticWorker,
                 PolicyWorker,
@@ -387,15 +387,30 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
+        # Expose the trainer on self so callers can log exceptions raised
+        # during `build_models` (which happens before _setup_trainer returns).
+        self.trainer = trainer
 
         # Build the models
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
-        trainer = self._setup_trainer()
-        # Start the training loop
-        asyncio.run(trainer.train())
+        self.trainer = None
+        try:
+            trainer = self._setup_trainer()
+            # Start the training loop
+            asyncio.run(trainer.train())
+        except Exception as e:
+            # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
+            # surface here as RayTaskError. Without this they only land in Ray
+            # worker logs; route them through the tracker so wandb users see
+            # them as an `error/tracebacks` table row.
+            if self.trainer is not None and self.trainer.tracker is not None:
+                self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
+            else:
+                logger.error(f"Setup failed before tracker was initialized:\n{e}")
+            raise
 
 
 @ray.remote(num_cpus=1)

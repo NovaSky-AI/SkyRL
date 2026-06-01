@@ -53,7 +53,7 @@ def test_config() -> SkyRLTrainConfig:
     cfg.generator.sampling_params.max_generate_length = 512
 
     # Training knobs for tests
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     cfg.trainer.train_batch_size = 128
     cfg.trainer.policy_mini_batch_size = 128
     cfg.trainer.micro_forward_batch_size_per_gpu = 8

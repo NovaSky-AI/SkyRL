@@ -1,0 +1,19 @@
+agent:
+  name: mini-swe-agent
+  model_name: hosted_vllm/Qwen3-32B
+  kwargs:
+    api_base: http://localhost:8080/v1
+    max_turns: 20
+    enable_summarize: false
+    record_terminal_session: false
+    store_all_messages: true
+    temperature: 0.3
+environment:
+  type: docker
+  override_cpus: 2
+  override_memory_mb: 4096
+  override_storage_mb: 4096
+  kwargs:
+    auto_stop_interval_mins: null
+verifier:
+  disable: false

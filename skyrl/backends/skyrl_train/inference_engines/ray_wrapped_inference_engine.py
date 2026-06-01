@@ -233,7 +233,7 @@ def create_ray_wrapped_inference_engines(
             other_kwargs = {}
 
             # served_model_name allows using a different model name for HTTP endpoint validation
-            # than the actual model path. See generator.served_model_name in ppo_base_config.yaml.
+            # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
             if served_model_name is not None:
                 other_kwargs["served_model_name"] = served_model_name
 

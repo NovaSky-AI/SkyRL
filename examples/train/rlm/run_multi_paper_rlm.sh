@@ -27,7 +27,7 @@ uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-2b" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
   trainer.placement.ref_num_gpus_per_node=$TRAIN_GPUS \
   generator.inference_engine.num_engines=$NUM_ENGINES \

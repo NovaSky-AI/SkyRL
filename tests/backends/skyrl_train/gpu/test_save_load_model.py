@@ -55,7 +55,7 @@ def run_one_training_step(
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
-    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    # Unified interface for all strategies (megatron, fsdp)
     batch = megatron_batch if strategy == "megatron" else data
     assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
     ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
@@ -66,7 +66,6 @@ def run_one_training_step(
     "strategy",
     [
         "fsdp",
-        "fsdp2",
         pytest.param("megatron", marks=pytest.mark.megatron),
     ],
 )

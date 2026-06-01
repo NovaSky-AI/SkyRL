@@ -5,9 +5,27 @@ installed.
 """
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+def _fft_dispatch_cfg() -> SimpleNamespace:
+    """Build the minimal ``self.cfg`` view that ``save_weights_for_sampler``
+    inspects on the non-colocated path. Defaults to FFT (lora.rank=0) so
+    the pause/resume branch is taken.
+    """
+    return SimpleNamespace(
+        trainer=SimpleNamespace(
+            strategy="fsdp",
+            policy=SimpleNamespace(
+                model=SimpleNamespace(lora=SimpleNamespace(rank=0)),
+                megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False)),
+            ),
+        )
+    )
+
 
 _has_megatron = "megatron" in sys.modules or __import__("importlib").util.find_spec("megatron") is not None
 
@@ -124,10 +142,12 @@ class TestWeightSyncPauseFlush:
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
         dispatch._broadcast_to_inference_engines = MagicMock()
         dispatch._prepare_for_weight_sync = MagicMock()
         dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
@@ -141,10 +161,12 @@ class TestWeightSyncPauseFlush:
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = True
+        dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
         dispatch._broadcast_to_inference_engines = MagicMock()
         dispatch._prepare_for_weight_sync = MagicMock()
         dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
@@ -160,6 +182,7 @@ class TestWeightSyncPauseFlush:
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
         dispatch._inference_engine_client.pause_generation = AsyncMock(side_effect=lambda: call_order.append("pause"))
         dispatch._inference_engine_client.resume_generation = AsyncMock(side_effect=lambda: call_order.append("resume"))
@@ -168,6 +191,7 @@ class TestWeightSyncPauseFlush:
         )
         dispatch._prepare_for_weight_sync = MagicMock()
         dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
 
         await dispatch.save_weights_for_sampler()
 
@@ -180,13 +204,72 @@ class TestWeightSyncPauseFlush:
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
         dispatch._broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
         dispatch._prepare_for_weight_sync = MagicMock()
         dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
 
         with pytest.raises(RuntimeError, match="broadcast failed"):
             await dispatch.save_weights_for_sampler()
+
+        dispatch._inference_engine_client.pause_generation.assert_awaited_once()
+        dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_colocated_inplace_lora_skips_pause_and_resume(self):
+        """In-place LoRA (lora.rank>0, no merge_lora) must NOT pause/resume.
+
+        Mirrors the multi-tenant branch in
+        ``save_weights_for_sampler``: when the engine's LoRA tensors are
+        swapped in place via ``load_lora_adapter``, the weight sync is
+        dispatched without any pause — load_lora_adapter is the engine-
+        side primitive that's expected to be safe under in-flight
+        requests on its own.
+        """
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        cfg = _fft_dispatch_cfg()
+        cfg.trainer.policy.model.lora.rank = 32  # in-place LoRA path
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = cfg
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._broadcast_to_inference_engines = MagicMock()
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+
+        await dispatch.save_weights_for_sampler(model_id="lora-target")
+
+        dispatch._broadcast_to_inference_engines.assert_called_once()
+        dispatch._inference_engine_client.pause_generation.assert_not_awaited()
+        dispatch._inference_engine_client.resume_generation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_colocated_megatron_merge_lora_still_pauses(self):
+        """Megatron + merge_lora keeps the pause/resume path (LoRA merged
+        into the base weights → tensors flow over NCCL, not load_lora_adapter)."""
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        cfg = _fft_dispatch_cfg()
+        cfg.trainer.strategy = "megatron"
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = cfg
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._broadcast_to_inference_engines = MagicMock()
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+
+        await dispatch.save_weights_for_sampler()
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()

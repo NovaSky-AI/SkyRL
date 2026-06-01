@@ -21,7 +21,7 @@
 # limitations under the License.
 
 import gc
-from typing import List, Union
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,11 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.moe_utils import (
+    clear_aux_losses_tracker,
+    get_moe_layer_wise_logging_tracker,
+    reduce_aux_losses_tracker_across_ranks,
+)
 from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -93,6 +98,52 @@ def get_model_size(model: nn.Module, scale="auto"):
         raise NotImplementedError(f"Unknown scale {scale}")
 
     return n_params, scale
+
+
+def get_moe_metrics(
+    loss_scale: float,
+    total_loss_dict: Optional[dict] = None,
+    per_layer_logging: bool = False,
+) -> dict[str, Any]:
+    """Returns Mixture of Experts (MoE) auxiliary-loss metrics.
+
+    This function reduces MoE auxiliary losses across ranks, aggregates them, and
+    returns a dictionary of metrics.
+
+    Args:
+        loss_scale: Scale factor to apply to each auxiliary loss (e.g., 1/num_microbatches).
+        total_loss_dict: If provided, accumulate means into this dict (by name).
+        per_layer_logging: If True, include per-layer values in the returned dict.
+
+    Returns:
+        dict[str, Any]: A flat dict of aggregated metrics. For each aux loss name,
+        the mean value is returned under the same key (e.g., "load_balancing_loss").
+        If per_layer_logging is True, per-layer values are returned under keys of the
+        form "moe/{name}_layer_{i}".
+    """
+    reduce_aux_losses_tracker_across_ranks()
+    tracker = get_moe_layer_wise_logging_tracker()
+
+    metrics: dict[str, Any] = {}
+    if len(tracker) > 0:
+        aux_losses = {k: v["values"].float() * loss_scale for k, v in tracker.items()}
+        for name, loss_list in aux_losses.items():
+            # Megatron-Core aggregates aux losses across layers and normalizes by number of MoE layers
+            num_layers = int(loss_list.numel()) if loss_list.numel() > 0 else 1
+            aggregated_value = loss_list.sum() / num_layers
+            metrics[name] = float(aggregated_value.item())
+            if total_loss_dict is not None:
+                if name not in total_loss_dict:
+                    total_loss_dict[name] = aggregated_value
+                else:
+                    total_loss_dict[name] += aggregated_value
+
+            if per_layer_logging:
+                for i, loss in enumerate(loss_list.tolist()):
+                    metrics[f"moe/{name}_layer_{i}"] = float(loss)
+
+    clear_aux_losses_tracker()
+    return metrics
 
 
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):

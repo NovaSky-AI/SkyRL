@@ -83,7 +83,7 @@ if __name__ == "__main__":
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     initialize_ray(cfg)
 
     total_ranks = args.num_nodes

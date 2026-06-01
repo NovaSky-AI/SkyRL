@@ -17,6 +17,7 @@ from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
+    EngineStateDB,
     FutureDB,
     ModelDB,
     RequestStatus,
@@ -59,6 +60,7 @@ def prepare_sample_batch(
     all_model_ids = []
     all_checkpoint_ids = []
     all_checkpoint_paths = []
+    all_session_ids = []
     request_batch_slices = []
 
     needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
@@ -72,6 +74,7 @@ def prepare_sample_batch(
             checkpoint_path = str(
                 checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
             )
+        session_id = types.make_routing_session_id(request_data.sampling_session_id, request_data.seq_id)
         for sample_idx in range(request_data.num_samples):
             all_model_inputs.append(request_data.prompt)
             # Derive a unique seed per sample so that num_samples > 1 produces
@@ -83,6 +86,7 @@ def prepare_sample_batch(
             all_model_ids.append(model_id)
             all_checkpoint_ids.append(request_data.checkpoint_id)
             all_checkpoint_paths.append(checkpoint_path)
+            all_session_ids.append(session_id)
 
         request_batch_slices.append(
             (request_id, model_id, request_start, len(all_model_inputs), request_data.prompt_logprobs)
@@ -94,6 +98,7 @@ def prepare_sample_batch(
         all_model_ids=all_model_ids,
         all_checkpoint_ids=all_checkpoint_ids,
         all_checkpoint_paths=all_checkpoint_paths,
+        all_session_ids=all_session_ids,
         needs_prompt_logprobs=needs_prompt_logprobs,
         request_batch_slices=request_batch_slices,
     )
@@ -253,6 +258,13 @@ class TinkerEngine:
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
+        # Backends that support async sample routing notify us when their
+        # inference endpoint changes; we persist it to EngineStateDB so the
+        # API process can forward sample requests directly. Backends stay
+        # DB-free; only the engine owns the connection.
+        if hasattr(self.backend, "set_inference_state_publisher"):
+            self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
+
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
 
@@ -262,6 +274,20 @@ class TinkerEngine:
     def metrics(self) -> types.EngineMetrics:
         """Pass-through to backend metrics for backwards compatibility."""
         return self.backend.metrics
+
+    def _write_inference_state_to_db(self, proxy_url: str | None) -> None:
+        """Upsert the singleton EngineStateDB row.
+
+        Wired into the backend via set_inference_state_publisher so the API
+        process can resolve the engine-managed vLLM URL on the async sample
+        routing path. ``proxy_url=None`` clears the row (post-teardown).
+        """
+        with Session(self.db_engine) as session:
+            row = session.get(EngineStateDB, 1) or EngineStateDB(singleton_id=1)
+            row.inference_proxy_url = proxy_url
+            row.updated_at = datetime.now(timezone.utc)
+            session.add(row)
+            session.commit()
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
