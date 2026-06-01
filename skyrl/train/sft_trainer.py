@@ -518,11 +518,15 @@ class SFTTrainer:
                 f"use_sequence_packing=True only supports strategy='megatron'; got "
                 f"{self.sft_cfg.strategy!r}. Use the FSDP packing path instead."
             )
+        # Sequence packing needs the THD layout, so it implies
+        # remove_microbatch_padding=True. Auto-enable it (warning if the user
+        # explicitly set it False) instead of erroring on the contradiction.
         if not self.sft_cfg.remove_microbatch_padding:
-            raise ValueError(
-                "use_sequence_packing=True requires remove_microbatch_padding=True "
-                "(the worker still uses the THD layout)."
+            logger.warning(
+                "use_sequence_packing=True requires the THD layout; "
+                "setting remove_microbatch_padding=True (was False)."
             )
+            self.sft_cfg.remove_microbatch_padding = True
 
     # ------------------------------------------------------------------ #
     # Setup

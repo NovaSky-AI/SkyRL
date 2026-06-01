@@ -633,7 +633,8 @@ class TrainerConfig(BaseConfig):
     micro_train_batch_size_per_gpu: int = 1
     micro_forward_batch_size_per_gpu: int = 1
     update_ref_every_epoch: bool = False
-    use_sample_packing: bool = True
+    remove_microbatch_padding: bool = True
+    """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""
     eval_batch_size: int = 1024
     eval_before_train: bool = True
     eval_interval: int = 5
@@ -832,6 +833,22 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
+        # Accept the deprecated ``trainer.use_sample_packing`` key as an alias
+        # for ``trainer.remove_microbatch_padding``. Remap it before
+        # construction so the strict key validation does not reject the old
+        # name.
+        if "trainer" in overrides and "use_sample_packing" in overrides.trainer:
+            import warnings
+
+            warnings.warn(
+                "trainer.use_sample_packing has been renamed to "
+                "trainer.remove_microbatch_padding; use "
+                "trainer.remove_microbatch_padding instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            overrides.trainer["remove_microbatch_padding"] = overrides.trainer["use_sample_packing"]
+            del overrides.trainer["use_sample_packing"]
         return cls.from_dict_config(overrides)
 
 

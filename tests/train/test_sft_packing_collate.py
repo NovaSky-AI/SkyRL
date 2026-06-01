@@ -257,16 +257,18 @@ class TestPackingValidation:
                 )()
             )
 
-    def test_rejects_no_sample_packing(self):
-        # Build a cfg that bypasses validate_sft_cfg's own check
+    def test_auto_enables_remove_microbatch_padding(self):
+        # An explicit remove_microbatch_padding=False is auto-corrected to True
+        # (with a warning) rather than rejected, since sequence packing needs
+        # the THD layout.
         cfg = SFTConfig(
             strategy="megatron",
             remove_microbatch_padding=False,
             use_sequence_packing=True,
             max_length=128,
         )
-        with pytest.raises(ValueError, match="remove_microbatch_padding"):
-            SFTTrainer._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())
+        SFTTrainer._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())
+        assert cfg.remove_microbatch_padding is True
 
     def test_accepts_cp_gt_1(self):
         # CP > 1 is supported: preprocess/postprocess zigzag-shard the packed

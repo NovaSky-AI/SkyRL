@@ -37,7 +37,7 @@ def get_test_config() -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.placement.colocate_all = True
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
     cfg.trainer.strategy = "fsdp"
     cfg.trainer.ref.fsdp_config.cpu_offload = False

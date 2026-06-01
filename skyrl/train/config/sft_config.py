@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import List, Optional, Union
 
+from loguru import logger
 from omegaconf import OmegaConf
 
 from skyrl.train.config import (
@@ -307,8 +308,15 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     if cfg.use_sequence_packing:
         if cfg.strategy != "megatron":
             raise ValueError("use_sequence_packing=True is only supported with strategy='megatron'.")
+        # Sequence packing needs the THD layout, so it implies
+        # remove_microbatch_padding=True. Auto-enable it (warning if the user
+        # explicitly set it False) instead of erroring on the contradiction.
         if not cfg.remove_microbatch_padding:
-            raise ValueError("use_sequence_packing=True requires remove_microbatch_padding=True.")
+            logger.warning(
+                "use_sequence_packing=True requires the THD layout; "
+                "setting remove_microbatch_padding=True (was False)."
+            )
+            cfg.remove_microbatch_padding = True
         if cfg.max_length is None:
             raise ValueError("use_sequence_packing=True requires max_length to be set (it is the bin capacity).")
         # Resolve and validate the FFD bin capacity (asserts it is >= max_length
@@ -356,7 +364,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
-    cfg.trainer.use_sample_packing = sft_cfg.remove_microbatch_padding
+    cfg.trainer.remove_microbatch_padding = sft_cfg.remove_microbatch_padding
     # When sequence packing is on, each row in the dispatched batch is one bin
     # and one worker micro-batch, so the worker-side
     # ``micro_train_batch_size_per_gpu`` is 1 (the bin token budget is carried

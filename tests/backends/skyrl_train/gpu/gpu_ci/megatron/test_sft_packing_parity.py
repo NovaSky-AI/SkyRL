@@ -131,7 +131,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
         micro_bsz = micro_buffer[0]["sequences"].shape[0]
-        use_sample_packing = self.model.use_sample_packing
+        remove_microbatch_padding = self.model.remove_microbatch_padding
 
         captured: List[torch.Tensor] = []
 
@@ -159,7 +159,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
             sub_seq_lengths = batch["sub_seq_lengths_list"]
-            if use_sample_packing:
+            if remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
@@ -179,7 +179,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
             outputs = model(new_sequences, new_position_ids, new_attention_mask, packed_seq_params=packed_seq_params)
 
-            if use_sample_packing:
+            if remove_microbatch_padding:
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,

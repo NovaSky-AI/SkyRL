@@ -50,7 +50,7 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
     """
     Full test: initialize actor group, send dummy experience to forward_backward + optim_step, validate output.
     """
-    cfg.trainer.use_sample_packing = packed
+    cfg.trainer.remove_microbatch_padding = packed
     cfg.trainer.strategy = strategy
     cfg.trainer.policy.model.path = model_name
 
@@ -100,7 +100,7 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
     Uses variable action_lengths so each sample has a different number of valid
     tokens, then checks that each output's logprobs length matches exactly.
     """
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
@@ -154,7 +154,7 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
     """
     Full test: initialize critic actor group, send dummy experience to forward_backward + optim_step, validate output.
     """
-    cfg.trainer.use_sample_packing = packed
+    cfg.trainer.remove_microbatch_padding = packed
     cfg.trainer.strategy = strategy
     validate_cfg(cfg)
     try:
@@ -188,7 +188,7 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
     """
     Test that set_lr updates the optimizer's learning rate.
     """
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
@@ -231,7 +231,7 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
     Test SFT path: forward_backward with loss_fn="cross_entropy" returns loss_fn_outputs.
     Uses DP=2 to verify each rank returns outputs for its data chunk.
     """
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = strategy
     if strategy == "megatron":
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
@@ -291,7 +291,7 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
 )
 async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     """forward(loss_fn='cross_entropy') returns a non-zero loss + per-sample loss_fn_outputs (no grads)."""
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = strategy
     if strategy == "megatron":
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1

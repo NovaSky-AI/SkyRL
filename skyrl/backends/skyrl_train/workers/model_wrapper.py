@@ -73,7 +73,7 @@ class HFModelWrapper(nn.Module):
         temperature=1.0,
         use_liger_kernel=False,
         sequence_parallel_size=1,
-        use_sample_packing: bool = False,
+        remove_microbatch_padding: bool = False,
         use_torch_compile: bool = False,
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
@@ -87,12 +87,12 @@ class HFModelWrapper(nn.Module):
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
-        self.use_sample_packing = use_sample_packing
+        self.remove_microbatch_padding = remove_microbatch_padding
         self.is_vlm = False
-        if use_sample_packing:
+        if remove_microbatch_padding:
             assert (
                 self.attn_implementation == "flash_attention_2"
-            ), "Flash attention 2 should be used for `use_sample_packing`"
+            ), "Flash attention 2 should be used for `remove_microbatch_padding`"
 
         if isinstance(pretrain_or_model, str):
             if load_in_4bit:
@@ -248,7 +248,7 @@ class HFModelWrapper(nn.Module):
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
             # model specific logic to compute.
-            assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
+            assert not self.remove_microbatch_padding, "Sample packing is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
             if has_image_inputs:
@@ -264,7 +264,7 @@ class HFModelWrapper(nn.Module):
         sequences_fwd = sequences
         position_ids_fwd = position_ids
         attention_mask_fwd = attention_mask
-        if self.use_sample_packing:
+        if self.remove_microbatch_padding:
             with torch.no_grad():
                 # Removes padding to get a packed tensor. `unpad_input` expects 3 dimensional tensor so we unsqueeze first
                 sequences_fwd, nnz_indices, _, _, _ = unpad_input(
@@ -280,7 +280,7 @@ class HFModelWrapper(nn.Module):
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
-            attention_mask_fwd = None if self.use_sample_packing else attention_mask_fwd
+            attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
 
             # slice for sequence parallelism
             # (bsz, seqlen) -> (bsz, seqlen//sp_size)
@@ -312,7 +312,7 @@ class HFModelWrapper(nn.Module):
                 **vlm_kwargs,
             )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+        elif self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
@@ -336,7 +336,7 @@ class HFModelWrapper(nn.Module):
                 log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
             )  # shape can be (1, nnz) - with packing or (B, S) - without packing
 
-        if self.use_sample_packing:
+        if self.remove_microbatch_padding:
             # add padding back - postprocess logprobs to be compatible with original tensor
             batch_size, seqlen = attention_mask.shape
             # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
@@ -348,7 +348,7 @@ class HFModelWrapper(nn.Module):
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
             entropy_mask = None
-            if not self.use_sample_packing:
+            if not self.remove_microbatch_padding:
                 # Non-sample packing: pass attention mask to handle padding
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
                 entropy_mask = attention_mask_fwd
@@ -365,7 +365,7 @@ class HFModelWrapper(nn.Module):
                 entropy_BS = gather_outputs_and_unpad(
                     entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (1, nnz) - with packing or (B,S) - without packing
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 entropy_BS = pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
                 ).squeeze(
@@ -398,7 +398,7 @@ def _get_critic_model(
     base_llm_model,
     value_head_prefix="value_head",
     sequence_parallel_size=1,
-    use_sample_packing: bool = False,
+    remove_microbatch_padding: bool = False,
 ):
     class CriticModel(base_pretrained_model):
         supports_gradient_checkpointing = True
@@ -411,8 +411,8 @@ def _get_critic_model(
             setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
 
             self.sequence_parallel_size = sequence_parallel_size
-            self.use_sample_packing = use_sample_packing
-            if use_sample_packing:
+            self.remove_microbatch_padding = remove_microbatch_padding
+            if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
                 ), "Flash attention must be used with sample packing"
@@ -435,7 +435,7 @@ def _get_critic_model(
             position_ids_fwd = position_ids
             attention_mask_fwd = attention_mask
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
                     input_ids_fwd, nnz_indices, _, _, _ = unpad_input(
@@ -452,7 +452,7 @@ def _get_critic_model(
                     attention_mask_fwd = None
 
             if self.sequence_parallel_size > 1:
-                assert self.use_sample_packing, "sample packing must be true for sequence parallelism"
+                assert self.remove_microbatch_padding, "sample packing must be true for sequence parallelism"
                 # don't pass any attention mask for flash attention 2. this will save an all gather.
                 attention_mask_fwd = None if self.config._attn_implementation == "flash_attention_2" else attention_mask
                 # slice for sequence parallelism
@@ -479,7 +479,7 @@ def _get_critic_model(
 
             values_BSH = getattr(self, self.value_head_prefix)(last_hidden_states_BSH)
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 # add padding back - postprocess logits to be compatible with original tensors
                 batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
@@ -519,7 +519,7 @@ def get_llm_for_sequence_regression(
     value_head_prefix="value_head",
     device_map=None,
     sequence_parallel_size=1,
-    use_sample_packing: bool = False,
+    remove_microbatch_padding: bool = False,
     model_config_kwargs: dict = {},
     meta_init: bool = False,
     **kwargs,
@@ -547,7 +547,7 @@ def get_llm_for_sequence_regression(
         base_class,
         value_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
-        use_sample_packing=use_sample_packing,
+        remove_microbatch_padding=remove_microbatch_padding,
     )
 
     if load_in_4bit:

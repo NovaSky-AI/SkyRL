@@ -36,7 +36,7 @@ def get_test_config() -> SkyRLTrainConfig:
     cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
 
     validate_cfg(cfg)

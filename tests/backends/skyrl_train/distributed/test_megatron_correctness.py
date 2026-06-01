@@ -58,7 +58,7 @@ class TestGradScaleFunc:
             return_value=mock_config_obj,
         ):
             mock_skyrl_config = MagicMock()
-            mock_skyrl_config.trainer.use_sample_packing = False
+            mock_skyrl_config.trainer.remove_microbatch_padding = False
 
             MegatronModelWrapper(
                 config=mock_skyrl_config,
@@ -84,7 +84,7 @@ class TestGradScaleFunc:
             return_value=mock_config_obj,
         ):
             mock_skyrl_config = MagicMock()
-            mock_skyrl_config.trainer.use_sample_packing = False
+            mock_skyrl_config.trainer.remove_microbatch_padding = False
 
             MegatronModelWrapper(
                 config=mock_skyrl_config,
