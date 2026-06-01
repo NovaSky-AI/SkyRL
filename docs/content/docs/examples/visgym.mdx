@@ -133,7 +133,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   # VLM flags
   generator.vision_language_generator=true \
   generator.batched=false \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   # Multi-turn rollouts
   generator.max_turns=15 \
   generator.inference_engine.async_engine=true \
@@ -153,7 +153,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   # Same VLM flags as above
   generator.vision_language_generator=true \
   generator.batched=false \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   # More turns, higher temperature, KL regularization on
   generator.max_turns=18 \
   generator.sampling_params.temperature=1 \

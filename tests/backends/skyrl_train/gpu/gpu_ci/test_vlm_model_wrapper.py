@@ -22,7 +22,7 @@ def vlm_model():
         use_flash_attention_2=True,
         bf16=True,
         sequence_parallel_size=1,
-        use_sample_packing=False,
+        remove_microbatch_padding=False,
     )
     model.model.eval()
     model.model.to("cuda")

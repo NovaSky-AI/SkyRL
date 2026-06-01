@@ -24,7 +24,7 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine.tensor_parallel_size = 2
 

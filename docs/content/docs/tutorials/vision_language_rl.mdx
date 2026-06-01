@@ -36,14 +36,14 @@ Two flags are what actually switch a training run into VLM mode:
 
 ```bash
 generator.vision_language_generator=true \
-trainer.use_sample_packing=false \
+trainer.remove_microbatch_padding=false \
 ```
 
 - **`generator.vision_language_generator=true`** — Switches from the default gym generator to a VLM generator, ensuring that visual content is correctly routed to the inference server.
-- **`trainer.use_sample_packing=false`** — sample packing is currently unsupported for VLM training (see callout below).
+- **`trainer.remove_microbatch_padding=false`** — sample packing is currently unsupported for VLM training (see callout below).
 
 <Callout type="info">
-**Sample packing is unsupported for VL models.** Each VLM family (Qwen-VL, InternVL, etc.) processes images and positional embeddings differently, and packing across heterogeneous image counts per sample would need per-model handling. Support is expected in a future release; until then, set `trainer.use_sample_packing=false` for any VLM run.
+**Sample packing is unsupported for VL models.** Each VLM family (Qwen-VL, InternVL, etc.) processes images and positional embeddings differently, and packing across heterogeneous image counts per sample would need per-model handling. Support is expected in a future release; until then, set `trainer.remove_microbatch_padding=false` for any VLM run.
 </Callout>
 
 ## Dataset record shape

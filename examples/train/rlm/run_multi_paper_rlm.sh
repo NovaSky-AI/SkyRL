@@ -44,7 +44,7 @@ uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=100 \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=1024 \
   generator.eval_sampling_params.max_generate_length=1024 \

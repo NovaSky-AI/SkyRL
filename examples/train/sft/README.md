@@ -73,7 +73,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
-| `use_sample_packing` | `true` | Pack multiple sequences per batch (requires flash attention) |
+| `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |

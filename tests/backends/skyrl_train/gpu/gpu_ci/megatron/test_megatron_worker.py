@@ -46,7 +46,7 @@ def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -201,7 +201,7 @@ async def test_megatron_policy_weight_sync(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "lora"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "remove_microbatch_padding", "lora"),
     [
         ("policy", 2, 1, 1, 1, None, 2, False, False),
         # ref has same forward pass as policy - just duplicate one test to test setup
@@ -226,7 +226,7 @@ async def test_megatron_policy_weight_sync(
 )
 @pytest.mark.megatron
 async def test_megatron_forward(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, lora
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, remove_microbatch_padding, lora
 ):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
@@ -240,7 +240,7 @@ async def test_megatron_forward(
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-    cfg.trainer.use_sample_packing = use_sample_packing
+    cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     if ep > 1:
@@ -364,7 +364,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-    cfg.trainer.use_sample_packing = True
+    cfg.trainer.remove_microbatch_padding = True
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     if ep > 1:
@@ -396,7 +396,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-    cfg.trainer.use_sample_packing = True
+    cfg.trainer.remove_microbatch_padding = True
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     # set lora this time
@@ -435,7 +435,18 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "use_entropy_loss", "lora"),
+    (
+        "worker_type",
+        "tp",
+        "pp",
+        "cp",
+        "ep",
+        "etp",
+        "gpus_per_node",
+        "remove_microbatch_padding",
+        "use_entropy_loss",
+        "lora",
+    ),
     [
         ("policy", 2, 2, 1, 1, 1, 4, True, False, False),
         ("policy", 2, 2, 1, 1, 1, 4, True, True, False),
@@ -457,7 +468,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 )
 @pytest.mark.megatron
 async def test_megatron_train(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, use_entropy_loss, lora
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, remove_microbatch_padding, use_entropy_loss, lora
 ):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
@@ -473,7 +484,7 @@ async def test_megatron_train(
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-    cfg.trainer.use_sample_packing = use_sample_packing
+    cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     cfg.trainer.algorithm.use_kl_loss = False
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
@@ -546,10 +557,10 @@ async def test_megatron_train(
 
     cfg.trainer.strategy = "fsdp"
     # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
-    # between use_sample_packing true/false for FSDP (no diff for megatron)
+    # between remove_microbatch_padding true/false for FSDP (no diff for megatron)
     # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
     # + tested that this does not affect convergence
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
 
     if ep > 1:
         cfg.trainer.policy.fsdp_config.cpu_offload = True
