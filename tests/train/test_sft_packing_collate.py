@@ -1,4 +1,4 @@
-"""Unit tests for SFTTrainerWithPacking.collate_batch.
+"""Unit tests for PackedDataCollator.
 
 Run with:
   uv run --extra dev --extra megatron -- pytest tests/train/test_sft_packing_collate.py
@@ -8,12 +8,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from skyrl.train.collators import PackedDataCollator
 from skyrl.train.config import MegatronConfig
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
-from skyrl.train.sft_trainer_with_packing import SFTTrainerWithPacking
+from skyrl.train.sft_trainer import SFTTrainer
 
 
-def _make_trainer(
+def _make_collator(
     *,
     batch_size: int = 8,
     max_length: int = 128,
@@ -22,16 +23,16 @@ def _make_trainer(
     pp: int = 1,
     cp: int = 1,
     packed_mbs: int = 1,
-) -> SFTTrainerWithPacking:
-    """Build a trainer instance without setup() (no Ray, no workers)."""
+) -> PackedDataCollator:
+    """Build a PackedDataCollator from config (no Ray, no workers)."""
     cfg = SFTConfig(
         strategy="megatron",
         max_length=max_length,
         batch_size=batch_size,
         micro_train_batch_size_per_gpu=1,
-        use_sample_packing=True,
-        use_minibatch_packing=True,
-        packed_micro_batch_size_per_gpu=packed_mbs,
+        remove_microbatch_padding=True,
+        use_sequence_packing=True,
+        max_tokens_per_microbatch=packed_mbs * max_length,
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=num_gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=tp,
@@ -41,16 +42,17 @@ def _make_trainer(
         ),
     )
     # Avoid SFTTrainer.__init__ kicking off bridge config build by injecting
-    # a fake skyrl_cfg. We only need the .sft_cfg attribute populated.
+    # a fake skyrl_cfg. The collator is built from config alone.
     from skyrl.train.config.sft_config import build_skyrl_config_for_sft
 
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
-    trainer = SFTTrainerWithPacking(cfg, skyrl_cfg=skyrl_cfg)
+    trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
+    collator = trainer.collator
     # Patch in a tokenizer with a pad_token_id.
     tok = MagicMock()
     tok.pad_token_id = 0
-    trainer.tokenizer = tok
-    return trainer
+    collator.tokenizer = tok
+    return collator
 
 
 def _make_example(seq_len: int, num_actions: int, base_token: int = 100) -> dict:
@@ -65,9 +67,9 @@ def _make_example(seq_len: int, num_actions: int, base_token: int = 100) -> dict
 
 class TestPackingCollator:
     def test_bin_count_is_multiple_of_dp(self):
-        trainer = _make_trainer(num_gpus=4, batch_size=8)
+        collator = _make_collator(num_gpus=4, batch_size=8)
         examples = [_make_example(10, 5, base_token=100 + 100 * i) for i in range(8)]
-        batch = trainer.collate_batch(examples, batch_size=8)
+        batch = collator(examples, batch_size=8)
         # 8 short seqs of length 10 fit in 1 bin (cap=128). dp_size=4
         # forces at least 4 bins.
         assert batch.batch_size == 4
@@ -76,28 +78,28 @@ class TestPackingCollator:
         assert len(batch["sub_seq_lengths"]) == 4
 
     def test_all_examples_included(self):
-        trainer = _make_trainer(num_gpus=2, batch_size=4)
+        collator = _make_collator(num_gpus=2, batch_size=4)
         examples = [_make_example(20, 10, base_token=100 + 100 * i) for i in range(4)]
-        batch = trainer.collate_batch(examples, batch_size=4)
+        batch = collator(examples, batch_size=4)
         # All 4 examples appear somewhere in the bin data field.
         total_subseqs = sum(len(t) for t in batch["sub_seq_lengths"])
         assert total_subseqs == 4
 
     def test_sub_seq_lengths_match_attention_mask(self):
-        trainer = _make_trainer(num_gpus=2, batch_size=4, max_length=64)
+        collator = _make_collator(num_gpus=2, batch_size=4, max_length=64)
         examples = [
             _make_example(10, 5),
             _make_example(15, 8),
             _make_example(8, 4),
             _make_example(12, 6),
         ]
-        batch = trainer.collate_batch(examples, batch_size=4)
+        batch = collator(examples, batch_size=4)
         # Per-row attention_mask.sum() should equal sum(sub_seq_lengths_per_row[r]).
         for r, lengths in enumerate(batch["sub_seq_lengths"]):
             assert int(batch["attention_mask"][r].sum().item()) == int(lengths.sum().item())
 
     def test_loss_mask_zero_at_sub_seq_boundary(self):
-        trainer = _make_trainer(num_gpus=1, batch_size=4, max_length=128)
+        collator = _make_collator(num_gpus=1, batch_size=4, max_length=128)
         # Make two short sequences that pack into the same bin.
         examples = [
             _make_example(6, 3, base_token=100),
@@ -105,7 +107,7 @@ class TestPackingCollator:
             _make_example(6, 3, base_token=300),
             _make_example(6, 3, base_token=400),
         ]
-        batch = trainer.collate_batch(examples, batch_size=4)
+        batch = collator(examples, batch_size=4)
         # With dp=1, all 4 short seqs pack into ONE bin row.
         assert batch.batch_size == 1
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
@@ -130,12 +132,12 @@ class TestPackingCollator:
         """Sum of (unscaled) 1s in loss_mask before scaling should equal total
         nonpad response tokens minus boundary positions.
         """
-        trainer = _make_trainer(num_gpus=1, batch_size=2, max_length=64)
+        collator = _make_collator(num_gpus=1, batch_size=2, max_length=64)
         examples = [
             _make_example(5, 3),  # response of 3, 2 prompt
             _make_example(7, 4),
         ]
-        batch = trainer.collate_batch(examples, batch_size=2)
+        batch = collator(examples, batch_size=2)
         # 1 row (both seqs pack into one bin).
         # Sub-seq 0: response at positions 2-4 (3 tokens). The token at
         # row-position 4 is the last token of sub-seq 0 (boundary) -> mask 0.
@@ -164,7 +166,7 @@ class TestPackingCollator:
 
     def test_pp_padding_makes_rows_uniform(self):
         """With pp_size > 1, all packed rows are padded to the global max."""
-        trainer = _make_trainer(num_gpus=2, batch_size=4, max_length=64, pp=2)
+        collator = _make_collator(num_gpus=2, batch_size=4, max_length=64, pp=2)
         # Two different-sized bins after FFD.
         examples = [
             _make_example(30, 15),
@@ -172,7 +174,7 @@ class TestPackingCollator:
             _make_example(10, 5),
             _make_example(8, 4),
         ]
-        batch = trainer.collate_batch(examples, batch_size=4)
+        batch = collator(examples, batch_size=4)
         # All rows have the same width.
         row_widths = [batch["sequences"][r].shape[0] for r in range(batch.batch_size)]
         assert len(set(row_widths)) == 1
@@ -181,12 +183,12 @@ class TestPackingCollator:
         """With tp_size > 1, each sub-seq's footprint in the row is
         rounded up to a multiple of tp_size."""
         # Need num_gpus % (tp*pp*cp) == 0; use 4 GPUs with tp=4 -> dp=1.
-        trainer = _make_trainer(num_gpus=4, batch_size=2, max_length=128, tp=4)
+        collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4)
         examples = [
             _make_example(7, 3),  # 7 tokens -> rounded to 8
             _make_example(5, 3),  # 5 tokens -> rounded to 8
         ]
-        batch = trainer.collate_batch(examples, batch_size=2)
+        batch = collator(examples, batch_size=2)
         # Row width >= 16 (two sub-seqs each padded to 8).
         assert batch["sequences"].shape[1] >= 16
         # Both seqs are in the same row.
@@ -198,12 +200,12 @@ class TestPackingCollator:
         multiple of ``tp_size * cp_size * 2`` (must match the worker's
         preprocess_packed_seqs align_size)."""
         # tp=1, cp=2 -> align_size = 1*2*2 = 4. Use 2 GPUs -> dp=1.
-        trainer = _make_trainer(num_gpus=2, batch_size=2, max_length=128, cp=2)
+        collator = _make_collator(num_gpus=2, batch_size=2, max_length=128, cp=2)
         examples = [
             _make_example(6, 3),  # 6 tokens -> rounded up to 8
             _make_example(5, 3),  # 5 tokens -> rounded up to 8
         ]
-        batch = trainer.collate_batch(examples, batch_size=2)
+        batch = collator(examples, batch_size=2)
         # Both sub-seqs in one row (dp=1), each padded to 8 -> row width >= 16.
         assert batch["sequences"].shape[1] >= 16
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
@@ -216,10 +218,10 @@ class TestPackingCollator:
 
     def test_eval_path_falls_back_to_super(self):
         """When batch_size != self.sft_cfg.batch_size (eval), no packing happens."""
-        trainer = _make_trainer(num_gpus=1, batch_size=4, max_length=64)
+        collator = _make_collator(num_gpus=1, batch_size=4, max_length=64)
         examples = [_make_example(10, 5) for _ in range(2)]
         # Eval batch with chunk size 2 (!= self.sft_cfg.batch_size=4).
-        batch = trainer.collate_batch(examples, batch_size=2)
+        batch = collator(examples, batch_size=2)
         # Falls back: no sub_seq_lengths data field (and not in metadata either).
         assert batch.get("sub_seq_lengths") is None
         assert (batch.metadata or {}).get("sub_seq_lengths") is None
@@ -228,15 +230,15 @@ class TestPackingCollator:
 class TestPackingValidation:
     def test_rejects_fsdp(self):
         with pytest.raises(ValueError, match="strategy='megatron'"):
-            _make_trainer()._validate_packing_cfg.__func__(
+            SFTTrainer._validate_packing_cfg(
                 type(
                     "FakeSelf",
                     (),
                     {
                         "sft_cfg": SFTConfig(
                             strategy="fsdp",
-                            use_sample_packing=True,
-                            use_minibatch_packing=True,
+                            remove_microbatch_padding=True,
+                            use_sequence_packing=True,
                             max_length=128,
                         )
                     },
@@ -247,12 +249,12 @@ class TestPackingValidation:
         # Build a cfg that bypasses validate_sft_cfg's own check
         cfg = SFTConfig(
             strategy="megatron",
-            use_sample_packing=False,
-            use_minibatch_packing=True,
+            remove_microbatch_padding=False,
+            use_sequence_packing=True,
             max_length=128,
         )
-        with pytest.raises(ValueError, match="use_sample_packing"):
-            SFTTrainerWithPacking._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())
+        with pytest.raises(ValueError, match="remove_microbatch_padding"):
+            SFTTrainer._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())
 
     def test_accepts_cp_gt_1(self):
         # CP > 1 is supported: preprocess/postprocess zigzag-shard the packed
@@ -260,10 +262,10 @@ class TestPackingValidation:
         # to match. _validate_packing_cfg must NOT raise.
         cfg = SFTConfig(
             strategy="megatron",
-            use_sample_packing=True,
-            use_minibatch_packing=True,
+            remove_microbatch_padding=True,
+            use_sequence_packing=True,
             max_length=128,
         )
         cfg.megatron_config.context_parallel_size = 2
         # Should not raise.
-        SFTTrainerWithPacking._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())
+        SFTTrainer._validate_packing_cfg(type("S", (), {"sft_cfg": cfg})())

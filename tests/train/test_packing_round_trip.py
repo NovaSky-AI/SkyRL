@@ -90,7 +90,7 @@ def _build_collator_layout(
 ):
     """Construct the (sequences, attention_mask) tensor pair that the
     controller-side collator produces for the given per-row sub-seq token
-    lists. Mirrors ``SFTTrainerWithPacking.collate_batch`` exactly:
+    lists. Mirrors ``PackedDataCollator`` exactly:
     write each sub-seq's tokens at ``row_offset``, advance row_offset by
     ``_round_up(len(subseq), align_size)`` between sub-seqs in the same
     row, and set ``attention_mask=1`` only at the valid (non-pad) slots.
@@ -146,7 +146,7 @@ class TestRoundTrip:
             align_size=tp_size,
         )
 
-        # Sanity: collator layout matches what SFTTrainerWithPacking does.
+        # Sanity: collator layout matches what PackedDataCollator does.
         #   row 0: [101..107] + [pad] + [201..205] + [pad, pad, pad]  => 16 slots
         #   row 1: [301..303] + [pad] + [401..411] + [pad]            => 16 slots
         assert sequences.shape == (2, 16)
@@ -311,7 +311,7 @@ class TestRoundTrip:
             SFTPlacementConfig,
             build_skyrl_config_for_sft,
         )
-        from skyrl.train.sft_trainer_with_packing import SFTTrainerWithPacking
+        from skyrl.train.sft_trainer import SFTTrainer
 
         # num_gpus must be divisible by TP*PP*CP. With TP=4 we need 4 GPUs.
         # dp_size = 4/(4*1*1) = 1, so all bins live on a single DP shard.
@@ -320,9 +320,9 @@ class TestRoundTrip:
             max_length=128,
             batch_size=4,
             micro_train_batch_size_per_gpu=1,
-            use_sample_packing=True,
-            use_minibatch_packing=True,
-            packed_micro_batch_size_per_gpu=2,
+            remove_microbatch_padding=True,
+            use_sequence_packing=True,
+            max_tokens_per_microbatch=256,
             placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=4),
             megatron_config=MegatronConfig(
                 tensor_model_parallel_size=4,
@@ -332,10 +332,10 @@ class TestRoundTrip:
             ),
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
-        trainer = SFTTrainerWithPacking(cfg, skyrl_cfg=skyrl_cfg)
+        trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
         tok = MagicMock()
         tok.pad_token_id = 0
-        trainer.tokenizer = tok
+        trainer.collator.tokenizer = tok
 
         # 4 examples sized to force 2 bin rows each holding 2 sub-seqs.
         examples = [

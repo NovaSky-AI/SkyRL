@@ -5,11 +5,11 @@ set -x
 # Packed variant of run_sft_megatron_tulu3_50k.sh.
 #
 # Differences vs the reference script:
-#   - use_minibatch_packing=true        -> switches the trainer to
-#       SFTTrainerWithPacking, which runs controller-level FFD bin-packing
+#   - use_sequence_packing=true         -> the trainer collates with
+#       PackedDataCollator, which runs controller-level FFD bin-packing
 #       across the global mini-batch (bin capacity = max_length).
-#   - packed_micro_batch_size_per_gpu=1 -> one bin per worker micro-batch
-#       (the bin==micro-batch default that matches the reference impl).
+#   - max_tokens_per_microbatch=4096    -> token budget per worker micro-batch;
+#       == max_length here, so one bin row per micro-batch.
 #   - run_name suffix changed to *_packed for wandb/console disambiguation.
 #
 # All other knobs (model, dataset, batch sizing, parallelism, optimizer,
@@ -32,10 +32,11 @@ set -x
 : "${export_path:="/tmp/skyrl_tulu3_50k_hf_ckpts"}"
 
 # Packing flags (set just below in the uv invocation):
-#   use_minibatch_packing=true            -> enable controller-level FFD bin-packing
+#   use_sequence_packing=true             -> enable controller-level FFD bin-packing
 #                                            across the global mini-batch (Megatron-only).
-#   packed_micro_batch_size_per_gpu=1     -> bins per worker micro-batch (default 1 = one
-#                                            packed sequence per micro-batch).
+#   max_tokens_per_microbatch=4096        -> token budget per worker micro-batch; a
+#                                            multiple of max_length giving the bin rows
+#                                            per micro-batch (here == max_length = 1 row).
 
 uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
@@ -50,9 +51,9 @@ uv run --isolated --extra megatron \
     num_steps=4166 \
     batch_size=24 \
     micro_train_batch_size_per_gpu=6 \
-    use_sample_packing=true \
-    use_minibatch_packing=true \
-    packed_micro_batch_size_per_gpu=1 \
+    remove_microbatch_padding=true \
+    use_sequence_packing=true \
+    max_tokens_per_microbatch=4096 \
     seed=42 \
     optimizer_config.lr=1e-6 \
     optimizer_config.weight_decay=1e-2 \

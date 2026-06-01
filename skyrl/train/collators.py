@@ -1,17 +1,19 @@
-"""
-SFT trainer variant that performs FFD bin-packing at the controller, before
-dispatching to workers. Once per training step, sequences are packed into
-bins of capacity ``max_length``, the bin count is rounded up to a multiple
-of ``dp_size`` (so every DP rank gets the same number of micro-batches),
-and each bin becomes one row of the resulting :class:`TrainingInputBatch`.
+"""Collators that turn tokenized SFT examples into a :class:`TrainingInputBatch`.
 
-The packed rows carry a per-row ``sub_seq_lengths`` field inside
-``TrainingInputBatch`` data (a :class:`TensorList`, one 1-D int tensor per
-bin) so the worker's :func:`preprocess_packed_seqs` can enumerate every
-sub-sequence in the ``cu_seqlens`` it emits. Being a data field (not
-metadata), ``MeshDispatch`` shards it per-DP rank automatically.
+Two callables cover the two SFT data paths:
 
-Megatron backend only.
+- :class:`DefaultCollator` left-pads sequences to the batch maximum and applies
+  the per-non-pad-token loss normalization.
+- :class:`PackedDataCollator` performs controller-level FFD bin-packing
+  (Megatron-only): once per training step it packs sequences into bins of
+  capacity ``max_length``, rounds the bin count up to a multiple of
+  ``dp_size * packed_mbs`` (so every DP rank gets the same number of
+  micro-batches), and emits one row per bin. On the eval path (when the batch
+  size differs from the configured training ``batch_size``) it falls back to
+  the un-packed :class:`DefaultCollator` behavior.
+
+Both reuse the shared :func:`skyrl.train.sft_trainer.collate_sft_batch` free
+function for the un-packed layout.
 """
 
 from __future__ import annotations
@@ -24,89 +26,112 @@ from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
     make_seq_packer,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
-from skyrl.train.config.sft_config import SFTConfig
-from skyrl.train.sft_trainer import SFTTrainer
 
 
-class SFTTrainerWithPacking(SFTTrainer):
-    """SFT trainer with controller-level FFD bin-packing.
+class DefaultCollator:
+    """Left-pad examples into a batch and apply loss normalization.
 
-    Activates when ``SFTConfig.use_minibatch_packing=True``. The training
-    loop, dataset loading, checkpointing, eval, and dispatch are all
-    inherited from :class:`SFTTrainer`. The only behavior change is the
-    :meth:`collate_batch` override that emits packed rows instead of
-    per-example rows.
+    Normalizes the ``loss_mask`` so that the sum-reduction in
+    ``cross_entropy_loss`` produces a per-non-pad-token mean: the scale is
+    ``batch_size / (micro_train_batch_size_per_gpu * total_nonpad)`` where
+    ``total_nonpad`` is the count of loss-contributing tokens in the batch.
+    This accounts for the ``microbatch_weight`` (FSDP) or ``1/num_microbatches``
+    (Megatron) applied during gradient accumulation so the effective gradient
+    equals ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
     """
 
-    def __init__(self, cfg: SFTConfig, skyrl_cfg=None):
-        super().__init__(cfg, skyrl_cfg=skyrl_cfg)
-        self._validate_packing_cfg()
+    def __init__(self, tokenizer, micro_train_batch_size_per_gpu: int):
+        self.tokenizer = tokenizer
+        self.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
 
-    # ------------------------------------------------------------------ #
-    # Validation
-    # ------------------------------------------------------------------ #
+    def __call__(self, examples: list, batch_size: int) -> TrainingInputBatch:
+        """Collate ``examples`` and scale the loss mask.
 
-    def _validate_packing_cfg(self):
-        if self.sft_cfg.strategy != "megatron":
-            raise ValueError(
-                f"SFTTrainerWithPacking only supports strategy='megatron'; got "
-                f"{self.sft_cfg.strategy!r}. Use the FSDP packing path instead."
-            )
-        if not self.sft_cfg.use_sample_packing:
-            raise ValueError(
-                "use_minibatch_packing=True requires use_sample_packing=True " "(the worker still uses the THD layout)."
-            )
-        if not getattr(self.sft_cfg, "use_minibatch_packing", False):
-            raise ValueError("SFTTrainerWithPacking was instantiated but use_minibatch_packing=False.")
-
-    # ------------------------------------------------------------------ #
-    # Data path
-    # ------------------------------------------------------------------ #
-
-    def _dp_size(self) -> int:
-        """Number of DP ranks under the configured Megatron parallelism."""
-        total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
-        tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
-        pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-        cp = self.sft_cfg.megatron_config.context_parallel_size
-        return total_gpus // (tp * pp * cp)
-
-    def _packed_micro_batch_size(self) -> int:
-        """Bins per micro-batch on the worker.
-
-        Defaults to ``micro_batch_size=1`` for packed sequences (each
-        bin IS one micro-batch); users can override via
-        ``packed_micro_batch_size_per_gpu`` for memory tuning.
+        Args:
+            examples: Tokenized examples to collate.
+            batch_size: Global batch dimension used in the loss-mask scaling
+                factor. The train path passes ``sft_cfg.batch_size`` and the
+                eval path passes its per-dispatch chunk size.
         """
-        return getattr(self.sft_cfg, "packed_micro_batch_size_per_gpu", None) or 1
+        # Imported lazily to avoid a circular import: ``sft_trainer`` imports
+        # this module to select a collator at construction time.
+        from skyrl.train.sft_trainer import collate_sft_batch
 
-    def collate_batch(self, examples: list, batch_size: int) -> TrainingInputBatch:
-        """Pack examples into bin rows and return a :class:`TrainingInputBatch`.
+        batch = collate_sft_batch(examples, self.tokenizer)
+        micro_batch_size = self.micro_train_batch_size_per_gpu
+        total_nonpad = max(batch["loss_mask"].sum().item(), 1)
+        batch["loss_mask"] = batch["loss_mask"].float() * (batch_size / (micro_batch_size * total_nonpad))
+        return batch
 
-        Flow:
 
-        1. Compute per-example sequence lengths.
-        2. FFD-pack with ``bin_capacity = max_length``,
-           ``min_bin_count = dp_size``, ``bin_count_multiple = dp_size``.
-        3. Round-robin assign bins to DP shards (this happens implicitly
-           inside ``MeshDispatch.dispatch`` because we lay out bins in
-           shard-major order: shard 0 rows first, then shard 1, etc).
-        4. Build the per-bin packed row tensors and the per-row
-           ``sub_seq_lengths`` data field (a :class:`TensorList`).
-        """
-        # When eval calls collate_batch with a chunk of the eval set, we fall
-        # back to the inherited un-packed collate path. Packing only fires on
-        # the training-step batch (== self.sft_cfg.batch_size).
-        if batch_size != self.sft_cfg.batch_size:
-            return super().collate_batch(examples, batch_size=batch_size)
+class PackedDataCollator:
+    """Pack examples into bin rows via FFD and return a :class:`TrainingInputBatch`.
 
-        max_length = self.sft_cfg.max_length
+    Activates on the training-step batch (``batch_size == self.batch_size``).
+    Flow:
+
+    1. Compute per-example sequence lengths.
+    2. FFD-pack with ``bin_capacity = max_length``,
+       ``min_bin_count = dp_size * packed_mbs``,
+       ``bin_count_multiple = dp_size * packed_mbs``.
+    3. Round-robin assign bins to DP shards (this happens implicitly inside
+       ``MeshDispatch.dispatch`` because the rows are laid out in shard-major
+       order: shard 0 rows first, then shard 1, etc).
+    4. Build the per-bin packed row tensors and the per-row ``sub_seq_lengths``
+       data field (a :class:`TensorList`).
+
+    On the eval path (``batch_size != self.batch_size``) it delegates to a
+    :class:`DefaultCollator` so eval always uses the un-packed layout; packing
+    only fires on the training-step batch.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        max_length: int,
+        tp_size: int,
+        pp_size: int,
+        cp_size: int,
+        dp_size: int,
+        packed_mbs: int,
+        batch_size: int,
+        micro_train_batch_size_per_gpu: int,
+    ):
         if max_length is None:
-            raise ValueError("SFTTrainerWithPacking requires max_length to be set explicitly.")
+            raise ValueError("PackedDataCollator requires max_length to be set explicitly.")
+        self.max_length = max_length
+        self.tp_size = tp_size
+        self.pp_size = pp_size
+        self.cp_size = cp_size
+        self.dp_size = dp_size
+        self.packed_mbs = packed_mbs
+        self.batch_size = batch_size
+        self._default_collator = DefaultCollator(tokenizer, micro_train_batch_size_per_gpu)
+        self._tokenizer = tokenizer
 
-        tp_size = self.sft_cfg.megatron_config.tensor_model_parallel_size
-        pp_size = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-        cp_size = self.sft_cfg.megatron_config.context_parallel_size
+    @property
+    def tokenizer(self):
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value):
+        # The eval fall-through reuses the inner DefaultCollator, so keep both
+        # tokenizers in sync.
+        self._tokenizer = value
+        self._default_collator.tokenizer = value
+
+    def __call__(self, examples: list, batch_size: int) -> TrainingInputBatch:
+        # When eval calls the collator with a chunk of the eval set, fall back
+        # to the un-packed collate path. Packing only fires on the
+        # training-step batch (== self.batch_size).
+        if batch_size != self.batch_size:
+            return self._default_collator(examples, batch_size=batch_size)
+
+        max_length = self.max_length
+
+        tp_size = self.tp_size
+        pp_size = self.pp_size
+        cp_size = self.cp_size
         # Each sub-seq's padded length must satisfy two divisibility
         # constraints, which is why ``align_size`` carries both factors:
         #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
@@ -119,7 +144,7 @@ class SFTTrainerWithPacking(SFTTrainer):
         # gather/scatter offsets silently corrupt loss/grads (no crash).
         align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
 
-        dp_size = self._dp_size()
+        dp_size = self.dp_size
 
         # ------------------------------------------------------------------
         # 1. Sequence lengths and full-sequence loss masks
@@ -150,7 +175,7 @@ class SFTTrainerWithPacking(SFTTrainer):
         # at the call site). Forcing the bin count to a multiple of
         # ``dp_size * packed_mbs`` keeps every per-DP-rank shard divisible
         # by ``packed_mbs``.
-        packed_mbs = self._packed_micro_batch_size()
+        packed_mbs = self.packed_mbs
         bin_count_multiple = dp_size * packed_mbs
         packer = make_seq_packer(
             "first_fit_decreasing",
@@ -294,30 +319,3 @@ class SFTTrainerWithPacking(SFTTrainer):
             "response_length": max_packed_len - 1,
         }
         return batch
-
-    # ------------------------------------------------------------------ #
-    # Override _validate_batch_parallelism to relax mbs divisibility
-    # ------------------------------------------------------------------ #
-
-    def _validate_batch_parallelism(self):
-        """With packing, batch_size is the *example* count (not bins) and the
-        per-DP-rank bin count == bins_per_shard. The micro batch size in the
-        worker config refers to bins-per-micro-batch and is independently
-        configurable via ``packed_micro_batch_size_per_gpu``.
-        """
-        batch_size = self.sft_cfg.batch_size
-        total_gpus = self.sft_cfg.placement.num_nodes * self.sft_cfg.placement.num_gpus_per_node
-        tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
-        pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-        cp = self.sft_cfg.megatron_config.context_parallel_size
-        dp_size = total_gpus // (tp * pp * cp)
-        # We require batch_size >= dp_size so every DP rank gets >= 1 bin.
-        if batch_size < dp_size:
-            raise ValueError(
-                f"batch_size ({batch_size}) must be >= dp_size ({dp_size}) when "
-                f"use_minibatch_packing=True (each DP rank needs at least one bin)."
-            )
-        # We do NOT require batch_size % micro_train_batch_size_per_gpu == 0
-        # because micro_train_batch_size_per_gpu now refers to bins-per-MB,
-        # not examples-per-MB. The bin count is rounded up to a multiple of
-        # dp_size by FFD, and bins/MB is a separate knob.

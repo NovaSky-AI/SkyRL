@@ -320,7 +320,7 @@ def test_alpaca_no_input_uses_chat_template(tokenizer):
 
 @dataclass
 class _FakeSFTConfig:
-    """Minimal stand-in for SFTConfig used by SFTTrainer.collate_batch."""
+    """Minimal stand-in for SFTConfig used by the DefaultCollator tests."""
 
     batch_size: int = 4
     micro_train_batch_size_per_gpu: int = 2
@@ -336,7 +336,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
     This ensures that reduce_loss (sum over micro-batch) combined with
     microbatch_weight (mbs/pgb) produces a mean-per-non-pad-token loss.
     """
-    from skyrl.train.sft_trainer import SFTTrainer
+    from skyrl.train.collators import DefaultCollator
 
     cfg = _FakeSFTConfig(batch_size=4, micro_train_batch_size_per_gpu=2)
 
@@ -353,12 +353,9 @@ def test_loss_norm_sums_to_expected(tokenizer):
         _make_example([1, 2, 3, 4, 5], 3),
     ]
 
-    # Create a minimal trainer-like object to call collate_batch
-    trainer = object.__new__(SFTTrainer)
-    trainer.sft_cfg = cfg
-    trainer.tokenizer = tokenizer
+    collator = DefaultCollator(tokenizer, micro_train_batch_size_per_gpu=cfg.micro_train_batch_size_per_gpu)
 
-    batch = trainer.collate_batch(examples, batch_size=cfg.batch_size)
+    batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 2 + 4 + 1 + 3  # = 10
     expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
@@ -377,7 +374,7 @@ def test_loss_norm_all_nonpad(tokenizer):
     """When all tokens are non-pad, loss_mask values equal
     batch_size / (micro_batch_size * batch_size * num_actions)
     = 1 / (micro_batch_size * num_actions)."""
-    from skyrl.train.sft_trainer import SFTTrainer
+    from skyrl.train.collators import DefaultCollator
 
     cfg = _FakeSFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
 
@@ -386,11 +383,9 @@ def test_loss_norm_all_nonpad(tokenizer):
         _make_example([4, 5, 6], 2),  # 2 actions
     ]
 
-    trainer = object.__new__(SFTTrainer)
-    trainer.sft_cfg = cfg
-    trainer.tokenizer = tokenizer
+    collator = DefaultCollator(tokenizer, micro_train_batch_size_per_gpu=cfg.micro_train_batch_size_per_gpu)
 
-    batch = trainer.collate_batch(examples, batch_size=cfg.batch_size)
+    batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 4  # 2 + 2
     expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)

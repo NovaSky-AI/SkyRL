@@ -34,16 +34,10 @@ def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
     Receives the pre-built ``skyrl_cfg`` so that the trainer does not
     need to rebuild the bridge config.
 
-    Picks ``SFTTrainerWithPacking`` when ``use_minibatch_packing=True``
-    (controller-level FFD bin-packing, Megatron-only), otherwise the
-    classic ``SFTTrainer`` is used.
+    ``SFTTrainer`` selects its batch collator from ``use_sequence_packing``
+    (controller-level FFD bin-packing, Megatron-only, when enabled).
     """
-    if cfg.use_minibatch_packing:
-        from skyrl.train.sft_trainer_with_packing import SFTTrainerWithPacking
-
-        trainer = SFTTrainerWithPacking(cfg, skyrl_cfg=skyrl_cfg)
-    else:
-        trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
+    trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
     trainer.setup()
     trainer.train()
     trainer.shutdown()

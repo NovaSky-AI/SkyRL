@@ -365,7 +365,7 @@ def preprocess_packed_seqs(
         flat_seqlens: list[int] = []
         # Per-row, per-sub-seq starting column within the original padded row.
         # We need this to gather sub-seq tokens from the padded input_ids.
-        # IMPORTANT: the controller-side collator (``SFTTrainerWithPacking``)
+        # IMPORTANT: the controller-side collator (``PackedDataCollator``)
         # advances ``row_offset += round_up(length, align_size)`` between
         # consecutive sub-sequences in the same row so that flash-attn varlen
         # sees TP/CP-aligned segment boundaries. We MUST mirror that here —
@@ -487,7 +487,7 @@ def postprocess_packed_seqs(
       lengths across the row's sub-seqs. Each row's tokens are written back
       into the contiguous valid-token region of ``output_new[i]`` (the
       ``attention_mask`` for row ``i`` covers every sub-seq's valid tokens
-      and their TP-alignment gaps — see ``SFTTrainerWithPacking``).
+      and their TP-alignment gaps — see ``PackedDataCollator``).
     """
     if not post_process:
         return output

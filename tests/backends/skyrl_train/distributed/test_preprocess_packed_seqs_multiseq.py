@@ -158,7 +158,7 @@ class TestSubSeqLengths:
         batch_size = 1
 
         # Two sub-seqs of length 3 and 5; tp_size=4 should pad each to 4 and 8.
-        # Row layout mirrors what SFTTrainerWithPacking.collate_batch produces:
+        # Row layout mirrors what PackedDataCollator produces:
         # row[0:3]   = sub-seq 0 tokens
         # row[3]     = TP-alignment pad (zero)
         # row[4:9]   = sub-seq 1 tokens
@@ -243,7 +243,7 @@ class TestMultiSeqCPRoundTrip:
     @staticmethod
     def _build_batch(tp_size, cp_size, sub_seq_lengths, seq_len=64):
         """Build (input_ids, attention_mask) whose row layout matches the
-        SFTTrainerWithPacking collator: each sub-seq padded to align_size,
+        PackedDataCollator: each sub-seq padded to align_size,
         laid out back-to-back from column 0. Real tokens get unique nonzero
         ids so reassembly is exactly verifiable.
         """
@@ -279,7 +279,7 @@ class TestMultiSeqCPRoundTrip:
         # Under the identity model, postprocess must reassemble each row's
         # sub-seqs (each padded to align_size) back-to-back from column 0 with
         # the rest zero. ``_build_batch`` already produces exactly that layout
-        # in ``input_ids`` (the same row layout the SFTTrainerWithPacking
+        # in ``input_ids`` (the same row layout the PackedDataCollator
         # collator emits), so the row buffer is just input_ids cast to float.
         # NOTE: we deliberately do NOT use the cp_size==1 path as ground truth
         # here -- the cp==1 align_size is ``tp_size`` whereas the cp>1

@@ -32,8 +32,7 @@ from skyrl.train.config.sft_config import (
     TrainOnWhat,
     build_skyrl_config_for_sft,
 )
-from skyrl.train.sft_trainer import collate_sft_batch, tokenize_chat_example
-from skyrl.train.sft_trainer_with_packing import SFTTrainerWithPacking
+from skyrl.train.sft_trainer import SFTTrainer, collate_sft_batch, tokenize_chat_example
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.utils import ResolvedPlacementGroup
 from skyrl.utils.tok import get_tokenizer
@@ -230,15 +229,15 @@ _ParityProbeWorker = ray.remote(num_gpus=1)(_ParityProbeWorkerBase)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _make_sft_cfg(use_minibatch_packing: bool, cp: int, gpus: int) -> SFTConfig:
+def _make_sft_cfg(use_sequence_packing: bool, cp: int, gpus: int) -> SFTConfig:
     cfg = SFTConfig(
         strategy="megatron",
         max_length=MAX_LENGTH,
         batch_size=GLOBAL_BATCH_SIZE,
         micro_train_batch_size_per_gpu=2,
-        use_sample_packing=True,
-        use_minibatch_packing=use_minibatch_packing,
-        packed_micro_batch_size_per_gpu=1 if use_minibatch_packing else None,
+        remove_microbatch_padding=True,
+        use_sequence_packing=use_sequence_packing,
+        max_tokens_per_microbatch=MAX_LENGTH if use_sequence_packing else None,
         seed=SEED,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
         dataset_name="allenai/tulu-3-sft-mixture",
@@ -442,7 +441,7 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
         f"\n[parity] loaded {len(examples)} Tulu3 examples; " f"seq lengths={[len(e['input_ids']) for e in examples]}"
     )
 
-    # Config specs: (label, use_minibatch_packing, cp, gpus)
+    # Config specs: (label, use_sequence_packing, cp, gpus)
     configs = [
         ("baseline_dp2", False, 1, 2),
         ("packing_dp2", True, 1, 2),
@@ -453,13 +452,13 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
 
     for idx, (label, packed, cp, gpus) in enumerate(configs):
         print(f"\n[parity] === config {idx + 1}: {label} (packing={packed}, cp={cp}, gpus={gpus}) ===")
-        sft_cfg = _make_sft_cfg(use_minibatch_packing=packed, cp=cp, gpus=gpus)
+        sft_cfg = _make_sft_cfg(use_sequence_packing=packed, cp=cp, gpus=gpus)
         skyrl_cfg = build_skyrl_config_for_sft(sft_cfg)
 
         # Build the collated batch on the controller exactly as the trainer would.
         if packed:
-            trainer = SFTTrainerWithPacking(sft_cfg, skyrl_cfg=skyrl_cfg)
-            trainer.tokenizer = tokenizer
+            trainer = SFTTrainer(sft_cfg, skyrl_cfg=skyrl_cfg)
+            trainer.collator.tokenizer = tokenizer
             collated = trainer.collate_batch(examples, batch_size=GLOBAL_BATCH_SIZE)
             # Recompute flat_bins + align_size deterministically (same FFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)
@@ -554,7 +553,7 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
     )
 
 
-def _recompute_flat_bins(trainer: SFTTrainerWithPacking, examples: List[dict]) -> List[List[int]]:
+def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List[int]]:
     """Reproduce the collator's flat_bins permutation (shard-major FFD order)
     so we can invert the example reordering for the comparison."""
     from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
@@ -563,7 +562,7 @@ def _recompute_flat_bins(trainer: SFTTrainerWithPacking, examples: List[dict]) -
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
     dp_size = trainer._dp_size()
-    packed_mbs = trainer._packed_micro_batch_size()
+    packed_mbs = trainer.sft_cfg.packed_micro_batch_size()
     bin_count_multiple = dp_size * packed_mbs
     packer = make_seq_packer(
         "first_fit_decreasing",

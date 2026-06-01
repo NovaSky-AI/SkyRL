@@ -96,6 +96,20 @@ class SFTConfig(BaseConfig):
         # Check for mutual exclusion before constructing the full config
         if "num_epochs" in overrides and "num_steps" in overrides:
             raise ValueError("Cannot specify both num_epochs and num_steps")
+        # Accept the deprecated ``use_sample_packing`` key as an alias for
+        # ``remove_microbatch_padding``. Remap it before construction so the
+        # strict key validation does not reject the old name.
+        if "use_sample_packing" in overrides:
+            import warnings
+
+            warnings.warn(
+                "use_sample_packing has been renamed to remove_microbatch_padding; "
+                "use remove_microbatch_padding instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            overrides["remove_microbatch_padding"] = overrides["use_sample_packing"]
+            del overrides["use_sample_packing"]
         return cls.from_dict_config(overrides)
 
     # ---- Reused SkyRL config objects ----
@@ -178,22 +192,45 @@ class SFTConfig(BaseConfig):
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
 
     # ---- Packing ----
-    use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)
-    use_minibatch_packing: bool = False
+    remove_microbatch_padding: bool = True  # Pack multiple sequences per batch (requires flash_attn)
+    use_sequence_packing: bool = False
     """Enable controller-level FFD bin-packing across the global mini-batch.
-    Requires ``use_sample_packing=True`` and the Megatron backend. When
-    enabled, ``SFTTrainerWithPacking`` is used instead of ``SFTTrainer``.
-    Each bin row becomes one row in the dispatched batch and one
-    micro-batch on the worker (per ``packed_micro_batch_size_per_gpu``).
+    Requires ``remove_microbatch_padding=True`` and the Megatron backend. When
+    enabled, ``SFTTrainer`` uses ``PackedDataCollator`` instead of
+    ``DefaultCollator``. Each bin row becomes one row in the dispatched batch,
+    and a worker micro-batch holds ``max_tokens_per_microbatch // max_length``
+    bin rows.
     """
-    packed_micro_batch_size_per_gpu: Optional[int] = None
-    """Number of bins per micro-batch on the worker. ``None`` (default)
-    means 1 bin per micro-batch (one packed sequence per micro-batch).
-    Only consulted when ``use_minibatch_packing=True``."""
+    max_tokens_per_microbatch: Optional[int] = None
+    """Token budget for one worker micro-batch when ``use_sequence_packing=True``.
+    Must be a positive multiple of ``max_length`` (each bin row holds up to
+    ``max_length`` tokens, so the micro-batch holds
+    ``max_tokens_per_microbatch // max_length`` bin rows). ``None`` (default)
+    resolves to ``max_length`` (one bin row per micro-batch)."""
 
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
     dummy_run_max_steps: int = 5  # Number of steps to run in dummy mode
+
+    def packed_micro_batch_size(self) -> int:
+        """Bin rows per worker micro-batch when sequence packing is enabled.
+
+        Derived as ``max_tokens_per_microbatch // max_length``. When
+        ``max_tokens_per_microbatch`` is ``None`` it resolves to ``max_length``
+        (one bin row per micro-batch). Requires ``max_length`` to be set and
+        ``max_tokens_per_microbatch`` to be a positive multiple of it.
+        """
+        if self.max_length is None:
+            raise ValueError("max_tokens_per_microbatch requires max_length to be set.")
+        max_tokens = self.max_tokens_per_microbatch
+        if max_tokens is None:
+            max_tokens = self.max_length
+        if max_tokens < self.max_length or max_tokens % self.max_length != 0:
+            raise ValueError(
+                f"max_tokens_per_microbatch ({max_tokens}) must be a positive multiple of "
+                f"max_length ({self.max_length})."
+            )
+        return max_tokens // self.max_length
 
 
 # ---------------------------------------------------------------------------
@@ -260,21 +297,23 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
         # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
-            assert cfg.use_sample_packing, "context parallel is only supported with sample packing"
+            assert cfg.remove_microbatch_padding, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
         assert cfg.sequence_parallel_size == 1, (
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
 
-    # ---- minibatch packing checks ----
-    if cfg.use_minibatch_packing:
+    # ---- sequence packing checks ----
+    if cfg.use_sequence_packing:
         if cfg.strategy != "megatron":
-            raise ValueError("use_minibatch_packing=True is only supported with strategy='megatron'.")
-        if not cfg.use_sample_packing:
-            raise ValueError("use_minibatch_packing=True requires use_sample_packing=True.")
+            raise ValueError("use_sequence_packing=True is only supported with strategy='megatron'.")
+        if not cfg.remove_microbatch_padding:
+            raise ValueError("use_sequence_packing=True requires remove_microbatch_padding=True.")
         if cfg.max_length is None:
-            raise ValueError("use_minibatch_packing=True requires max_length to be set (it is the bin capacity).")
+            raise ValueError("use_sequence_packing=True requires max_length to be set (it is the bin capacity).")
+        # Validate the token budget resolves to an integer count of bin rows.
+        cfg.packed_micro_batch_size()
 
 
 # NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend
@@ -317,13 +356,13 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
-    cfg.trainer.use_sample_packing = sft_cfg.use_sample_packing
-    # When minibatch packing is on, the worker-side ``micro_train_batch_size_per_gpu``
-    # refers to bins-per-micro-batch (because each row in the dispatched
-    # batch is one bin). Override with ``packed_micro_batch_size_per_gpu``
-    # (default 1) so the bin-per-MB knob is explicit.
-    if sft_cfg.use_minibatch_packing:
-        cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.packed_micro_batch_size_per_gpu or 1
+    cfg.trainer.use_sample_packing = sft_cfg.remove_microbatch_padding
+    # When sequence packing is on, the worker-side ``micro_train_batch_size_per_gpu``
+    # refers to bin rows per micro-batch (because each row in the dispatched
+    # batch is one bin). It is derived from the ``max_tokens_per_microbatch``
+    # token budget.
+    if sft_cfg.use_sequence_packing:
+        cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.packed_micro_batch_size() or 1
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger

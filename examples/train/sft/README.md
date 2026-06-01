@@ -73,9 +73,9 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
-| `use_sample_packing` | `true` | Pack multiple sequences per batch (requires flash attention) |
-| `use_minibatch_packing` | `false` | Enable controller-level FFD bin-packing across the global mini-batch. Megatron-only. Requires `use_sample_packing=true`, `max_length` set, `context_parallel_size=1`, `expert_model_parallel_size=1`. |
-| `packed_micro_batch_size_per_gpu` | `null` | Bins per micro-batch on the worker when `use_minibatch_packing=true`. `null` = 1 (one bin per micro-batch). |
+| `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
+| `use_sequence_packing` | `false` | Enable controller-level FFD bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
+| `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
@@ -101,10 +101,10 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 
 ## Minibatch packing (controller-level FFD, Megatron only)
 
-When `use_minibatch_packing=true`, the trainer switches from
-`SFTTrainer` to `SFTTrainerWithPacking`. Every training step:
+When `use_sequence_packing=true`, `SFTTrainer` collates with
+`PackedDataCollator` instead of `DefaultCollator`. Every training step:
 
-1. The controller's `collate_batch` runs FFD bin-packing over the global
+1. The controller's collator runs FFD bin-packing over the global
    mini-batch using `max_length` as the bin capacity.
 2. The bin count is forced to a multiple of `dp_size` via empty-bin
    padding (`min_bin_count`/`bin_count_multiple` knobs in
@@ -117,8 +117,8 @@ When `use_minibatch_packing=true`, the trainer switches from
    `target.roll(shifts=-1)` inside `from_parallel_logits_to_logprobs` never
    contributes a cross-sub-seq prediction.
 
-Constraints: Megatron backend only, `context_parallel_size==1`,
-`expert_model_parallel_size==1`. See
+Constraints: Megatron backend only, `remove_microbatch_padding=true`, and
+`max_length` set. See
 [`docs/agent_packing_design.md`](../../../docs/agent_packing_design.md) and
 [`docs/packing_architecture_comparison.md`](../../../docs/packing_architecture_comparison.md).
 
@@ -126,8 +126,8 @@ Example overrides on top of `run_sft_megatron_tulu3_50k.sh`:
 
 ```bash
 bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
-    use_minibatch_packing=true \
-    packed_micro_batch_size_per_gpu=1
+    use_sequence_packing=true \
+    max_tokens_per_microbatch=4096
 ```
 
 ## Packing simulators (CPU only)
