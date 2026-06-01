@@ -76,7 +76,7 @@ class TestSubSeqLengthsSlicing:
             assert _to_lists(chunks[chunk_idx]) == [expected]
 
     def test_multi_bin_per_micro_batch(self):
-        # 6 bin rows with packed_mbs=2: 3 micro-batches of 2 bins each.
+        # 6 bin rows sliced at micro_batch_size=2: 3 micro-batches of 2 bins each.
         sub_seq_lengths = _make_tensor_list(
             [
                 [5],

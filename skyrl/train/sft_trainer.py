@@ -490,12 +490,11 @@ class SFTTrainer:
             self._validate_packing_cfg()
             return PackedDataCollator(
                 tokenizer=None,
-                max_length=self.sft_cfg.max_length,
+                max_tokens_per_microbatch=self.sft_cfg.resolved_bin_capacity(),
                 tp_size=self.sft_cfg.megatron_config.tensor_model_parallel_size,
                 pp_size=self.sft_cfg.megatron_config.pipeline_model_parallel_size,
                 cp_size=self.sft_cfg.megatron_config.context_parallel_size,
                 dp_size=self._dp_size(),
-                packed_mbs=self.sft_cfg.packed_micro_batch_size(),
                 batch_size=self.sft_cfg.batch_size,
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
             )

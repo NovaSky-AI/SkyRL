@@ -22,7 +22,7 @@ def _make_collator(
     tp: int = 1,
     pp: int = 1,
     cp: int = 1,
-    packed_mbs: int = 1,
+    max_tokens_per_microbatch: int | None = None,
 ) -> PackedDataCollator:
     """Build a PackedDataCollator from config (no Ray, no workers)."""
     cfg = SFTConfig(
@@ -32,7 +32,7 @@ def _make_collator(
         micro_train_batch_size_per_gpu=1,
         remove_microbatch_padding=True,
         use_sequence_packing=True,
-        max_tokens_per_microbatch=packed_mbs * max_length,
+        max_tokens_per_microbatch=max_tokens_per_microbatch,
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=num_gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=tp,
@@ -76,6 +76,18 @@ class TestPackingCollator:
         # sub_seq_lengths is now a per-row data field (TensorList).
         assert "sub_seq_lengths" in batch
         assert len(batch["sub_seq_lengths"]) == 4
+
+    def test_bin_capacity_is_token_budget(self):
+        # max_tokens_per_microbatch is the FFD bin capacity. With dp_size=1 and
+        # four length-100 seqs: a 128-token budget fits one seq per bin (4
+        # bins); a 256-token budget fits two seqs per bin (2 bins).
+        examples = [_make_example(100, 50, base_token=100 + 100 * i) for i in range(4)]
+
+        narrow = _make_collator(num_gpus=1, batch_size=4, max_length=128, max_tokens_per_microbatch=128)
+        assert narrow(examples, batch_size=4).batch_size == 4
+
+        wide = _make_collator(num_gpus=1, batch_size=4, max_length=128, max_tokens_per_microbatch=256)
+        assert wide(examples, batch_size=4).batch_size == 2
 
     def test_all_examples_included(self):
         collator = _make_collator(num_gpus=2, batch_size=4)

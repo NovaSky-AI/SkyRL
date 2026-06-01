@@ -562,11 +562,10 @@ def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
     dp_size = trainer._dp_size()
-    packed_mbs = trainer.sft_cfg.packed_micro_batch_size()
-    bin_count_multiple = dp_size * packed_mbs
+    bin_count_multiple = dp_size
     packer = make_seq_packer(
         "first_fit_decreasing",
-        bin_capacity=trainer.sft_cfg.max_length,
+        bin_capacity=trainer.sft_cfg.resolved_bin_capacity(),
         min_bin_count=bin_count_multiple,
         bin_count_multiple=bin_count_multiple,
     )

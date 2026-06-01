@@ -6,11 +6,11 @@ Two callables cover the two SFT data paths:
   the per-non-pad-token loss normalization.
 - :class:`PackedDataCollator` performs controller-level FFD bin-packing
   (Megatron-only): once per training step it packs sequences into bins of
-  capacity ``max_length``, rounds the bin count up to a multiple of
-  ``dp_size * packed_mbs`` (so every DP rank gets the same number of
-  micro-batches), and emits one row per bin. On the eval path (when the batch
-  size differs from the configured training ``batch_size``) it falls back to
-  the un-packed :class:`DefaultCollator` behavior.
+  capacity ``max_tokens_per_microbatch``, rounds the bin count up to a multiple
+  of ``dp_size`` (so every DP rank gets the same number of micro-batches), and
+  emits one row per bin. On the eval path (when the batch size differs from the
+  configured training ``batch_size``) it falls back to the un-packed
+  :class:`DefaultCollator` behavior.
 
 Both reuse the shared :func:`skyrl.train.sft_trainer.collate_sft_batch` free
 function for the un-packed layout.
@@ -71,9 +71,8 @@ class PackedDataCollator:
     Flow:
 
     1. Compute per-example sequence lengths.
-    2. FFD-pack with ``bin_capacity = max_length``,
-       ``min_bin_count = dp_size * packed_mbs``,
-       ``bin_count_multiple = dp_size * packed_mbs``.
+    2. FFD-pack with ``bin_capacity = max_tokens_per_microbatch``,
+       ``min_bin_count = dp_size``, ``bin_count_multiple = dp_size``.
     3. Round-robin assign bins to DP shards (this happens implicitly inside
        ``MeshDispatch.dispatch`` because the rows are laid out in shard-major
        order: shard 0 rows first, then shard 1, etc).
@@ -88,23 +87,21 @@ class PackedDataCollator:
     def __init__(
         self,
         tokenizer,
-        max_length: int,
+        max_tokens_per_microbatch: int,
         tp_size: int,
         pp_size: int,
         cp_size: int,
         dp_size: int,
-        packed_mbs: int,
         batch_size: int,
         micro_train_batch_size_per_gpu: int,
     ):
-        if max_length is None:
-            raise ValueError("PackedDataCollator requires max_length to be set explicitly.")
-        self.max_length = max_length
+        if max_tokens_per_microbatch is None:
+            raise ValueError("PackedDataCollator requires max_tokens_per_microbatch to be set explicitly.")
+        self.max_tokens_per_microbatch = max_tokens_per_microbatch
         self.tp_size = tp_size
         self.pp_size = pp_size
         self.cp_size = cp_size
         self.dp_size = dp_size
-        self.packed_mbs = packed_mbs
         self.batch_size = batch_size
         self._default_collator = DefaultCollator(tokenizer, micro_train_batch_size_per_gpu)
         self._tokenizer = tokenizer
@@ -127,7 +124,7 @@ class PackedDataCollator:
         if batch_size != self.batch_size:
             return self._default_collator(examples, batch_size=batch_size)
 
-        max_length = self.max_length
+        bin_capacity = self.max_tokens_per_microbatch
 
         tp_size = self.tp_size
         pp_size = self.pp_size
@@ -166,20 +163,16 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 2. FFD pack with DP-symmetry constraints
         # ------------------------------------------------------------------
-        # ``packed_mbs`` rows are consumed in a single forward pass on the
-        # worker. Megatron's ``forward_backward_func`` receives a single
-        # scalar ``micro_batch_size`` for the entire mini-batch, so every
-        # per-DP-rank micro-batch must have **exactly** ``packed_mbs`` rows
-        # (partial last-MBs with fewer rows raise a shape mismatch inside
-        # ``postprocess_packed_seqs`` because ``micro_batch_size`` is fixed
-        # at the call site). Forcing the bin count to a multiple of
-        # ``dp_size * packed_mbs`` keeps every per-DP-rank shard divisible
-        # by ``packed_mbs``.
-        packed_mbs = self.packed_mbs
-        bin_count_multiple = dp_size * packed_mbs
+        # Each bin row is one worker micro-batch. Megatron's
+        # ``forward_backward_func`` runs one micro-batch per bin on each DP
+        # rank, and its pipeline schedule requires every DP rank to issue the
+        # same number of micro-batches. Forcing the global bin count to a
+        # multiple of ``dp_size`` makes the per-DP-rank bin count (and thus
+        # ``num_microbatches``) identical across ranks.
+        bin_count_multiple = dp_size
         packer = make_seq_packer(
             "first_fit_decreasing",
-            bin_capacity=max_length,
+            bin_capacity=bin_capacity,
             min_bin_count=bin_count_multiple,
             bin_count_multiple=bin_count_multiple,
         )
@@ -287,11 +280,10 @@ class PackedDataCollator:
         # 5. Loss normalization
         # ------------------------------------------------------------------
         # The realized gradient is sum(loss * loss_mask) / (num_microbatches
-        # * dp_size). With packing, packed_mbs * num_microbatches * dp_size
-        # = num_bins. So loss_mask *= num_bins / (packed_mbs * total_nonpad)
-        # yields mean_over_nonpad. ``packed_mbs`` was bound during the FFD
-        # constraint step above.
-        scale = num_bins / (packed_mbs * max(total_nonpad, 1))
+        # * dp_size). Each bin row is one micro-batch, so num_microbatches *
+        # dp_size = num_bins. So loss_mask *= num_bins / total_nonpad yields
+        # mean_over_nonpad.
+        scale = num_bins / max(total_nonpad, 1)
         loss_mask.mul_(scale)
 
         # ------------------------------------------------------------------
