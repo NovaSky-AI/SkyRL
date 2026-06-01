@@ -69,3 +69,37 @@ so they appear starting from the **second** training step. Counter resets
 The full set of vLLM metrics is still available via the Prometheus endpoints
 themselves — only this curated subset is forwarded to wandb. The selection
 lives in [vllm_metrics_scraper.py:27-51](skyrl/train/utils/vllm_metrics_scraper.py#L27-L51).
+
+## Querying additional metrics
+
+The curated subset above is only what SkyRL forwards to wandb. Every metric the
+vLLM engine exports is still available on the same Ray metrics endpoints, so you
+can query anything vLLM emits — not just the keys in the table.
+
+The quickest way to see what's there is to curl an endpoint directly. Discover
+the URLs the scraper uses (one per alive Ray node) and inspect the raw
+Prometheus text:
+
+```bash
+curl -s http://<node-ip>:<MetricsExportPort>/metrics | grep vllm
+```
+
+Names are sanitized on the way out: vLLM's `:` becomes `_`, and Ray's metrics
+agent prepends `ray_`. So vLLM's `vllm:kv_cache_usage_perc` is exported as
+`ray_vllm_kv_cache_usage_perc`, and histograms expose `_sum` / `_count` /
+`_bucket` samples.
+
+### Example: KV cache block lifetime
+
+vLLM can emit KV-cache **residency** histograms — block lifetime (allocation →
+eviction), idle time before eviction, and reuse gaps. These are **off by
+default**; start the engine with `--kv-cache-metrics` (they also require log
+stats to be enabled, and are sampled at 1% of blocks via
+`--kv-cache-metrics-sample`). Once on, they show up as:
+
+```bash
+curl -s http://<node-ip>:<MetricsExportPort>/metrics | grep kv_block_lifetime
+# ray_vllm_kv_block_lifetime_seconds_sum{...}
+# ray_vllm_kv_block_lifetime_seconds_count{...}
+# ray_vllm_kv_block_lifetime_seconds_bucket{le="...",...}
+```
