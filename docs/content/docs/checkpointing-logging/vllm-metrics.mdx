@@ -20,8 +20,7 @@ generator:
 When enabled, vLLM's `RayPrometheusStatLogger` is installed on every engine. Each
 engine reports its stats through `ray.util.metrics`, and Ray's per-node
 metrics agent exposes them at `http://<node-ip>:<MetricsExportPort>/metrics`
-in Prometheus text format. On Anyscale this feeds the hosted Prometheus +
-Grafana stack with no extra setup.
+in Prometheus text format. 
 
 ## Inference path support
 
