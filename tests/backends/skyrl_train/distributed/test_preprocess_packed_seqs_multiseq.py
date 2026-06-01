@@ -34,6 +34,8 @@ _MEGATRON_MODULES = [
     "megatron.core.packed_seq_params",
     "megatron.core.transformer",
     "megatron.core.transformer.module",
+    "megatron.core.transformer.moe",
+    "megatron.core.transformer.moe.moe_utils",
     "megatron.core.utils",
 ]
 
@@ -46,6 +48,9 @@ _mock_modules["megatron.core.packed_seq_params"].PackedSeqParams = _PackedSeqPar
 _mock_modules["megatron.core.distributed"].DistributedDataParallel = MagicMock
 _mock_modules["megatron.core.optimizer"].ChainedOptimizer = MagicMock
 _mock_modules["megatron.core.transformer.module"].Float16Module = MagicMock
+_mock_modules["megatron.core.transformer.moe.moe_utils"].clear_aux_losses_tracker = MagicMock()
+_mock_modules["megatron.core.transformer.moe.moe_utils"].get_moe_layer_wise_logging_tracker = MagicMock()
+_mock_modules["megatron.core.transformer.moe.moe_utils"].reduce_aux_losses_tracker_across_ranks = MagicMock()
 _mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
 sys.modules.update(_mock_modules)
 
