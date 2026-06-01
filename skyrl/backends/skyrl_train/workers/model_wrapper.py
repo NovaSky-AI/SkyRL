@@ -138,7 +138,22 @@ class HFModelWrapper(nn.Module):
             if meta_init:
                 with torch.device("meta"):
                     self.model = model_class.from_config(model_config, trust_remote_code=True)
-                self.model.to(torch.bfloat16 if bf16 else torch.float32)
+                target_dtype = torch.bfloat16 if bf16 else torch.float32
+                # Cast just params + persistent buffers to the target dtype;
+                # leave non-persistent buffers at their init dtype. For example, transformers
+                # builds `Qwen3RotaryEmbedding.inv_freq` via a RoPE init that hardcodes
+                # `dtype=torch.float`, so it is fp32 no matter the model dtype, which rank-0's
+                # `from_pretrained` preserves but a blanket `.to` would clobber.
+                # SEE: https://github.com/huggingface/transformers/blob/v5.8.0/src/transformers/modeling_rope_utils.py#L177-L178
+                # Otherwise, e.g., non-rank-0's `inv_freq` is bf16 while rank-0's stays fp32,
+                # so the init-time rank-0→all broadcast that seeds these buffers copies
+                # rank-0's fp32 bytes into that half-width bf16 buffer as huge garbage values
+                non_persistent_names = {n for n, _ in self.model.named_non_persistent_buffers()}
+                for p in self.model.parameters():
+                    p.data = p.data.to(target_dtype)
+                for name, buf in self.model.named_buffers():
+                    if name not in non_persistent_names:
+                        buf.data = buf.data.to(target_dtype)
             else:
                 self.model = model_class.from_pretrained(
                     pretrain_or_model,

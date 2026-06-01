@@ -1052,6 +1052,12 @@ async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
+    if request.sampling_session_id is not None and ":" in request.sampling_session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
+        )
+
     base_model, model_path = await get_sampling_model(request, session)
 
     if base_model:
@@ -1087,6 +1093,8 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
             prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
+            seq_id=request.seq_id,
+            sampling_session_id=request.sampling_session_id,
         ),
     )
 

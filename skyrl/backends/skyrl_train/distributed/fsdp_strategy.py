@@ -4,7 +4,6 @@ import json
 import os
 import random
 from collections import defaultdict
-from datetime import timedelta
 from typing import List, Optional, Union
 
 import numpy as np
@@ -98,7 +97,7 @@ class FSDPStrategy(DistributedStrategy):
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
+    def setup_distributed(self) -> None:
         self.set_seed(self.seed)
 
         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))

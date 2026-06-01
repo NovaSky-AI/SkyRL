@@ -216,10 +216,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
-    async def pause_generation(self, lora_name: Optional[str] = None, clear_cache: bool = False) -> None:
+    async def pause_generation(self, clear_cache: bool = False) -> None:
         raise NotImplementedError("pause_generation is only supported for AsyncVLLMInferenceEngine.")
 
-    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
+    async def resume_generation(self) -> None:
         raise NotImplementedError("resume_generation is only supported for AsyncVLLMInferenceEngine.")
 
 
@@ -235,14 +235,14 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         if kwargs.get("pipeline_parallel_size", 1) > 1:
             raise ValueError(
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
-                "Please set `generator.async_engine=true` in your config."
+                "Please set `generator.inference_engine.async_engine=true` in your config."
             )
         # Pop enable_ray_prometheus_stats - only supported for async engine
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
         if enable_ray_prometheus_stats:
             logger.warning(
                 "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
-                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+                "Set `generator.inference_engine.async_engine=true` to enable Ray Prometheus stats logging."
             )
         return vllm.LLM(*args, **kwargs)
 
@@ -370,7 +370,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         model_path = kwargs.get("model")
-        # Use served_model_name if provided (from generator.served_model_name config),
+        # Use served_model_name if provided (from generator.inference_engine.served_model_name config),
         # otherwise fall back to model_path. This allows using a different model name
         # in HTTP endpoint requests than the actual model path.
         # See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
@@ -381,8 +381,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         models = OpenAIServingModels(engine, base_model_paths)
 
         # Build request logger for debugging (off by default).
-        # Enable via: generator.engine_init_kwargs.enable_log_requests=true
-        # Optionally limit logged chars: generator.engine_init_kwargs.max_log_len=256
+        # Enable via: generator.inference_engine.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: generator.inference_engine.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
             from vllm.entrypoints.logger import RequestLogger
@@ -648,18 +648,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 
-    async def pause_generation(self, lora_name: Optional[str] = None, clear_cache: bool = False) -> None:
+    async def pause_generation(self, clear_cache: bool = False) -> None:
         """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
         engine = self._get_engine()
         await engine.pause_generation(mode="keep", clear_cache=clear_cache)
         logger.info("pause_generation(mode='keep') finished")
 
-    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
+    async def resume_generation(self) -> None:
         """Resume generation after a keep-mode pause."""
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
         engine = self._get_engine()
         await engine.resume_generation()
         logger.info("resume_generation() finished")

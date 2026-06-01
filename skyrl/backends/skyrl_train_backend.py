@@ -1003,33 +1003,23 @@ class SkyRLTrainBackend(AbstractBackend):
             for mid in prepared_batch.all_model_ids
         ]
 
-        # Multi-LoRA training shares one inference engine across multiple
-        # tenants. When *one* tenant's weights are being swapped, we abort
-        # only that LoRA's in-flight requests (via pause_generation(lora_name=...))
-        # and rely on sample_with_retry to accumulate partial tokens and
-        # resubmit when resume_generation is called. Other tenants are
-        # unaffected. FFT / single-tenant uses the single-shot path.
-        # TRANSIENT: drop the branch when vLLM ships native per-LoRA pause.
-        is_multi_lora = self._base_lora_signature is not None
-        sample_fn = (
-            self._inference_engine_client.sample_with_retry if is_multi_lora else self._inference_engine_client.sample
-        )
-
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_model_inputs)):
                 model_input = prepared_batch.all_model_inputs[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
-                request_payload = {
-                    "json": {
-                        "model": per_request_models[i],
-                        "prompt": model_input.model_dump(),
-                        "num_samples": 1,
-                        "sampling_params": sampling_params.model_dump(),
-                    }
+                json_body = {
+                    "model": per_request_models[i],
+                    "prompt": model_input.model_dump(),
+                    "num_samples": 1,
+                    "sampling_params": sampling_params.model_dump(),
                 }
-                tasks.append(sample_fn(request_payload))
+
+                session_id = prepared_batch.all_session_ids[i]
+                if session_id is not None:
+                    json_body["session_id"] = session_id
+                tasks.append(self._inference_engine_client.sample({"json": json_body}))
 
             try:
                 return await asyncio.gather(*tasks, return_exceptions=True)

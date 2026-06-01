@@ -61,7 +61,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.inference_engine_cfg = inference_engine_cfg
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
-        # than the actual model path. See ppo_base_config.yaml for details.
+        # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
         served_model_name = inference_engine_cfg.served_model_name
         if served_model_name is not None:
             self.model_name = served_model_name
@@ -366,29 +366,21 @@ class InferenceEngineClient(InferenceEngineInterface):
     # ----------------------------
     # Generation pause and resume
     # ----------------------------
-    async def pause_generation(self, lora_name: Optional[str] = None) -> None:
+    async def pause_generation(self) -> None:
         """
         Pauses generation for all engines using vLLM's native keep mode.
 
         In-flight requests are frozen (not aborted) and will resume from where they left off
         when `resume_generation()` is called. New requests are blocked until resume.
-
-        ``lora_name`` is accepted for interface parity with the HTTP path but
-        targeted (per-LoRA) pause is HTTP-only; passing a non-None value
-        raises ``NotImplementedError``.
         """
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
         await self._run_on_all_engines("pause_generation")
 
-    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
+    async def resume_generation(self) -> None:
         """
         Resumes generation for all engines after a keep-mode pause.
 
         Frozen in-flight requests continue from where they left off, and new requests are unblocked.
         """
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
         await self._run_on_all_engines("resume_generation")
 
     # ----------------------------

@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import ray
 from packaging import version
@@ -76,14 +76,10 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 
-    async def pause_generation(self, lora_name: Optional[str] = None) -> None:
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
+    async def pause_generation(self) -> None:
         return await self.inference_engine_actor.pause_generation.remote()
 
-    async def resume_generation(self, lora_name: Optional[str] = None) -> None:
-        if lora_name is not None:
-            raise NotImplementedError("targeted pause is HTTP-only")
+    async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
 
@@ -237,7 +233,7 @@ def create_ray_wrapped_inference_engines(
             other_kwargs = {}
 
             # served_model_name allows using a different model name for HTTP endpoint validation
-            # than the actual model path. See generator.served_model_name in ppo_base_config.yaml.
+            # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
             if served_model_name is not None:
                 other_kwargs["served_model_name"] = served_model_name
 

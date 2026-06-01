@@ -61,7 +61,20 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    # This function may run a GPU-less Ray head
+    # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
+    # ``device_type == ""``. vLLM's ``add_cli_args`` walks ``VllmConfig`` defaults
+    # and instantiates ``DeviceConfig()`` (device="auto"), which in turn runs
+    # ``DeviceConfig.__post_init__`` and raises ``Failed to infer device type``.
+    # Explicitly pin the platform's device type to ``cuda`` so the autodetection
+    # path in ``DeviceConfig.__post_init__`` succeeds during arg parsing.
+    # NOTE: mutating current_platform.device_type relies on vLLM 0.20.2's singleton
+    # initialization where instance attrs shadow class attrs. This should be re-verified on vLLM bumps.
+    if not current_platform.device_type:
+        current_platform.device_type = "cuda"
 
     # Create common CLI args namespace
     parser = FlexibleArgumentParser()
