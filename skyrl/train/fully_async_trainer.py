@@ -193,6 +193,8 @@ class _AsyncStalenessManager:
         This is expected at epoch boundaries when the trainer cancels in-flight workers.
         """
         async with self._cond:
+            assert self._stat.submitted > 0, f"Cannot decrement submitted count below zero (current: {self._stat.submitted})"
+            assert self._stat.running > 0, f"Cannot decrement running count below zero (current: {self._stat.running})"
             self._stat.submitted -= 1
             self._stat.running -= 1
             self._cond.notify_all()
