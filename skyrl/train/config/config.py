@@ -168,10 +168,17 @@ class MegatronConfig(BaseConfig):
     # MoE runtime configuration flags
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
+    """Set to "aux_loss", "seq_aux_loss", or "global_aux_loss" to enable aux loss-based load balancing and logging."""
+    moe_aux_loss_coeff: float = 0.0
+    """Scaling coefficient for the moe load balancing loss if moe_router_load_balancing_type is not 'none'. Will disable aux loss in megatron-core if set to 0."""
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
     moe_enable_routing_replay: bool = False
+    moe_per_layer_logging: bool = False
+    """Enable per-layer logging of MoE metrics (i.e. per layer aux losses)."""
+    moe_router_dtype: str = "fp32"
+    """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
@@ -181,12 +188,24 @@ class MegatronConfig(BaseConfig):
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
-    empty_cuda_cache: Optional[bool] = None
+    empty_cuda_cache: Optional[bool] = True
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+
+    def __post_init__(self):
+        # Backfill defaults for any keys the user didn't override so an override dict
+        # doesn't have to repeat every default just to set one value.
+        if self.transformer_config_kwargs is None:
+            self.transformer_config_kwargs = {}
+        for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
+            self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
+        if self.optimizer_config_kwargs is None:
+            self.optimizer_config_kwargs = {}
+        for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
+            self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +664,8 @@ class TrainerConfig(BaseConfig):
     project_name: str = "skyrl"
     run_name: str = "test_run"
     logger: str = "wandb"
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None

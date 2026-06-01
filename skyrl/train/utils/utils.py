@@ -310,9 +310,11 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         "token_mean_legacy",
         "sequence_mean",
         "seq_mean_token_sum_norm",
+        "prompt_mean",
     ), (
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+        f"Must be one of `['token_mean', 'token_mean_legacy', 'sequence_mean', "
+        f"'seq_mean_token_sum_norm', 'prompt_mean']`"
     )
     if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
         if cfg.trainer.algorithm.max_seq_len is None:

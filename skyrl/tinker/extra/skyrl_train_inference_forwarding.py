@@ -141,8 +141,14 @@ class SkyRLTrainInferenceForwardingClient:
             elif all(isinstance(s, str) for s in stop):
                 payload["stop"] = list(stop)
 
+        # Pass X-Session-ID for deterministic routing
+        headers = {}
+        session_id = types.make_routing_session_id(sample_req.sampling_session_id, sample_req.seq_id)
+        if session_id is not None:
+            headers["X-Session-ID"] = session_id
+
         url = f"{proxy_url}/v1/completions"
-        response = await self._http_client.post(url, json=payload)
+        response = await self._http_client.post(url, json=payload, headers=headers)
         if response.status_code >= 400:
             raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
         try:

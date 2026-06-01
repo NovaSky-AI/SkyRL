@@ -4,7 +4,6 @@ import random
 import re
 import shutil
 import tempfile
-from datetime import timedelta
 from typing import List, Optional, Union
 
 import megatron.core.parallel_state as mpu
@@ -160,7 +159,7 @@ class MegatronStrategy(DistributedStrategy):
 
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
 
-    def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
+    def setup_distributed(self) -> None:
         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
         if local_rank != -1:
             torch.cuda.set_device(local_rank)

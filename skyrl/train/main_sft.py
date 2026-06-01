@@ -12,6 +12,7 @@ Usage::
 import sys
 
 import ray
+from loguru import logger
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
@@ -38,9 +39,19 @@ def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
     (controller-level FFD bin-packing, Megatron-only, when enabled).
     """
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
-    trainer.setup()
-    trainer.train()
-    trainer.shutdown()
+    try:
+        trainer.setup()
+        trainer.train()
+        trainer.shutdown()
+    except Exception as e:
+        # OOMs (and other crashes) raised inside actor init / training surface
+        # here. Route them through the tracker so wandb users see them as an
+        # `error/tracebacks` table row rather than only in Ray worker logs.
+        if trainer.tracker is not None:
+            trainer.tracker.log_exception(e, step=trainer.global_step)
+        else:
+            logger.error(f"SFT setup failed before tracker was initialized:\n{e}")
+        raise
 
 
 def main():

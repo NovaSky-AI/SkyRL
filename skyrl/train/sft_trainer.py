@@ -22,17 +22,20 @@ Or as a CLI entrypoint::
 
 import functools
 import json
+import multiprocessing as mp
 import os
 import random
+import tempfile
 from dataclasses import asdict
 from math import ceil
 from typing import Any, Optional
 
 import ray
 import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
+from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -52,6 +55,13 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.callbacks import (
+    CallbackHandler,
+    CallbackInput,
+    TrainingCallback,
+    TrainingControl,
+)
+from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -65,6 +75,224 @@ from skyrl.utils.tok import get_tokenizer
 # ---------------------------------------------------------------------------
 # Tokenization helpers
 # ---------------------------------------------------------------------------
+
+
+def _tokenize_chat_slice_worker(args):
+    """Worker function for parallel chat-format tokenization with slice-based loading.
+
+    Each worker loads the full dataset (HF caches it locally after the parent's
+    first call) and tokenizes only its assigned index range.
+
+    Must be top-level for pickling with spawn.
+    """
+    (
+        dataset_name,
+        dataset_split,
+        start_idx,
+        end_idx,
+        tokenizer_path,
+        max_length,
+        messages_key,
+        train_on_what_str,
+        tools_key,
+        system_key,
+    ) = args
+
+    # Worker loads tokenizer from cached path
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+        use_fast=True,
+        local_files_only=True,
+    )
+
+    train_on_what = TrainOnWhat(train_on_what_str)
+
+    # Reload the dataset using the original split string and slice by index.
+    # The parent has already loaded once so this hits the HF cache.
+    dataset = load_dataset(dataset_name, split=dataset_split)
+    dataset_slice = dataset.select(range(start_idx, end_idx))
+
+    # Tokenize and filter inline
+    results = []
+    for example in dataset_slice:
+        tokenized = tokenize_chat_example(
+            example,
+            tokenizer,
+            max_length=max_length,
+            messages_key=messages_key,
+            train_on_what=train_on_what,
+            tools_key=tools_key,
+            system_key=system_key,
+        )
+        if tokenized is not None:
+            results.append(tokenized)
+
+    return results
+
+
+def _tokenize_alpaca_slice_worker(args):
+    """Worker function for parallel Alpaca-format tokenization with slice-based loading.
+
+    Each worker loads the full dataset (HF caches it locally after the parent's
+    first call) and tokenizes only its assigned index range.
+
+    Must be top-level for pickling with spawn.
+    """
+    dataset_name, dataset_split, start_idx, end_idx, tokenizer_path, max_length = args
+
+    # Worker loads tokenizer from cached path
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+        use_fast=True,
+        local_files_only=True,
+    )
+
+    # Reload the dataset using the original split string and slice by index.
+    dataset = load_dataset(dataset_name, split=dataset_split)
+    dataset_slice = dataset.select(range(start_idx, end_idx))
+
+    # Tokenize and filter inline
+    results = []
+    for example in dataset_slice:
+        tokenized = tokenize_sft_example(example, tokenizer, max_length)
+        if tokenized is not None:
+            results.append(tokenized)
+
+    return results
+
+
+def _compute_cache_key(
+    dataset_name: str,
+    dataset_split: str,
+    model_path: str,
+    max_length: Optional[int],
+    messages_key: str,
+    train_on_what: str,
+    tools_key: Optional[str],
+    system_key: Optional[str],
+) -> str:
+    """Compute a cache key (hash) for a tokenized dataset.
+
+    The hash uniquely identifies the dataset and tokenization parameters so
+    that cached results can be safely reused when parameters match.
+
+    Args:
+        dataset_name: HuggingFace dataset name
+        dataset_split: Dataset split string (e.g., "train[:100000]")
+        model_path: Model name/path (tokenizer identity)
+        max_length: Maximum sequence length for truncation
+        messages_key: Column name for messages
+        train_on_what: Training target (last_assistant_message or all_assistant_messages)
+        tools_key: Column name for tools (if applicable)
+        system_key: Column name for system prompt (if applicable)
+
+    Returns:
+        A hex string hash (e.g., "a3f2c1...")
+    """
+    import hashlib
+
+    # Build a deterministic string from all relevant parameters
+    cache_params = json.dumps(
+        {
+            "dataset_name": dataset_name,
+            "dataset_split": dataset_split,
+            "model_path": model_path,
+            "max_length": max_length,
+            "messages_key": messages_key,
+            "train_on_what": train_on_what,
+            "tools_key": tools_key,
+            "system_key": system_key,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(cache_params.encode()).hexdigest()[:16]
+
+
+def _get_cache_path(cache_dir: str, cache_key: str) -> str:
+    """Get the full path to a cached tokenized dataset.
+
+    The cache is stored as an arrow-backed HuggingFace dataset on disk
+    (``Dataset.save_to_disk``), so this path is a directory, not a file.
+
+    Args:
+        cache_dir: Base cache directory
+        cache_key: Cache key (hash) for this dataset
+
+    Returns:
+        Path to the cache directory (e.g., /path/to/cache/a3f2c1).
+    """
+    return os.path.join(cache_dir, cache_key)
+
+
+def _load_from_cache(cache_path: str) -> Optional[list]:
+    """Load tokenized dataset from cache.
+
+    Reads an arrow-backed HF ``Dataset`` directory written by
+    :func:`_save_to_cache` and materializes it back to the ``list[dict]``
+    representation expected by the trainer (which slices, shuffles, and
+    concatenates the result during the training loop).
+
+    Args:
+        cache_path: Path to cached dataset directory.
+
+    Returns:
+        List of tokenized examples, or ``None`` if the cache directory
+        does not exist or fails to load.
+    """
+    if not os.path.isdir(cache_path):
+        return None
+
+    try:
+        logger.info(f"Loading tokenized dataset from cache: {cache_path}")
+        dataset = Dataset.load_from_disk(cache_path)
+        tokenized = dataset.to_list()
+        logger.info(f"Loaded {len(tokenized)} examples from cache")
+        return tokenized
+    except Exception as e:
+        logger.warning(f"Failed to load cache from {cache_path}: {e}")
+        return None
+
+
+def _save_to_cache(cache_path: str, tokenized: list) -> None:
+    """Save tokenized dataset to cache.
+
+    Materializes the in-memory ``list[dict]`` as a HuggingFace ``Dataset``
+    and writes it via ``save_to_disk``. At 1M-row scale, the arrow-backed,
+    memory-mapped format reads and writes dramatically faster than pickle
+    while also being portable across Python versions. The write goes to a
+    sibling ``<cache_path>.tmp`` directory which is then atomically renamed
+    onto ``cache_path`` for NFS safety.
+
+    Args:
+        cache_path: Path to the cache directory to create.
+        tokenized: List of tokenized examples.
+    """
+    try:
+        import shutil
+
+        parent_dir = os.path.dirname(cache_path)
+        os.makedirs(parent_dir, exist_ok=True)
+
+        logger.info(f"Saving {len(tokenized)} examples to cache: {cache_path}")
+        # Build the HF Dataset from rows and write to a sibling temp dir.
+        # An atomic rename onto cache_path makes concurrent readers see only
+        # a fully-written cache (NFS-safe; matches the previous pickle path).
+        dataset = Dataset.from_list(tokenized)
+        temp_path = cache_path + ".tmp"
+        # Clean up any stale temp dir from an interrupted prior run.
+        if os.path.isdir(temp_path):
+            shutil.rmtree(temp_path)
+        dataset.save_to_disk(temp_path)
+        # If a previous cache exists at the final path, drop it before
+        # rename so the swap is the only visible state change.
+        if os.path.isdir(cache_path):
+            shutil.rmtree(cache_path)
+        os.rename(temp_path, cache_path)
+        logger.info("Cache saved successfully")
+    except Exception as e:
+        logger.warning(f"Failed to save cache to {cache_path}: {e}")
 
 
 @functools.lru_cache(maxsize=512)
@@ -459,7 +687,12 @@ class SFTTrainer:
         trainer.shutdown()
     """
 
-    def __init__(self, cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig | None = None):
+    def __init__(
+        self,
+        cfg: SFTConfig,
+        skyrl_cfg: SkyRLTrainConfig | None = None,
+        callbacks: Optional[list[TrainingCallback]] = None,
+    ):
         self.sft_cfg = cfg
         # Accept a pre-built bridge config to avoid redundant rebuilds.
         # When not provided (e.g. standalone usage), build it here.
@@ -471,6 +704,16 @@ class SFTTrainer:
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
         self.collator = self._build_collator()
+
+        self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
+        self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
+
+        self._callback_handler = CallbackHandler(callbacks)
+        self._training_control = TrainingControl()
+        # Loop metadata used to build CallbackInput. Populated in train().
+        self._total_steps: int = 0
+        self._steps_per_epoch: int = 0
+        self._current_epoch: int = 0
 
     def _build_collator(self):
         """Select the batch collator from the configured packing mode.
@@ -545,8 +788,8 @@ class SFTTrainer:
             padding_side="left",
         )
         self.collator.tokenizer = self.tokenizer
-        self._init_workers()
         self._init_tracker()
+        self._init_workers()
 
     def _init_workers(self):
         """Create PPORayActorGroup and WorkerDispatch.
@@ -602,17 +845,48 @@ class SFTTrainer:
             config=self.sft_cfg,
         )
 
+    def add_callback(self, callback: TrainingCallback) -> None:
+        """Register a callback. Can be called anytime; events fired after this
+        call will reach the new callback."""
+        self._callback_handler.add(callback)
+
+    def _build_callback_input(self, **fields) -> CallbackInput:
+        """Snapshot loop counters + per-event fields into a CallbackInput."""
+        return CallbackInput(
+            global_step=self.global_step,
+            epoch=self._current_epoch,
+            total_steps=self._total_steps,
+            steps_per_epoch=self._steps_per_epoch,
+            **fields,
+        )
+
+    def _fire(self, event_name: str, **fields) -> None:
+        """Build a CallbackInput and dispatch the given event to all callbacks."""
+        cb_input = self._build_callback_input(**fields)
+        getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
+
     # ------------------------------------------------------------------ #
     # Data
     # ------------------------------------------------------------------ #
 
     def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
-        """Load and tokenize a dataset.
+        """Load and tokenize a dataset with caching support.
 
         Auto-detects the dataset format based on column names:
         - If a ``messages_key`` column exists, uses chat-format tokenization.
         - If ``instruction`` and ``output`` columns exist, uses Alpaca-format
           tokenization.
+
+        Uses manual multiprocessing for parallel tokenization when num_workers > 0.
+        With parallel mode, uses slice-based loading where each worker loads its
+        own data slice directly from HuggingFace to eliminate pickle overhead.
+
+        Caching:
+        - Tokenized datasets are cached to disk as a HuggingFace ``Dataset``
+          (arrow-backed, memory-mapped) for reuse across runs.
+        - Cache key is a hash of dataset name, split, model, and tokenization params.
+        - Set ``force_recache=True`` to ignore cache and re-tokenize.
+        - Set ``disable_cache=True`` to disable caching entirely.
 
         Args:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
@@ -621,43 +895,175 @@ class SFTTrainer:
         Returns a list of tokenized examples (dicts with ``input_ids``,
         ``attention_mask``, ``num_actions``).
         """
+        # Check cache first (unless disabled or force_recache)
+        if not self.sft_cfg.disable_cache:
+            cache_dir = self.sft_cfg.cache_dir
+
+            # Compute cache key
+            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key else None
+            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key else None
+            cache_key = _compute_cache_key(
+                dataset_name=dataset_name,
+                dataset_split=dataset_split,
+                model_path=self.sft_cfg.model.path,
+                max_length=self.sft_cfg.max_length,
+                messages_key=self.sft_cfg.messages_key,
+                train_on_what=self.sft_cfg.train_on_what.value,
+                tools_key=tools_key,
+                system_key=system_key,
+            )
+            cache_path = _get_cache_path(cache_dir, cache_key)
+
+            # Try to load from cache (unless force_recache)
+            if not self.sft_cfg.force_recache:
+                cached = _load_from_cache(cache_path)
+                if cached is not None:
+                    return cached
+
+            logger.info("Cache miss or force_recache=True, tokenizing dataset...")
+            logger.info(f"Cache key: {cache_key}")
+
         logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}'...")
         dataset = load_dataset(dataset_name, split=dataset_split)
 
         columns = dataset.column_names
-        logger.info("Tokenizing dataset...")
+        num_workers = self.sft_cfg.num_workers
 
-        if self.sft_cfg.messages_key in columns:
-            # Chat format. Tool-calling datasets often ship a per-row ``tools``
-            # column (function schemas) and ``system`` column (domain policy)
-            # alongside ``messages``; thread those through when present.
-            tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
-            system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
-            tokenized = [
-                tokenize_chat_example(
-                    ex,
-                    self.tokenizer,
-                    self.sft_cfg.max_length,
-                    self.sft_cfg.messages_key,
-                    train_on_what=self.sft_cfg.train_on_what,
-                    tools_key=tools_key,
-                    system_key=system_key,
+        # Sequential tokenization path
+        if num_workers == 0:
+            logger.info("Tokenizing dataset (sequential)...")
+            if self.sft_cfg.messages_key in columns:
+                tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+                system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
+                tokenized = [
+                    tokenize_chat_example(
+                        ex,
+                        self.tokenizer,
+                        self.sft_cfg.max_length,
+                        self.sft_cfg.messages_key,
+                        train_on_what=self.sft_cfg.train_on_what,
+                        tools_key=tools_key,
+                        system_key=system_key,
+                    )
+                    for ex in dataset
+                ]
+            elif "instruction" in columns and "output" in columns:
+                tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
+            else:
+                raise ValueError(
+                    f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
+                    f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
+                    f"Found columns: {columns}"
                 )
-                for ex in dataset
-            ]
-        elif "instruction" in columns and "output" in columns:
-            # Alpaca format
-            tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
-        else:
-            raise ValueError(
-                f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
-                f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
-                f"Found columns: {columns}"
-            )
+            tokenized = [ex for ex in tokenized if ex is not None]
+            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
 
-        tokenized = [ex for ex in tokenized if ex is not None]
-        logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
-        return tokenized
+            # Save to cache if enabled
+            if not self.sft_cfg.disable_cache:
+                # TODO (sumanthrh): Currently we use a simple list instead of dataset + stateful dataloader
+                # for simplicity but for caching we use HF Dataset since file sizes can get large
+                # We should migrate to using HF datasets + a dataloader so that we don't materialize
+                # the full dataset in memory
+                _save_to_cache(cache_path, tokenized)
+
+            return tokenized
+
+        # Parallel tokenization path with slice-based loading
+        logger.info(f"Tokenizing dataset with {num_workers} workers (slice-based loading)...")
+
+        # Cache tokenizer to temp dir for fast worker loading
+        tokenizer_cache_dir = tempfile.mkdtemp(prefix="skyrl_tokenizer_")
+        try:
+            self.tokenizer.save_pretrained(tokenizer_cache_dir)
+
+            # Slice the already-loaded dataset; the original split string is
+            # forwarded to workers verbatim so HF parses it (no local regex).
+            dataset_size = len(dataset)
+            chunk_size = max(1, dataset_size // num_workers)
+
+            # Generate worker slice boundaries
+            worker_args = []
+            for worker_idx in range(num_workers):
+                worker_start = worker_idx * chunk_size
+                # Last worker takes any remainder
+                if worker_idx == num_workers - 1:
+                    worker_end = dataset_size
+                else:
+                    worker_end = min((worker_idx + 1) * chunk_size, dataset_size)
+
+                # Skip empty slices
+                if worker_start >= worker_end:
+                    continue
+
+                # Prepare worker arguments based on format
+                if self.sft_cfg.messages_key in columns:
+                    tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
+                    system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
+                    worker_args.append(
+                        (
+                            dataset_name,
+                            dataset_split,
+                            worker_start,
+                            worker_end,
+                            tokenizer_cache_dir,
+                            self.sft_cfg.max_length,
+                            self.sft_cfg.messages_key,
+                            self.sft_cfg.train_on_what.value,
+                            tools_key,
+                            system_key,
+                        )
+                    )
+                elif "instruction" in columns and "output" in columns:
+                    worker_args.append(
+                        (
+                            dataset_name,
+                            dataset_split,
+                            worker_start,
+                            worker_end,
+                            tokenizer_cache_dir,
+                            self.sft_cfg.max_length,
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
+                        f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
+                        f"Found columns: {columns}"
+                    )
+
+            # Select worker function based on format
+            if self.sft_cfg.messages_key in columns:
+                worker_fn = _tokenize_chat_slice_worker
+            else:
+                worker_fn = _tokenize_alpaca_slice_worker
+
+            logger.info(f"Dividing {dataset_size} examples among {len(worker_args)} workers")
+
+            # Use spawn to avoid Ray fork issues
+            ctx = mp.get_context("spawn")
+
+            # Process in parallel
+            with ctx.Pool(processes=num_workers) as pool:
+                results = pool.map(worker_fn, worker_args)
+
+            # Flatten results
+            tokenized = []
+            for chunk_results in results:
+                tokenized.extend(chunk_results)
+
+            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {dataset_size})")
+
+            # Save to cache if enabled
+            if not self.sft_cfg.disable_cache:
+                _save_to_cache(cache_path, tokenized)
+
+            return tokenized
+
+        finally:
+            # Cleanup temp tokenizer cache
+            import shutil
+
+            shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
     def load_dataset(self) -> list:
         """Load and tokenize the training dataset."""
@@ -933,7 +1339,7 @@ class SFTTrainer:
         micro_batch = self.sft_cfg.micro_train_batch_size_per_gpu
         if per_dp_batch % micro_batch != 0:
             raise ValueError(
-                f"batch_size / dp_size ({per_dp_batch}) must be divisible by "
+                f"batch_size ({self.sft_cfg.batch_size}) / dp_size ({dp_size}) must be divisible by "
                 f"micro_train_batch_size_per_gpu ({micro_batch})"
             )
 
@@ -980,6 +1386,8 @@ class SFTTrainer:
             f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
         )
 
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
         for step in range(num_steps):
             all_timings: dict[str, float] = {}
 
@@ -995,10 +1403,13 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
             self.tracker.log(log_dict, step=step, commit=True)
             logger.info(
@@ -1027,25 +1438,15 @@ class SFTTrainer:
         if eval_tokenized is not None:
             logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
 
-        # Baseline eval before training begins (logged at step 0).
-        # Wandb's step counter starts at 0; the training loop's first commit
-        # advances it to >=1, so step=0 here does not conflict with later steps.
-        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
-            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
-            self.tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=0, commit=True)
-            logger.info(
-                f"Baseline eval before training: "
-                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                f"over {num_eval_batches} batches"
-            )
-
         batch_size = self.sft_cfg.batch_size
+
+        # steps_per_epoch is always derived from the data; callbacks rely on it.
+        steps_per_epoch = max(1, ceil(len(tokenized) / batch_size))
 
         # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
         if self.sft_cfg.num_steps is not None:
             num_steps = self.sft_cfg.num_steps
         else:
-            steps_per_epoch = ceil(len(tokenized) / batch_size)
             num_steps = self.sft_cfg.num_epochs * steps_per_epoch
             logger.info(
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
@@ -1078,12 +1479,49 @@ class SFTTrainer:
             rng.shuffle(tokenized)
         current_epoch = start_epoch
 
-        # SkyRL starts counting at step 1
-        self.global_step = start_step + 1 if start_step > 0 else 1
+        # Initialize `global_step`
+        self.global_step = start_step
+
+        # Publish loop metadata so CallbackInput can be built consistently.
+        self._total_steps = num_steps
+        self._steps_per_epoch = steps_per_epoch
+        self._current_epoch = current_epoch
+        self._training_control.reset()
 
         logger.info(f"Starting SFT training for {num_steps} steps (batch_size={batch_size})...")
         if start_step > 0:
             logger.info(f"Resuming from step {start_step}")
+
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
+        # Tracks whether the most recent in-loop iteration saved a checkpoint
+        # (either via the ckpt_interval or via a callback-driven ``should_save``).
+        did_save_last_step = False
+
+        self._fire("on_train_start")
+
+        # Baseline eval before training begins (logged at step 0).
+        # Wandb's step counter starts at 0; the training loop's first commit
+        # advances it to >=1, so step=0 here does not conflict with later steps.
+        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+            self._fire("on_eval_start")
+            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+            self._fire("on_eval_end", metrics=eval_metrics)
+            baseline_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
+            self._fire("on_log", logs=baseline_log)
+            self.tracker.log(baseline_log, step=self.global_step, commit=True)
+            logger.info(
+                f"Baseline eval before training: "
+                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"over {num_eval_batches} batches"
+            )
+
+        # SkyRL starts counting at step 1
+        self.global_step = start_step + 1 if start_step > 0 else 1
+        self._fire("on_epoch_start")
+        epoch_in_progress = True
+
         while self.global_step <= num_steps:
             all_timings: dict[str, float] = {}
 
@@ -1098,6 +1536,8 @@ class SFTTrainer:
                     else:
                         batch_examples = tokenized[start_idx:end_idx]
                     batch = self.collator(batch_examples, batch_size=batch_size)
+
+                self._fire("on_step_start", batch=batch)
 
                 # Training step
                 step_result = self.train_step(batch, self.global_step)
@@ -1114,22 +1554,35 @@ class SFTTrainer:
                 "train/loss": step_result["loss"],
                 "train/grad_norm": step_result["grad_norm"],
                 "train/tokens_per_second": tokens_per_second,
+                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                 "train/actual_num_tokens": actual_num_tokens,
                 "train/batch_padded_seq_len": batch_padded_seq_len,
                 "train/total_tokens_processed": self._total_tokens_processed,
             }
             log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+            if self._ray_gpu_monitor is not None:
+                log_dict.update(self._ray_gpu_monitor.flush())
 
-            # Checkpoint at regular intervals
-            if (
-                self.sft_cfg.ckpt_path
-                and self.sft_cfg.ckpt_interval > 0
+            self._fire("on_step_end", batch=batch, metrics=step_result)
+
+            # Capture callback-driven triggers, then reset so they only fire once.
+            force_save = self._training_control.should_save
+            force_eval = self._training_control.should_evaluate
+            self._training_control.should_save = False
+            self._training_control.should_evaluate = False
+
+            # Checkpoint: interval-driven or callback-requested.
+            interval_save = (
+                self.sft_cfg.ckpt_interval > 0
                 and self.global_step > 0
                 and self.global_step % self.sft_cfg.ckpt_interval == 0
-            ):
+            )
+            did_save_last_step = force_save or interval_save
+            if did_save_last_step:
                 with Timer("save_checkpoint", all_timings):
-                    self.save_checkpoint()
+                    ckpt_path = self.save_checkpoint()
                 log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+                self._fire("on_save", ckpt_path=ckpt_path)
 
             # HF export at regular intervals
             if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
@@ -1139,24 +1592,21 @@ class SFTTrainer:
 
             eval_metrics = None
             num_eval_batches: int | None = None
-            # Eval fires at step N where N % eval_interval == 0 and N > 0.
-            # The first iteration of this loop runs as global_step=1 (the
-            # initial increment happens before this block on resume), so a
-            # baseline eval at step 0 is not currently produced by the
-            # training loop. If a step-0 baseline is needed, it would have to
-            # be evaluated before entering the training loop and logged
-            # separately.
-            if (
-                eval_tokenized is not None
-                and self.sft_cfg.eval_interval > 0
-                and self.global_step % self.sft_cfg.eval_interval == 0
-            ):
+            # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
+            # whenever a callback set ``control.should_evaluate``.
+            interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
+            if eval_tokenized is not None and (force_eval or interval_eval):
+                self._fire("on_eval_start")
                 with Timer("eval", all_timings):
                     eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                     log_dict["timing/eval"] = all_timings["eval"]
 
+            log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
+            # Callbacks may mutate log_dict in place via on_log.
+            self._fire("on_log", logs=log_dict)
             self.tracker.log(log_dict, step=self.global_step, commit=True)
 
             if self.global_step % 5 == 0:
@@ -1173,22 +1623,33 @@ class SFTTrainer:
             # Check for epoch boundary and reshuffle
             epoch = (self.global_step * batch_size) // len(tokenized)
             if epoch > current_epoch:
+                self._fire("on_epoch_end")
+                epoch_in_progress = False
                 for _ in range(epoch - current_epoch):
                     rng.shuffle(tokenized)
                 current_epoch = epoch
+                self._current_epoch = epoch
+                if self.global_step + 1 <= num_steps:
+                    self._fire("on_epoch_start")
+                    epoch_in_progress = True
 
             self.global_step += 1
         self.global_step = min(self.global_step, num_steps)
 
-        # Save final checkpoint (if checkpointing is enabled)
-        if self.sft_cfg.ckpt_path:
+        # Pair the leading on_epoch_start: fire on_epoch_end if we exited the
+        # loop mid-epoch
+        if epoch_in_progress:
+            self._fire("on_epoch_end")
+            epoch_in_progress = False
+
+        # Save final checkpoint (if checkpointing is enabled). Skip if the last
+        # in-loop iteration already saved (either via ckpt_interval or via a
+        # callback-driven force-save) so we don't double-save.
+        if self.sft_cfg.ckpt_path and not did_save_last_step:
             final_step = num_steps
-            already_saved = (
-                self.sft_cfg.ckpt_interval > 0 and final_step > 0 and final_step % self.sft_cfg.ckpt_interval == 0
-            )
-            if not already_saved:
-                logger.info(f"Saving final checkpoint at step {final_step}")
-                self.save_checkpoint()
+            logger.info(f"Saving final checkpoint at step {final_step}")
+            ckpt_path = self.save_checkpoint()
+            self._fire("on_save", ckpt_path=ckpt_path)
 
         # Save final HF model if enabled (only if not already saved at last step)
         if self.sft_cfg.hf_save_interval > 0:
@@ -1214,11 +1675,14 @@ class SFTTrainer:
             if not already_ran:
                 final_eval_step = num_steps + 1
                 eval_timings: dict[str, float] = {}
+                self._fire("on_eval_start")
                 with Timer("eval", eval_timings):
                     eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
                     eval_log["timing/eval"] = eval_timings["eval"]
+                    self._fire("on_log", logs=eval_log)
                     self.tracker.log(eval_log, step=final_eval_step, commit=True)
                     logger.info(
                         f"Final eval at step {final_eval_step}: "
@@ -1226,10 +1690,11 @@ class SFTTrainer:
                         f"over {num_eval_batches} batches"
                     )
 
+        self._fire("on_train_end")
         logger.info("SFT training complete!")
 
-    def save_checkpoint(self):
-        """Save a checkpoint at the given step."""
+    def save_checkpoint(self) -> str:
+        """Save a checkpoint at the given step. Returns the checkpoint folder path."""
         step = self.global_step
         global_step_folder = os.path.join(self.sft_cfg.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
@@ -1255,6 +1720,7 @@ class SFTTrainer:
 
         # Clean up old checkpoints after successful save
         cleanup_old_checkpoints(self.sft_cfg.ckpt_path, self.sft_cfg.max_ckpts_to_keep)
+        return global_step_folder
 
     def save_hf_model(self):
         """Save policy weights in HuggingFace format.
@@ -1283,5 +1749,7 @@ class SFTTrainer:
         within the task would be incorrect.  The head-node process owns
         the Ray lifecycle.
         """
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.stop()
         if self.tracker is not None:
             self.tracker.finish()

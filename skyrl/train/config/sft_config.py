@@ -174,8 +174,10 @@ class SFTConfig(BaseConfig):
     logger: str = "console"  # "console" or "wandb"
     project_name: str = "skyrl_sft"
     run_name: str = "skyrl_sft_run"
-    ckpt_path: str = ""  # empty string = no checkpointing
-    ckpt_interval: int = 0
+    ckpt_path: str = ""
+    ckpt_interval: int = 0  # <= 0 -> no checkpointing
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
@@ -187,6 +189,21 @@ class SFTConfig(BaseConfig):
     """Directory for HF-format exports. Defaults to ckpt_path/hf_exports if empty."""
 
     seed: int = 42
+
+    # ---- Data loading ----
+    num_workers: int = 8
+    """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+
+    # ---- Tokenized dataset caching ----
+    cache_dir: str = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "skyrl", "tokenized_datasets"
+    )
+    """Directory to cache tokenized datasets. For multi-node training, set this to an NFS-mounted path so all nodes can
+    share the cache."""
+    force_recache: bool = False
+    """If True, ignore existing cache and re-tokenize the dataset."""
+    disable_cache: bool = False
+    """If True, disable cache completely (always tokenize from scratch)."""
 
     # ---- Training target ----
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
