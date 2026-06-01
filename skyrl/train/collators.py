@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import List
 
 import torch
+from loguru import logger
 
 from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
     make_seq_packer,
@@ -230,6 +231,12 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         pad_token_id = self.tokenizer.pad_token_id
         num_bins = len(flat_bins)
+
+        n_samples = len(examples)
+        logger.info(
+            f"sequence packing | packed {n_samples} samples into {num_bins} bins "
+            f"(~{num_bins // dp_size}/DP rank, bin_capacity={bin_capacity} tokens)"
+        )
 
         sequences = torch.full((num_bins, max_packed_len), pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros((num_bins, max_packed_len), dtype=torch.long)
