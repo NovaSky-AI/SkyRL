@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from skyrl.train.collators import PackedDataCollator
 from skyrl.train.config import MegatronConfig
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
+from skyrl.train.dataset.collators import PackedDataCollator
 from skyrl.train.sft_trainer import SFTTrainer
 
 

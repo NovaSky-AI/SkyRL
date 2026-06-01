@@ -108,7 +108,7 @@ When `use_sequence_packing=true`, `SFTTrainer` collates with
    mini-batch using `max_length` as the bin capacity.
 2. The bin count is forced to a multiple of `dp_size` via empty-bin
    padding (`min_bin_count`/`bin_count_multiple` knobs in
-   [`bin_packing._adjust_bin_count`](../../../skyrl/backends/skyrl_train/distributed/megatron/bin_packing.py)).
+   [`bin_packing._adjust_bin_count`](../../../skyrl/train/dataset/bin_packing.py)).
 3. Each bin becomes one row of the dispatched `TrainingInputBatch`. The
    per-row `sub_seq_lengths` metadata flows through `BatchIterator` into
    the worker's `forward_step`, where `preprocess_packed_seqs` emits

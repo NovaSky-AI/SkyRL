@@ -727,7 +727,7 @@ class SFTTrainer:
         """
         # Imported lazily to avoid a circular import: ``collators`` imports
         # ``collate_sft_batch`` from this module.
-        from skyrl.train.collators import DefaultCollator, PackedDataCollator
+        from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 
         if self.sft_cfg.use_sequence_packing:
             self._validate_packing_cfg()

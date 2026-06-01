@@ -556,7 +556,7 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
 def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List[int]]:
     """Reproduce the collator's flat_bins permutation (shard-major FFD order)
     so we can invert the example reordering for the comparison."""
-    from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
+    from skyrl.train.dataset.bin_packing import (
         make_seq_packer,
     )
 

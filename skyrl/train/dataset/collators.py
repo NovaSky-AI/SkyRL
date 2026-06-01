@@ -23,10 +23,9 @@ from typing import List
 import torch
 from loguru import logger
 
-from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
-    make_seq_packer,
-)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+
+from .bin_packing import make_seq_packer
 
 
 class DefaultCollator:

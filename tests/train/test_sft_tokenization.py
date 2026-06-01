@@ -327,7 +327,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
     This ensures that reduce_loss (sum over micro-batch) combined with
     microbatch_weight (mbs/pgb) produces a mean-per-non-pad-token loss.
     """
-    from skyrl.train.collators import DefaultCollator
+    from skyrl.train.dataset.collators import DefaultCollator
 
     cfg = SFTConfig(batch_size=4, micro_train_batch_size_per_gpu=2)
 
@@ -365,7 +365,7 @@ def test_loss_norm_all_nonpad(tokenizer):
     """When all tokens are non-pad, loss_mask values equal
     batch_size / (micro_batch_size * batch_size * num_actions)
     = 1 / (micro_batch_size * num_actions)."""
-    from skyrl.train.collators import DefaultCollator
+    from skyrl.train.dataset.collators import DefaultCollator
 
     cfg = SFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
 

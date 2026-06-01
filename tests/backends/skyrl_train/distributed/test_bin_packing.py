@@ -6,7 +6,7 @@ Run with:
 
 import pytest
 
-from skyrl.backends.skyrl_train.distributed.megatron.bin_packing import (
+from skyrl.train.dataset.bin_packing import (
     FirstFitDecreasing,
     PackingStrategy,
     make_seq_packer,
