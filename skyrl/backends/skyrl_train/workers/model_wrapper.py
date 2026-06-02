@@ -467,7 +467,7 @@ def _get_critic_model(
                     attention_mask_fwd = None
 
             if self.sequence_parallel_size > 1:
-                assert self.remove_microbatch_padding, "sample packing must be true for sequence parallelism"
+                assert self.remove_microbatch_padding, "remove_microbatch_padding must be true for sequence parallelism"
                 # don't pass any attention mask for flash attention 2. this will save an all gather.
                 attention_mask_fwd = None if self.config._attn_implementation == "flash_attention_2" else attention_mask
                 # slice for sequence parallelism
