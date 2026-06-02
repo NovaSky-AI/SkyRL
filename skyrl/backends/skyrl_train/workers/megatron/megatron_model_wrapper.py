@@ -12,13 +12,13 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
-    postprocess_packed_seqs,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
+    from_parallel_logits_to_logprobs_packed_sequences,
     vocab_parallel_entropy,
 )
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -31,6 +31,24 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
+
+
+def _build_packed_targets(
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+    packed_seq_params,
+) -> torch.Tensor:
+    """Pack full target token IDs without context-parallel sharding."""
+    cu_padded_cpu = packed_seq_params.cu_seqlens_q_padded.tolist()
+    seq_lens_cpu = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
+    total_padded_tokens = cu_padded_cpu[-1]
+
+    targets = torch.zeros(total_padded_tokens, dtype=sequences.dtype, device=sequences.device)
+    for i, seq_len in enumerate(seq_lens_cpu):
+        start = cu_padded_cpu[i]
+        if seq_len > 0:
+            targets[start : start + seq_len] = sequences[i, attention_mask[i]]
+    return targets.unsqueeze(0)
 
 
 class MegatronModelWrapper:
@@ -90,22 +108,38 @@ class MegatronModelWrapper:
 
         def collection_func(logits, data):
             sequences = data["sequences"]
+            packed_seq_params = data.get("packed_seq_params")
+            packed_targets = data.get("packed_targets")
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = from_parallel_logits_to_logprobs(
-                logits,
-                sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_grp,
-                inference_only=True,
-                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
-            )
+            if packed_seq_params is not None:
+                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                    logits,
+                    packed_targets,
+                    packed_seq_params.cu_seqlens_q_padded,
+                    sequences.shape[1],
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    group=tp_grp,
+                    inference_only=True,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                )
+            else:
+                token_logprobs = from_parallel_logits_to_logprobs(
+                    logits,
+                    sequences,
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    tp_group=tp_grp,
+                    inference_only=True,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
+                )
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
@@ -130,6 +164,8 @@ class MegatronModelWrapper:
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
+                batch["packed_seq_params"] = packed_seq_params
+                batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -148,16 +184,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.remove_microbatch_padding:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-            else:
+            if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
@@ -243,6 +270,8 @@ class MegatronModelWrapper:
 
         def loss_func(logits, data):
             sequences = data["sequences"]
+            packed_seq_params = data.get("packed_seq_params")
+            packed_targets = data.get("packed_targets")
             num_actions = data["num_actions"]
             old_action_log_probs = data["old_action_log_probs"]
             base_action_log_probs = data["base_action_log_probs"]
@@ -260,16 +289,30 @@ class MegatronModelWrapper:
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = from_parallel_logits_to_logprobs(
-                logits,
-                sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_grp,
-                inference_only=False,
-                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
-            )
+            if packed_seq_params is not None:
+                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                    logits,
+                    packed_targets,
+                    packed_seq_params.cu_seqlens_q_padded,
+                    sequences.shape[1],
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    group=tp_grp,
+                    inference_only=False,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                )
+            else:
+                token_logprobs = from_parallel_logits_to_logprobs(
+                    logits,
+                    sequences,
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    tp_group=tp_grp,
+                    inference_only=False,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
+                )
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
@@ -332,15 +375,16 @@ class MegatronModelWrapper:
 
             # RL path: add optional KL/entropy terms
             # entropy loss
-            with torch.set_grad_enabled(loss_config.use_entropy_loss):
+            if packed_seq_params is not None and loss_config.use_entropy_loss:
+                raise NotImplementedError("Entropy loss is not implemented for packed Megatron logits")
+            if loss_config.use_entropy_loss:
                 action_logits = logits[:, -num_actions - 1 : -1, :]
                 entropy_BS = vocab_parallel_entropy(action_logits)
                 entropy = masked_mean(entropy_BS, loss_mask)
-
-            if loss_config.use_entropy_loss:
                 entropy_loss_term = entropy * loss_config.entropy_loss_coef
             else:
-                entropy_loss_term = torch.tensor(0.0)
+                entropy = torch.tensor(0.0, device=logits.device)
+                entropy_loss_term = torch.tensor(0.0, device=logits.device)
 
             if loss_config.use_kl_loss:
                 kl_loss = compute_approx_kl(
@@ -429,6 +473,8 @@ class MegatronModelWrapper:
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
+                batch["packed_seq_params"] = packed_seq_params
+                batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -447,16 +493,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.remove_microbatch_padding:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-            else:
+            if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
