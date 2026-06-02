@@ -102,8 +102,26 @@ class BatchIterator:
 
     @staticmethod
     def batch_to_experience(batch: TrainingInputBatch):
-        # TODO (sumanthrh): other keys are not permitted right now, can go into info
-        # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
+        # Preserve integration-provided tensor fields without requiring SkyRL core
+        # to know each auxiliary objective by name.
+        known_fields = {
+            "sequences",
+            "action_log_probs",
+            "base_action_log_probs",
+            "values",
+            "returns",
+            "advantages",
+            "attention_mask",
+            "loss_mask",
+            "response_mask",
+            "rollout_logprobs",
+            "rollout_expert_indices",
+            "pixel_values",
+            "image_grid_thw",
+            "rewards",
+            "kl",
+        }
+        extras = {key: value for key, value in batch.items() if key not in known_fields and value is not None}
         exp = Experience(
             sequences=batch["sequences"],
             action_log_probs=batch.get("action_log_probs"),
@@ -125,5 +143,6 @@ class BatchIterator:
             # Multi-modal vision fields (may be absent for text-only)
             pixel_values=batch.get("pixel_values"),
             image_grid_thw=batch.get("image_grid_thw"),
+            extras=extras,
         )
         return exp

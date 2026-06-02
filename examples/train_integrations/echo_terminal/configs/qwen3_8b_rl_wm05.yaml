@@ -1,0 +1,118 @@
+# Example config: RL plus auxiliary world-modeling loss on Qwen3-8B for the terminal-agent task.
+#
+# This matches the q8b e20 cluster runs used in the ECHO experiments:
+# train batch size 16, 16 samples per prompt, eval/checkpoint every 20 steps,
+# and evaluation only on terminal_agent_train val100.
+#
+# Edit data paths for your machine before running.
+
+data:
+  train_data:
+    - name: terminal_agent_train
+      path: /mnt/pvc/datasets/terminalagent/terminal-traindev/v0.1.5/qwen35_parquets/train8770_sa_q35xml_wip2.parquet
+  val_data:
+    - name: terminal_agent_train
+      path: /mnt/pvc/datasets/terminalagent/terminal-traindev/v0.1.5/qwen35_parquets/val100_sa_q35xml_wip2.parquet
+
+tokenizer_path: Qwen/Qwen3-8B
+chat_template_path: examples/train_integrations/echo_terminal/chat_templates/qwen3_xml_tool_calling.jinja
+
+trainer:
+  placement:
+    colocate_all: true
+    colocate_policy_ref: true
+    policy_num_nodes: 1
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 1
+    ref_num_gpus_per_node: 8
+  policy:
+    model:
+      path: Qwen/Qwen3-8B
+    optimizer_config:
+      lr: 1.0e-6
+      adam_betas: [0.9, 0.999]
+      weight_decay: 0.01
+      max_grad_norm: 0.2
+      scheduler: constant_with_warmup
+      num_warmup_steps: 20
+  algorithm:
+    max_seq_len: 34096
+    use_kl_loss: false
+    use_kl_in_reward: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    advantage_batch_normalize: false
+    loss_reduction: sequence_mean
+    world_model_coeff: 0.05
+    world_loss_normalization: full_observation_tokens
+  epochs: 2
+  update_epochs_per_batch: 1
+  max_prompt_length: 1536
+  train_batch_size: 16
+  policy_mini_batch_size: 16
+  micro_train_batch_size_per_gpu: 1
+  micro_forward_batch_size_per_gpu: 1
+  eval_batch_size: 16
+  eval_before_train: false
+  eval_interval: 20
+  ckpt_interval: 20
+  hf_save_interval: -1
+  ckpt_path: ${oc.env:OUTPUT_DIR}/ckpts
+  export_path: ${oc.env:OUTPUT_DIR}/exports
+  log_path: ${oc.env:OUTPUT_DIR}/skyrl_logs
+  logger: wandb
+  project_name: world_model
+  run_name: terminal_agent_phitrain_full_scale
+  log_example_interval: -1
+
+generator:
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 8
+  step_wise_trajectories: false
+  parser_name: qwen35
+  command_selection: first
+  max_turns: 16
+  max_context_tokens: 16384
+  max_tokens_per_generation: 2048
+  max_terminal_output_chars: 50000
+  terminal_output_truncation: start
+  add_format_warn: true
+  world_loss_target: env_only
+  thinking_handling: keep_all
+  verifier_timeout: 120.0
+  length_penalty_coef: 0.0
+  length_penalty_threshold: 20000
+  correct_threshold: 0.5
+  max_total_tokens: 34096
+  docker_memory_mb: 1024
+  docker_cpus: 1
+  base_temp_dir: /tmp/tbench_b200
+  agent_max_concurrency: 512
+  agent_timeout: 600.0
+  max_concurrent_builds: 32
+  max_build_retries: 3
+  dataset_num_workers: 8
+  dataset_max_rows: null
+  sampling_params:
+    max_generate_length: 2048
+    temperature: 0.8
+    logprobs: 0
+  eval_sampling_params:
+    max_generate_length: 2048
+    temperature: 0.6
+    logprobs: 0
+  inference_engine:
+    backend: vllm
+    run_engines_locally: true
+    num_engines: 8
+    weight_sync_backend: nccl
+    tensor_parallel_size: 1
+    async_engine: true
+    enforce_eager: false
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    gpu_memory_utilization: 0.8
+    max_num_batched_tokens: 262144
+    engine_init_kwargs:
+      swap_space: 4

@@ -1,6 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict
 
+try:
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
+
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -29,6 +34,9 @@ class InferenceEngineInput(TypedDict):
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
     mm_features: Optional[List[MultiModalFeatures]]
+    # Token-only callers can skip response detokenization in inference clients
+    # that otherwise perform an additional decode round trip.
+    skip_detokenize: NotRequired[bool]
 
 
 class InferenceEngineOutput(TypedDict):
@@ -39,6 +47,9 @@ class InferenceEngineOutput(TypedDict):
     # represent the same text with tokens. Therefore, for multi-turn generation,
     # please use token-in-token-out to ensure correctness.
     # `skip_special_tokens=True` is needed because string responses do not include EOS tokens like `<|im_end|>`
+    # Token-only callers may set `skip_detokenize` in `InferenceEngineInput`;
+    # in that case `responses` may contain empty strings while `response_ids`
+    # remains populated.
     responses: List[str]
     response_ids: List[List[int]]
     stop_reasons: List[str]

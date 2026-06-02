@@ -140,7 +140,7 @@ class BasePPOExp:
         """
         self.cfg = cfg
         self.tokenizer = get_tokenizer(
-            self.cfg.trainer.policy.model.path,
+            self.get_tokenizer_path(),
             trust_remote_code=True,
             use_fast=not self.cfg.trainer.disable_fast_tokenizer,
             padding_side="left",
@@ -154,6 +154,9 @@ class BasePPOExp:
         self._prefill_server_groups = None
         self._decode_server_groups = None
         self._inference_router = None
+
+    def get_tokenizer_path(self) -> str:
+        return self.cfg.trainer.policy.model.path
 
     @staticmethod
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
@@ -342,19 +345,8 @@ class BasePPOExp:
 
         return client
 
-    def _setup_trainer(self):
-        """Setup and return the trainer.
-
-        Instantiates the trainer and all the associated models for training.
-
-        Returns:
-            RayPPOTrainer: The trainer.
-        """
-        logger.info(self.get_cfg_as_str(self.cfg))
-        os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
-        os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
-
-        if self.cfg.trainer.strategy == "fsdp":
+    def get_worker_classes(self):
+        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                 CriticWorker,
                 PolicyWorker,
@@ -368,6 +360,21 @@ class BasePPOExp:
             )
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+        return PolicyWorker, CriticWorker, RefWorker
+
+    def _setup_trainer(self):
+        """Setup and return the trainer.
+
+        Instantiates the trainer and all the associated models for training.
+
+        Returns:
+            RayPPOTrainer: The trainer.
+        """
+        logger.info(self.get_cfg_as_str(self.cfg))
+        os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
+        os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
+
+        PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
 
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.

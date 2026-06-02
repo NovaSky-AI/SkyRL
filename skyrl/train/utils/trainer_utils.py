@@ -276,7 +276,6 @@ def dump_per_dataset_eval_results(
                     "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -550,21 +549,14 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
     """Filter GeneratorOutput based on kept indices."""
-    filtered = {
-        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
-        "response_ids": [output["response_ids"][i] for i in kept_indices],
-        "rewards": [output["rewards"][i] for i in kept_indices],
-        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
-        "stop_reasons": None,
-        "rollout_metrics": output.get("rollout_metrics"),
-        "rollout_logprobs": (
-            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
-        ),
-    }
-
-    if output.get("stop_reasons"):
-        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
-
+    filtered = {}
+    for key, value in output.items():
+        if key == "rollout_metrics":
+            filtered[key] = value
+        elif isinstance(value, list):
+            filtered[key] = [value[i] for i in kept_indices]
+        else:
+            filtered[key] = value
     return filtered
 
 
