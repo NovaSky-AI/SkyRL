@@ -117,13 +117,13 @@ Trains an image classifier on top of [Qwen3-VL](https://huggingface.co/Qwen/Qwen
 VLM training requires a newer vLLM than the version pinned in the repo. Clone vLLM from GitHub and point `[tool.uv.sources]` in the root `pyproject.toml` at your local checkout before running. See the [vLLM source override callout](../tutorials/vision_language_rl#requirements) on the tutorial page for the exact steps.
 </Callout>
 
-This recipe uses a **different server command** than the common one at the top of this page, in particular the `use_sample_packing` override is VLM-specific:
+This recipe uses a **different server command** than the common one at the top of this page, in particular the `remove_microbatch_padding` override is VLM-specific:
 
 ```bash
 uv run --isolated --extra tinker --extra fsdp \
     -m skyrl.tinker.api \
     --base-model "Qwen/Qwen3-VL-8B-Instruct" --backend fsdp \
-    --backend-config '{"trainer.use_sample_packing": false}'
+    --backend-config '{"trainer.remove_microbatch_padding": false}'
 ```
 
 Then launch the training recipe:

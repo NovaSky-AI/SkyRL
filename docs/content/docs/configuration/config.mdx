@@ -51,7 +51,7 @@ critic_mini_batch_size: 256
 micro_train_batch_size_per_gpu: 1
 micro_forward_batch_size_per_gpu: 1
 update_ref_every_epoch: false
-use_sample_packing: true
+remove_microbatch_padding: true
 max_prompt_length: 512
 gradient_checkpointing: true
 seed: 42
@@ -66,7 +66,7 @@ seed: 42
 - `micro_train_batch_size_per_gpu`: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches.
 - `micro_forward_batch_size_per_gpu`: Micro batch size during forward pass (i.e., for log probability or value computation). This is common for both policy and critic models. Each mini batch is split into micro batches of this size, model forward pass is performed over these micro batches.
 - `update_ref_every_epoch`: Whether to update the reference model every epoch.
-- `use_sample_packing`: Whether to use sample packing during model forward pass (common for all models).
+- `remove_microbatch_padding`: Whether to pack samples and strip intra-microbatch padding during the model forward pass (requires flash attention; common for all models).
 - `max_prompt_length`: Maximum prompt length during training. Longer prompts will be truncated.
 - `gradient_checkpointing`: Whether to use gradient checkpointing.
 - `seed`: Random seed for training.

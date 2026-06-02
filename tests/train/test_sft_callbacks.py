@@ -133,7 +133,7 @@ def _build_test_sft_config() -> SFTConfig:
     cfg.batch_size = 1
     cfg.micro_train_batch_size_per_gpu = 1
     cfg.max_length = 16
-    cfg.use_sample_packing = False
+    cfg.remove_microbatch_padding = False
     cfg.logger = "console"
     # ckpt_path must be truthy so the save block isn't gated out. The actual
     # save is monkeypatched below so nothing is written to disk.

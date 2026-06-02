@@ -207,7 +207,9 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     for config, worker_type in worker_configs:
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
-            assert cfg.trainer.remove_microbatch_padding, "context parallel is only supported with sample packing"
+            assert (
+                cfg.trainer.remove_microbatch_padding
+            ), "context parallel is only supported with remove_microbatch_padding"
         # check that sequence parallel is not configured outside of megatron
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence "

@@ -431,10 +431,13 @@ class Worker(DistributedTorchRayActor):
             tokenizer=tokenizer,
         )
 
-    def get_lr(self) -> float:
+    def get_lr(self) -> Optional[float]:
         """
-        Get current learning rate from optimizer.
+        Get current learning rate from optimizer. Returns None when the worker was
+        initialized with ``policy.inference_only_init=True`` (no optimizer constructed).
         """
+        if self.optimizer is None:
+            return None
         return self.optimizer.param_groups[0]["lr"]
 
     def set_lr(self, learning_rate: float) -> None:
@@ -442,8 +445,11 @@ class Worker(DistributedTorchRayActor):
         Set learning rate for the optimizer.
 
         This directly updates the optimizer's param_groups, bypassing the scheduler.
-        Useful for external learning rate schedules (e.g., from Tinker).
+        Useful for external learning rate schedules (e.g., from Tinker). No-op when
+        ``policy.inference_only_init=True`` (no optimizer constructed).
         """
+        if self.optimizer is None:
+            return
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
 

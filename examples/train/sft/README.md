@@ -74,7 +74,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
-| `use_sequence_packing` | `false` | Enable controller-level FFD bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
+| `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
 | `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |

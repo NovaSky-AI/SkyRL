@@ -11,7 +11,6 @@ import pytest
 
 from skyrl.train.config import (
     SFTConfig,
-    SkyRLTrainConfig,
     build_skyrl_config_for_sft,
 )
 from skyrl.train.config.sft_config import validate_sft_cfg
@@ -42,46 +41,14 @@ class TestUseSamplePackingAlias:
             cfg = _sft_cfg_from_overrides(["use_sample_packing=true"])
         assert cfg.remove_microbatch_padding is True
 
+    def test_use_sample_packing_remapped_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = SFTConfig.from_cli_overrides({"use_sample_packing": False})
+        assert cfg.remove_microbatch_padding is False
 
-class TestTrainerUseSamplePackingAlias:
-    """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
-    on the RL entrypoint config (mirrors the ``fsdp2``->``fsdp`` alias)."""
-
-    def test_trainer_use_sample_packing_remapped_with_warning(self):
-        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
-            cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.use_sample_packing=false"])
-        assert cfg.trainer.remove_microbatch_padding is False
-
-    def test_trainer_use_sample_packing_remapped_from_dict(self):
-        # The Tinker backend passes overrides as a dict of dotted keys.
-        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
-            cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.use_sample_packing": True})
-        assert cfg.trainer.remove_microbatch_padding is True
-
-
-class TestSequencePackingAutoEnablesRemoveMicrobatchPadding:
-    """``use_sequence_packing=True`` implies the THD layout, so it auto-enables
-    ``remove_microbatch_padding`` (with a warning) instead of erroring."""
-
-    def _packed_cfg(self, remove_microbatch_padding: bool) -> SFTConfig:
-        cfg = SFTConfig(
-            strategy="megatron",
-            max_length=128,
-            remove_microbatch_padding=remove_microbatch_padding,
-            use_sequence_packing=True,
-        )
-        cfg.model.path = "test/my-model"
-        return cfg
-
-    def test_auto_sets_when_left_default(self):
-        cfg = self._packed_cfg(remove_microbatch_padding=True)
-        validate_sft_cfg(cfg)
-        assert cfg.remove_microbatch_padding is True
-
-    def test_auto_corrects_explicit_false_with_warning(self, caplog):
-        cfg = self._packed_cfg(remove_microbatch_padding=False)
-        validate_sft_cfg(cfg)
-        assert cfg.remove_microbatch_padding is True
+    def test_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of use_sample_packing"):
+            _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
 
 
 class TestTopLevelOverrides:

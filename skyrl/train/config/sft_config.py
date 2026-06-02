@@ -101,6 +101,10 @@ class SFTConfig(BaseConfig):
         # ``remove_microbatch_padding``. Remap it before construction so the
         # strict key validation does not reject the old name.
         if "use_sample_packing" in overrides:
+            if "remove_microbatch_padding" in overrides:
+                raise ValueError(
+                    "Specify only one of use_sample_packing (deprecated) and remove_microbatch_padding, not both."
+                )
             import warnings
 
             warnings.warn(
@@ -210,7 +214,7 @@ class SFTConfig(BaseConfig):
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
 
     # ---- Packing ----
-    remove_microbatch_padding: bool = True  # Pack multiple sequences per batch (requires flash_attn)
+    remove_microbatch_padding: bool = True  # Pack multiple sequences per microbatch (requires flash_attn)
     use_sequence_packing: bool = False
     """Enable controller-level FFD bin-packing across the global mini-batch.
     Requires ``remove_microbatch_padding=True`` and the Megatron backend. When
@@ -314,7 +318,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
         # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
-            assert cfg.remove_microbatch_padding, "context parallel is only supported with sample packing"
+            assert cfg.remove_microbatch_padding, "context parallel is only supported with remove_microbatch_padding"
         # check that sequence parallel is not configured outside of megatron
         assert cfg.sequence_parallel_size == 1, (
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "

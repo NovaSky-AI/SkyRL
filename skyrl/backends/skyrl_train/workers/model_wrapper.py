@@ -263,7 +263,9 @@ class HFModelWrapper(nn.Module):
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
             # model specific logic to compute.
-            assert not self.remove_microbatch_padding, "Sample packing is not supported with VLM vision inputs"
+            assert (
+                not self.remove_microbatch_padding
+            ), "remove_microbatch_padding is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
             if has_image_inputs:
@@ -430,7 +432,7 @@ def _get_critic_model(
             if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with sample packing"
+                ), "Flash attention must be used with remove_microbatch_padding"
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
@@ -467,7 +469,7 @@ def _get_critic_model(
                     attention_mask_fwd = None
 
             if self.sequence_parallel_size > 1:
-                assert self.remove_microbatch_padding, "sample packing must be true for sequence parallelism"
+                assert self.remove_microbatch_padding, "remove_microbatch_padding must be true for sequence parallelism"
                 # don't pass any attention mask for flash attention 2. this will save an all gather.
                 attention_mask_fwd = None if self.config._attn_implementation == "flash_attention_2" else attention_mask
                 # slice for sequence parallelism
