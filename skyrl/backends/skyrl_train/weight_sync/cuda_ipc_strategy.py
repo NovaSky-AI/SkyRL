@@ -186,11 +186,11 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         Per chunk, each rank packs + creates one IPC handle, handles are
         all_gather_object'd into a single {gpu_uuid: handle} dict, and rank 0
         sends the dict (plus per-param `sizes` metadata) via
-        update_weights_chunk. The receiver rebuilds the packed tensor, slices
+        update_weights_ipc. The receiver rebuilds the packed tensor, slices
         it per param, and loads into vLLM.
 
         TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands,
-        replace update_weights_chunk with the native /update_weights endpoint
+        replace update_weights_ipc with the native /update_weights endpoint
         and start/finish with /start_weight_update and /finish_weight_update.
         """
         rank = torch.distributed.get_rank()
@@ -254,7 +254,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                     "sizes": sizes,
                     "ipc_handles_pickled": pickled,
                 }
-                await self._inference_client.update_weights_chunk(chunk_update_info)
+                await self._inference_client.update_weights_ipc(chunk_update_info)
 
             # Keep packed_tensor alive past the barrier so the receiver's
             # rebuilt view has valid backing storage while it copies into

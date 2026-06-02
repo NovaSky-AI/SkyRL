@@ -37,6 +37,10 @@ def _build_ray_env_vars():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
 
+    # Mirrors prepare_runtime_environment for the nccl weight-sync backend.
+    # Without this, NCCL 2.28's cuMem-based commAlloc SEGV's on this driver.
+    env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
         if pythonpath is None:

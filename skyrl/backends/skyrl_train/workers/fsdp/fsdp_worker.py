@@ -137,7 +137,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.policy.fsdp_config,
-            optimizer_config=self.cfg.policy.optimizer_config,
+            # Inference-only workers skip the optimizer entirely: passing None makes
+            # FSDPStrategy.prepare return (model, None, None), avoiding the fp32 master
+            # weights + AdamW state that would OOM memory-constrained nodes.
+            optimizer_config=None if self.cfg.policy.inference_only_init else self.cfg.policy.optimizer_config,
             model_config=self.cfg.policy.model,
             fsdp_strategy=self.cfg.strategy,
             seed=self.cfg.seed,
@@ -159,7 +162,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=False,
+            bf16=self.cfg.policy.inference_only_init,
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,
@@ -186,9 +189,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
         )
-        assert (
-            self.optimizer is not None and self.scheduler is not None
-        ), "FSDP preparation should create optimizer and scheduler"
+        if self.cfg.policy.inference_only_init:
+            assert (
+                self.optimizer is None and self.scheduler is None
+            ), "inference_only_init should skip optimizer and scheduler construction"
+        else:
+            assert (
+                self.optimizer is not None and self.scheduler is not None
+            ), "FSDP preparation should create optimizer and scheduler"
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
