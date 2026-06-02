@@ -260,11 +260,19 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
-        if is_lora:
-            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
-            # the freshly-initialised LoRA into a per-worker pristine slot, then
-            # register the first adapter under `model_id`. Must happen while the
-            # model + optimizer are still GPU-resident (i.e. before the offload).
+        if is_lora and cfg.trainer.strategy == "megatron":
+            # Multi-tenant LoRA training via the worker-side AdapterStore is
+            # currently only implemented for the Megatron backend: prime
+            # DistributedOptimizer state and snapshot the freshly-initialised
+            # LoRA into a per-worker pristine slot, then register the first
+            # adapter under `model_id`. Must happen while the model + optimizer
+            # are still GPU-resident (i.e. before the offload).
+            #
+            # FSDP serves single-tenant LoRA by syncing the live adapter
+            # directly (FSDPPolicyWorkerBase.broadcast_to_inference_engines) and
+            # needs no priming/pristine snapshot. Registering a *second* FSDP
+            # adapter routes through `register_adapter` below, which raises a
+            # clear NotImplementedError (multi-tenant LoRA is Megatron-only).
             ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))

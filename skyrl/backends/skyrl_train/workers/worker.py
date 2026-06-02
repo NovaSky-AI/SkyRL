@@ -1124,6 +1124,83 @@ class PolicyWorkerBase(Worker):
         output.metadata = micro_batch.metadata
         return output
 
+    # ------------------------------------------------------------------
+    # Multi-LoRA / adapter-store interface
+    #
+    # These methods back the Tinker multi-tenant LoRA path, where a single set
+    # of policy workers hosts several LoRA adapters and swaps the live one in
+    # and out of the GPU-resident model + optimizer. The full implementation
+    # (an ``AdapterStore``) currently lives in the Megatron policy worker. The
+    # base class provides:
+    #   * a shared, backend-agnostic helper (``_resolve_lora_sync_target``),
+    #   * safe no-ops for the dispatch hot path on backends without an adapter
+    #     store (``swap_to_adapter``, ``adapter_store_state``), and
+    #   * ``NotImplementedError`` stubs for the adapter-store lifecycle so that
+    #     unsupported backends (currently FSDP) fail loudly and clearly rather
+    #     than with an opaque ``AttributeError`` from the Ray dispatch layer.
+    # ------------------------------------------------------------------
+
+    def _resolve_lora_sync_target(self, model_id: Optional[str]) -> tuple[str, str]:
+        """Return ``(lora_name, lora_sync_path)`` for a given Tinker ``model_id``.
+
+        The single-tenant fallback (``model_id is None``) uses the default
+        shared adapter name + shared sync path. Multi-tenant routes through
+        ``os.path.basename`` on ``lora_sync_path`` so each adapter is written to
+        its own subdir and registered on the inference engine under that name.
+
+        Shared by the FSDP and Megatron policy workers.
+        """
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            SKYRL_LORA_ADAPTER_NAME,
+        )
+
+        base_sync_path = self.cfg.policy.model.lora.lora_sync_path
+        safe_model_id = os.path.basename(model_id) if model_id is not None else None
+        if safe_model_id:
+            return safe_model_id, os.path.join(base_sync_path, safe_model_id)
+        return SKYRL_LORA_ADAPTER_NAME, base_sync_path
+
+    def swap_to_adapter(self, model_id: str) -> None:
+        """Make ``model_id`` the live LoRA adapter on this worker.
+
+        No-op on backends without an adapter store (e.g. FSDP) and on the FFT
+        path: there is only ever one set of live weights, so there is nothing
+        to swap. The dispatch layer calls this before every forward / optim
+        step with the request's ``model_id``, so it must stay cheap and must
+        not raise on the single-tenant path.
+        """
+        return None
+
+    def adapter_store_state(self) -> dict:
+        """Diagnostic snapshot of the adapter store. Backends without an
+        adapter store report it as disabled."""
+        return {"enabled": False}
+
+    def _adapter_store_unsupported(self, op: str) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__}.{op} is not implemented: multi-tenant LoRA "
+            "adapter management (the adapter store) is currently only supported "
+            "on the Megatron backend. The FSDP backend supports a single LoRA "
+            "adapter (or full fine-tuning) per worker group."
+        )
+
+    def prime_optimizer_state(self) -> None:
+        """Materialise optimizer state so it can be snapshotted into the
+        pristine adapter slot. Only meaningful for adapter-store backends."""
+        self._adapter_store_unsupported("prime_optimizer_state")
+
+    def register_pristine_adapter(self) -> None:
+        """Capture the freshly-initialised LoRA state as the pristine slot."""
+        self._adapter_store_unsupported("register_pristine_adapter")
+
+    def register_adapter(self, model_id: str) -> None:
+        """Register a new LoRA adapter slot keyed by ``model_id``."""
+        self._adapter_store_unsupported("register_adapter")
+
+    def delete_adapter(self, model_id: str) -> None:
+        """Remove the LoRA adapter slot keyed by ``model_id``."""
+        self._adapter_store_unsupported("delete_adapter")
+
 
 class CriticWorkerBase(Worker):
     def __init__(self, **kwargs):

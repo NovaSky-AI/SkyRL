@@ -1095,19 +1095,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise RuntimeError("register_adapter called before register_pristine_adapter")
         self.adapter_store.create(model_id, self.actor_module, self.optimizer, signature)
 
-    def _resolve_lora_sync_target(self, model_id: Optional[str]) -> tuple[str, str]:
-        """Return ``(lora_name, lora_sync_path)`` for a given Tinker model_id.
-
-        The single-tenant fallback (``model_id=None``) uses the default
-        shared adapter name + shared sync path. Multi-tenant routes through
-        ``os.path.basename`` on the lora_sync_path.
-        """
-        base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-        safe_model_id = os.path.basename(model_id) if model_id is not None else None
-        if safe_model_id:
-            return safe_model_id, os.path.join(base_sync_path, safe_model_id)
-        return SKYRL_LORA_ADAPTER_NAME, base_sync_path
-
     def delete_adapter(self, model_id: str) -> None:
         if self.adapter_store is None:
             raise RuntimeError("AdapterStore not initialised (FFT path)")

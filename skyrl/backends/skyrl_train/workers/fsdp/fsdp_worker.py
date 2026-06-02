@@ -278,12 +278,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
             # Multi-tenant: per-adapter subdir + per-adapter vLLM name.
             # Single-tenant (model_id=None) keeps the legacy shared path +
-            # name. basename guards against a malformed model_id escaping
-            # lora_sync_path even though api.py already validates IDs.
-            base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            safe_model_id = os.path.basename(model_id) if model_id is not None else None
-            lora_name = safe_model_id if safe_model_id else SKYRL_LORA_ADAPTER_NAME
-            lora_sync_path = os.path.join(base_sync_path, safe_model_id) if safe_model_id else base_sync_path
+            # name. _resolve_lora_sync_target (shared with Megatron, defined on
+            # PolicyWorkerBase) basename-guards against a malformed model_id
+            # escaping lora_sync_path even though api.py already validates IDs.
+            lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )
