@@ -416,7 +416,7 @@ def preprocess_packed_seqs(
         flat_seqlens: list[int] = []
         # Per-row, per-sub-seq starting column within the original padded row.
         # We need this to gather sub-seq tokens from the padded input_ids.
-        # IMPORTANT: the controller-side collator (``PackedDataCollator``)
+        # NOTE: the controller-side collator (``PackedDataCollator``)
         # advances ``row_offset += round_up(length, align_size)`` between
         # consecutive sub-sequences in the same row so that flash-attn varlen
         # sees TP/CP-aligned segment boundaries. We MUST mirror that here —
@@ -567,23 +567,20 @@ def postprocess_packed_seqs(
         if len(sub_seq_lengths) != batch_size:
             raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
         # Build an index mapping (batch_row, intra_row_subseq) -> flat sub-seq
-        # index inside cu_padded_cpu, so we can compute the THD offset for the
+        # index inside cu_padded_cpu, so we can compute the offset for the
         # *first* sub-seq of each row (== row start).
-        # Each row's THD start is cu_padded_cpu[flat_sub_idx_of_row_start[r]].
+        # Each row's start is cu_padded_cpu[flat_sub_idx_of_row_start[r]].
         flat_sub_idx_of_row_start: list[int] = []
         running = 0
         for r in range(batch_size):
             flat_sub_idx_of_row_start.append(running)
             running += len(sub_seq_lengths[r])
-        # NOTE: in the multi-subseq path, the row-i THD slab covers all of
+        # NOTE: in the multi-subseq path, row-i's slice covers all of
         # row i's sub-seqs (including their TP-alignment pads). We read from
         # ``cu_padded_cpu[flat_sub_idx_of_row_start[i]]`` (start of row i's
         # first sub-seq) up to ``cu_padded_cpu[flat_sub_idx_of_row_start[i] +
-        # len(sub_seq_lengths[i])]`` (start of row i+1, exclusive). The
-        # destination is the same number of slots in ``output_new[i]``,
-        # starting at column 0 — the collator lays out each row's sub-seqs
-        # back-to-back (with alignment pads in between) starting from
-        # ``row_offset = 0``.
+        # len(sub_seq_lengths[i])]`` (start of row i+1, exclusive) to "unpack"
+        # and recover row-i
 
         for i in range(batch_size):
             n_sub = len(sub_seq_lengths[i])
@@ -600,12 +597,6 @@ def postprocess_packed_seqs(
             # independently and write its FULL padded slab (sub-seq tokens +
             # this sub-seq's own alignment pad) back-to-back into output_new[i],
             # starting at column 0.
-            #
-            # ``cu_padded_cpu`` carries one entry PER SUB-SEQ here, so
-            # ``cu_padded_cpu[seg]`` is the sub-seq's global (un-sharded) THD
-            # start. Each CP rank's local buffer holds 1/cp_size of every
-            # segment, so the per-rank start is ``cu_padded_cpu[seg] // cp_size``
-            # (identical bookkeeping to preprocess_packed_seqs).
             row_global_start = cu_padded_cpu[row_first_sub]
             for seg in range(row_first_sub, row_last_sub_exclusive):
                 s_len_padded_chunk = (cu_padded_cpu[seg + 1] - cu_padded_cpu[seg]) // cp_size
@@ -614,7 +605,7 @@ def postprocess_packed_seqs(
                 # This segment's start in each rank's CP-sharded local buffer.
                 packed_start_idx = cu_padded_cpu[seg] // cp_size
                 # Destination column of this segment within row i's output
-                # buffer: its global THD offset relative to the row start.
+                # buffer: its global offset relative to the row start.
                 # (== sum of preceding sub-seqs' padded lengths in this row,
                 # matching the collator's row_offset layout.)
                 dest_off = cu_padded_cpu[seg] - row_global_start
@@ -634,10 +625,14 @@ def postprocess_packed_seqs(
         return output_new
 
     seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
+
     for i in range(batch_size):
         if cp_size <= 1:
             s = seq_lens_cpu[i]
             start_idx = cu_padded_cpu[i]
+            # attention_mask[i] -> (seq_len,) # output_new[i, ...] (non-pad-seq-len)
+            # attention_mask tensor is a boolean here
+            # so it only selects the non-padding token positions and we place the sequence here
             output_new[i, attention_mask[i]] = output[0][start_idx : start_idx + s]
             continue
         s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size

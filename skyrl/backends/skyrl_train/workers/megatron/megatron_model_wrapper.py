@@ -427,8 +427,7 @@ class MegatronModelWrapper:
             # packing). preprocess_packed_seqs uses it to emit cu_seqlens
             # entries covering all sub-seqs, not one per row.
             #
-            # It arrives as a ``TensorList`` data field (one 1-D int tensor per
-            # row, sharded per-DP rank by MeshDispatch). The consumers
+            # It arrives as a ``TensorList`` data field.
             # ``preprocess/postprocess_packed_seqs`` are typed
             # ``list[list[int]]``, so convert tensors -> python lists here at
             # the forward_step boundary, keeping those signatures unchanged.

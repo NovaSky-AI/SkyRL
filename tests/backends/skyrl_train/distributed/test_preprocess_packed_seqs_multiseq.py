@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 
@@ -52,7 +53,28 @@ _mock_modules["megatron.core.transformer.moe.moe_utils"].clear_aux_losses_tracke
 _mock_modules["megatron.core.transformer.moe.moe_utils"].get_moe_layer_wise_logging_tracker = MagicMock()
 _mock_modules["megatron.core.transformer.moe.moe_utils"].reduce_aux_losses_tracker_across_ranks = MagicMock()
 _mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
-sys.modules.update(_mock_modules)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stub_megatron_modules():
+    """Install the mock ``megatron`` modules for this module's tests only.
+
+    The stubs are injected into ``sys.modules`` at module setup and removed at
+    teardown so they do not leak into other test files in the same pytest
+    session. Only the megatron entries are touched: evicting everything this
+    module imported (e.g. ``vllm``) would force a re-import whose module-level
+    side effects are not idempotent.
+    """
+    saved = {_name: sys.modules.get(_name) for _name in _MEGATRON_MODULES}
+    sys.modules.update(_mock_modules)
+    try:
+        yield
+    finally:
+        for _name in _MEGATRON_MODULES:
+            if saved[_name] is None:
+                sys.modules.pop(_name, None)
+            else:
+                sys.modules[_name] = saved[_name]
 
 
 def _mock_mpu(tp_size: int = 1, cp_size: int = 1, cp_rank: int = 0):

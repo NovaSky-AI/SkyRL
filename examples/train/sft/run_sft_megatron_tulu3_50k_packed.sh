@@ -4,20 +4,6 @@ set -x
 
 # Packed variant of run_sft_megatron_tulu3_50k.sh.
 #
-# Differences vs the reference script:
-#   - use_sequence_packing=true         -> the trainer collates with
-#       PackedDataCollator, which runs controller-level FFD bin-packing
-#       across the global mini-batch (bin capacity = max_length).
-#   - max_tokens_per_microbatch=4096    -> token budget per worker micro-batch;
-#       == max_length here, so one bin row per micro-batch.
-#   - run_name suffix changed to *_packed for wandb/console disambiguation.
-#
-# All other knobs (model, dataset, batch sizing, parallelism, optimizer,
-# scheduler, logger, checkpointing) match the reference exactly. The v1
-# packing impl requires Megatron with CP=1, which the reference already
-# satisfies. EP>1 is supported (the ban was lifted 2026-05-20). See
-# docs/agent_packing_design.md for the design.
-
 # SFT training with Megatron backend for Qwen2.5-0.5B-Instruct on Tulu3
 #
 # This script runs supervised fine-tuning using the Megatron backend with
@@ -32,7 +18,7 @@ set -x
 : "${export_path:="/tmp/skyrl_tulu3_50k_hf_ckpts"}"
 
 # Packing flags (set just below in the uv invocation):
-#   use_sequence_packing=true             -> enable controller-level FFD bin-packing
+#   use_sequence_packing=true             -> enable controller-level bin-packing
 #                                            across the global mini-batch (Megatron-only).
 #   max_tokens_per_microbatch=4096        -> token budget per worker micro-batch; a
 #                                            multiple of max_length giving the bin rows

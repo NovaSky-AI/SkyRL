@@ -109,18 +109,8 @@ When `use_sequence_packing=true`, `SFTTrainer` collates with
 2. The bin count is forced to a multiple of `dp_size` via empty-bin
    padding (`min_bin_count`/`bin_count_multiple` knobs in
    [`bin_packing._adjust_bin_count`](../../../skyrl/train/dataset/bin_packing.py)).
-3. Each bin becomes one row of the dispatched `TrainingInputBatch`. The
-   per-row `sub_seq_lengths` metadata flows through `BatchIterator` into
-   the worker's `forward_step`, where `preprocess_packed_seqs` emits
-   `cu_seqlens` entries for every sub-sequence (not one per row).
-4. The per-row loss mask zeros out positions at sub-seq boundaries so the
-   `target.roll(shifts=-1)` inside `from_parallel_logits_to_logprobs` never
-   contributes a cross-sub-seq prediction.
-
-Constraints: Megatron backend only, `remove_microbatch_padding=true`, and
-`max_length` set. See
-[`docs/agent_packing_design.md`](../../../docs/agent_packing_design.md) and
-[`docs/packing_architecture_comparison.md`](../../../docs/packing_architecture_comparison.md).
+3. Each bin becomes one row of the dispatched `TrainingInputBatch`. SkyRL additionally
+   tracks some metadata for demarcating sequences.
 
 Example overrides on top of `run_sft_megatron_tulu3_50k.sh`:
 
@@ -130,41 +120,9 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
     max_tokens_per_microbatch=4096
 ```
 
-## Packing simulators (CPU only)
-
-For research on packing strategies, two pure-Python simulators live alongside
-the runnable training scripts. They tokenize a real chat dataset (Tulu3 SFT
-mixture by default), iterate over mini-batches, run either SkyRL's
-micro-batch-level packing or mini-batch-level FFD packing, and use
-`time.sleep` to approximate fwd/bwd cost. They require no GPU and run with
-just the `fsdp` extra.
-
-```bash
-# Run both simulators with defaults (matches run_sft_megatron_tulu3_50k.sh
-# knobs: max_length=4096, batch_size=24, micro_batch_size=6, 10 mini-batches)
-bash examples/train/sft/simulate_packing_compare.sh
-
-# Or run them individually
-uv run --isolated --extra fsdp -- \
-    python examples/train/sft/simulate_packing_skyrl.py --num-batches 10
-uv run --isolated --extra fsdp -- \
-    python examples/train/sft/simulate_packing_nemo.py --num-batches 10
-
-# Render a side-by-side comparison plot from the result JSONs
-uv run --isolated --extra fsdp -- \
-    python examples/train/sft/simulate_packing_plot.py \
-    --input "SkyRL::results/<date>/skyrl.json" \
-    --input "Minibatch-FFD::results/<date>/nemo.json" \
-    --out results/<date>/comparison.png
-```
-
-`simulate_packing_common.py` carries the shared bin-packing implementation
-(an inline FirstFitDecreasingPacker) and the synthetic
-fwd/bwd cost model.
 
 ## Limitations
 
-- **No evaluation support.** : Currently we do not support using an evaluation dataset.
 - **Limited `train_on_what` options**: Supports training on all or the last assistant message.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.
