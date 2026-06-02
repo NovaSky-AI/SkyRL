@@ -165,6 +165,28 @@ def test_cross_field_defaults():
     assert cfg.generator.rope_theta == cfg.trainer.rope_theta
 
 
+class TestTrainerUseSamplePackingAlias:
+    """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
+    on the RL entrypoint config (mirrors the ``fsdp2``->``fsdp`` alias)."""
+
+    def test_trainer_use_sample_packing_remapped_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
+            cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.use_sample_packing=false"])
+        assert cfg.trainer.remove_microbatch_padding is False
+
+    def test_trainer_use_sample_packing_remapped_from_dict(self):
+        # The Tinker backend passes overrides as a dict of dotted keys.
+        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
+            cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.use_sample_packing": True})
+        assert cfg.trainer.remove_microbatch_padding is True
+
+    def test_trainer_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of trainer.use_sample_packing"):
+            SkyRLTrainConfig.from_cli_overrides(
+                ["trainer.use_sample_packing=true", "trainer.remove_microbatch_padding=false"]
+            )
+
+
 class TestMaxSeqLenValidation:
     """Tests for max_seq_len defaults and validation behavior."""
 

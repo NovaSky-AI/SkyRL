@@ -11,7 +11,6 @@ import pytest
 
 from skyrl.train.config import (
     SFTConfig,
-    SkyRLTrainConfig,
     build_skyrl_config_for_sft,
 )
 from skyrl.train.config.sft_config import validate_sft_cfg
@@ -50,28 +49,6 @@ class TestUseSamplePackingAlias:
     def test_use_sample_packing_with_new_key_raises(self):
         with pytest.raises(ValueError, match="only one of use_sample_packing"):
             _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
-
-
-class TestTrainerUseSamplePackingAlias:
-    """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
-    on the RL entrypoint config (mirrors the ``fsdp2``->``fsdp`` alias)."""
-
-    def test_trainer_use_sample_packing_remapped_with_warning(self):
-        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
-            cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.use_sample_packing=false"])
-        assert cfg.trainer.remove_microbatch_padding is False
-
-    def test_trainer_use_sample_packing_remapped_from_dict(self):
-        # The Tinker backend passes overrides as a dict of dotted keys.
-        with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
-            cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.use_sample_packing": True})
-        assert cfg.trainer.remove_microbatch_padding is True
-
-    def test_trainer_use_sample_packing_with_new_key_raises(self):
-        with pytest.raises(ValueError, match="only one of trainer.use_sample_packing"):
-            SkyRLTrainConfig.from_cli_overrides(
-                ["trainer.use_sample_packing=true", "trainer.remove_microbatch_padding=false"]
-            )
 
 
 class TestTopLevelOverrides:
