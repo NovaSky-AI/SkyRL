@@ -174,9 +174,7 @@ def _sum_loss(out) -> float:
 
 
 def test_forward_backward_optim_step_improves_loss(training_client):
-    """The core regression test for issue #1717: creating an FSDP-backed LoRA
-    training client and running forward_backward + optim_step must work end to
-    end (previously crashed with AttributeError: 'prime_optimizer_state').
+    """Test that creating an FSDP-backed LoRA training client and running forward_backward + optim_step works.
 
     Single-step convergence on a fixed micro-batch with a tiny model + a
     nontrivial LR is a reliable signal that gradients flow and the optimizer
@@ -211,25 +209,16 @@ def test_forward_only_returns_logprobs(training_client):
 
 
 def test_second_adapter_rejected(training_client, service_client):
-    """Creating a second adapter against the same FSDP server is rejected.
-
-    Multi-tenant LoRA needs the worker-side AdapterStore, which is Megatron-only;
-    the FSDP worker's ``register_adapter`` raises NotImplementedError. The
-    failure is surfaced to the client as an API error referencing the
-    limitation. (Depends on ``training_client`` so the first adapter exists.)
-    """
+    """Test that creating a second adapter against the same FSDP server is rejected."""
     with pytest.raises(Exception) as exc:
         service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
     msg = str(exc.value).lower()
-    assert "not implemented" in msg or "megatron" in msg or "single lora" in msg, msg
+    assert "not implemented" in msg
 
 
 @pytest.mark.skipif(cuda_device_count < 2, reason="sampling brings up a separate vLLM engine (needs a 2nd GPU)")
 def test_sample_after_training(training_client):
-    """Weight-sync the trained adapter to vLLM and greedy-sample. With
-    temperature=0 + a fixed seed the generated tokens are deterministic, so a
-    non-empty, stable sequence confirms the FSDP LoRA -> vLLM sync path works.
-    """
+    """Test that weight-sync the trained adapter to vLLM and greedy-sample works."""
     tok = training_client.get_tokenizer()
     data = [_make_datum(tok, "Question: 1+1?\nAnswer:", " 2")]
 
