@@ -39,7 +39,6 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.training_batch import (
-    TensorList,
     TrainingInputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
@@ -813,27 +812,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
-        # When the controller emits sub_seq_lengths (per-row sub-sequence
-        # length lists), it arrives as a ``TensorList`` data field on ``data``
-        # (one 1-D int tensor per bin). Because it is a data field rather than
-        # metadata, ``MeshDispatch.dispatch`` already sharded it to this DP
-        # rank alongside ``sequences``/``attention_mask`` — no per-rank
-        # re-slicing needed here. We split it per micro-batch the same way
-        # ``BatchIterator`` chunks the tensor rows (``data.chunk(mbs)``) so
-        # ``sub_seq_lengths_chunks[chunk_idx]`` lines up with each micro-batch.
-        # The ``TensorList`` -> ``list[list[int]]`` conversion that
-        # ``preprocess/postprocess_packed_seqs`` expect happens later at the
-        # ``forward_step`` boundary. Absent (RL path, unpacked SFT) this is
-        # None.
-        sub_seq_lengths_field: Optional[TensorList] = data.get("sub_seq_lengths")
-        sub_seq_lengths_chunks: List[Optional[TensorList]] = []
-        if sub_seq_lengths_field is not None:
-            for i in range(0, data.batch_size, micro_batch_size):
-                sub_seq_lengths_chunks.append(sub_seq_lengths_field[i : i + micro_batch_size])
-
-        # Build micro-batch dicts expected by forward_backward_mini_batch
+        # Build micro-batch dicts expected by forward_backward_mini_batch.
         micro_buffer = []
-        for chunk_idx, experience in enumerate(BatchIterator(data, micro_batch_size, drop_last=False)):
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
             sequences = experience.sequences
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
@@ -855,9 +836,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
-                    "sub_seq_lengths": (
-                        sub_seq_lengths_chunks[chunk_idx] if sub_seq_lengths_field is not None else None
-                    ),
+                    # used with global sequence packing
+                    "sub_seq_lengths": experience.sub_seq_lengths,
                 }
             )
 

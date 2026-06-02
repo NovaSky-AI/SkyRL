@@ -125,5 +125,8 @@ class BatchIterator:
             # Multi-modal vision fields (may be absent for text-only)
             pixel_values=batch.get("pixel_values"),
             image_grid_thw=batch.get("image_grid_thw"),
+            # Per-row sub-sequence lengths for sequence packing (None otherwise);
+            # chunked per micro-batch by ``TensorBatch.chunk`` like any other field.
+            sub_seq_lengths=batch.get("sub_seq_lengths"),
         )
         return exp
