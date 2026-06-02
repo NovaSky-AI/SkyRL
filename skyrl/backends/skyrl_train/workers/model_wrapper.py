@@ -430,7 +430,7 @@ def _get_critic_model(
             if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with sample packing"
+                ), "Flash attention must be used with remove_microbatch_padding"
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
