@@ -16,7 +16,7 @@ The base model is loaded once on the policy workers and shared across all tenant
 
 What this means for you:
 
-- **GPU memory is bounded** by the base model plus a few small LoRA buffers, regardless of tenant count. The growth from adding a tenant is in *CPU* memory (one slot per adapter, on the order of `~3× lora_param_bytes_per_DP_shard` — tens of MB for Qwen3-0.6B at rank 32).
+- **GPU memory is bounded** by the base model plus a few small LoRA buffers, regardless of tenant count. The growth from adding a tenant is in *CPU* memory (one slot per adapter, on the order of `~3× lora_param_bytes_per_DP_shard` — hundreds of MB for Qwen3-4B-Instruct-2507 at rank 32).
 - **Swap cost is small** relative to a forward pass — a host→device `tensor.copy_()` plus a DP-group barrier. You should not see noticeable per-call latency from tenant churn.
 - **Per-tenant sampling on vLLM** is by `model_id`. The worker exports each tenant's adapter into `lora_sync_path/<model_id>/` on `save_weights_for_sampler` and registers it on vLLM via `load_lora_adapter`. Sampling uses `model=<model_id>` and vLLM routes to the right adapter.
 - **Capacity is bounded by `max_cpu_loras`**, vLLM's CPU LRU cache. If you have more concurrent tenants than slots, vLLM evicts one and the next `sample()` against it 404s — there is no on-demand reload. Size for your peak.
@@ -48,7 +48,7 @@ Run two `tinker-cookbook` `sl_loop` clients in parallel against one Megatron-bac
 uv run --extra tinker --extra megatron -m skyrl.tinker.api \
     --host 0.0.0.0 \
     --port 8000 \
-    --base-model Qwen/Qwen3-0.6B \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
     --backend megatron \
     --backend-config '{
         "strategy": "megatron",
@@ -75,7 +75,7 @@ In two separate terminals (in the tinker-cookbook repo):
 TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     train_on_what=LAST_ASSISTANT_MESSAGE \
     lora_rank=32 \
     log_path=/tmp/sl_loop_a.log
@@ -86,7 +86,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with data
 TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     train_on_what=LAST_ASSISTANT_MESSAGE \
     lora_rank=32 \
     log_path=/tmp/sl_loop_b.log
@@ -107,7 +107,7 @@ Two `rl_loop` clients each train and sample independently against one server. RL
 uv run --extra tinker --extra megatron -m skyrl.tinker.api \
     --host 0.0.0.0 \
     --port 8000 \
-    --base-model Qwen/Qwen3-0.6B \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
     --backend megatron \
     --backend-config '{
         "strategy": "megatron",
@@ -140,7 +140,7 @@ Critical knobs vs the SL quickstart:
 TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     lora_rank=32 \
     log_path=/tmp/rl_loop_a.log
 ```
@@ -150,7 +150,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with data
 TINKER_API_KEY=tml-dummy uv run --with tinker --with tinker-cookbook --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     lora_rank=32 \
     log_path=/tmp/rl_loop_b.log
 ```
@@ -164,5 +164,5 @@ You should see both clients' rewards trend upward independently in `rl_loop_a.lo
 - **`LoRA signature mismatch`** — clients passed different `(rank, alpha, target_modules)`. All adapters on one server share a signature, captured from the first `create_model`.
 - **`sample()` 404 on `lora_name=…`** — either `save_sampler_checkpoint` wasn't called for that `model_id` before sampling, or `max_cpu_loras` is too low and vLLM evicted the adapter. Check the vLLM server log.
 - **Server hangs on the second `create_model`** — the first policy build hasn't finished. Wait for `init policy model done` before starting subsequent clients.
-- **CPU OOM on the Nth client** — each adapter slot holds LoRA params + fp32 main + Adam moments, roughly `~3× lora_param_bytes_per_DP_shard`. For Qwen3-0.6B at rank 32 this is on the order of tens of MB per slot; for larger models scale accordingly. Reduce concurrent adapters or move to a host with more RAM.
+- **CPU OOM on the Nth client** — each adapter slot holds LoRA params + fp32 main + Adam moments, roughly `~3× lora_param_bytes_per_DP_shard`. For Qwen3-4B-Instruct-2507 at rank 32 this is on the order of hundreds of MB per slot; for larger models scale accordingly. Reduce concurrent adapters or move to a host with more RAM.
 - **Sample returns the wrong tenant's output** — confirm `merge_lora: false` is set on the Megatron config; with merge enabled vLLM only sees the merged base.
