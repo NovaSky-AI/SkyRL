@@ -42,6 +42,15 @@ class TestUseSamplePackingAlias:
             cfg = _sft_cfg_from_overrides(["use_sample_packing=true"])
         assert cfg.remove_microbatch_padding is True
 
+    def test_use_sample_packing_remapped_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = SFTConfig.from_cli_overrides({"use_sample_packing": False})
+        assert cfg.remove_microbatch_padding is False
+
+    def test_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of use_sample_packing"):
+            _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
+
 
 class TestTrainerUseSamplePackingAlias:
     """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
@@ -57,6 +66,12 @@ class TestTrainerUseSamplePackingAlias:
         with pytest.warns(DeprecationWarning, match="trainer.use_sample_packing.*has been renamed"):
             cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.use_sample_packing": True})
         assert cfg.trainer.remove_microbatch_padding is True
+
+    def test_trainer_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of trainer.use_sample_packing"):
+            SkyRLTrainConfig.from_cli_overrides(
+                ["trainer.use_sample_packing=true", "trainer.remove_microbatch_padding=false"]
+            )
 
 
 class TestTopLevelOverrides:

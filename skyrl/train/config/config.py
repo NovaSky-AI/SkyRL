@@ -859,6 +859,11 @@ class SkyRLTrainConfig(BaseConfig):
         # construction so the strict key validation does not reject the old
         # name.
         if "trainer" in overrides and "use_sample_packing" in overrides.trainer:
+            if "remove_microbatch_padding" in overrides.trainer:
+                raise ValueError(
+                    "Specify only one of trainer.use_sample_packing (deprecated) and "
+                    "trainer.remove_microbatch_padding, not both."
+                )
             import warnings
 
             warnings.warn(

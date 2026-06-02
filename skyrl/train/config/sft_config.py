@@ -100,6 +100,10 @@ class SFTConfig(BaseConfig):
         # ``remove_microbatch_padding``. Remap it before construction so the
         # strict key validation does not reject the old name.
         if "use_sample_packing" in overrides:
+            if "remove_microbatch_padding" in overrides:
+                raise ValueError(
+                    "Specify only one of use_sample_packing (deprecated) and remove_microbatch_padding, not both."
+                )
             import warnings
 
             warnings.warn(
