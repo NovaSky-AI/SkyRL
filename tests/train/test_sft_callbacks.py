@@ -173,6 +173,8 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     tokenizer = MagicMock()
     tokenizer.pad_token_id = 0
     trainer.tokenizer = tokenizer
+    # setup() also builds the collator once the tokenizer is available.
+    trainer.collator = trainer._build_collator(tokenizer)
     trainer.tracker = MagicMock()
 
     # Mock the worker dispatch — the only thing train_step / run_eval touch
