@@ -263,7 +263,7 @@ class HFModelWrapper(nn.Module):
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
             # model specific logic to compute.
-            assert not self.remove_microbatch_padding, "Sample packing is not supported with VLM vision inputs"
+            assert not self.remove_microbatch_padding, "remove_microbatch_padding is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
             if has_image_inputs:
