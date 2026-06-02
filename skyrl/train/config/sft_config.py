@@ -284,7 +284,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
         # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
-            assert cfg.remove_microbatch_padding, "context parallel is only supported with sample packing"
+            assert cfg.remove_microbatch_padding, "context parallel is only supported with remove_microbatch_padding"
         # check that sequence parallel is not configured outside of megatron
         assert cfg.sequence_parallel_size == 1, (
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
