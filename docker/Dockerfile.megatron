@@ -29,8 +29,8 @@ RUN sudo apt-get update && sudo apt-get install -y \
 
 # ---------- PyTorch + cuDNN + Transformer Engine ----------
 # PyTorch + cuDNN + Transformer Engine
-RUN pip install --no-cache-dir "torch==2.7.1" "nvidia-cudnn-cu12>=9.3" && \
-    CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')" && \
+RUN uv pip install --system --no-cache-dir "torch==2.10.0" "nvidia-cudnn-cu12>=9.3" && \
+    CUDNN_PATH="$(python -c 'import nvidia.cudnn as c; print(c.__path__[0])')" && \
     sudo mkdir -p /opt && sudo ln -sfn "$CUDNN_PATH" /opt/cudnn && \
     echo "/opt/cudnn/lib" | sudo tee /etc/ld.so.conf.d/cudnn.conf >/dev/null && sudo ldconfig
 
@@ -38,7 +38,7 @@ ENV CUDNN_PATH=/opt/cudnn
 ENV CPATH=${CUDNN_PATH}/include:${CPATH}
 ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
 
-RUN pip install --no-cache-dir \
+RUN uv pip install  --system --no-cache-dir \
     nvidia-mathdx \
     pybind11 \
     setuptools \
@@ -46,5 +46,9 @@ RUN pip install --no-cache-dir \
 
 ENV CMAKE_ARGS=-DPython_EXECUTABLE=/home/ray/anaconda3/bin/python3
 
-RUN pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.9.0"
+RUN sudo mkdir /opt/wheels && sudo chown ray: /opt/wheels && \
+     pip wheel --no-cache-dir --no-build-isolation --no-deps \
+        -w /opt/wheels "transformer-engine-torch==2.10.0"
+RUN pip install --no-cache-dir --no-build-isolation --find-links /opt/wheels "transformer_engine[pytorch]==2.10.0"
+ENV UV_FIND_LINKS=/opt/wheels
 # --------------------

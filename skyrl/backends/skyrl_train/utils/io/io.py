@@ -129,6 +129,10 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
 
     fs = _get_filesystem(cloud_path)
+    # NOTE (sumanthrh): While uploading files in a directory `src` to an existing directory `dst` with fsspec,
+    # we need to ensure that the file path ends in a trailing slash. otherwise, fsspec will create a subdirectory
+    # `dst/src` instead of directly syncing contents of `src` into the root `dst` directory
+    local_path = os.path.join(local_path, "")
     if cloud_path.startswith("s3://"):
         call_with_s3_retry(fs, fs.put, local_path, fs._strip_protocol(cloud_path), recursive=True)
     else:

@@ -16,7 +16,7 @@ set -x
 
 uv run --isolated --extra fsdp \
     python -m skyrl.train.main_sft \
-    strategy=fsdp2 \
+    strategy=fsdp \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
     model.lora.rank=32 \
     model.lora.alpha=16 \
@@ -28,7 +28,7 @@ uv run --isolated --extra fsdp \
     num_steps=10 \
     batch_size=4 \
     micro_train_batch_size_per_gpu=2 \
-    use_sample_packing=true \
+    remove_microbatch_padding=true \
     seed=42 \
     optimizer_config.lr=2e-5 \
     optimizer_config.weight_decay=0.0 \

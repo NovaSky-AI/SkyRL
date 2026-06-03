@@ -9,7 +9,8 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
-    concatenate_outputs_after_mesh_dispatch,
+    WorkerOutput,
+    loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -38,13 +39,13 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = True
+    cfg.trainer.remove_microbatch_padding = True
     cfg.generator.inference_engine.distributed_executor_backend = "mp"
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
-    # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
-    # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
-    # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
+    # we should add an assert that if you set remove_microbatch_padding=False flash attn can accidentally be used
+    # and that we enable nvte fused attn for moonlight models with remove_microbatch_padding=True
+    # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
     if "Moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -246,7 +247,8 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
 
             refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
             results = ray.get(refs)
-            outputs = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
+            output = WorkerOutput.cat(actor_group.actor_infos, results)
+            outputs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
             for actor in actor_group._actor_handlers:
                 ray.kill(actor)

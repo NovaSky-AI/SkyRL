@@ -15,7 +15,7 @@ EPS_CLIP_LOW=0.2
 EPS_CLIP_HIGH=0.28
 DYNAMIC_SAMPLING_TYPE=filter
 DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
-LOSS_REDUCTION="token_mean"
+LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py
@@ -51,7 +51,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_GPUS \

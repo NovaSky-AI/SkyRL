@@ -13,6 +13,12 @@ import ray
 
 logger = logging.getLogger(__name__)
 
+# Stride between successive server actors' (or groups') start_port values.
+# Each actor's `find_and_reserve_port` increments by 1 on conflict, so this
+# stride must be larger than the max number of conflicts an actor could see
+# inside its window.
+SERVER_PORT_STRIDE = 100
+
 
 @dataclass
 class ServerInfo:
@@ -85,8 +91,9 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
         (port, socket) -- caller must close the socket before rebinding.
     """
     port = start_port
+    end_port = start_port + SERVER_PORT_STRIDE
     sock: socket.socket | None = None
-    while True:
+    while port < end_port:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -97,5 +104,7 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
             if sock:
                 sock.close()
             port += 1
-            if port > 65535:
-                raise RuntimeError(f"No available port found starting from {start_port}")
+    raise RuntimeError(
+        f"No available port found in [{start_port}, {end_port}). "
+        f"Free up the port range or raise SERVER_PORT_STRIDE."
+    )

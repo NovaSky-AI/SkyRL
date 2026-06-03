@@ -230,6 +230,24 @@ class ModelMetadata(BaseModel):
     loaded_checkpoint_id: str | None = None
 
 
+def make_routing_session_id(sampling_session_id: str | None, seq_id: int | None) -> str | None:
+    """Stable per-request routing key for the ``X-Session-ID`` header, or None.
+
+    Combines the (per-client) ``sampling_session_id`` with the (per-request)
+    ``seq_id`` into the "deterministic request id" the Tinker SDK describes.
+    Used to pin all of one logical sample's traffic (including retries) to a
+    single inference backend while still spreading distinct requests across
+    backends.
+
+    Returns None when either input is absent (e.g. direct base-model sampling
+    with no SDK session), in which case callers omit the header and fall back to
+    plain load-balancing.
+    """
+    if sampling_session_id is None or seq_id is None:
+        return None
+    return f"{sampling_session_id}:{seq_id}"
+
+
 class SampleInput(BaseModel):
     base_model: str | None = None
     prompt: ModelInput
@@ -237,6 +255,9 @@ class SampleInput(BaseModel):
     num_samples: int
     checkpoint_id: str
     prompt_logprobs: bool
+    # See make_routing_session_id.
+    seq_id: int | None = None
+    sampling_session_id: str | None = None
 
 
 class GeneratedSequence(BaseModel):
@@ -296,6 +317,8 @@ class PreparedSampleBatch(BaseModel):
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
     all_checkpoint_paths: list[str]
+    # Routing key per sample
+    all_session_ids: list[str | None]
 
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool

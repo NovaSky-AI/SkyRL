@@ -17,28 +17,34 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 We recommend adding the following configs in order to your training runs to help address off-policy drift:
 
 ```yaml
-# For dense models, we recommend trying basic TIS correction first
-trainer.algorithm.off_policy_correction.tis_ratio_type="token"
-trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
+# We recommend starting with geometric sequence masking. This zeros out the per-sequence
+# loss when the geometric mean of token-wise importance-sampling ratios falls outside [geo_mask_low, geo_mask_high].
+trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
+trainer.algorithm.off_policy_correction.geo_mask_low=0.99
+trainer.algorithm.off_policy_correction.geo_mask_high=1.01
+# ------------ #
 
 # for MoE models, enabling router replay (R3) to fix the source of train/infer mismatch is recommended 
 trainer.policy.megatron_config.moe_enable_routing_replay=True
 generator.inference_engine.enable_return_routed_experts=True
 generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
+# ------------ #
+
+# TIS (Truncated Importance Sampling) applies logprob corrections on a per-token basis
+trainer.algorithm.off_policy_correction.tis_ratio_type="token"
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
+# ------------ #
 
 # The following masking strategies can additionally help mitigate off policy drift, especially from sources other than train/infer mismatch
-# geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
-trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
-trainer.algorithm.off_policy_correction.geo_mask_high=1.01
-trainer.algorithm.off_policy_correction.geo_mask_low=0.99
-
 # token masking (icepop): tune token_mask_is_threshold_low/high
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
+# ------------ #
 
 # outlier based sequence masking: stacks on top of geometric sequence masking
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
+# ------------ #
 ```
 
 # Setup
@@ -268,6 +274,21 @@ Some examples are shown below:
 ![Log Probability Differences](/images/algorithms/logprobs_diff.png)
 
 ![Outlier Mask](/images/algorithms/outlier_mask.png)
+
+# Comparisons for different off-policy correction methods
+
+To augment the references mentioned above, we also ran our own comparisons for different off policy correction methods in SkyRL. Specifically, we compared training `deepseek-ai/deepseek-r1-distill-qwen-1.5b` for 1.5K steps with TIS vs geometric sequence masking with one-step off policy RL on the DAPO recipe. Geometric masking yielded superior evaluation performance while also keeping logprob difference in a stable range.
+
+<div style={{display: "flex", gap: "1rem", justifyContent: "center", alignItems: "flex-start", flexWrap: "wrap"}}>
+  <div style={{flex: "1 1 0", minWidth: "0"}}>
+    ![Eval Reward: Geometric vs TIS](/images/off_policy_correction/eval_reward_geom_vs_tis.png)
+  </div>
+  <div style={{flex: "1 1 0", minWidth: "0"}}>
+    ![Logprob Diff: Geometric vs TIS](/images/off_policy_correction/logprob_diff_geom_vs_tis.png)
+  </div>
+</div>
+
+The full WandB report is available [here](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/pa5as3is).
 
 # References
 - [Mathematical Formulations of Rollout Correction Methods in verl](https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md)

@@ -21,6 +21,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
     create_remote_inference_engines,
 )
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
@@ -84,10 +85,13 @@ def create_ray_wrapped_inference_engines_from_config(
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+        lora_cfg = cfg.trainer.policy.model.lora
         engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["max_lora_rank"] = lora_cfg.rank
         engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = 1
+        engine_kwargs["max_loras"] = lora_cfg.max_loras
+        if lora_cfg.max_cpu_loras is not None:
+            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
         engine_kwargs["fully_sharded_loras"] = ie_cfg.fully_sharded_loras
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
@@ -235,6 +239,7 @@ class BasePPOExp:
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            policy_model_name=resolve_policy_model_name(cfg),
         )
 
     def get_trainer(
@@ -349,7 +354,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+        if self.cfg.trainer.strategy == "fsdp":
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                 CriticWorker,
                 PolicyWorker,
@@ -382,15 +387,30 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
+        # Expose the trainer on self so callers can log exceptions raised
+        # during `build_models` (which happens before _setup_trainer returns).
+        self.trainer = trainer
 
         # Build the models
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
-        trainer = self._setup_trainer()
-        # Start the training loop
-        asyncio.run(trainer.train())
+        self.trainer = None
+        try:
+            trainer = self._setup_trainer()
+            # Start the training loop
+            asyncio.run(trainer.train())
+        except Exception as e:
+            # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
+            # surface here as RayTaskError. Without this they only land in Ray
+            # worker logs; route them through the tracker so wandb users see
+            # them as an `error/tracebacks` table row.
+            if self.trainer is not None and self.trainer.tracker is not None:
+                self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
+            else:
+                logger.error(f"Setup failed before tracker was initialized:\n{e}")
+            raise
 
 
 @ray.remote(num_cpus=1)

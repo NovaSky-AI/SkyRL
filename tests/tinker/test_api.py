@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 from skyrl.tinker.api import _build_uv_run_cmd_engine
 from skyrl.tinker.config import EngineConfig
-from tests.tinker.conftest import wait_for_condition
+from tests.tinker.conftest import api_server_is_up, wait_for_condition
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -48,11 +48,21 @@ def create_service_and_training_client(base_url: str, skip_verify: bool = False)
 
 
 @contextmanager
-def start_api_server(overrides: dict[str, str] | None = None):
-    """Start the FastAPI server with optional config overrides. Prints log on failure."""
+def start_api_server(
+    overrides: dict[str, str] | None = None,
+    extras: tuple[str, ...] = ("tinker",),
+    db_path: str | None = None,
+    wait_for_up: bool = False,
+    teardown_timeout: float = 5.0,
+):
+    """Start the FastAPI server with optional config overrides. Prints log on failure.
+
+    Pass ``db_path`` to keep the SQLite file alive past the context (e.g. for tests
+    that inspect persisted state after server shutdown).
+    """
     with tempfile.TemporaryDirectory() as tmp_dir:
         log_path = os.path.join(tmp_dir, "server.log")
-        db_path = os.path.join(tmp_dir, "server.db")
+        resolved_db_path = db_path if db_path is not None else os.path.join(tmp_dir, "server.db")
 
         with open(log_path, "w") as log_file:
             defaults = {
@@ -60,16 +70,25 @@ def start_api_server(overrides: dict[str, str] | None = None):
                 "port": str(TEST_SERVER_PORT),
                 "base-model": BASE_MODEL,
                 "backend-config": '{"max_lora_adapters": 4}',
-                "database-url": f"sqlite:///{db_path}",
+                "database-url": f"sqlite:///{resolved_db_path}",
             }
             if overrides:
                 defaults.update(overrides)
-            cmd = ["uv", "run", "--extra", "tinker", "-m", "skyrl.tinker.api"]
+            cmd = ["uv", "run"]
+            for extra in extras:
+                cmd.extend(["--extra", extra])
+            cmd.extend(["-m", "skyrl.tinker.api"])
             for key, value in defaults.items():
                 cmd.extend([f"--{key}", value])
             process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
             print(f"Starting API server: {' '.join(cmd)}")
             try:
+                if wait_for_up:
+                    port = int(defaults["port"])
+                    if not wait_for_condition(lambda: api_server_is_up(port), timeout_sec=180, poll_interval_sec=2):
+                        with open(log_path) as f:
+                            print(f"=== Server failed to start ===\n{f.read()}")
+                        pytest.fail("Tinker API server did not come up in time")
                 yield process, log_path
             except Exception:
                 with open(log_path) as f:
@@ -77,7 +96,10 @@ def start_api_server(overrides: dict[str, str] | None = None):
                 raise
             finally:
                 process.terminate()
-                process.wait(timeout=5)
+                try:
+                    process.wait(timeout=teardown_timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
 
 @pytest.fixture(scope="module")

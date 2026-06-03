@@ -65,7 +65,7 @@ class WorkerWrap:
             else:
                 warnings.warn(
                     "Detected an existing weight receiver. "
-                    "For overriding, use `generator.override_existing_update_group=enable`"
+                    "For overriding, use `generator.inference_engine.override_existing_update_group=enable`"
                 )
                 return
 
@@ -82,6 +82,8 @@ class WorkerWrap:
         """
         import pickle
 
+        from vllm.config import set_current_vllm_config
+
         # Unpickle request to restore the original object type
         assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
         request = pickle.loads(request)
@@ -90,7 +92,8 @@ class WorkerWrap:
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))
 
-        self.model_runner.model.load_weights(weights=weight_list)
+        with torch.device(self.device), set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(weights_iterator=iter(weight_list))
 
         for weight in weight_list:
             del weight

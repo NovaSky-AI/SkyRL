@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
     VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
 )
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    SKYRL_LORA_ADAPTER_NAME,
+)
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import (
     InferenceEngineConfig,
@@ -31,13 +34,47 @@ def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     return True
 
 
+def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
+    """Return the model identifier the inference engine knows the policy by.
+
+    Mirrors the weight-sync code path: when the worker registers a LoRA
+    adapter on the inference engine (FSDP + LoRA, or Megatron + LoRA with
+    ``merge_lora=False``), the policy is that adapter and callers must pass
+    ``SKYRL_LORA_ADAPTER_NAME`` as ``model`` on data-plane calls. Otherwise
+    — including Megatron + LoRA with ``merge_lora=True``, where merged
+    weights are pushed as a full weight update — the policy is the base
+    model itself.
+
+    This is the single source of truth for "which name does the inference
+    server know the policy by?" and should be used wherever a caller needs
+    to issue a ``generate``/``sample``/``chat_completion``/``completion`` /
+    ``render_chat_completion`` request against the current policy.
+    """
+    if _uses_lora_weight_sync(cfg):
+        return SKYRL_LORA_ADAPTER_NAME
+    return cfg.trainer.policy.model.path
+
+
 # TODO: Add a test for validation
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    # This function may run a GPU-less Ray head
+    # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
+    # ``device_type == ""``. vLLM's ``add_cli_args`` walks ``VllmConfig`` defaults
+    # and instantiates ``DeviceConfig()`` (device="auto"), which in turn runs
+    # ``DeviceConfig.__post_init__`` and raises ``Failed to infer device type``.
+    # Explicitly pin the platform's device type to ``cuda`` so the autodetection
+    # path in ``DeviceConfig.__post_init__`` succeeds during arg parsing.
+    # NOTE: mutating current_platform.device_type relies on vLLM 0.20.2's singleton
+    # initialization where instance attrs shadow class attrs. This should be re-verified on vLLM bumps.
+    if not current_platform.device_type:
+        current_platform.device_type = "cuda"
 
     # Create common CLI args namespace
     parser = FlexibleArgumentParser()
@@ -76,6 +113,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         ),
         language_model_only=ie_cfg.language_model_only,
         mm_processor_cache_gb=0,
+        kv_cache_metrics=True,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -84,9 +122,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     # LoRA adapters (not merged weights).  Megatron merges by default
     # (merge_lora=True), so the inference engine must NOT have LoRA wrapping.
     if _uses_lora_weight_sync(cfg):
+        lora_cfg = cfg.trainer.policy.model.lora
         args.enable_lora = True
-        args.max_lora_rank = cfg.trainer.policy.model.lora.rank
-        args.max_loras = 1
+        args.max_lora_rank = lora_cfg.rank
+        args.max_loras = lora_cfg.max_loras
+        if lora_cfg.max_cpu_loras is not None:
+            args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
 
         if not cfg.trainer.placement.colocate_all:

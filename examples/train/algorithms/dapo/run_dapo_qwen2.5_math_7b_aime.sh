@@ -21,7 +21,7 @@ EPS_CLIP_HIGH=0.28
 # dynamic sampling parameters - off by default, since this greatly slows down inference
 DYNAMIC_SAMPLING_TYPE=null
 DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
-LOSS_REDUCTION="token_mean"
+LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py
@@ -67,7 +67,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \

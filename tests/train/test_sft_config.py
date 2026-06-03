@@ -13,11 +13,42 @@ from skyrl.train.config import (
     SFTConfig,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.config.sft_config import validate_sft_cfg
 
 
 def _sft_cfg_from_overrides(overrides: list[str]) -> SFTConfig:
     """Build an SFTConfig from CLI-style overrides."""
     return SFTConfig.from_cli_overrides(overrides)
+
+
+class TestFSDP2StrategyAlias:
+    """`strategy='fsdp2'` is accepted as a deprecated alias for `'fsdp'`."""
+
+    def test_fsdp2_normalized_to_fsdp_with_warning(self):
+        cfg = SFTConfig()
+        cfg.strategy = "fsdp2"
+        cfg.model.path = "test/my-model"
+        with pytest.warns(DeprecationWarning, match="fsdp2.*has been renamed"):
+            validate_sft_cfg(cfg)
+        assert cfg.strategy == "fsdp"
+
+
+class TestUseSamplePackingAlias:
+    """`use_sample_packing` is accepted as a deprecated alias for `remove_microbatch_padding`."""
+
+    def test_use_sample_packing_remapped_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = _sft_cfg_from_overrides(["use_sample_packing=true"])
+        assert cfg.remove_microbatch_padding is True
+
+    def test_use_sample_packing_remapped_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = SFTConfig.from_cli_overrides({"use_sample_packing": False})
+        assert cfg.remove_microbatch_padding is False
+
+    def test_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of use_sample_packing"):
+            _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
 
 
 class TestTopLevelOverrides:
@@ -28,14 +59,14 @@ class TestTopLevelOverrides:
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.model.path == "test/my-model"
 
-    def test_use_sample_packing_propagates(self):
-        cfg = _sft_cfg_from_overrides(["use_sample_packing=false"])
+    def test_remove_microbatch_padding_propagates(self):
+        cfg = _sft_cfg_from_overrides(["remove_microbatch_padding=false"])
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
-        assert skyrl_cfg.trainer.use_sample_packing is False
+        assert skyrl_cfg.trainer.remove_microbatch_padding is False
 
-        cfg_on = _sft_cfg_from_overrides(["use_sample_packing=true"])
+        cfg_on = _sft_cfg_from_overrides(["remove_microbatch_padding=true"])
         skyrl_cfg_on = build_skyrl_config_for_sft(cfg_on)
-        assert skyrl_cfg_on.trainer.use_sample_packing is True
+        assert skyrl_cfg_on.trainer.remove_microbatch_padding is True
 
 
 class TestMegatronConfigOverrides:
@@ -104,12 +135,12 @@ class TestLoraConfigOverrides:
 
 
 class TestFSDPConfigOverrides:
-    """FSDP config overrides propagate when strategy=fsdp2."""
+    """FSDP config overrides propagate when strategy=fsdp."""
 
     def test_cpu_offload(self):
         cfg = _sft_cfg_from_overrides(
             [
-                "strategy=fsdp2",
+                "strategy=fsdp",
                 "fsdp_config.cpu_offload=true",
             ]
         )
@@ -119,7 +150,7 @@ class TestFSDPConfigOverrides:
     def test_reshard_after_forward(self):
         cfg = _sft_cfg_from_overrides(
             [
-                "strategy=fsdp2",
+                "strategy=fsdp",
                 "fsdp_config.reshard_after_forward=false",
             ]
         )

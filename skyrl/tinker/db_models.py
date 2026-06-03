@@ -134,3 +134,22 @@ class SamplingSessionDB(SQLModel, table=True):
     base_model: str | None = None
     model_path: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+
+
+class EngineStateDB(SQLModel, table=True):
+    """Engine→API handoff for the inference engine the backend stands up.
+
+    Singleton row (``singleton_id=1``). Written by the backend when a new
+    inference client is built (or torn down) and read by the API's
+    forwarding client to resolve the vLLM proxy URL.
+    """
+
+    __tablename__ = "engine_state"
+
+    singleton_id: int = Field(default=1, primary_key=True)
+
+    # Proxy URL of the engine-managed vLLM. None when no vLLM has been
+    # stood up yet (no create_model, FFT path, or last delete tore down).
+    inference_proxy_url: str | None = None
+
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))

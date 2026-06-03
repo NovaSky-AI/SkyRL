@@ -64,16 +64,16 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `strategy` | `megatron` | Backend: `megatron` or `fsdp2` |
+| `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
 | `dataset_name` | `yahma/alpaca-cleaned` | HuggingFace dataset name |
 | `dataset_split` | `train[:100]` | Dataset split/slice |
-| `max_length` | `512` | Maximum sequence length |
-| `num_steps` | `10` | Number of training steps |
+| `max_length` | `None` | Maximum sequence length |
+| `num_steps` | `None` | Number of training steps |
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
-| `use_sample_packing` | `true` | Pack multiple sequences per batch (requires flash attention) |
+| `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
@@ -82,6 +82,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `megatron_config.context_parallel_size` | `1` | Context parallelism degree (Megatron only) |
 | `logger` | `console` | `console` or `wandb` |
 | `project_name` | `skyrl_sft` | W&B project name (when `logger=wandb`) |
+| `train_on_what` | `last_assistant_message` | Which tokens to train on. See `TrainOnWhat` enum: `last_assistant_message` (default, loss on final assistant reply only) or `all_assistant_messages` (loss on every assistant message). |
 | `dummy_run_full_ctx` | `false` | Enable dummy/benchmarking mode |
 | `dummy_run_max_steps` | `5` | Steps to run in dummy mode |
 
@@ -99,6 +100,6 @@ See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI en
 ## Limitations
 
 - **No evaluation support.** : Currently we do not support using an evaluation dataset.
-- **Last assistant message only**: The current SFT trainer only supports training on the last assistant message.
+- **Limited `train_on_what` options**: Supports training on all or the last assistant message.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.

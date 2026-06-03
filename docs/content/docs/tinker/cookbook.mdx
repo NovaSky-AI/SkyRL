@@ -19,7 +19,7 @@ Before launching a training script, start the Tinker server from the `SkyRL/` di
 
 ```bash
 uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
-    --base-model "Qwen/Qwen3-0.6B" --backend fsdp
+    --base-model "Qwen/Qwen3-4B-Instruct-2507" --backend fsdp
 ```
 
 The same server command can be reused across all recipes below. For more detail on configuration options for the training backend, see [Configuration](./configuration).
@@ -36,7 +36,7 @@ Fine-tunes a model on the [No Robots](https://huggingface.co/datasets/HuggingFac
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
@@ -50,7 +50,7 @@ For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learni
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     train_on_what=LAST_ASSISTANT_MESSAGE \
     lora_rank=0 learning_rate=1e-5
 ```
@@ -63,7 +63,7 @@ Trains a model on [GSM8K](https://huggingface.co/datasets/openai/gsm8k) math pro
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B"
+    model_name="Qwen/Qwen3-4B-Instruct-2507"
 ```
 
 <div style={{width: "75%", margin: "0 auto"}}>
@@ -76,7 +76,7 @@ For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learni
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     lora_rank=0 learning_rate=4e-6
 ```
 
@@ -90,7 +90,7 @@ RL training specifically for mathematical reasoning.
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.math_rl.train \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B"
+    model_name="Qwen/Qwen3-4B-Instruct-2507"
 ```
 
 <div style={{width: "75%", margin: "0 auto"}}>
@@ -105,7 +105,7 @@ RL training for code generation tasks. Uses the same `importance_sampling` loss 
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.code_rl.train \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     lora_rank=0 learning_rate=1e-6
 ```
 
@@ -117,13 +117,13 @@ Trains an image classifier on top of [Qwen3-VL](https://huggingface.co/Qwen/Qwen
 VLM training requires a newer vLLM than the version pinned in the repo. Clone vLLM from GitHub and point `[tool.uv.sources]` in the root `pyproject.toml` at your local checkout before running. See the [vLLM source override callout](../tutorials/vision_language_rl#requirements) on the tutorial page for the exact steps.
 </Callout>
 
-This recipe uses a **different server command** than the common one at the top of this page, in particular the `use_sample_packing` override is VLM-specific:
+This recipe uses a **different server command** than the common one at the top of this page, in particular the `remove_microbatch_padding` override is VLM-specific:
 
 ```bash
 uv run --isolated --extra tinker --extra fsdp \
     -m skyrl.tinker.api \
     --base-model "Qwen/Qwen3-VL-8B-Instruct" --backend fsdp \
-    --backend-config '{"trainer.use_sample_packing": false}'
+    --backend-config '{"trainer.remove_microbatch_padding": false}'
 ```
 
 Then launch the training recipe:

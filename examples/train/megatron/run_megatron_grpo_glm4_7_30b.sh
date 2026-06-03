@@ -57,6 +57,8 @@ MOE_ROUTER_EXPERT_BIAS=true
 OPTIMIZER_CPU_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
+export _SKYRL_USE_NEW_INFERENCE=0
+
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -83,7 +85,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.policy.megatron_config.empty_cuda_cache=true \
-  trainer.use_sample_packing=true \
+  trainer.remove_microbatch_padding=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \

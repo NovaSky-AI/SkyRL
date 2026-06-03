@@ -23,12 +23,12 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="unsloth/gpt-oss-20b-BF16" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=2 \
   trainer.flash_attn=false \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   generator.inference_engine.tensor_parallel_size=4 \
   generator.inference_engine.enforce_eager=true \
   trainer.epochs=20 \

@@ -12,11 +12,11 @@ When spinning up the Tinker server, the `--backend-config` flag accepts a JSON d
 
 ```bash
 uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
-    --base-model "Qwen/Qwen3-0.6B" --backend fsdp \
+    --base-model "Qwen/Qwen3-4B-Instruct-2507" --backend fsdp \
     --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 4}'
 ```
 
-Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml) for all available keys and defaults). The most commonly used options are listed below.
+Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults). The most commonly used options are listed below.
 
 ### GPU and Parallelism
 
@@ -54,8 +54,25 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=32
 python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 ```
 
-No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning.
+No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
+
+### Multi-tenant LoRA
+
+Hosting multiple LoRA tenants concurrently against one server *does* require server-side configuration on the Megatron backend. At minimum:
+
+```json
+{
+    "trainer.placement.colocate_all": false,
+    "trainer.policy.megatron_config.lora_config.merge_lora": false,
+    "trainer.policy.model.lora.max_loras": <max concurrent adapters in a single batch>,
+    "trainer.policy.model.lora.max_cpu_loras": <total adapter capacity>
+}
+```
+
+`merge_lora: false` is required so vLLM serves each tenant's adapter by name (with `merge_lora: true` vLLM only sees the merged base and per-tenant sampling returns the wrong weights). `max_cpu_loras` must be sized to the peak number of concurrent tenants — there is no on-demand reload, and if vLLM evicts an adapter the next `sample()` against it 404s. All adapters on one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
+
+See [Multi-tenancy](./multi_tenancy) for the full operator contract and SFT/RL quickstarts.
 
 ## Full Config Reference
 
-For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml).
+For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [`SkyRLTrainConfig` dataclass](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py).

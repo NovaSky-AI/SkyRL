@@ -16,14 +16,13 @@ from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
-    concatenate_outputs_after_mesh_dispatch,
+    WorkerOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
-    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
@@ -74,6 +73,36 @@ class WorkerDispatch:
         self._actor_groups[model] = actor_group
         self._gpu_state[model] = GPUState()
 
+    # ------------------------------------------------------------------
+    # Multi-LoRA: per-model adapter swap orchestration.
+    # ------------------------------------------------------------------
+
+    def ensure_active_adapter(self, role: str, model_id: Optional[str]) -> None:
+        """Make ``model_id`` the live LoRA adapter for ``role`` workers.
+
+        No-op when ``model_id is None`` (single-tenant / FFT path) or when
+        the workers don't have an AdapterStore (non-LoRA strategies).
+
+        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
+        and optimizer storages are live before we tensor.copy_() into them.
+        """
+        if model_id is None or role not in self._actor_groups:
+            return
+        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
+
+    def register_adapter(self, role: str, model_id: str) -> None:
+        """Register a new adapter slot on every worker (subsequent
+        create_model). Pristine must already exist.
+        """
+        if role not in self._actor_groups:
+            return
+        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id))
+
+    def delete_adapter(self, role: str, model_id: str) -> None:
+        if role not in self._actor_groups:
+            return
+        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "delete_adapter", model_id))
+
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
         import math
@@ -84,6 +113,10 @@ class WorkerDispatch:
         if "ref" in self._actor_groups:
             dp_size = math.lcm(dp_size, self._actor_groups["ref"].actor_infos[0].rank.dp_size)
         return dp_size
+
+    def dp_size(self, model: str) -> int:
+        """Return the data-parallel size for ``model`` (e.g. "policy")."""
+        return self._actor_groups[model].actor_infos[0].rank.dp_size
 
     def _should_manage_offload(self, model: str) -> bool:
         """Check if we need to manage offload for this model."""
@@ -162,15 +195,47 @@ class WorkerDispatch:
             return
         self._gpu_state[model] = GPUState()
 
-    def forward(self, model: str, data: TrainingInputBatch) -> TrainingOutputBatch:
-        """Run inference forward pass. Only loads model (not optimizer)."""
-        self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
+    def forward(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ) -> WorkerOutput:
+        """Run forward pass. Only loads model (not optimizer).
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data)
+        Returns a :class:`WorkerOutput` aggregated across DP ranks:
+
+        - When ``loss_fn`` is None (RL/inference path): ``loss_fn_outputs`` is a
+          per-sample list of dicts (one entry per batch item) keyed by
+          ``logprobs`` (policy/ref) or ``values`` (critic); ``metrics`` is empty.
+        - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): ``loss_fn_outputs``
+          carries per-sample arrays (e.g. ``logprobs`` / ``elementwise_loss``)
+          and ``metrics`` contains scalar metrics like ``"loss"``.
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            data: Training batch data
+            loss_fn: Optional resolved loss function name (e.g., "cross_entropy"). When set,
+                     the worker computes loss + per-sample outputs without backward (no_grad).
+            loss_fn_config: Optional config overrides for the loss function.
+            model_id: Optional Tinker model_id; when set, the corresponding LoRA adapter
+                     is swapped in before the forward.
+        """
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
+        self.ensure_active_adapter(model, model_id)
+
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
         results = ray.get(refs)
 
-        output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
-        return output
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
     def stage_data(
         self,
@@ -201,7 +266,8 @@ class WorkerDispatch:
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+        model_id: Optional[str] = None,
+    ) -> WorkerOutput:
         """Run forward/backward pass. Needs model + optimizer.
 
         Args:
@@ -212,11 +278,15 @@ class WorkerDispatch:
                      normalized before dispatch.
             loss_fn_config: Optional config overrides for the loss function
                            (e.g., {"eps_clip_low": 0.1} for the regular PPO loss)
+            model_id: Optional Tinker model_id; when set, the corresponding
+                     LoRA adapter is swapped in before the forward/backward.
 
         Returns:
-            Dictionary of training metrics
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` aggregated
+            across DP ranks plus scalar ``metrics`` (already all-reduced).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
+        self.ensure_active_adapter(model, model_id)
 
         # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
         kwargs = {}
@@ -230,18 +300,7 @@ class WorkerDispatch:
 
         self._save_memory_snapshot(model, "forward_backward")
 
-        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
-        # Concatenate them in rank order to get the full batch's outputs.
-        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
-        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
-            all_loss_fn_outputs = []
-            for status in statuses:
-                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
-            result = statuses[0]
-            result["loss_fn_outputs"] = all_loss_fn_outputs
-            return result
-
-        return statuses[0]
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
 
     def forward_backward_from_staged(
         self,
@@ -249,7 +308,8 @@ class WorkerDispatch:
         chunk_refs: List[ObjectRef],
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, float]:
+        model_id: Optional[str] = None,
+    ) -> WorkerOutput:
         """
         Run forward/backward pass using pre-staged per-DP chunks.
 
@@ -261,9 +321,11 @@ class WorkerDispatch:
             chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_data``)
 
         Returns:
-            Aggregated metrics dict from training
+            :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` aggregated
+            across DP ranks plus scalar ``metrics`` (already all-reduced).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
+        self.ensure_active_adapter(model, model_id)
 
         # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
         kwargs = {}
@@ -281,23 +343,28 @@ class WorkerDispatch:
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
-        return statuses[0]
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
 
-    def optim_step(self, model: str) -> Optional[float]:
-        """Run optimizer step. Model should already be on GPU from forward_backward."""
+    def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
+        """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
+
+        For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
+        """
+        self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
         grad_norms = ray.get(refs)
 
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
-    def set_lr(self, model: str, learning_rate: float) -> None:
+    def set_lr(self, model: str, learning_rate: float, model_id: Optional[str] = None) -> None:
         """Set learning rate for model's optimizer.
 
         This directly updates the optimizer's param_groups on all workers,
         bypassing the scheduler. Useful for external learning rate schedules.
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
+        self.ensure_active_adapter(model, model_id)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
@@ -311,9 +378,10 @@ class WorkerDispatch:
             self._actor_groups[model].async_run_ray_method("pass_through", "save_memory_snapshot", tag=f"{model}_{tag}")
         )
 
-    def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None) -> None:
+    def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None, model_id: Optional[str] = None) -> None:
         """Save checkpoint for model."""
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
+        self.ensure_active_adapter(model, model_id)
 
         ray.get(
             self._actor_groups[model].async_run_ray_method(
@@ -327,9 +395,11 @@ class WorkerDispatch:
         ckpt_dir: str,
         load_optimizer_states: bool = True,
         load_lr_scheduler_states: bool = True,
+        model_id: Optional[str] = None,
     ) -> None:
         """Load checkpoint for model."""
         self._ensure_on_gpu(model, need_optimizer=load_optimizer_states, need_model=True)
+        self.ensure_active_adapter(model, model_id)
 
         ray.get(
             self._actor_groups[model].async_run_ray_method(
@@ -409,14 +479,21 @@ class WorkerDispatch:
             )
         )
 
-    def _broadcast_to_inference_engines(self, inference_engine_client) -> None:
-        """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler."""
+    def _broadcast_to_inference_engines(self, inference_engine_client, model_id: Optional[str] = None) -> None:
+        """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler.
+
+        ``model_id`` is forwarded to the worker so that, on the LoRA path, the
+        adapter is saved into a per-tenant subdir of ``lora_sync_path`` and
+        registered on vLLM under that name. None preserves single-tenant
+        behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
+        """
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
                 inference_engine_client,
                 self.cfg.generator.inference_engine,
+                model_id=model_id,
             )
         )
 
@@ -436,11 +513,14 @@ class WorkerDispatch:
             return
         self._offload("policy", offload_optimizer=True, offload_model=True)
 
-    async def save_weights_for_sampler(self) -> None:
+    async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         """
         Tinker API method to prepare updated parameters for sampling.
 
-        Syncs weights to inference engine for sampling.
+        Syncs weights to inference engine for sampling. When ``model_id`` is
+        provided we ensure the corresponding LoRA adapter is the live one
+        before broadcasting, and tell the worker to register the adapter on
+        vLLM under ``model_id``.
         """
         if self._inference_engine_client is None:
             raise RuntimeError(
@@ -450,17 +530,29 @@ class WorkerDispatch:
 
         # Sync weights to inference engine
         self._prepare_for_weight_sync()
+        # Make the requested adapter live on every worker before broadcasting
+        # — otherwise we'd export some other tenant's LoRA weights to vLLM.
+        self.ensure_active_adapter("policy", model_id)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            self._broadcast_to_inference_engines(self._inference_engine_client)
+            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
-            # Non-colocated: pause generation to prevent in-flight requests from
-            # reading partially-updated weights during the NCCL broadcast.
-            await self._inference_engine_client.pause_generation()
-            try:
-                self._broadcast_to_inference_engines(self._inference_engine_client)
+            strategy = self.cfg.trainer.strategy
+            is_lora = self.cfg.trainer.policy.model.lora.rank > 0
+            if is_lora and not (
+                strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
+            ):
+                # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
+                self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                 self._finish_weight_sync()
-            finally:
-                await self._inference_engine_client.resume_generation()
+            else:
+                # Non-colocated single tenant: pause generation to prevent in-flight requests from
+                # reading partially-updated weights during the NCCL broadcast.
+                await self._inference_engine_client.pause_generation()
+                try:
+                    self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                    self._finish_weight_sync()
+                finally:
+                    await self._inference_engine_client.resume_generation()
