@@ -143,7 +143,17 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     else:
         args.enable_lora = False
 
-    # Add any extra engine_init_kwargs
+    # Speculative decoding (e.g. Multi-Token Prediction). Pass the dict straight through to vLLM's
+    # AsyncEngineArgs.speculative_config. For MTP (`{"method": "mtp", ...}`) vLLM loads the MTP heads
+    # from the same policy checkpoint, so SkyRL's weight sync keeps the draft aligned with the policy
+    # (the trained MTP head weights are exported by the Megatron bridge and loaded into the draft).
+    if ie_cfg.speculative_config is not None:
+        spec_cfg = get_config_as_dict(ie_cfg.speculative_config)
+        args.speculative_config = spec_cfg
+        logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
+
+    # Add any extra engine_init_kwargs (applied last so they can override anything above, including
+    # speculative_config, if a user needs full control).
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)

@@ -29,8 +29,40 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.utils.torch_utils import (
+    build_mtp_loss_mask,
+    build_mtp_next_token_labels,
+    masked_mean,
+)
 from skyrl.train.config import TrainerConfig
+
+
+def _mtp_logits_passthrough(
+    *,
+    hidden_states,
+    output_layer,
+    output_weight,
+    runtime_gather_output=None,
+    scale_logits=None,
+    **kwargs,
+):
+    """``output_processor`` hook for GPTModel that returns logits instead of the LM loss.
+
+    When Multi-Token Prediction is active we pass ``labels``/``loss_mask`` into ``GPTModel.forward``
+    so that ``process_mtp_loss`` runs and injects the MTP loss into the autograd graph (via
+    ``MTPLossAutoScaler`` on ``hidden_states``). But passing labels would normally make the model
+    return the *main* LM loss, whereas SkyRL needs the *logits* to compute its own PPO/GRPO/CE loss.
+
+    GPTModel invokes this hook after ``process_mtp_loss`` and returns whatever it produces, short-
+    circuiting the labels->loss path. We reproduce the stock ``labels is None`` logits path exactly
+    (see ``GPTModel._postprocess``) so all downstream SkyRL logic is unchanged: vocab-parallel
+    logits in ``[batch, seq, vocab]`` layout.
+    """
+    logits, _ = output_layer(hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output)
+    if scale_logits is not None:
+        logits = scale_logits(logits)
+    # [s b h] => [b s h], matching GPTModel's non-loss return.
+    return logits.transpose(0, 1).contiguous()
 
 
 class MegatronModelWrapper:
@@ -225,6 +257,32 @@ class MegatronModelWrapper:
             List[dict]: one metrics dict per micro-batch in order.
         """
         forward_backward_func = get_forward_backward_func()
+
+        # ------------------------------------------------------------------
+        # Multi-Token Prediction (MTP)
+        # ------------------------------------------------------------------
+        # If the model was built with MTP heads (policy.megatron_config.mtp_num_layers), train them
+        # alongside the policy by feeding next-token labels into GPTModel.forward so Megatron's
+        # process_mtp_loss runs and injects the MTP gradient via MTPLossAutoScaler. We only do this
+        # when actually training (not forward_only / logprob-only passes).
+        model_config = get_model_config(self.actor_module[0])
+        mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
+        if mtp_enabled:
+            from megatron.core.transformer.multi_token_prediction import (
+                MTPLossAutoScaler,
+                MTPLossLoggingHelper,
+            )
+
+            # Match the pipeline schedule's per-microbatch loss division (Megatron divides the
+            # main loss by num_microbatches before backward). The MTP autoscaler injects a constant
+            # gradient independent of the main loss value, so we scale it the same way to keep the
+            # MTP aux-loss gradient commensurate with the policy-loss gradient. mtp_loss_scaling_factor
+            # (set on the provider) is the higher-level knob for the MTP/policy loss ratio.
+            MTPLossAutoScaler.set_loss_scale(
+                torch.tensor(1.0 / max(1, len(micro_batches)), device=torch.cuda.current_device())
+            )
+            if "values" in MTPLossLoggingHelper.tracker:
+                MTPLossLoggingHelper.clean_loss_in_tracker()
 
         # Resolve loss function
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -440,11 +498,34 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
+            # When MTP is active, build next-token labels + loss mask in the SAME de-padded/packed
+            # space as new_sequences and pass them (plus the logits passthrough) so process_mtp_loss
+            # runs. We materialize labels on all ranks (pre_process=True) because they are consumed
+            # on the post_process / last pipeline stage, regardless of which stage owns the input.
+            mtp_kwargs = {}
+            if mtp_enabled:
+                labels_full = build_mtp_next_token_labels(sequences)
+                loss_mask_full = build_mtp_loss_mask(attention_mask)
+                if self.remove_microbatch_padding:
+                    mtp_labels = preprocess_packed_seqs(labels_full, attention_mask, pre_process=True)[0]
+                    mtp_loss_mask = preprocess_packed_seqs(loss_mask_full, attention_mask, pre_process=True)[0]
+                else:
+                    mtp_labels = remove_left_padding(labels_full, attention_mask, position_ids, pre_process=True)[0]
+                    mtp_loss_mask = remove_left_padding(loss_mask_full, attention_mask, position_ids, pre_process=True)[
+                        0
+                    ]
+                mtp_kwargs = dict(
+                    labels=mtp_labels,
+                    loss_mask=mtp_loss_mask,
+                    output_processor=_mtp_logits_passthrough,
+                )
+
             outputs = model(
                 new_sequences,
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                **mtp_kwargs,
             )
 
             if self.remove_microbatch_padding:
@@ -482,6 +563,22 @@ class MegatronModelWrapper:
             micro_batch_size=micro_batch_size,
             forward_only=forward_only,
         )
+
+        # Surface the MTP loss for logging. process_mtp_loss accumulates a per-layer loss into
+        # MTPLossLoggingHelper.tracker (summed across microbatches) on the last pipeline stage.
+        # Attach the mean MTP loss to the first microbatch's metrics so it rides along the existing
+        # PP broadcast + DP reduction below.
+        if mtp_enabled and mpu.is_pipeline_last_stage(ignore_virtual=True):
+            from megatron.core.transformer.multi_token_prediction import (
+                MTPLossLoggingHelper,
+            )
+
+            mtp_values = MTPLossLoggingHelper.tracker.get("values")
+            if mtp_values is not None and metrics_list and metrics_list[0] is not None:
+                mtp_mean = (mtp_values.sum() / (mtp_values.numel() * max(1, len(micro_batches)))).item()
+                metrics_list[0]["mtp_loss"] = mtp_mean
+            if mtp_values is not None:
+                MTPLossLoggingHelper.clean_loss_in_tracker()
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):

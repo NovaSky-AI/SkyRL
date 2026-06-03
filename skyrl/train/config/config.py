@@ -194,6 +194,21 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    mtp_num_layers: Optional[int] = None
+    """Number of Multi-Token Prediction (MTP) layers/heads to build on the model.
+
+    - ``None`` (default): honor the model's own HF config (``num_nextn_predict_layers``). For models
+      that ship MTP heads (e.g. GLM-4.7-Flash / DeepSeek-V3) this enables and trains them; for models
+      without MTP heads it is a no-op.
+    - An ``int``: explicitly override (e.g. ``0`` to force-disable MTP even for MTP-capable models).
+
+    When MTP layers are present, SkyRL adds the Megatron MTP loss to the training step so the heads
+    track the updated policy, and the heads are synced to vLLM for speculative decoding (set
+    ``generator.inference_engine.speculative_config`` accordingly)."""
+    mtp_loss_scaling_factor: float = 0.1
+    """Scaling coefficient for the MTP auxiliary loss (Megatron ``mtp_loss_scaling_factor``).
+    Only used when MTP layers are active. Higher values train the MTP heads more aggressively at the
+    cost of pulling on the shared trunk; the default matches Megatron/DeepSeek-V3."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -525,6 +540,13 @@ class InferenceEngineConfig(BaseConfig):
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
+    speculative_config: Optional[Dict[str, Any]] = None
+    """Speculative-decoding config passed through to vLLM (``AsyncEngineArgs.speculative_config``).
+    Use this to enable Multi-Token Prediction (MTP) draft decoding for faster rollout, e.g.
+    ``{"method": "mtp", "num_speculative_tokens": 1}``. With ``method="mtp"`` vLLM loads the MTP
+    heads from the *same* policy checkpoint, so SkyRL's weight sync keeps the draft in sync with
+    the trained policy (requires ``policy.megatron_config.mtp_num_layers`` > 0 on the training side
+    for the heads to actually be trained). ``None`` disables speculative decoding."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None

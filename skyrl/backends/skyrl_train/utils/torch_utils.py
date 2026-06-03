@@ -184,6 +184,44 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor | None, dim: int | None
     return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
+def build_mtp_next_token_labels(sequences: torch.Tensor) -> torch.Tensor:
+    """Build pre-shifted next-token labels for Multi-Token Prediction (MTP).
+
+    Megatron's MTP path (``process_mtp_loss``) expects ``labels`` in the same convention as
+    the main language-model loss: ``labels[t]`` is the token the model should predict at
+    position ``t`` (i.e. ``sequences[t + 1]``). Megatron then rolls these labels once more per
+    MTP layer so MTP layer ``k`` is supervised against token ``t + k + 2``.
+
+    The last position has no next token, so it is zeroed here; the corresponding loss-mask
+    entry is dropped by Megatron's own boundary handling (``roll_tensor`` zeros the wrapped
+    position), so it never contributes to the loss.
+
+    Args:
+        sequences: ``[batch, seq_len]`` token ids (per-row a single, contiguous sequence).
+
+    Returns:
+        ``[batch, seq_len]`` next-token labels (same dtype as ``sequences``).
+    """
+    labels = torch.roll(sequences, shifts=-1, dims=1)
+    labels[:, -1] = 0
+    return labels
+
+
+def build_mtp_loss_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Build the MTP loss mask from an attention mask.
+
+    We train the MTP heads on every real token of the sequence (next-token prediction over the
+    full prompt+response), mirroring standard MTP pretraining. ``attention_mask`` already marks
+    real (non-pad) tokens, so it doubles as the loss mask. Per-sequence boundaries (the final
+    real token, whose MTP target is invalid) are handled by Megatron's roll in
+    ``process_mtp_loss`` and need no special treatment here.
+
+    Returns a float tensor so it can flow through the same de-padding/packing transforms applied
+    to the token ids.
+    """
+    return attention_mask.to(torch.float32)
+
+
 def safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
     """
     Clamp the delta before exponentiating to avoid potential overflow.

@@ -326,9 +326,16 @@ class MegatronWorker:
         bf16=True,
         flash_attn=False,
         lora_config=None,
+        enable_mtp=True,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
+
+        Args:
+            enable_mtp: When True (policy worker), honor Multi-Token Prediction (MTP) heads —
+                either from ``megatron_config.mtp_num_layers`` or, if that is None, from the
+                model's own HF config (``num_nextn_predict_layers``). When False (ref worker /
+                inference-only flows), force MTP off so the extra layers are neither built nor run.
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -397,6 +404,25 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        # Multi-Token Prediction (MTP) head configuration.
+        # DeepSeek-V3 / GLM-4.7-Flash bridges set provider.mtp_num_layers from the HF config's
+        # num_nextn_predict_layers. We layer SkyRL's explicit config on top:
+        #   - enable_mtp=False (ref worker): force MTP off (the heads don't affect ref logprobs
+        #     and would only waste compute/memory).
+        #   - mtp_num_layers set: override the model default (0 force-disables).
+        #   - mtp_num_layers=None: keep whatever the bridge inferred from the model.
+        if not enable_mtp:
+            provider.mtp_num_layers = None
+        elif megatron_config.mtp_num_layers is not None:
+            provider.mtp_num_layers = megatron_config.mtp_num_layers or None
+        if getattr(provider, "mtp_num_layers", None):
+            provider.mtp_loss_scaling_factor = megatron_config.mtp_loss_scaling_factor
+            logger.info(
+                f"MTP enabled: mtp_num_layers={provider.mtp_num_layers}, "
+                f"mtp_loss_scaling_factor={provider.mtp_loss_scaling_factor}"
+            )
+
         provider.finalize()
 
         self.provider = provider
@@ -1250,6 +1276,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             self.cfg.ref.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
+            # Ref worker only needs main-model logprobs; MTP heads are irrelevant here.
+            enable_mtp=False,
         )
 
         self.actor_module = self.make_megatron_module(
