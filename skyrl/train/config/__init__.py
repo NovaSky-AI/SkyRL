@@ -6,6 +6,7 @@ from skyrl.train.config.config import (
     ClipCovConfig,
     CriticConfig,
     DataConfig,
+    DataLoaderConfig,
     DynamicSamplingConfig,
     EnvironmentConfig,
     FSDPConfig,
@@ -47,6 +48,7 @@ from skyrl.train.config.sft_config import (
 __all__ = [
     "SkyRLTrainConfig",
     "DataConfig",
+    "DataLoaderConfig",
     "TrainerConfig",
     "PolicyConfig",
     "CriticConfig",
