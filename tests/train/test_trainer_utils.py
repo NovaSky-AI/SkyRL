@@ -13,6 +13,7 @@ from unittest.mock import Mock, mock_open, patch
 import pytest
 import ray
 
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
     build_dataloader,
@@ -895,6 +896,36 @@ def test_build_dataloader_seeding(dummy_config):
     assert (
         first_batch1 != first_batch3
     ), f"Different seeds should produce different first batches, but both gave {first_batch1}"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_num_workers", "expected_persistent", "expected_start_method"),
+    [
+        pytest.param(["data.dataloader.num_workers=0"], 0, False, None, id="workerless"),
+        pytest.param(
+            ["data.dataloader.num_workers=2", "data.dataloader.persistent_workers=true"],
+            2,
+            True,
+            "spawn",
+            id="persistent-spawn-workers",
+        ),
+    ],
+)
+def test_build_dataloader_worker_config(
+    overrides: list[str],
+    expected_num_workers: int,
+    expected_persistent: bool,
+    expected_start_method: str | None,
+) -> None:
+    """build_dataloader passes num_workers/persistent_workers through and derives the spawn context."""
+    config = SkyRLTrainConfig.from_cli_overrides(["trainer.train_batch_size=2", *overrides])
+    dataloader = build_dataloader(config, MultiItemDataset(size=8), is_train=True)
+    assert dataloader.num_workers == expected_num_workers
+    assert dataloader.persistent_workers == expected_persistent
+    start_method = (
+        None if dataloader.multiprocessing_context is None else dataloader.multiprocessing_context.get_start_method()
+    )
+    assert start_method == expected_start_method
 
 
 def test_validate_generator_output_invalid_rewards():
