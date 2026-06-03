@@ -309,7 +309,7 @@ fi
   trainer.micro_train_batch_size_per_gpu="$MICRO_TRAIN_BATCH_SIZE_PER_GPU" \
   trainer.flash_attn=true \
   trainer.policy.record_memory=true \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   trainer.ckpt_interval="$CKPT_INTERVAL" \
   trainer.hf_save_interval="$HF_SAVE_INTERVAL" \
   trainer.policy.optimizer_config.lr=1.0e-6 \

@@ -83,6 +83,7 @@ def _api_server(port: int, backend_config: dict | None = None):
         cmd = [
             "uv",
             "run",
+            "--isolated",
             "--extra",
             "tinker",
             "--extra",

@@ -45,7 +45,7 @@ class MegatronModelWrapper:
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
-        self.use_sample_packing = self.cfg.use_sample_packing
+        self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -117,14 +117,14 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
-                    use_sample_packing=self.use_sample_packing,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
@@ -148,7 +148,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,
@@ -416,14 +416,14 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
-                    use_sample_packing=self.use_sample_packing,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
@@ -447,7 +447,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,

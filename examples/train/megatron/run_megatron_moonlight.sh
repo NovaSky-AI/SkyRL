@@ -57,7 +57,7 @@ uv run --isolated --extra megatron --with blobfile -m skyrl.train.entrypoints.ma
   trainer.ref.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
   trainer.ref.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
-  trainer.use_sample_packing=true \
+  trainer.remove_microbatch_padding=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \

@@ -260,11 +260,12 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
-        if is_lora:
+        if is_lora and cfg.trainer.strategy == "megatron":
             # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
             # the freshly-initialised LoRA into a per-worker pristine slot, then
             # register the first adapter under `model_id`. Must happen while the
             # model + optimizer are still GPU-resident (i.e. before the offload).
+            # currently, this is only supported for megatron backend
             ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
@@ -1009,15 +1010,17 @@ class SkyRLTrainBackend(AbstractBackend):
                 model_input = prepared_batch.all_model_inputs[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
-                request_payload = {
-                    "json": {
-                        "model": per_request_models[i],
-                        "prompt": model_input.model_dump(),
-                        "num_samples": 1,
-                        "sampling_params": sampling_params.model_dump(),
-                    }
+                json_body = {
+                    "model": per_request_models[i],
+                    "prompt": model_input.model_dump(),
+                    "num_samples": 1,
+                    "sampling_params": sampling_params.model_dump(),
                 }
-                tasks.append(self._inference_engine_client.sample(request_payload))
+
+                session_id = prepared_batch.all_session_ids[i]
+                if session_id is not None:
+                    json_body["session_id"] = session_id
+                tasks.append(self._inference_engine_client.sample({"json": json_body}))
 
             try:
                 return await asyncio.gather(*tasks, return_exceptions=True)

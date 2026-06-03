@@ -48,6 +48,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
 )
@@ -805,6 +806,9 @@ class RayPPOTrainer:
         training_input.metadata["policy_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
             uids, self.cfg.trainer.policy_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
         )
+        # Per-prompt boundaries (used by the `prompt_mean` loss reduction). Policy-only,
+        # since advantage normalization only applies to the policy.
+        training_input.metadata["policy_prompt_boundaries"] = compute_prompt_boundaries(uids)
         if self.cfg.trainer.critic.model.path is not None:
             training_input.metadata["critic_mini_batch_boundaries"] = compute_prompt_mini_batch_boundaries(
                 uids, self.cfg.trainer.critic_mini_batch_size, train_batch_size, is_stepwise, n_samples_per_prompt
@@ -1218,6 +1222,7 @@ class RayPPOTrainer:
         self,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
+        prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
     ) -> TrainingInputBatch:
         advantages = data["advantages"]
         response_mask = data["response_mask"]
@@ -1234,12 +1239,22 @@ class RayPPOTrainer:
         normalized_advantages = torch.zeros_like(advantages)
         for start_idx, end_idx in mini_batch_boundaries:
             mini_batch = data[start_idx:end_idx]
+            # For prompt_mean, select the prompt boundaries falling within this mini-batch
+            # and rebase them to mini-batch-relative indices.
+            mb_prompt_boundaries = None
+            if prompt_boundaries is not None:
+                mb_prompt_boundaries = [
+                    (p_start - start_idx, p_end - start_idx)
+                    for p_start, p_end in prompt_boundaries
+                    if start_idx <= p_start < end_idx
+                ]
             normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
                 advantages=mini_batch["advantages"],
                 loss_mask=mini_batch["loss_mask"],
                 loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
                 micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
                 max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+                prompt_boundaries=mb_prompt_boundaries,
             )
 
         data["advantages"] = normalized_advantages
@@ -1266,7 +1281,8 @@ class RayPPOTrainer:
 
         if model == "policy":
             # Normalize advantages for policy training; critic training does not need this
-            data = self._normalize_advantages(data, boundaries)
+            prompt_boundaries = data.metadata.get("policy_prompt_boundaries")
+            data = self._normalize_advantages(data, boundaries, prompt_boundaries)
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 

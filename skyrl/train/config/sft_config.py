@@ -96,6 +96,24 @@ class SFTConfig(BaseConfig):
         # Check for mutual exclusion before constructing the full config
         if "num_epochs" in overrides and "num_steps" in overrides:
             raise ValueError("Cannot specify both num_epochs and num_steps")
+        # Accept the deprecated ``use_sample_packing`` key as an alias for
+        # ``remove_microbatch_padding``. Remap it before construction so the
+        # strict key validation does not reject the old name.
+        if "use_sample_packing" in overrides:
+            if "remove_microbatch_padding" in overrides:
+                raise ValueError(
+                    "Specify only one of use_sample_packing (deprecated) and remove_microbatch_padding, not both."
+                )
+            import warnings
+
+            warnings.warn(
+                "use_sample_packing has been renamed to remove_microbatch_padding; "
+                "use remove_microbatch_padding instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            overrides["remove_microbatch_padding"] = overrides["use_sample_packing"]
+            del overrides["use_sample_packing"]
         return cls.from_dict_config(overrides)
 
     # ---- Reused SkyRL config objects ----
@@ -195,7 +213,7 @@ class SFTConfig(BaseConfig):
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
 
     # ---- Packing ----
-    use_sample_packing: bool = True  # Pack multiple sequences per batch (requires flash_attn)
+    remove_microbatch_padding: bool = True  # Pack multiple sequences per batch (requires flash_attn)
 
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
@@ -266,7 +284,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             )
         # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
-            assert cfg.use_sample_packing, "context parallel is only supported with sample packing"
+            assert cfg.remove_microbatch_padding, "context parallel is only supported with remove_microbatch_padding"
         # check that sequence parallel is not configured outside of megatron
         assert cfg.sequence_parallel_size == 1, (
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
@@ -314,7 +332,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
-    cfg.trainer.use_sample_packing = sft_cfg.use_sample_packing
+    cfg.trainer.remove_microbatch_padding = sft_cfg.remove_microbatch_padding
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger

@@ -188,7 +188,7 @@ class MegatronConfig(BaseConfig):
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
-    empty_cuda_cache: Optional[bool] = None
+    empty_cuda_cache: Optional[bool] = True
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
@@ -249,6 +249,15 @@ class PolicyConfig(BaseConfig):
     language_model_only: bool = False
     """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
     Loads only the language model backbone using AutoModelForCausalLM."""
+    inference_only_init: bool = False
+    """When True, set up the policy worker for inference-only flows (forward + weight
+    sync, no train_step), skipping the training-only state that would otherwise OOM
+    memory-constrained nodes (e.g. large MoE on 4xH100). NOT valid for actual training.
+    Backend-specific behavior:
+    - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
+      that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
+    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
+      materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass
@@ -657,7 +666,8 @@ class TrainerConfig(BaseConfig):
     -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
     Applies to both forward and training micro-batching."""
     update_ref_every_epoch: bool = False
-    use_sample_packing: bool = True
+    remove_microbatch_padding: bool = True
+    """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""
     eval_batch_size: int = 1024
     eval_before_train: bool = True
     eval_interval: int = 5
@@ -858,6 +868,27 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
+        # Accept the deprecated ``trainer.use_sample_packing`` key as an alias
+        # for ``trainer.remove_microbatch_padding``. Remap it before
+        # construction so the strict key validation does not reject the old
+        # name.
+        if "trainer" in overrides and "use_sample_packing" in overrides.trainer:
+            if "remove_microbatch_padding" in overrides.trainer:
+                raise ValueError(
+                    "Specify only one of trainer.use_sample_packing (deprecated) and "
+                    "trainer.remove_microbatch_padding, not both."
+                )
+            import warnings
+
+            warnings.warn(
+                "trainer.use_sample_packing has been renamed to "
+                "trainer.remove_microbatch_padding; use "
+                "trainer.remove_microbatch_padding instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            overrides.trainer["remove_microbatch_padding"] = overrides.trainer["use_sample_packing"]
+            del overrides.trainer["use_sample_packing"]
         return cls.from_dict_config(overrides)
 
 

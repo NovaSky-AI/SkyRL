@@ -33,6 +33,24 @@ class TestFSDP2StrategyAlias:
         assert cfg.strategy == "fsdp"
 
 
+class TestUseSamplePackingAlias:
+    """`use_sample_packing` is accepted as a deprecated alias for `remove_microbatch_padding`."""
+
+    def test_use_sample_packing_remapped_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = _sft_cfg_from_overrides(["use_sample_packing=true"])
+        assert cfg.remove_microbatch_padding is True
+
+    def test_use_sample_packing_remapped_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="use_sample_packing.*has been renamed"):
+            cfg = SFTConfig.from_cli_overrides({"use_sample_packing": False})
+        assert cfg.remove_microbatch_padding is False
+
+    def test_use_sample_packing_with_new_key_raises(self):
+        with pytest.raises(ValueError, match="only one of use_sample_packing"):
+            _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
+
+
 class TestTopLevelOverrides:
     """Top-level SFTConfig fields bridge to the correct SkyRLTrainConfig paths."""
 
@@ -41,14 +59,14 @@ class TestTopLevelOverrides:
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.model.path == "test/my-model"
 
-    def test_use_sample_packing_propagates(self):
-        cfg = _sft_cfg_from_overrides(["use_sample_packing=false"])
+    def test_remove_microbatch_padding_propagates(self):
+        cfg = _sft_cfg_from_overrides(["remove_microbatch_padding=false"])
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
-        assert skyrl_cfg.trainer.use_sample_packing is False
+        assert skyrl_cfg.trainer.remove_microbatch_padding is False
 
-        cfg_on = _sft_cfg_from_overrides(["use_sample_packing=true"])
+        cfg_on = _sft_cfg_from_overrides(["remove_microbatch_padding=true"])
         skyrl_cfg_on = build_skyrl_config_for_sft(cfg_on)
-        assert skyrl_cfg_on.trainer.use_sample_packing is True
+        assert skyrl_cfg_on.trainer.remove_microbatch_padding is True
 
 
 class TestMegatronConfigOverrides:

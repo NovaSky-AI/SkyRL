@@ -47,13 +47,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = True
+    cfg.trainer.remove_microbatch_padding = True
     cfg.generator.inference_engine.distributed_executor_backend = "ray"
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
-    # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
-    # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
-    # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
+    # we should add an assert that if you set remove_microbatch_padding=False flash attn can accidentally be used
+    # and that we enable nvte fused attn for moonlight models with remove_microbatch_padding=True
+    # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
     is_mla_model = "moonlight" in model_name.lower() or "glm-4" in model_name.lower()
     if is_mla_model:
@@ -67,11 +67,20 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # Hopper-only, so there is no viable TE attention backend for
         # MLA + sample_packing on Ada/Ampere.  Fall back to BSHD.
         if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9:
-            cfg.trainer.use_sample_packing = False
+            cfg.trainer.remove_microbatch_padding = False
     if "qwen3.5" in model_name.lower():
-        # sample packing not yet supported for GDN
+        # packed sequence not yet supported for GDN
         # https://github.com/NVIDIA/Megatron-LM/pull/2644
-        cfg.trainer.use_sample_packing = False
+        cfg.trainer.remove_microbatch_padding = False
+    # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
+    # the fp32 master + AdamW state on GPU at init (~6x model size), which
+    # OOMs on 4xH100 before forward ever runs. These tests only forward +
+    # weight-sync, so skip optimizer construction entirely.
+    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
+        "nemotron-3-nano" in model_name.lower()
+    )
+    if is_large_moe:
+        cfg.trainer.policy.inference_only_init = True
     validate_cfg(cfg)
     return cfg
 
@@ -89,7 +98,13 @@ def _engine_overrides_for_model(model_name: str) -> dict:
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
     if "Nemotron-3-Nano" in model_name:
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
-        overrides["gpu_memory_utilization"] = 0.6
+        # Megatron policy init also needs room alongside vLLM on the same
+        # GPU, so lower vLLM's pool footprint.
+        overrides["gpu_memory_utilization"] = 0.5
+    # Large MoE: Megatron policy init also needs room alongside vLLM on the
+    # same GPU, so lower vLLM's pool footprint.
+    if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
+        overrides["gpu_memory_utilization"] = 0.5
     return overrides
 
 
@@ -205,19 +220,44 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
+        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
+        # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
+        # TP=1 OOMed in the EP alltoall because dense layers were replicated
+        # on every GPU; TP=4 shards them 4-way and matches the qwen3.5-35b
+        # layout below. AdamW optimizer is skipped entirely via is_large_moe
+        # in get_test_actor_config (forward-only test), and vLLM gmu is
+        # lowered to 0.5 so the policy shard + vLLM pool fit on each H100.
         pytest.param(
+            4,
             1,
-            1,
-            1,
-            8,
             1,
             4,
-            8,
+            1,
+            4,
+            4,
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
             5e-1,
             5e-2,
-            id="nemotron3-nano_tp4_ep8",
-            marks=pytest.mark.skip(reason="skip full size nemotron3-nano test until we migrate to h100 CI"),
+            id="nemotron3-nano_tp4_ep4_h100",
+            marks=pytest.mark.h100,
+        ),
+        # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:
+        # TP=4 EP=4 ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs
+        # (colocated). Thresholds mirror the GLM-4.7-Flash entry; tune as
+        # we find what the actual logprob diffs look like.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "Qwen/Qwen3.5-35B-A3B",
+            3e-1,
+            5e-2,
+            id="qwen3.5-35b-a3b_h100_tp4_ep4",
+            marks=pytest.mark.h100,
         ),
     ],
 )
@@ -250,7 +290,7 @@ async def test_logprobs_matching_roundtrip(
             use_local=True,
             colocate_all=True,
             backend="vllm",
-            sleep_level=1,
+            sleep_level=2,  # full sleep — this test explicitly syncs weights
             gpu_memory_utilization=engine_overrides["gpu_memory_utilization"],
             engine_init_kwargs=engine_overrides["engine_init_kwargs"],
         ) as engines:

@@ -26,7 +26,7 @@ The server hosts the Tinker API and manages a background engine that processes t
 
 ```bash
 uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
-    --base-model "Qwen/Qwen3-0.6B" \
+    --base-model "Qwen/Qwen3-4B-Instruct-2507" \
     --backend fsdp
 ```
 
@@ -58,7 +58,7 @@ cd tinker-cookbook
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
+    model_name="Qwen/Qwen3-4B-Instruct-2507" \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 

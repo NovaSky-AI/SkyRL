@@ -5,6 +5,7 @@
     "quickstart",
     "architecture",
     "multi_tenancy",
+    "session_based_routing",
     "cookbook",
     "configuration",
     "limitations"
