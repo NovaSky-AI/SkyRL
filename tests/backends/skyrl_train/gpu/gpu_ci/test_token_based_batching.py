@@ -2,13 +2,15 @@
 Tests for max_tokens_per_microbatch (token-based micro-batching).
 
 Tests verify:
-1. Unit tests for balanced_binpacking and TokenBasedBatchIterator
-2. FSDP forward_backward with token-based batching produces equivalent loss
-3. Megatron forward with token-based batching produces equivalent results
-4. Performance comparison (token-based vs sample-based)
+1. FSDP forward_backward with token-based batching produces equivalent loss
+2. Megatron forward with token-based batching produces equivalent results
+3. Performance comparison (token-based vs sample-based)
+
+Unit tests for balanced_binpacking and TokenBasedBatchIterator (CPU only) live in
+tests/backends/skyrl_train/test_token_based_batching_utils.py
 
 Run with:
-uv run --isolated --extra dev --extra fsdp -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_token_based_batching.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_token_based_batching.py
 """
 
 import time
@@ -17,148 +19,13 @@ import pytest
 import ray
 import torch
 
+from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.workers.worker_utils import (
-    TokenBasedBatchIterator,
-    balanced_binpacking,
-    get_microbatch_iterator,
-)
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
-
-# ─── Unit Tests (CPU only, no Ray/GPU needed) ───────────────────────────────
-
-
-class TestBalancedBinpacking:
-    def test_basic_packing(self):
-        result = balanced_binpacking([10, 10, 5, 5], 15)
-        assert len(result) == 2
-        # Each microbatch should have total <= 15
-        for mb in result:
-            total = sum([10, 10, 5, 5][i] for i in mb)
-            assert total <= 15
-
-    def test_single_large_item(self):
-        result = balanced_binpacking([10, 1, 1, 1, 1, 1], 10)
-        assert len(result) == 2
-        # The large item should be alone
-        for mb in result:
-            total = sum([10, 1, 1, 1, 1, 1][i] for i in mb)
-            assert total <= 10
-
-    def test_all_items_equal(self):
-        result = balanced_binpacking([5, 5, 5, 5], 10)
-        assert len(result) == 2
-        for mb in result:
-            total = sum(5 for _ in mb)
-            assert total <= 10
-
-    def test_single_item(self):
-        result = balanced_binpacking([10], 15)
-        assert len(result) == 1
-        assert result[0] == [0]
-
-    def test_all_indices_covered(self):
-        token_counts = [8, 3, 5, 6, 2, 7]
-        result = balanced_binpacking(token_counts, 11)
-        all_indices = sorted(idx for mb in result for idx in mb)
-        assert all_indices == list(range(len(token_counts)))
-
-    def test_no_overflow(self):
-        token_counts = [8, 3, 5, 6, 2, 7]
-        max_tokens = 11
-        result = balanced_binpacking(token_counts, max_tokens)
-        for mb in result:
-            total = sum(token_counts[i] for i in mb)
-            assert total <= max_tokens
-
-
-class TestTokenBasedBatchIterator:
-    def _make_batch(self, seq_lens, num_actions=4):
-        """Create a dummy TrainingInputBatch with variable sequence lengths."""
-        batch_size = len(seq_lens)
-        max_seq_len = max(seq_lens)
-
-        sequences = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
-        attention_mask = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
-        for i, seq_len in enumerate(seq_lens):
-            sequences[i, :seq_len] = torch.randint(0, 100, (seq_len,), dtype=int, device="cpu")
-            attention_mask[i, :seq_len] = 1
-
-        data = TrainingInputBatch(
-            {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
-                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
-                "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
-                "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
-                "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
-                "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
-                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
-            }
-        )
-        data.metadata = {"response_length": num_actions}
-        return data
-
-    def test_iterator_yields_all_samples(self):
-        batch = self._make_batch([10, 10, 5, 5])
-        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
-
-        all_indices = []
-        for mb_indices in iterator._microbatches:
-            all_indices.extend(mb_indices)
-        assert sorted(all_indices) == [0, 1, 2, 3]
-
-    def test_iterator_respects_token_limit(self):
-        batch = self._make_batch([10, 10, 5, 5])
-        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
-
-        for microbatch in iterator:
-            token_count = microbatch["attention_mask"].sum().item()
-            # Allow some slack for padding microbatches
-            if microbatch["loss_mask"].sum() > 0:  # not a padding batch
-                assert token_count <= 15
-
-    def test_len_matches_iteration(self):
-        batch = self._make_batch([10, 10, 5, 5])
-        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
-        count = sum(1 for _ in iterator)
-        assert count == len(iterator)
-
-    def test_reorder_and_combine(self):
-        """Verify that reorder_and_combine_batches restores original order."""
-        batch = self._make_batch([10, 3, 8, 5])
-        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
-
-        # Simulate forward outputs (just use the microbatch itself as output)
-        outputs = []
-        for microbatch in iterator:
-            outputs.append(microbatch)
-
-        reordered = iterator.reorder_and_combine_batches(outputs)
-        # Check that the sequences match the original order
-        for i in range(batch.batch_size):
-            assert torch.equal(reordered["sequences"][i], batch["sequences"][i])
-
-    def test_get_microbatch_iterator_factory(self):
-        batch = self._make_batch([10, 10, 5, 5])
-
-        # Token-based
-        it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=15)
-        assert isinstance(it, TokenBasedBatchIterator)
-
-        # Sample-based (disabled)
-        from skyrl.backends.skyrl_train.workers.worker_utils import (
-            SampleBasedBatchIterator,
-        )
-
-        it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=-1)
-        assert isinstance(it, SampleBasedBatchIterator)
-
 
 # ─── GPU Tests: FSDP ─────────────────────────────────────────────────────────
 
@@ -240,14 +107,14 @@ async def test_fsdp_token_based_forward_backward(ray_init_fixture, worker_type):
         # Verify results have expected structure
         loss_key = "policy_loss" if worker_type == "policy" else "critic_loss"
         for i, r in enumerate(results_token):
-            assert isinstance(r, dict), f"Result should be a dict, got {type(r)}"
-            assert loss_key in r, f"Missing {loss_key} in result"
-            print(f"  Rank {i}: token-based {loss_key}={r[loss_key]:.6f}")
+            assert isinstance(r, WorkerOutput), f"Result should be a WorkerOutput, got {type(r)}"
+            assert loss_key in r.metrics, f"Missing {loss_key} in result metrics"
+            print(f"  Rank {i}: token-based {loss_key}={r.metrics[loss_key]:.6f}")
 
             if worker_type == "policy":
-                assert "loss_metrics/clip_ratio" in r
-                assert "policy_entropy" in r
-                assert "loss_fn_outputs" in r
+                assert "loss_metrics/clip_ratio" in r.metrics
+                assert "policy_entropy" in r.metrics
+                assert len(r.loss_fn_outputs) > 0
 
         # Also verify optim_step works
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
@@ -315,8 +182,8 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
 
         # With uniform sequences and 1 sample per microbatch, losses should match closely
         for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
-            bl = r_baseline["policy_loss"]
-            tl = r_token["policy_loss"]
+            bl = r_baseline.metrics["policy_loss"]
+            tl = r_token.metrics["policy_loss"]
             print(f"  Rank {i}: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl-tl):.6f}")
             assert abs(bl - tl) < 1e-4, f"Loss mismatch on rank {i}: {bl} vs {tl}"
 
@@ -442,7 +309,7 @@ async def test_megatron_token_based_forward(ray_init_fixture):
     Compares forward output between sample-based and token-based batching.
     """
     from skyrl.backends.skyrl_train.distributed.dispatch import (
-        concatenate_outputs_after_mesh_dispatch,
+        loss_fn_outputs_to_tensor,
     )
     from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
 
@@ -464,7 +331,8 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
         results_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         results_baseline = ray.get(results_refs)
-        output_baseline = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results_baseline)["output"]
+        baseline_output = WorkerOutput.cat(actor_group.actor_infos, results_baseline)
+        output_baseline = loss_fn_outputs_to_tensor(baseline_output.loss_fn_outputs, key="logprobs")
 
         ray.shutdown()
         ray_init_for_tests()
@@ -483,7 +351,8 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
         results_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         results_token = ray.get(results_refs)
-        output_token = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results_token)["output"]
+        token_output = WorkerOutput.cat(actor_group.actor_infos, results_token)
+        output_token = loss_fn_outputs_to_tensor(token_output.loss_fn_outputs, key="logprobs")
 
         # Compare log probs
         max_diff = torch.max(torch.abs(output_baseline - output_token)).item()
@@ -500,37 +369,62 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
 @pytest.mark.asyncio
 @pytest.mark.megatron
-async def test_megatron_token_based_train(ray_init_fixture):
+async def test_megatron_token_based_loss_equivalence(ray_init_fixture):
     """
-    Test that training with token-based batching works correctly for Megatron (TP=2, PP=1).
+    Test that the policy loss from forward_backward matches between sample-based
+    and token-based batching for Megatron (TP=2, PP=2).
+
+    The loss is normalized over the full mini-batch, so packing samples into
+    token-based microbatches (rather than fixed-size sample-based microbatches)
+    should produce an equivalent loss up to numerical tolerance.
     """
+    from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
+
     try:
         seq_lens = [30, 30, 15, 15, 30, 30, 15, 15]
+
+        def _make_cfg(max_tokens_per_microbatch):
+            cfg = _get_megatron_test_config(tp=2, pp=2, gpus=4)
+            cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
+            cfg.trainer.train_batch_size = len(seq_lens)
+            cfg.trainer.policy_mini_batch_size = len(seq_lens)
+            cfg.trainer.algorithm.use_kl_loss = False
+            return cfg
+
+        # Run 1: sample-based baseline
         batch = _make_variable_length_batch(seq_lens, num_actions=4)
         batch.metadata["global_step"] = 0
-
-        cfg = _get_megatron_test_config(tp=2, pp=1, gpus=2)
-        cfg.trainer.max_tokens_per_microbatch = 35
-        cfg.trainer.train_batch_size = len(seq_lens)
-        cfg.trainer.policy_mini_batch_size = 4
-        cfg.trainer.algorithm.use_kl_loss = False
-
+        cfg_baseline = _make_cfg(max_tokens_per_microbatch=-1)
         actor_group = init_worker_with_type(
             "policy",
             shared_pg=None,
             colocate_all=False,
-            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
+            num_gpus_per_node=cfg_baseline.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg_baseline,
         )
+        results_baseline = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
 
-        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
-        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        ray.shutdown()
+        ray_init_for_tests()
 
-        for result in results:
-            assert isinstance(result, dict), "Result should be a dictionary"
-            assert "policy_loss" in result
-            assert "policy_entropy" in result
-            print(f"  policy_loss={result['policy_loss']:.6f}")
+        # Run 2: token-based (packs 2 short seqs or 1 long seq per microbatch)
+        batch = _make_variable_length_batch(seq_lens, num_actions=4)
+        batch.metadata["global_step"] = 0
+        cfg_token = _make_cfg(max_tokens_per_microbatch=35)
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg_token.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg_token,
+        )
+        results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+
+        for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
+            bl = r_baseline.metrics["policy_loss"]
+            tl = r_token.metrics["policy_loss"]
+            print(f"  Rank {i}: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl - tl):.6f}")
+            assert abs(bl - tl) < 1e-3, f"Loss mismatch on rank {i}: {bl} vs {tl}"
 
     finally:
         ray.shutdown()
