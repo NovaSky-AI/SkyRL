@@ -55,9 +55,7 @@ def _build_packed_targets(
                 if seg_idx + 1 >= len(cu_padded_cpu):
                     raise ValueError("sub_seq_lengths contains more sub-sequences than packed_seq_params")
                 packed_start = cu_padded_cpu[seg_idx]
-                targets[packed_start : packed_start + seq_len] = sequences[
-                    row_idx, row_offset : row_offset + seq_len
-                ]
+                targets[packed_start : packed_start + seq_len] = sequences[row_idx, row_offset : row_offset + seq_len]
                 row_offset += cu_padded_cpu[seg_idx + 1] - cu_padded_cpu[seg_idx]
                 seg_idx += 1
         if seg_idx != len(cu_padded_cpu) - 1:

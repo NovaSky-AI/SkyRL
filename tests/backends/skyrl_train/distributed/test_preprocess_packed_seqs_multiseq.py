@@ -359,9 +359,9 @@ class TestMultiSeqCPLayout:
                     front = rank_tokens[packed_start_idx : packed_start_idx + half_seqlen]
                     back = rank_tokens[packed_start_idx + half_seqlen : packed_start_idx + local_segment_len]
                     tmp[cp_rank * half_seqlen : (cp_rank + 1) * half_seqlen] = front
-                    tmp[padded_segment_len - (cp_rank + 1) * half_seqlen : padded_segment_len - cp_rank * half_seqlen] = (
-                        back
-                    )
+                    tmp[
+                        padded_segment_len - (cp_rank + 1) * half_seqlen : padded_segment_len - cp_rank * half_seqlen
+                    ] = back
                 output[row_idx, dest_off : dest_off + padded_segment_len] = tmp
 
         return output
