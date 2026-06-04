@@ -98,6 +98,7 @@ def _api_server(port: int, db_path: str, backend_config: dict | None = None):
         cfg = dict(backend_config or BACKEND_CONFIG)
         cmd = [
             "uv", "run", "--extra", "tinker", "--extra", "megatron",
+            "--isolated",
             "-m", "skyrl.tinker.api",
             "--host", "0.0.0.0",
             "--port", str(port),

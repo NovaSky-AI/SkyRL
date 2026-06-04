@@ -39,13 +39,13 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = True
+    cfg.trainer.remove_microbatch_padding = True
     cfg.generator.inference_engine.distributed_executor_backend = "mp"
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
-    # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
-    # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
-    # need to enable nvte fused attn for router replay tests when using moonlight models with use_sample_packing=True
+    # we should add an assert that if you set remove_microbatch_padding=False flash attn can accidentally be used
+    # and that we enable nvte fused attn for moonlight models with remove_microbatch_padding=True
+    # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
     if "Moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:

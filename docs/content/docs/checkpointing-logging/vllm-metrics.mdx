@@ -1,0 +1,107 @@
+---
+title: "vLLM Engine Metrics"
+---
+
+SkyRL can route vLLM's engine-level metrics (queue depth, KV cache usage,
+throughput, latency, prefix-cache hit rate) through Ray's per-node Prometheus
+metrics agents. A small fixed subset is also scraped once per training step
+and merged into the trainer's wandb payload.
+
+## Enabling
+
+This is **on by default**. To disable it:
+
+```yaml
+generator:
+  inference_engine:
+    enable_ray_prometheus_stats: false
+```
+
+When enabled, vLLM's `RayPrometheusStatLogger` is installed on every engine. Each
+engine reports its stats through `ray.util.metrics`, and Ray's per-node
+metrics agent exposes them at `http://<node-ip>:<MetricsExportPort>/metrics`
+in Prometheus text format. 
+
+## Inference path support
+
+| Inference path                                  | Supported |
+| ----------------------------------------------- | --------- |
+| New inference (`_SKYRL_USE_NEW_INFERENCE=1`, default) | Yes  |
+| Old inference + `generator.async_engine=true`   | Yes       |
+| Old inference + `generator.async_engine=false`  | **No**    |
+
+The new inference path ([vllm_server_actor.py:329-339](skyrl/backends/skyrl_train/inference_servers/vllm_server_actor.py#L329-L339))
+always uses `AsyncLLMEngine` and wires the stat logger unconditionally.
+
+The legacy path supports it only when `async_engine=true`
+([vllm_engine.py:359-370](skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py#L359-L370)).
+The synchronous `VLLMInferenceEngine` pops the flag and emits a warning
+([vllm_engine.py:240-247](skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py#L240-L247)):
+vLLM's sync `LLM` class doesn't accept `stat_loggers`. Set
+`generator.async_engine=true` if you need engine metrics on the legacy path.
+
+## Metrics logged to wandb
+
+When the flag is on, the trainer constructs a `VLLMMetricsScraper`
+([trainer.py:122-124](skyrl/train/trainer.py#L122-L124)) that scrapes every
+alive Ray node's metrics endpoint once per training step and merges its
+output into the wandb log payload — the same payload used for training
+metrics, so the keys appear under whatever logger backend is configured
+(`wandb`, `mlflow`, `swanlab`, `tensorboard`, or `console`).
+
+Both `Trainer` and `FullyAsyncTrainer` log these:
+
+| Key                                | Source                       | Aggregation                |
+| ---------------------------------- | ---------------------------- | -------------------------- |
+| `vllm/num_requests_running`        | gauge                        | sum across replicas        |
+| `vllm/num_requests_waiting`        | gauge                        | sum across replicas        |
+| `vllm/kv_cache_usage_perc`         | gauge                        | mean across replicas       |
+| `vllm/generation_throughput_tok_s` | counter delta / Δt           | summed before differencing |
+| `vllm/prompt_throughput_tok_s`     | counter delta / Δt           | summed before differencing |
+| `vllm/prefix_cache_hit_rate`       | hits Δ / queries Δ           | summed before ratio        |
+| `vllm/ttft_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
+| `vllm/tpot_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
+
+Rate- and ratio-style metrics need two consecutive samples to take a delta,
+so they appear starting from the **second** training step. Counter resets
+(e.g. engine restart) are skipped rather than reported as negative rates.
+
+The full set of vLLM metrics is still available via the Prometheus endpoints
+themselves — only this curated subset is forwarded to wandb. The selection
+lives in [vllm_metrics_scraper.py:27-51](skyrl/train/utils/vllm_metrics_scraper.py#L27-L51).
+
+## Querying additional metrics
+
+The curated subset above is only what SkyRL forwards to wandb. Every metric the
+vLLM engine exports is still available on the same Ray metrics endpoints, so you
+can query anything vLLM emits — not just the keys in the table.
+
+To actually query these over time, point a Prometheus server at Ray's metrics
+endpoints (Ray exposes them for exactly this) and use PromQL.
+
+Names are sanitized on the way out: vLLM's `:` becomes `_`, and Ray's metrics
+agent prepends `ray_`. So vLLM's `vllm:kv_cache_usage_perc` is exported as
+`ray_vllm_kv_cache_usage_perc`, and histograms expose `_sum` / `_count` /
+`_bucket` samples.
+
+### Example: KV cache block lifetime
+
+vLLM can emit KV-cache **residency** histograms — block lifetime (allocation →
+eviction), idle time before eviction, and reuse gaps. These are **off by
+default**; start the engine with `--kv-cache-metrics` (they also require log
+stats to be enabled, and are sampled at 1% of blocks via
+`--kv-cache-metrics-sample`). Once on, the series are
+`ray_vllm_kv_block_lifetime_seconds_{sum,count,bucket}`.
+
+Because it's a histogram, query it with `histogram_quantile` over the bucket
+rate — e.g. p95 block lifetime over a 5m window:
+
+```text
+# p95 KV block lifetime
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(ray_vllm_kv_block_lifetime_seconds_bucket[5m])
+  )
+)
+```

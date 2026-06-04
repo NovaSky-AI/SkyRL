@@ -40,7 +40,7 @@ def test_hf_model_wrapper_fwd_with_sample_packing(mock_logprobs_from_logits):
         use_flash_attention_2=True,
         bf16=False,
         sequence_parallel_size=1,
-        use_sample_packing=True,
+        remove_microbatch_padding=True,
     )
     model.model.eval()
     model.model.to("cuda")
@@ -75,7 +75,7 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
         use_flash_attention_2=True,
         bf16=False,
         sequence_parallel_size=1,
-        use_sample_packing=False,
+        remove_microbatch_padding=False,
     )
     model.model.eval()
     model.model.to("cuda")
@@ -105,7 +105,7 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
 
 @ray.remote(num_gpus=1)
 class ActorTask:
-    def __init__(self, rank, world_size, sequence_parallel_size, use_sample_packing):
+    def __init__(self, rank, world_size, sequence_parallel_size, remove_microbatch_padding):
         self.rank = rank
         self.world_size = world_size
         self.sequence_parallel_size = sequence_parallel_size
@@ -119,7 +119,7 @@ class ActorTask:
             use_flash_attention_2=True,
             bf16=True,
             sequence_parallel_size=sequence_parallel_size,
-            use_sample_packing=use_sample_packing,
+            remove_microbatch_padding=remove_microbatch_padding,
         )
         group = _get_default_group()
         set_ulysses_sequence_parallel_group(group)
@@ -136,8 +136,8 @@ class ActorTask:
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("use_sample_packing", [True, False])
-def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_packing):
+@pytest.mark.parametrize("remove_microbatch_padding", [True, False])
+def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, remove_microbatch_padding):
 
     # Create input sequence
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
@@ -158,7 +158,7 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_
         use_flash_attention_2=True,
         bf16=True,
         sequence_parallel_size=1,
-        use_sample_packing=use_sample_packing,
+        remove_microbatch_padding=remove_microbatch_padding,
     )
     model_no_sp.model.eval()
     model_no_sp.model.to("cuda:0")
@@ -175,7 +175,8 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_
 
     # Create Ray tasks
     actors = [
-        ActorTask.remote(rank, world_size, sequence_parallel_size, use_sample_packing) for rank in range(world_size)
+        ActorTask.remote(rank, world_size, sequence_parallel_size, remove_microbatch_padding)
+        for rank in range(world_size)
     ]
 
     # Run forward pass with sequence parallelism
@@ -218,7 +219,7 @@ def test_actor_entropy_consistency_sample_packing():
         use_flash_attention_2=True,
         bf16=True,
         sequence_parallel_size=1,
-        use_sample_packing=False,
+        remove_microbatch_padding=False,
     )
 
     model.model.eval()
@@ -230,7 +231,7 @@ def test_actor_entropy_consistency_sample_packing():
         )
 
     # Switch to using sample packing
-    model.use_sample_packing = True
+    model.remove_microbatch_padding = True
 
     with torch.no_grad():
         _, output_pack = model(

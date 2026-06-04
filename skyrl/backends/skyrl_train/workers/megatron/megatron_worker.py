@@ -607,18 +607,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.cfg.policy.megatron_config.torch_profiler_config.enable:
             self.profiler = Profiler(self.cfg.policy.megatron_config.torch_profiler_config)
 
-        # create optimizer
-        optim_config = init_megatron_optim_config(
-            self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
-        )
-        self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+        # create optimizer (skipped for inference-only flows; Megatron's
+        # DistributedOptimizer eagerly materializes fp32 master + AdamW state
+        # on GPU, which OOMs large MoE models on memory-constrained nodes)
+        if self.cfg.policy.inference_only_init:
+            self.optimizer = None
+            self.scheduler = None
+        else:
+            optim_config = init_megatron_optim_config(
+                self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
+            )
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
-        # create scheduler
-        self.scheduler = get_megatron_optimizer_param_scheduler(
-            optimizer=self.optimizer,
-            config=self.cfg.policy.optimizer_config,
-            num_training_steps=num_training_steps,
-        )
+            # create scheduler
+            self.scheduler = get_megatron_optimizer_param_scheduler(
+                optimizer=self.optimizer,
+                config=self.cfg.policy.optimizer_config,
+                num_training_steps=num_training_steps,
+            )
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -806,7 +812,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch
+        # Build micro-batch dicts expected by forward_backward_mini_batch.
         micro_buffer = []
         for experience in BatchIterator(data, micro_batch_size, drop_last=False):
             sequences = experience.sequences
@@ -830,6 +836,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    # used with global sequence packing
+                    "sub_seq_lengths": experience.sub_seq_lengths,
                 }
             )
 
@@ -841,6 +849,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
         micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
+        # (matches how status all-reduce treats metrics as identical within a DP group).
+        if (
+            mpu.get_tensor_model_parallel_rank() == 0
+            and mpu.get_pipeline_model_parallel_rank() == 0
+            and mpu.get_context_parallel_rank() == 0
+        ):
+            real_tokens = int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
+            num_microbatches = len(micro_buffer)
+            dp_rank = mpu.get_data_parallel_rank()
+            logger.info(
+                f"sequence packing | dp_rank={dp_rank} microbatches_this_step={num_microbatches} "
+                f"seq_len={seq_len} tokens={real_tokens}"
+            )
 
         metrics_list = self.model.forward_backward_mini_batch(
             micro_batches=micro_buffer,
@@ -872,7 +895,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
-        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+        if self.optimizer is not None:
+            status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
@@ -907,6 +931,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             The gradient norm (before scaling, after clipping), or None if unavailable.
         """
+        if self.optimizer is None:
+            raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
         # Reset counter for next accumulation cycle
@@ -916,12 +942,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
 
-    def get_lr(self) -> float:
+    def get_lr(self) -> Optional[float]:
         """
         Get current learning rate from optimizer.
 
-        Handles both regular optimizers and ChainedOptimizer.
+        Handles both regular optimizers and ChainedOptimizer. Returns None when
+        the worker was initialized with ``policy.inference_only_init=True``.
         """
+        if self.optimizer is None:
+            return None
         if isinstance(self.optimizer, ChainedOptimizer):
             return self.optimizer.chained_optimizers[0].param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
@@ -936,8 +965,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         Note: This bypasses the scheduler. The next scheduler.step() call
         will override this value unless the scheduler is configured for
-        constant LR.
+        constant LR. No-op when ``policy.inference_only_init=True``.
         """
+        if self.optimizer is None:
+            return
         if isinstance(self.optimizer, ChainedOptimizer):
             # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
@@ -1094,19 +1125,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if signature is None:
             raise RuntimeError("register_adapter called before register_pristine_adapter")
         self.adapter_store.create(model_id, self.actor_module, self.optimizer, signature)
-
-    def _resolve_lora_sync_target(self, model_id: Optional[str]) -> tuple[str, str]:
-        """Return ``(lora_name, lora_sync_path)`` for a given Tinker model_id.
-
-        The single-tenant fallback (``model_id=None``) uses the default
-        shared adapter name + shared sync path. Multi-tenant routes through
-        ``os.path.basename`` on the lora_sync_path.
-        """
-        base_sync_path = self.cfg.policy.model.lora.lora_sync_path
-        safe_model_id = os.path.basename(model_id) if model_id is not None else None
-        if safe_model_id:
-            return safe_model_id, os.path.join(base_sync_path, safe_model_id)
-        return SKYRL_LORA_ADAPTER_NAME, base_sync_path
 
     def delete_adapter(self, model_id: str) -> None:
         if self.adapter_store is None:

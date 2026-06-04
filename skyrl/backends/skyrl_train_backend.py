@@ -260,11 +260,12 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
-        if is_lora:
+        if is_lora and cfg.trainer.strategy == "megatron":
             # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
             # the freshly-initialised LoRA into a per-worker pristine slot, then
             # register the first adapter under `model_id`. Must happen while the
             # model + optimizer are still GPU-resident (i.e. before the offload).
+            # currently, this is only supported for megatron backend
             ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
@@ -952,6 +953,8 @@ class SkyRLTrainBackend(AbstractBackend):
         """Sample using legacy InferenceEngineClient with Ray-wrapped engines."""
         all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
+        needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
+
         async def sample_all():
             tasks = []
             for i in range(len(all_input_ids)):
@@ -978,6 +981,7 @@ class SkyRLTrainBackend(AbstractBackend):
                         prompt_token_ids=prompt_token_ids,
                         num_samples=1,  # Tinker batches multiple samples separately
                         sampling_params=params_dict,
+                        prompt_logprobs=needs_prompt_logprobs,
                     )
                 )
 
@@ -1051,7 +1055,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 )
 
         results = {}
-        for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
+        for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
             error_msg = None
@@ -1095,13 +1099,18 @@ class SkyRLTrainBackend(AbstractBackend):
                     status="error",
                 )
             else:
-                # Note: prompt_logprobs not supported initially
-                if needs_prompt_logprobs:
-                    logger.warning("Prompt logprobs requested but not yet supported")
+                # All samples for a request share the same prompt, so use the first sample's
+                # prompt logprobs (parity with JAX backend).
+                first_output = sample_outputs[start_idx]
+                prompt_logprobs = None
+                if prompt_logprobs_requested:
+                    all_prompt_logprobs = first_output.get("prompt_logprobs")
+                    if all_prompt_logprobs and len(all_prompt_logprobs) > 0:
+                        prompt_logprobs = all_prompt_logprobs[0]
 
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
-                    prompt_logprobs=None,
+                    prompt_logprobs=prompt_logprobs,
                 )
 
         return results

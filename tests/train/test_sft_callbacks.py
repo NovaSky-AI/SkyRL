@@ -133,7 +133,7 @@ def _build_test_sft_config() -> SFTConfig:
     cfg.batch_size = 1
     cfg.micro_train_batch_size_per_gpu = 1
     cfg.max_length = 16
-    cfg.use_sample_packing = False
+    cfg.remove_microbatch_padding = False
     cfg.logger = "console"
     # ckpt_path must be truthy so the save block isn't gated out. The actual
     # save is monkeypatched below so nothing is written to disk.
@@ -173,6 +173,8 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     tokenizer = MagicMock()
     tokenizer.pad_token_id = 0
     trainer.tokenizer = tokenizer
+    # setup() also builds the collator once the tokenizer is available.
+    trainer.collator = trainer._build_collator(tokenizer)
     trainer.tracker = MagicMock()
 
     # Mock the worker dispatch — the only thing train_step / run_eval touch
