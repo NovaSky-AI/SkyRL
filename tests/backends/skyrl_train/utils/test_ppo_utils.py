@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
 )
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 
 
 @pytest.fixture
@@ -64,6 +65,29 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+
+
+@pytest.mark.parametrize("kl_estimator_type", ["k1", "k2", "k3", "abs"])
+def test_compute_approx_kl_applies_loss_mask(kl_estimator_type: str) -> None:
+    """Scales kept positions; masked positions become 0.0, even when their inputs are nan/inf."""
+    log_probs = torch.tensor([[0.2, 0.3, 0.5, 0.7]])
+    # Position 3: nan input + mask=0.0; assertions below check the nan doesn't leak
+    log_probs_base = torch.tensor([[0.1, 0.2, 0.4, float("nan")]])
+    mask = torch.tensor([[1.0, 0.5, 0.25, 0.0]])
+
+    kld = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type=kl_estimator_type)
+
+    # A masked position must contribute nothing, even when its input is non-finite
+    assert torch.isfinite(kld).all(), f"{kl_estimator_type}: kld leaked non-finite values: {kld}"
+    assert kld[0, 3].item() == 0.0, f"{kl_estimator_type}: masked position not zeroed"
+    assert torch.isfinite(masked_mean(kld, mask)), f"{kl_estimator_type}: masked_mean is non-finite"
+
+    # Soft-mask values scale each kept position multiplicatively
+    unmasked = compute_approx_kl(log_probs, log_probs_base, None, kl_estimator_type=kl_estimator_type)
+    expected_kept = unmasked[:, :3] * mask[:, :3]
+    assert torch.allclose(
+        kld[:, :3], expected_kept, atol=1e-6
+    ), f"{kl_estimator_type}: soft mask scaling not preserved: {kld[:, :3]} vs {expected_kept}"
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
@@ -659,6 +683,39 @@ class TestApplyLossReductionToAdvantagesMinibatch:
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(8.5))
+
+    def test_prompt_mean(self):
+        """Prompt mean: token mean within each prompt group, then average over prompts."""
+        # 4 sequences forming 2 prompts (2 samples each): rows [0,1] -> p0, rows [2,3] -> p1.
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 1.0]])
+        prompt_boundaries = [(0, 2), (2, 4)]
+        # prompt 0: token mean = (1+2+3)/3 = 2.0
+        # prompt 1: token mean = (5+6+7+8)/4 = 6.5
+        # mean over prompts = (2.0 + 6.5) / 2 = 4.25
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="prompt_mean",
+            micro_batch_size=1,
+            max_seq_len=2,
+            prompt_boundaries=prompt_boundaries,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(4.25))
+
+    def test_prompt_mean_requires_boundaries(self):
+        """prompt_mean without prompt_boundaries should raise ValueError."""
+        advantages = torch.tensor([[1.0, 2.0]])
+        loss_mask = torch.tensor([[1.0, 1.0]])
+        with pytest.raises(ValueError, match="prompt_mean"):
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages=advantages,
+                loss_mask=loss_mask,
+                loss_reduction="prompt_mean",
+                micro_batch_size=1,
+                max_seq_len=2,
+            )
 
     def test_invalid_loss_reduction_raises(self):
         """Invalid loss_reduction should raise ValueError."""

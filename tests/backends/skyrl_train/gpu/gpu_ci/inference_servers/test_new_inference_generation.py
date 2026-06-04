@@ -61,10 +61,10 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.async_engine = True
+    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = num_inference_engines
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.run_engines_locally = True
     cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
     cfg.generator.sampling_params.max_generate_length = 256
     return cfg
@@ -501,7 +501,7 @@ async def test_client_error_handling(vllm_server: InferenceEngineState):
 
     # Missing required field (messages)
     with pytest.raises(aiohttp.ClientResponseError):
-        await client.chat_completion({"json": {"model": SERVED_MODEL_NAME}})
+        await client.chat_completion({"json": {}})
 
     # Wrong model name
     with pytest.raises(aiohttp.ClientResponseError):

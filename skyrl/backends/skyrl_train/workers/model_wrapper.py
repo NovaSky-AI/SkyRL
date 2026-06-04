@@ -73,25 +73,26 @@ class HFModelWrapper(nn.Module):
         temperature=1.0,
         use_liger_kernel=False,
         sequence_parallel_size=1,
-        use_sample_packing: bool = False,
+        remove_microbatch_padding: bool = False,
         use_torch_compile: bool = False,
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
         model_config_kwargs: dict = {},
         meta_init: bool = False,
         language_model_only: bool = False,
+        logprobs_chunk_size: int = 1024,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
-        self.use_sample_packing = use_sample_packing
+        self.remove_microbatch_padding = remove_microbatch_padding
         self.is_vlm = False
-        if use_sample_packing:
+        if remove_microbatch_padding:
             assert (
                 self.attn_implementation == "flash_attention_2"
-            ), "Flash attention 2 should be used for `use_sample_packing`"
+            ), "Flash attention 2 should be used for `remove_microbatch_padding`"
 
         if isinstance(pretrain_or_model, str):
             if load_in_4bit:
@@ -137,7 +138,22 @@ class HFModelWrapper(nn.Module):
             if meta_init:
                 with torch.device("meta"):
                     self.model = model_class.from_config(model_config, trust_remote_code=True)
-                self.model.to(torch.bfloat16 if bf16 else torch.float32)
+                target_dtype = torch.bfloat16 if bf16 else torch.float32
+                # Cast just params + persistent buffers to the target dtype;
+                # leave non-persistent buffers at their init dtype. For example, transformers
+                # builds `Qwen3RotaryEmbedding.inv_freq` via a RoPE init that hardcodes
+                # `dtype=torch.float`, so it is fp32 no matter the model dtype, which rank-0's
+                # `from_pretrained` preserves but a blanket `.to` would clobber.
+                # SEE: https://github.com/huggingface/transformers/blob/v5.8.0/src/transformers/modeling_rope_utils.py#L177-L178
+                # Otherwise, e.g., non-rank-0's `inv_freq` is bf16 while rank-0's stays fp32,
+                # so the init-time rank-0→all broadcast that seeds these buffers copies
+                # rank-0's fp32 bytes into that half-width bf16 buffer as huge garbage values
+                non_persistent_names = {n for n, _ in self.model.named_non_persistent_buffers()}
+                for p in self.model.parameters():
+                    p.data = p.data.to(target_dtype)
+                for name, buf in self.model.named_buffers():
+                    if name not in non_persistent_names:
+                        buf.data = buf.data.to(target_dtype)
             else:
                 self.model = model_class.from_pretrained(
                     pretrain_or_model,
@@ -218,6 +234,8 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
+        self.logprobs_chunk_size = logprobs_chunk_size
+
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
         # Credits: https://www.tylerromero.com/posts/2025-02-selective-log-softmax/#efficient-solution
         self.chunked_entropy_from_logits_fn = (
@@ -245,7 +263,9 @@ class HFModelWrapper(nn.Module):
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
             # model specific logic to compute.
-            assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
+            assert (
+                not self.remove_microbatch_padding
+            ), "remove_microbatch_padding is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
             if has_image_inputs:
@@ -261,7 +281,7 @@ class HFModelWrapper(nn.Module):
         sequences_fwd = sequences
         position_ids_fwd = position_ids
         attention_mask_fwd = attention_mask
-        if self.use_sample_packing:
+        if self.remove_microbatch_padding:
             with torch.no_grad():
                 # Removes padding to get a packed tensor. `unpad_input` expects 3 dimensional tensor so we unsqueeze first
                 sequences_fwd, nnz_indices, _, _, _ = unpad_input(
@@ -277,7 +297,7 @@ class HFModelWrapper(nn.Module):
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
-            attention_mask_fwd = None if self.use_sample_packing else attention_mask_fwd
+            attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
 
             # slice for sequence parallelism
             # (bsz, seqlen) -> (bsz, seqlen//sp_size)
@@ -309,7 +329,7 @@ class HFModelWrapper(nn.Module):
                 **vlm_kwargs,
             )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+        elif self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
@@ -333,7 +353,7 @@ class HFModelWrapper(nn.Module):
                 log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
             )  # shape can be (1, nnz) - with packing or (B, S) - without packing
 
-        if self.use_sample_packing:
+        if self.remove_microbatch_padding:
             # add padding back - postprocess logprobs to be compatible with original tensor
             batch_size, seqlen = attention_mask.shape
             # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
@@ -345,13 +365,16 @@ class HFModelWrapper(nn.Module):
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
             entropy_mask = None
-            if not self.use_sample_packing:
+            if not self.remove_microbatch_padding:
                 # Non-sample packing: pass attention mask to handle padding
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
                 entropy_mask = attention_mask_fwd
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
+                logits_BSV,
+                requires_grad=entropy_requires_grad,
+                attention_mask=entropy_mask,
+                chunk_size=self.logprobs_chunk_size,
             )
 
             if self.sequence_parallel_size > 1:
@@ -359,7 +382,7 @@ class HFModelWrapper(nn.Module):
                 entropy_BS = gather_outputs_and_unpad(
                     entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (1, nnz) - with packing or (B,S) - without packing
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 entropy_BS = pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
                 ).squeeze(
@@ -392,7 +415,7 @@ def _get_critic_model(
     base_llm_model,
     value_head_prefix="value_head",
     sequence_parallel_size=1,
-    use_sample_packing: bool = False,
+    remove_microbatch_padding: bool = False,
 ):
     class CriticModel(base_pretrained_model):
         supports_gradient_checkpointing = True
@@ -405,11 +428,11 @@ def _get_critic_model(
             setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
 
             self.sequence_parallel_size = sequence_parallel_size
-            self.use_sample_packing = use_sample_packing
-            if use_sample_packing:
+            self.remove_microbatch_padding = remove_microbatch_padding
+            if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with sample packing"
+                ), "Flash attention must be used with remove_microbatch_padding"
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
@@ -429,7 +452,7 @@ def _get_critic_model(
             position_ids_fwd = position_ids
             attention_mask_fwd = attention_mask
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
                     input_ids_fwd, nnz_indices, _, _, _ = unpad_input(
@@ -446,7 +469,7 @@ def _get_critic_model(
                     attention_mask_fwd = None
 
             if self.sequence_parallel_size > 1:
-                assert self.use_sample_packing, "sample packing must be true for sequence parallelism"
+                assert self.remove_microbatch_padding, "remove_microbatch_padding must be true for sequence parallelism"
                 # don't pass any attention mask for flash attention 2. this will save an all gather.
                 attention_mask_fwd = None if self.config._attn_implementation == "flash_attention_2" else attention_mask
                 # slice for sequence parallelism
@@ -473,7 +496,7 @@ def _get_critic_model(
 
             values_BSH = getattr(self, self.value_head_prefix)(last_hidden_states_BSH)
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 # add padding back - postprocess logits to be compatible with original tensors
                 batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
@@ -513,7 +536,7 @@ def get_llm_for_sequence_regression(
     value_head_prefix="value_head",
     device_map=None,
     sequence_parallel_size=1,
-    use_sample_packing: bool = False,
+    remove_microbatch_padding: bool = False,
     model_config_kwargs: dict = {},
     meta_init: bool = False,
     **kwargs,
@@ -541,7 +564,7 @@ def get_llm_for_sequence_regression(
         base_class,
         value_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
-        use_sample_packing=use_sample_packing,
+        remove_microbatch_padding=remove_microbatch_padding,
     )
 
     if load_in_4bit:

@@ -49,7 +49,11 @@ class InferenceEngineOutput(TypedDict):
 class InferenceEngineInterface(ABC):
 
     @abstractmethod
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(
+        self,
+        input_batch: InferenceEngineInput,
+        model: Optional[str] = None,
+    ) -> InferenceEngineOutput:
         raise NotImplementedError
 
     async def sample(

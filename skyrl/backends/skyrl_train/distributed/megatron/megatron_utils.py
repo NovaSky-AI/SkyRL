@@ -21,7 +21,7 @@
 # limitations under the License.
 
 import gc
-from typing import List, Union
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,11 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.moe_utils import (
+    clear_aux_losses_tracker,
+    get_moe_layer_wise_logging_tracker,
+    reduce_aux_losses_tracker_across_ranks,
+)
 from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -95,6 +100,52 @@ def get_model_size(model: nn.Module, scale="auto"):
     return n_params, scale
 
 
+def get_moe_metrics(
+    loss_scale: float,
+    total_loss_dict: Optional[dict] = None,
+    per_layer_logging: bool = False,
+) -> dict[str, Any]:
+    """Returns Mixture of Experts (MoE) auxiliary-loss metrics.
+
+    This function reduces MoE auxiliary losses across ranks, aggregates them, and
+    returns a dictionary of metrics.
+
+    Args:
+        loss_scale: Scale factor to apply to each auxiliary loss (e.g., 1/num_microbatches).
+        total_loss_dict: If provided, accumulate means into this dict (by name).
+        per_layer_logging: If True, include per-layer values in the returned dict.
+
+    Returns:
+        dict[str, Any]: A flat dict of aggregated metrics. For each aux loss name,
+        the mean value is returned under the same key (e.g., "load_balancing_loss").
+        If per_layer_logging is True, per-layer values are returned under keys of the
+        form "moe/{name}_layer_{i}".
+    """
+    reduce_aux_losses_tracker_across_ranks()
+    tracker = get_moe_layer_wise_logging_tracker()
+
+    metrics: dict[str, Any] = {}
+    if len(tracker) > 0:
+        aux_losses = {k: v["values"].float() * loss_scale for k, v in tracker.items()}
+        for name, loss_list in aux_losses.items():
+            # Megatron-Core aggregates aux losses across layers and normalizes by number of MoE layers
+            num_layers = int(loss_list.numel()) if loss_list.numel() > 0 else 1
+            aggregated_value = loss_list.sum() / num_layers
+            metrics[name] = float(aggregated_value.item())
+            if total_loss_dict is not None:
+                if name not in total_loss_dict:
+                    total_loss_dict[name] = aggregated_value
+                else:
+                    total_loss_dict[name] += aggregated_value
+
+            if per_layer_logging:
+                for i, loss in enumerate(loss_list.tolist()):
+                    metrics[f"moe/{name}_layer_{i}"] = float(loss)
+
+    clear_aux_losses_tracker()
+    return metrics
+
+
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
@@ -102,7 +153,7 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
 
     for model in models:
         for layer in model.decoder.layers:
-            if hasattr(layer.mlp, "router"):
+            if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
                 if getattr(layer.mlp.router, "bias", None) is not None:
@@ -321,37 +372,91 @@ def load_megatron_optimizer(optimizers):
 
 
 def preprocess_packed_seqs(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pre_process: bool = True,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
-    Preprocess packed sequences
-    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
-    gets second and second last chunks, and so on), this is for load balancing with causal masking.
+    Preprocess packed sequences.
+
+    Two modes:
+
+    - ``sub_seq_lengths is None`` (default): each row is assumed to hold a
+      single sub-sequence whose length is recovered from
+      ``attention_mask.sum(dim=-1)``. ``cu_seqlens`` enumerates one entry
+      per row. This is the historical SkyRL behavior used by the RL path
+      and the existing SFT path without mini-batch packing.
+    - ``sub_seq_lengths is not None``: each row may contain multiple
+      sub-sequences concatenated end-to-end. ``sub_seq_lengths[r]`` lists
+      the per-sub-sequence valid token counts for row ``r``. Tokens
+      ``input_ids[r, :sum(sub_seq_lengths[r])]`` are assumed to be the
+      concatenated sub-sequences in order; any trailing tokens in the row
+      are pad. ``cu_seqlens`` enumerates every sub-sequence across every
+      row.
+
+    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
+    gets first and last chunks, GPU1 gets second and second last chunks,
+    and so on), this is for load balancing with causal masking.
     See https://github.com/NVIDIA/TransformerEngine/issues/1368
     """
-    batch_size = input_ids.shape[0]
-
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
 
+    batch_size = input_ids.shape[0]
+
+    if sub_seq_lengths is not None:
+        if len(sub_seq_lengths) != batch_size:
+            raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
+
+        # Flatten per-sub-seq lengths into a single 1-D tensor; the i-th
+        # entry of the flattened list maps to the i-th cu_seqlens segment.
+        flat_seqlens: list[int] = []
+        # Per-row, per-sub-seq starting column within the original padded row.
+        # We need this to gather sub-seq tokens from the padded input_ids.
+        # NOTE: the controller-side collator (``PackedDataCollator``)
+        # advances ``row_offset += round_up(length, align_size)`` between
+        # consecutive sub-sequences in the same row so that flash-attn varlen
+        # sees TP/CP-aligned segment boundaries. We MUST mirror that here —
+        # otherwise sub-seq i (for i > 0) would be read starting inside the
+        # alignment-pad gap of sub-seq i-1, returning pad tokens.
+        row_index_of_subseq: list[int] = []
+        intra_row_offset_of_subseq: list[int] = []
+        for r, lens in enumerate(sub_seq_lengths):
+            running = 0
+            for length in lens:
+                length_int = int(length)
+                flat_seqlens.append(length_int)
+                row_index_of_subseq.append(r)
+                intra_row_offset_of_subseq.append(running)
+                # Pad each sub-seq independently to align_size, matching the
+                # collator's row layout.
+                pad = (align_size - length_int % align_size) % align_size
+                running += length_int + pad
+
+        seqlens_in_batch = torch.tensor(flat_seqlens, dtype=torch.int32, device=input_ids.device)
+        num_subseqs = len(flat_seqlens)
+    else:
+        seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        num_subseqs = batch_size
+
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
     seqlens_in_batch_padded = seqlens_in_batch + pad_size
 
-    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
+    cu_seqlens = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
-    cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
+    cu_seqlens_padded = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
 
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,
     # to avoid frequent .item() calls in the loop that cause D2H synchronization
     # ----------------------------------------------------------------------------
-    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()  # original valid lengths
-    seqlens_in_batch_padded_cpu: list[int] = seqlens_in_batch_padded.tolist()  # lengths after padding
-    cu_seqlens_padded_cpu: list[int] = cu_seqlens_padded.tolist()  # start positions (after padding)
+    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
+    seqlens_in_batch_padded_cpu: list[int] = seqlens_in_batch_padded.tolist()
+    cu_seqlens_padded_cpu: list[int] = cu_seqlens_padded.tolist()
 
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
@@ -360,22 +465,26 @@ def preprocess_packed_seqs(
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
-        for i in range(batch_size):
-            # Use Python int, so no GPU→CPU sync in the loop
-            if cp_size <= 1:
+        for i in range(num_subseqs):
+            if sub_seq_lengths is not None:
+                row_idx = row_index_of_subseq[i]
+                offset = intra_row_offset_of_subseq[i]
                 seqlen = seqlens_in_batch_cpu[i]
+                seq_tokens = input_ids[row_idx, offset : offset + seqlen]
+            else:
+                seqlen = seqlens_in_batch_cpu[i]
+                seq_tokens = input_ids[i, attention_mask[i]]
+
+            if cp_size <= 1:
                 start_idx = cu_seqlens_padded_cpu[i]
-                input_ids_rmpad[start_idx : start_idx + seqlen] = input_ids[i, attention_mask[i]]
+                input_ids_rmpad[start_idx : start_idx + seqlen] = seq_tokens
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
-            seqlen = seqlen_padded_i // cp_size
-            half_seqlen = seqlen // 2
+            seqlen_cp = seqlen_padded_i // cp_size
+            half_seqlen = seqlen_cp // 2
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
-            # split to 2 chunks
-            d = input_ids[i, attention_mask[i]]
-            # Pad d to the aligned length so CP chunk indexing doesn't go out of bounds
-            # when sequences are shorter than align_size (e.g. masked/failed sequences).
+            d = seq_tokens
             if d.shape[0] < seqlen_padded_i:
                 d = torch.nn.functional.pad(d, (0, seqlen_padded_i - d.shape[0]))
             input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
@@ -413,9 +522,23 @@ def postprocess_packed_seqs(
     batch_size: int,
     seq_len: int,
     post_process: bool = True,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
 ) -> torch.Tensor:
     """
-    Postprocess packed sequences
+    Postprocess packed sequences.
+
+    Two modes (mirroring :func:`preprocess_packed_seqs`):
+
+    - ``sub_seq_lengths is None`` (default): each batch row corresponds to a
+      single ``cu_seqlens`` segment.
+    - ``sub_seq_lengths is not None``: each batch row may contain multiple
+      sub-sequences concatenated end-to-end (controller-side mini-batch
+      packing). ``cu_seqlens_q_padded`` then has one entry **per sub-seq**,
+      not per row; we recover row-start offsets by accumulating padded
+      lengths across the row's sub-seqs. Each row's tokens are written back
+      into the contiguous valid-token region of ``output_new[i]`` (the
+      ``attention_mask`` for row ``i`` covers every sub-seq's valid tokens
+      and their TP-alignment gaps — see ``PackedDataCollator``).
     """
     if not post_process:
         return output
@@ -425,7 +548,6 @@ def postprocess_packed_seqs(
     # to avoid a large number of .item() calls in the loop
     # -------------------------------------------------------------------------
     cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
-    seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
 
     shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
     output_new = torch.zeros(shape, dtype=output.dtype, device=output.device)
@@ -440,10 +562,77 @@ def postprocess_packed_seqs(
         output_list[mpu.get_context_parallel_rank()] = output
     else:
         output_list = [output]
+
+    if sub_seq_lengths is not None:
+        if len(sub_seq_lengths) != batch_size:
+            raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
+        # Build an index mapping (batch_row, intra_row_subseq) -> flat sub-seq
+        # index inside cu_padded_cpu, so we can compute the offset for the
+        # *first* sub-seq of each row (== row start).
+        # Each row's start is cu_padded_cpu[flat_sub_idx_of_row_start[r]].
+        flat_sub_idx_of_row_start: list[int] = []
+        running = 0
+        for r in range(batch_size):
+            flat_sub_idx_of_row_start.append(running)
+            running += len(sub_seq_lengths[r])
+        # NOTE: in the multi-subseq path, row-i's slice covers all of
+        # row i's sub-seqs (including their TP-alignment pads). We read from
+        # ``cu_padded_cpu[flat_sub_idx_of_row_start[i]]`` (start of row i's
+        # first sub-seq) up to ``cu_padded_cpu[flat_sub_idx_of_row_start[i] +
+        # len(sub_seq_lengths[i])]`` (start of row i+1, exclusive) to "unpack"
+        # and recover row-i
+
+        for i in range(batch_size):
+            n_sub = len(sub_seq_lengths[i])
+            row_first_sub = flat_sub_idx_of_row_start[i]
+            row_last_sub_exclusive = row_first_sub + n_sub
+            if cp_size <= 1:
+                start_idx = cu_padded_cpu[row_first_sub]
+                end_idx = cu_padded_cpu[row_last_sub_exclusive]
+                row_len = end_idx - start_idx
+                output_new[i, :row_len] = output[0][start_idx:end_idx]
+                continue
+            # ----------------------------------------------------------------
+            # CP > 1, multi-subseq: un-zigzag each cu_seqlens segment (sub-seq)
+            # independently and write its FULL padded slab (sub-seq tokens +
+            # this sub-seq's own alignment pad) back-to-back into output_new[i],
+            # starting at column 0.
+            row_global_start = cu_padded_cpu[row_first_sub]
+            for seg in range(row_first_sub, row_last_sub_exclusive):
+                s_len_padded_chunk = (cu_padded_cpu[seg + 1] - cu_padded_cpu[seg]) // cp_size
+                half_seqlen = s_len_padded_chunk // 2
+                s_len_padded = s_len_padded_chunk * cp_size
+                # This segment's start in each rank's CP-sharded local buffer.
+                packed_start_idx = cu_padded_cpu[seg] // cp_size
+                # Destination column of this segment within row i's output
+                # buffer: its global offset relative to the row start.
+                # (== sum of preceding sub-seqs' padded lengths in this row,
+                # matching the collator's row_offset layout.)
+                dest_off = cu_padded_cpu[seg] - row_global_start
+                tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
+                for j in range(cp_size):
+                    o = output_list[j][0]
+                    # Rank j held chunk j (front half of its slab) and chunk
+                    # 2*cp_size-1-j (back half of its slab) for THIS segment.
+                    o0, o1 = (
+                        o[packed_start_idx : packed_start_idx + half_seqlen],
+                        o[packed_start_idx + half_seqlen : packed_start_idx + s_len_padded_chunk],
+                    )
+                    tmp[j * half_seqlen : (j + 1) * half_seqlen] = o0
+                    tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
+                output_new[i, dest_off : dest_off + s_len_padded] = tmp
+
+        return output_new
+
+    seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
+
     for i in range(batch_size):
         if cp_size <= 1:
             s = seq_lens_cpu[i]
             start_idx = cu_padded_cpu[i]
+            # attention_mask[i] -> (seq_len,) # output_new[i, ...] (non-pad-seq-len)
+            # attention_mask tensor is a boolean here
+            # so it only selects the non-padding token positions and we place the sequence here
             output_new[i, attention_mask[i]] = output[0][start_idx : start_idx + s]
             continue
         s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size

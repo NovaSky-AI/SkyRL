@@ -260,10 +260,10 @@ def test_micro_batches_accumulated_initialized():
         def init_model(self, *args, **kwargs):
             pass
 
-        def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+        def offload_to_cpu(self, offload_optimizer=True, offload_model=True):
             pass
 
-        def backload_to_gpu(self, non_blocking=True):
+        def backload_to_gpu(self, backload_optimizer=True, backload_model=True):
             pass
 
         def _forward_micro_batch(self, micro_batch):
@@ -545,8 +545,7 @@ def test_forward_backward_batch_calculations():
     ), f"PolicyWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(policy_forward_backward_micro_calls)}"
 
     # Verify result structure
-    assert isinstance(result, dict)
-    assert "policy_loss" in result
+    assert "policy_loss" in result.metrics
 
     # Test CriticWorkerBase with same pattern
     critic_worker = create_test_worker(CriticWorkerBase)
@@ -576,8 +575,7 @@ def test_forward_backward_batch_calculations():
     assert critic_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure for critic
-    assert isinstance(result, dict)
-    assert "critic_loss" in result
+    assert "critic_loss" in result.metrics
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

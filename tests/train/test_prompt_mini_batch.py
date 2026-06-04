@@ -12,7 +12,10 @@ import torch
 
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshDispatch
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.train.dataset.preprocess import compute_prompt_mini_batch_boundaries
+from skyrl.train.dataset.preprocess import (
+    compute_prompt_boundaries,
+    compute_prompt_mini_batch_boundaries,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,6 +75,24 @@ def _make_batch(num_sequences: int, seq_len: int = 8) -> TrainingInputBatch:
 # ---------------------------------------------------------------------------
 # Tests for compute_prompt_mini_batch_boundaries
 # ---------------------------------------------------------------------------
+
+
+class TestComputePromptBoundaries:
+    def test_nonstepwise(self):
+        uids = ["p0", "p0", "p1", "p1", "p2", "p2"]
+        assert compute_prompt_boundaries(uids) == [(0, 2), (2, 4), (4, 6)]
+
+    def test_variable_group_sizes(self):
+        uids = ["p0", "p0", "p0", "p1", "p2", "p2"]
+        assert compute_prompt_boundaries(uids) == [(0, 3), (3, 4), (4, 6)]
+
+    def test_empty(self):
+        assert compute_prompt_boundaries([]) == []
+
+    def test_noncontiguous_uids_raise(self):
+        uids = ["p0", "p0", "p1", "p0"]
+        with pytest.raises(AssertionError, match="uid 'p0' appears in non-contiguous positions at index 3."):
+            compute_prompt_boundaries(uids)
 
 
 class TestComputePromptMiniBatchBoundaries:

@@ -37,9 +37,9 @@ def get_test_config() -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.placement.colocate_all = True
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "fsdp"
     cfg.trainer.ref.fsdp_config.cpu_offload = False
 
     validate_cfg(cfg)
@@ -303,8 +303,8 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("strategy"),
-    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
-    ids=["fsdp2", "megatron"],
+    ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp", "megatron"],
 )
 async def test_dispatch_set_lr(ray_init_fixture, strategy):
     """

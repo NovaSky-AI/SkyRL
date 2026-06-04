@@ -3,9 +3,12 @@ Run with:
 uv run --isolated --extra dev --extra fsdp -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py
 """
 
+import math
+
 import pytest
 import ray
 
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -37,19 +40,17 @@ def cfg() -> SkyRLTrainConfig:
     [
         (True, "fsdp", MODEL_NAME),
         (False, "fsdp", MODEL_NAME),
-        (True, "fsdp2", MODEL_NAME),
-        (False, "fsdp2", MODEL_NAME),
         # TODO (erictang000): Add test for MoE model for FSDP backend
         # right now this fails due to token routing issues
-        # (True, "fsdp2", MOE_MODEL_NAME),
+        # (True, "fsdp", MOE_MODEL_NAME),
     ],
-    ids=["packed-fsdp", "unpacked-fsdp", "packed-fsdp2", "unpacked-fsdp2"],
+    ids=["packed-fsdp", "unpacked-fsdp"],
 )
 async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy, model_name):
     """
     Full test: initialize actor group, send dummy experience to forward_backward + optim_step, validate output.
     """
-    cfg.trainer.use_sample_packing = packed
+    cfg.trainer.remove_microbatch_padding = packed
     cfg.trainer.strategy = strategy
     cfg.trainer.policy.model.path = model_name
 
@@ -76,17 +77,14 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         print_mem("memory after forward_backward + optim_step", memory)
 
         for result in results:
-            assert isinstance(result, dict), "Result should be a dictionary of training stats"
-            assert "policy_loss" in result
-            assert "loss_metrics/clip_ratio" in result
-            assert "policy_entropy" in result
-            assert "loss_fn_outputs" in result, "RL path should return loss_fn_outputs"
-            loss_fn_outputs = result.pop("loss_fn_outputs")
-            assert isinstance(loss_fn_outputs, list)
-            for output in loss_fn_outputs:
+            assert "policy_loss" in result.metrics
+            assert "loss_metrics/clip_ratio" in result.metrics
+            assert "policy_entropy" in result.metrics
+            assert result.loss_fn_outputs, "RL path should return loss_fn_outputs"
+            for output in result.loss_fn_outputs:
                 assert "logprobs" in output, "Each output should have logprobs"
                 assert isinstance(output["logprobs"], list)
-            for k, v in result.items():
+            for k, v in result.metrics.items():
                 assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     finally:
@@ -102,8 +100,8 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
     Uses variable action_lengths so each sample has a different number of valid
     tokens, then checks that each output's logprobs length matches exactly.
     """
-    cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
     num_actions = 6
@@ -130,8 +128,8 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
         # Collect all loss_fn_outputs across DP ranks (returned in rank order)
         all_outputs = []
         for result in results:
-            assert "loss_fn_outputs" in result
-            all_outputs.extend(result["loss_fn_outputs"])
+            assert result.loss_fn_outputs
+            all_outputs.extend(result.loss_fn_outputs)
 
         assert len(all_outputs) == batch_size
         for i, output in enumerate(all_outputs):
@@ -146,19 +144,17 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("packed", "strategy"),
-    [(True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
+    [(True, "fsdp"), (False, "fsdp")],
     ids=[
         "packed-fsdp",
         "unpacked-fsdp",
-        "packed-fsdp2",
-        "unpacked-fsdp2",
     ],
 )
 async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize critic actor group, send dummy experience to forward_backward + optim_step, validate output.
     """
-    cfg.trainer.use_sample_packing = packed
+    cfg.trainer.remove_microbatch_padding = packed
     cfg.trainer.strategy = strategy
     validate_cfg(cfg)
     try:
@@ -178,10 +174,9 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:
-            assert isinstance(result, dict), "Result should be a dictionary of training stats"
-            assert "critic_loss" in result
-            assert "values_mean" in result
-            for k, v in result.items():
+            assert "critic_loss" in result.metrics
+            assert "values_mean" in result.metrics
+            for k, v in result.metrics.items():
                 assert isinstance(v, float), f"{k} should be a float"
 
     finally:
@@ -193,8 +188,8 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
     """
     Test that set_lr updates the optimizer's learning rate.
     """
-    cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.strategy = "fsdp"
     validate_cfg(cfg)
 
     try:
@@ -228,15 +223,15 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("strategy"),
-    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
-    ids=["fsdp2", "megatron"],
+    ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp", "megatron"],
 )
 async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     """
     Test SFT path: forward_backward with loss_fn="cross_entropy" returns loss_fn_outputs.
     Uses DP=2 to verify each rank returns outputs for its data chunk.
     """
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = strategy
     if strategy == "megatron":
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
@@ -267,12 +262,10 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
         # Each DP rank returns its chunk's results
         all_loss_fn_outputs = []
         for result in results:
-            assert isinstance(result, dict)
-            assert "loss" in result
-            assert "loss_fn_outputs" in result, "SFT path should return loss_fn_outputs"
+            assert "loss" in result.metrics
+            assert result.loss_fn_outputs, "SFT path should return loss_fn_outputs"
 
-            loss_fn_outputs = result["loss_fn_outputs"]
-            assert isinstance(loss_fn_outputs, list)
+            loss_fn_outputs = result.loss_fn_outputs
             assert len(loss_fn_outputs) == samples_per_rank, f"Expected {samples_per_rank} outputs per rank"
             all_loss_fn_outputs.extend(loss_fn_outputs)
 
@@ -288,3 +281,55 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy",
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
+    """forward(loss_fn='cross_entropy') returns a non-zero loss + per-sample loss_fn_outputs (no grads)."""
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+    validate_cfg(cfg)
+
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
+
+    dp_size = actor_group.actor_infos[0].rank.dp_size
+    batch_size = dp_size * 2  # Ensure multiple samples per DP rank
+    num_actions = 4
+    dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
+
+    dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
+
+    result = dispatch.forward(
+        "policy",
+        dummy_batch,
+        loss_fn="cross_entropy",
+        loss_fn_config=None,
+    )
+
+    # NOTE: The loss-fn forward path is no-grad: ``_forward_micro_with_loss``
+    # wraps the model call in ``torch.no_grad()`` (worker.py), so policy
+    # parameters accrue no ``.grad`` from this call. We don't assert that
+    # directly here because parameters live inside the Ray actors and reaching
+    # in adds a remote round-trip with no extra signal — the contract is
+    # enforced at the implementation site.
+    assert "loss" in result.metrics
+    assert math.isfinite(result.metrics["loss"]) and result.metrics["loss"] > 1e-3
+    assert len(result.loss_fn_outputs) == batch_size
+    for out in result.loss_fn_outputs:
+        assert "logprobs" in out and len(out["logprobs"]) == num_actions
+        assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions

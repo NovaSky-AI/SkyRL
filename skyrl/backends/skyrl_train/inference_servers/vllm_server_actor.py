@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.api_server import (
     init_app_state,
 )
 from vllm.inputs import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
@@ -96,6 +97,7 @@ class VLLMServerActor(ServerActorProtocol):
         colocated_training: bool = False,
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
+        enable_ray_prometheus_stats: bool = True,
     ):
         """
         Initialize the vLLM server actor.
@@ -122,6 +124,10 @@ class VLLMServerActor(ServerActorProtocol):
                 ``"mp"`` backend. Pre-computed by ServerGroup from the
                 per-server placement group. Only used when
                 ``distributed_executor_backend="mp"`` and TP*PP > 1.
+            enable_ray_prometheus_stats: If True, route vLLM engine metrics
+                through ``RayPrometheusStatLogger`` so they land in Ray's
+                per-node metrics agent (and thus Anyscale's hosted Prometheus +
+                Grafana).
         """
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
 
@@ -133,6 +139,7 @@ class VLLMServerActor(ServerActorProtocol):
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
         self._use_mp_backend = distributed_executor_backend == "mp"
+        self._enable_ray_prometheus_stats = enable_ray_prometheus_stats
 
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
@@ -317,9 +324,18 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Initialize the engine (this loads the model - takes time)
         engine_args = AsyncEngineArgs.from_cli_args(self._cli_args)
+
+        stat_loggers = None
+        if self._enable_ray_prometheus_stats:
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM engine metrics")
+            stat_loggers = [RayPrometheusStatLogger]
+
         self._engine = AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
+            stat_loggers=stat_loggers,
         )
         logger.info(f"Engine initialized on {self._ip}:{self._port}, adding custom endpoints...")
 
@@ -343,6 +359,9 @@ class VLLMServerActor(ServerActorProtocol):
             access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
         )
         server = uvicorn.Server(config)
+        # vllm's engine_error_handler reads app.state.server to call
+        # terminate_if_errored; normally wired up by vllm's own launcher.
+        app.state.server = server
         await server.serve(sockets=[sock])
 
     def _add_custom_endpoints(self, app) -> None:
@@ -359,6 +378,47 @@ class VLLMServerActor(ServerActorProtocol):
             """Reset the prefix cache."""
             await engine.reset_prefix_cache()
             return {"status": "ok"}
+
+        @app.post("/skyrl/v1/load_lora_adapter")
+        async def _skyrl_load_lora_adapter(request: Request):
+            """Load a LoRA adapter from disk, replacing any existing adapter
+            under the same name in place. Used by RemoteInferenceClient.update_lora_from_disk.
+
+            TODO(aaron): remove this endpoint and route update_lora_from_disk back
+            through /v1/load_lora_adapter once the upstream fix in
+            https://github.com/vllm-project/vllm/pull/41482 lands in a vLLM release we depend on.
+            """
+            body = await request.json()
+            lora_name = body.get("lora_name")
+            lora_path = body.get("lora_path")
+            if not lora_name or not lora_path:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Both 'lora_name' and 'lora_path' must be provided.",
+                )
+
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                lora_int_id = (
+                    models.lora_requests[lora_name].lora_int_id
+                    if lora_name in models.lora_requests
+                    else models.lora_id_counter.inc(1)
+                )
+                lora_request = LoRARequest(
+                    lora_name=lora_name,
+                    lora_int_id=lora_int_id,
+                    lora_path=lora_path,
+                    load_inplace=True,
+                )
+                await models.engine_client.add_lora(lora_request)
+                lora_request.load_inplace = False
+                models.lora_requests[lora_name] = lora_request
+
+            return {
+                "status": "ok",
+                "lora_name": lora_name,
+                "lora_int_id": lora_int_id,
+            }
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
         # endpoint /inference/v1/generate does not support returning routed expert IDs.

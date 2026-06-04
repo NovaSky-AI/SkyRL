@@ -113,7 +113,7 @@ def _make_mock_renderer(tokenizer):
 def _make_mock_llm(tokenizer, response_text: str):
     """Create an AsyncMock for the inference engine's generate method."""
 
-    async def mock_generate(input_batch):
+    async def mock_generate(input_batch, model=None):
         num_prompts = len(input_batch["prompt_token_ids"])
         text_with_eos = response_text + tokenizer.eos_token
         ids = tokenizer.encode(text_with_eos, add_special_tokens=False)

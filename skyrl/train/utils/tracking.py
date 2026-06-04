@@ -17,6 +17,7 @@
 
 import dataclasses
 import pprint
+import traceback
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -81,6 +82,8 @@ class Tracking:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
+        self._exception_logged = False
+
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
@@ -100,6 +103,44 @@ class Tracking:
                     logger_instance.finish()
             except Exception as e:
                 logger.warning(f"Attempted to finish tracking with logger {logger_name} but got error {e}")
+
+    def log_exception(self, e: BaseException, step: int = 0) -> None:
+        """Log the active exception's traceback to all configured backends.
+
+        Always prints the traceback on the driver via loguru (so it lands in
+        Ray driver logs instead of being swallowed). If wandb is configured,
+        also logs a row to an `error/tracebacks` wandb.Table and calls
+        `finish()` to flush the async upload before the process re-raises.
+
+        Ray-wrapped worker errors (e.g. OOMs raised inside actors) include
+        both local and remote frames in `traceback.format_exc()`.
+
+        Idempotent: a second call is a no-op so an outer except handler can
+        safely call this even if an inner handler already did.
+        """
+        if self._exception_logged:
+            return
+        self._exception_logged = True
+        tb_str = traceback.format_exc()[-10000:]
+        logger.error(f"Training failed at step {step} with {type(e).__name__}:\n{tb_str}")
+        if "wandb" in self.logger:
+            try:
+                import wandb
+
+                error_table = wandb.Table(columns=["step", "type", "traceback"])
+                error_table.add_data(step, type(e).__name__, tb_str)
+                # Note: omit `step=` here. Per-step logs use commit=True, so
+                # re-logging at the same step would be dropped. The step value
+                # is also embedded in the table row itself.
+                self.logger["wandb"].log({"error/tracebacks": error_table})
+                # Tables upload asynchronously. Finish the run so the upload
+                # completes before the caller re-raises and the process dies.
+                try:
+                    self.finish()
+                except Exception as finish_exc:
+                    logger.warning(f"tracker.finish() raised after logging exception: {finish_exc}")
+            except Exception as log_exc:
+                logger.warning(f"Failed to log exception traceback to wandb: {log_exc}")
 
     def __del__(self):
         try:

@@ -51,7 +51,7 @@ critic_mini_batch_size: 256
 micro_train_batch_size_per_gpu: 1
 micro_forward_batch_size_per_gpu: 1
 update_ref_every_epoch: false
-use_sample_packing: true
+remove_microbatch_padding: true
 max_prompt_length: 512
 gradient_checkpointing: true
 seed: 42
@@ -66,7 +66,7 @@ seed: 42
 - `micro_train_batch_size_per_gpu`: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches.
 - `micro_forward_batch_size_per_gpu`: Micro batch size during forward pass (i.e., for log probability or value computation). This is common for both policy and critic models. Each mini batch is split into micro batches of this size, model forward pass is performed over these micro batches.
 - `update_ref_every_epoch`: Whether to update the reference model every epoch.
-- `use_sample_packing`: Whether to use sample packing during model forward pass (common for all models).
+- `remove_microbatch_padding`: Whether to pack samples and strip intra-microbatch padding during the model forward pass (requires flash attention; common for all models).
 - `max_prompt_length`: Maximum prompt length during training. Longer prompts will be truncated.
 - `gradient_checkpointing`: Whether to use gradient checkpointing.
 - `seed`: Random seed for training.
@@ -132,27 +132,25 @@ log_example_interval: 1
 
 ## Training Backends
 
-We support three backends: FSDP1, FSDP2, and Megatron. The backend can be chosen with `trainer.strategy` field.
+We support two backends: FSDP (PyTorch's composable `fully_shard` API, formerly known as FSDP2) and Megatron. The backend can be chosen with the `trainer.strategy` field.
 
 ### FSDP Configuration
-
-We use the same configuration group for FSDP1 and FSDP2
 
 ```yaml
 fsdp_config:
     cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-    reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
+    reshard_after_forward: true # [True, False, int between 1 and fsdp_size]
     fsdp_size: -1
 
 ```
 
-- `cpu_offload`: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to [cpu_offload](https://docs.pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel)  parameter in FSDP1 and [offload_policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) in FSDP2.
-- `reshard_after_forward`: Whether to re-shard FSDP model after forward pass. This is a FSDP2 specific configuration, please refer to the [FSDP2 docs](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) for more details. If set to `false`, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
+- `cpu_offload`: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to [offload_policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) in FSDP.
+- `reshard_after_forward`: Whether to re-shard the FSDP model after the forward pass. See the [FSDP docs](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) for details. If set to `false`, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
 - `fsdp_size`: The group size within which worker state is sharded with FSDP. This is a parameter to be used for hybrid sharding in multi-node settings. For example, if the number of workers in the actor group is 8, with 4 in each node, and `fsdp_size` is 4, then the training state will be fully sharded across 4 ranks in each node, but replicated (DP) across nodes.
 
     `cpu_offload` is different from worker state offloading with model colocation.
 
-    In FSDP, `cpu_offload` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
+    With FSDP, `cpu_offload` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
 
     In the SkyRL-Train backend, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on [model placement and colocation](placement)
 
@@ -376,7 +374,7 @@ algorithm:
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
   policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
-  loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+  loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "prompt_mean"
   grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
   zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
 
@@ -497,6 +495,7 @@ algorithm:
   - `token_mean`: computes average loss over all valid tokens in the batch. Used in [DAPO](https://dapo-sia.github.io/).
   - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch.
   - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). `algorithm.max_seq_len` must be set explicitly for this mode because multi-turn/token budgets are workload-dependent.
+  - `prompt_mean`: computes the average token loss within each prompt group (all `generator.n_samples_per_prompt` responses sampled for a prompt), then averages over prompts. Unlike `token_mean`, every prompt contributes equally regardless of how many tokens its responses contain.
 
 - `algorithm.grpo_norm_by_std`: Whether to normalize advantages by the standard deviation in GRPO. This is set to `false` in [Dr. GRPO](https://arxiv.org/abs/2503.20783).
 - `algorithm.zero_variance_filter`: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.

@@ -45,7 +45,7 @@ class MegatronModelWrapper:
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
-        self.use_sample_packing = self.cfg.use_sample_packing
+        self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -104,7 +104,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=True,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
             )
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
@@ -117,14 +117,14 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
-                    use_sample_packing=self.use_sample_packing,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
@@ -148,7 +148,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,
@@ -201,6 +201,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        forward_only: bool = False,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -216,6 +217,9 @@ class MegatronModelWrapper:
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
+            forward_only: If True, run the forward pass without backward (no gradients).
+                          Useful for evaluation / loss-only inference paths (e.g., SFT
+                          ``forward(loss_fn=...)`` codepath).
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -264,7 +268,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=False,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
             )
 
             action_log_probs = token_logprobs[:, -num_actions:]
@@ -289,24 +293,32 @@ class MegatronModelWrapper:
                     if loss_mask is not None:
                         elementwise_loss = elementwise_loss * loss_mask
 
-                # Build per-sequence loss_fn_outputs
+                # Build per-sequence loss_fn_outputs.
+                # Compute valid_lens vectorized on GPU, then move tensors to CPU
+                # exactly once before iterating in Python — avoids ~3N GPU->CPU
+                # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
                 batch_size = action_log_probs.shape[0]
+                seq_len = action_log_probs.shape[1]
+                if action_mask is not None:
+                    valid_lens_t = action_mask.sum(dim=-1).long()
+                elif loss_mask is not None:
+                    valid_lens_t = loss_mask.sum(dim=-1).long()
+                else:
+                    valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
+
+                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
+                action_log_probs_cpu = action_log_probs.detach().cpu()
+                elementwise_loss_cpu = elementwise_loss.detach().cpu()
+                valid_lens = valid_lens_t.cpu().tolist()
+
                 loss_fn_outputs = []
                 for i in range(batch_size):
-                    if action_mask is not None:
-                        valid_len = int(action_mask[i].sum().item())
-                    elif loss_mask is not None:
-                        valid_len = int(loss_mask[i].sum().item())
-                    else:
-                        valid_len = action_log_probs.shape[1]
-
+                    valid_len = valid_lens[i]
                     loss_fn_outputs.append(
                         {
-                            "logprobs": (
-                                action_log_probs[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
-                            ),
+                            "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
                             "elementwise_loss": (
-                                elementwise_loss[i, -valid_len:].detach().cpu().tolist() if valid_len > 0 else []
+                                elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
                             ),
                         }
                     )
@@ -404,18 +416,30 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
-                    use_sample_packing=self.use_sample_packing,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
+            # When present, sub_seq_lengths enumerates every sub-sequence
+            # inside every row of the micro-batch (controller-side mini-batch
+            # packing). preprocess_packed_seqs uses it to emit cu_seqlens
+            # entries covering all sub-seqs, not one per row.
+            #
+            # It arrives as a ``TensorList`` data field.
+            # ``preprocess/postprocess_packed_seqs`` are typed
+            # ``list[list[int]]``, so convert tensors -> python lists here at
+            # the forward_step boundary, keeping those signatures unchanged.
+            sub_seq_lengths_field = batch.get("sub_seq_lengths")
+            sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -435,7 +459,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.use_sample_packing:
+            if self.remove_microbatch_padding:
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,
@@ -443,6 +467,7 @@ class MegatronModelWrapper:
                     micro_batch_size,
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
                 )
             else:
                 outputs = recover_left_padding(
@@ -468,7 +493,7 @@ class MegatronModelWrapper:
             num_microbatches=len(micro_batches),
             seq_length=seq_len,
             micro_batch_size=micro_batch_size,
-            forward_only=False,
+            forward_only=forward_only,
         )
 
         # broadcast metrics to all pp ranks

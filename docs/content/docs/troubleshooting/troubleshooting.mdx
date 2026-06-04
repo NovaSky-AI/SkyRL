@@ -16,22 +16,37 @@ To run the script, you can use the following command:
 
 ```bash
 uv run --isolated --env-file .env scripts/multi_node_nccl_test.py --num-nodes 2
-
 ```
 
-.env is optional, but it is recommended to use for configuring environment variables.
+`.env` is optional, but it is recommended to use for configuring environment variables.
 
 ### Note on `LD_LIBRARY_PATH`
 
 If you are using RDMA, you may need to customize the `LD_LIBRARY_PATH` to include the RDMA libraries (Ex: EFA on AWS). We've seen issues with `uv` where the `LD_LIBRARY_PATH` is not exported even if it is set in the `.env` file. It is recommended to set the `SKYRL_LD_LIBRARY_PATH_EXPORT=1` in the `.env` file and set `LD_LIBRARY_PATH` directly in the current shell.
 
-## Illegal Memory Access with vLLM
+## Worker startup timeout
 
-In some cases, you may encounter "illegal memory access" errors with vLLM >= 0.10.0: https://github.com/vllm-project/vllm/issues/23814. Currently, we recommend a workaround by downgrading to vLLM 0.9.2.
+Sometimes, you might see the following logs from the raylet:
 
-With SkyRL, this can be done with the following overrides:
+`(raylet) \[2025-08-29 23:30:23,740 E 2711113 2711113] (raylet) worker\_pool.cc:586: Some workers of the worker process(2769699) have not registered within the timeout. The process is still alive, probably it's hanging during start. \[repeated 4x across cluster]`
+
+**What this means**
+
+In Ray, all tasks and actors are run in a "worker process". Each worker process has to register with Ray's centralized Global Control Service. Code inside the actor class' `__init__` method is run after registration. In our case, we use the uv + ray integration, and thus startup includes starting the worker process with the uv run command (exact same command used to launch the entrypoint).
+
+The error message is referring to worker process not starting up within timeout. This can be due to
+
+1. Incorrect startup command : maybe the path to an env file passed to `uv run --env-file <env_file> ..` is incorrect, or not available on the worker node, etc
+   - Fix: Correct the startup command so that it is valid when run inside the working directory on the head as well as worker nodes.
+2. Slow startup : Your run can hang even if you simply exceed Ray's timeout limit for worker startup. This can happen with a cold-start run - the first SkyRL run in your cluster when `uv` has to download all the dependencies and populate its cache.
+   - Fix: Increase the registration timeout for Ray workers with `RAY_worker_register_timeout_seconds` (say 600). This should be set before the ray cluster is launched with ray start. The ideal fix is to bake this large value in the container. 
+
+## Memory leaks during training with code that uses `multiprocessing`
+
+One of the most common issues during training is unexplained memory leaks that lead to CPU RAM OOMs. The root cause can be varied, but typically you can get to the problematic piece of code by just inspecting memory usage: 
 
 ```bash
-uv run --isolated --extra fsdp --with vllm==0.9.2 --with transformers==4.53.0 --with torch==2.7.0 --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" -- ...
-
+ps -eo pid,comm,rss --sort=-rss | awk 'NR==1{print $0} NR>1{printf "%-8s %-20s %.2f GB\n", $1, $2, $3/1024/1024}' | head
 ```
+
+One common anti-pattern that causes memory leaks: Using `os.fork` with Ray. If your custom environment uses `fork` to spawn multiple processes, it can leak to unexplained behaviour because of its interaction with Ray. Ray uses sockets to communicate with other Ray-related processes and using `fork` is not a good idea in this case. If you’re seeing a memory leak, check out which of the processes are using the most memory with the above command, and if the processes are doing the same thing , then it is likely an issue with `fork` + Ray (although not always). See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html for more details.

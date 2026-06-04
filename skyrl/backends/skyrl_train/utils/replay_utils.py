@@ -221,7 +221,7 @@ def setup_per_microbatch_replay_forward(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
     model_config,
-    use_sample_packing: bool = False,
+    remove_microbatch_padding: bool = False,
 ) -> None:
     """Set up RouterReplay for a single micro-batch, aligning indices
     with the left-padding-removed token layout that the MoE layer sees.
@@ -255,7 +255,7 @@ def setup_per_microbatch_replay_forward(
 
     _patch_alltoall_dispatcher_for_replay()
 
-    if use_sample_packing:
+    if remove_microbatch_padding:
         aligned = _pack_replay_indices(rollout_expert_indices, attention_mask)
     else:
         aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)

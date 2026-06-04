@@ -15,27 +15,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 from collections import OrderedDict
-from contextlib import nullcontext
 from typing import Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from loguru import logger
 from omegaconf import DictConfig
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp._runtime_utils import _lazy_init
-from torch.distributed.fsdp.wrap import (
-    size_based_auto_wrap_policy,
-    transformer_auto_wrap_policy,
-)
-from transformers.trainer_pt_utils import get_module_class_from_name
 
 from skyrl.train.config import FSDPConfig
 
@@ -73,110 +63,6 @@ def should_use_meta_init(use_meta_tensor=True, mesh: DeviceMesh = None) -> bool:
     return mesh.get_coordinate()[-1] != 0
 
 
-def get_fsdp_wrap_policy(module, config=None, is_lora=False):
-    """Get FSDP wrap policy for the module.
-
-    Args:
-        module: The module to get wrap policy for
-        config: Configuration for wrap policy
-        is_lora: Whether to enable lambda policy for LoRA modules
-    """
-    if config is None:
-        config = {}
-
-    def _get_attr(attr_name, default_value=None):
-        if hasattr(config, "get"):
-            return config.get(attr_name, default_value)
-        else:
-            return getattr(config, attr_name, default_value)
-
-    if _get_attr("disable", False):
-        return None
-
-    default_transformer_cls_names_to_wrap = getattr(module, "_no_split_modules", None)
-    fsdp_transformer_layer_cls_to_wrap = _get_attr(
-        "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
-    )
-    min_num_params = _get_attr("min_num_params", 0)
-    auto_wrap_policy = None
-
-    policies = []
-
-    from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy
-
-    # Add lambda policy for LoRA modules if is_lora is True
-    if is_lora:
-
-        def lambda_policy_fn(module):
-            return bool(
-                len(list(module.named_children())) == 0
-                and getattr(module, "weight", None) is not None
-                and module.weight.requires_grad
-            )
-
-        lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
-        policies.append(lambda_policy)
-
-    if min_num_params > 0:
-        size_policy = functools.partial(size_based_auto_wrap_policy, min_num_params=min_num_params)
-        policies.append(size_policy)
-    elif fsdp_transformer_layer_cls_to_wrap is not None:
-        transformer_cls_to_wrap = set()
-        for layer_class in fsdp_transformer_layer_cls_to_wrap:
-            transformer_cls = get_module_class_from_name(module, layer_class)
-            if transformer_cls is None:
-                logger.warning(
-                    f"Could not find transformer layer class '{layer_class}' in the model, skipping. "
-                    "This is expected when using language_model_only=True with multimodal models."
-                )
-            else:
-                transformer_cls_to_wrap.add(transformer_cls)
-
-        if len(transformer_cls_to_wrap) == 0:
-            raise Exception(
-                f"Could not find any transformer layer class to wrap in the model. "
-                f"Searched for: {list(fsdp_transformer_layer_cls_to_wrap)}"
-            )
-
-        transformer_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls=transformer_cls_to_wrap,
-        )
-        policies.append(transformer_policy)
-
-    if len(policies) > 0:
-        auto_wrap_policy = functools.partial(_or_policy, policies=policies)
-
-    return auto_wrap_policy
-
-
-@torch.no_grad()
-def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
-    if fsdp_version(model) == 2:
-        offload_fsdp2_model_to_cpu(model, empty_cache)
-        return
-
-    assert isinstance(model, FSDP)
-    # lazy init FSDP model
-    _lazy_init(model, model)
-    assert model._is_root, "Only support root model offloading to CPU"
-    for handle in model._all_handles:
-        if handle._offload_params:
-            continue
-        flat_param = handle.flat_param
-        assert (
-            flat_param.data.data_ptr() == flat_param._local_shard.data_ptr()
-            and id(flat_param.data) != id(flat_param._local_shard)
-            and flat_param.data.size() == flat_param._local_shard.size()
-        )
-        handle.flat_param_to(torch.device("cpu"), non_blocking=True)
-        # the following still keeps id(._local_shard) != id(.data)
-        flat_param._local_shard = flat_param.data
-        assert id(flat_param._local_shard) != id(flat_param.data)
-    if empty_cache:
-        torch.cuda.empty_cache()
-
-
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     # Materialize any leftover meta buffers (e.g. non-persistent inv_freq from
@@ -190,26 +76,6 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     model.to("cpu", non_blocking=True)
     if empty_cache:
         torch.cuda.empty_cache()
-
-
-@torch.no_grad()
-def load_fsdp_model_to_gpu(model: FSDP):
-    if fsdp_version(model) == 2:
-        load_fsdp2_model_to_gpu(model)
-        return
-
-    assert isinstance(model, FSDP)
-    # lazy init FSDP model
-    _lazy_init(model, model)
-    assert model._is_root, "Only support root model loading to GPU"
-    device_id = torch.cuda.current_device()
-    for handle in model._all_handles:
-        if handle._offload_params:
-            continue
-        flat_param = handle.flat_param
-        handle.flat_param_to(torch.device(f"cuda:{device_id}"), non_blocking=True)
-        # the following still keeps id(._local_shard) != id(.data)
-        flat_param._local_shard = flat_param.data
 
 
 @torch.no_grad()
@@ -242,22 +108,6 @@ def load_fsdp_optimizer(optimizer, device_id):
                     state[key] = value.to(device_id, non_blocking=True)
 
 
-def fsdp_version(model):
-    if isinstance(model, FSDP):
-        return 1
-    elif FSDPModule is not None and isinstance(model, FSDPModule):
-        return 2
-    else:
-        return 0
-
-
-def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
-    if fsdp_version(model) == 1:
-        return FSDP.state_dict_type(model, state_type, state_cfg, optim_cfg)
-    else:
-        return nullcontext()
-
-
 def _sync_non_persistent_buffers(model: torch.nn.Module, loaded_sd: dict):
     """Broadcast non-persistent buffers (e.g. inv_freq) from rank 0 to all ranks.
 
@@ -279,100 +129,46 @@ def _sync_non_persistent_buffers(model: torch.nn.Module, loaded_sd: dict):
             module._buffers[key] = src.cpu()
 
 
-# Fsdp2 load full state dict from `accelerate`
-# Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
-# NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
 def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None):
     """
-    Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
-    parameters from rank 0 to all other ranks. This function modifies the model in-place.
+    Loads a full state dict (assumed populated on rank 0) into a sharded FSDP2
+    model by broadcasting from rank 0 and distributing per-parameter shards.
+
+    Uses PyTorch's `set_model_state_dict` with `full_state_dict=True` +
+    `broadcast_from_rank0=True`, which internally does the per-parameter
+    broadcast and DTensor distribution that we used to do manually. The
+    utility also releases intermediate staging tensors as it goes, so the
+    caching allocator can return memory to the device pool after init.
 
     Args:
         model (`torch.nn.Module`):
-            The model to load the state dict into, expected to be on meta device or a VRAM spike can occur
-        full_sd (`dict`): The full state dict to load, can be only on rank 0
+            The model to load the state dict into, expected to be on meta
+            device on all ranks except rank 0 (or on meta on all ranks and
+            full_sd populated on rank 0).
+        full_sd (`dict`): The full state dict to load (only rank 0 needs
+            real data; non-rank-0 ranks may pass an empty dict).
     """
-    import torch.distributed as dist
-    from torch.distributed.tensor import distribute_tensor
+    from torch.distributed.checkpoint.state_dict import (
+        StateDictOptions,
+        set_model_state_dict,
+    )
 
-    # Model was previously copied to meta device
-    meta_sharded_sd = model.state_dict()
-    sharded_sd = {}
+    set_model_state_dict(
+        model,
+        full_sd,
+        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
+    )
 
-    # Rank 0 distributes the full state dict to other ranks
-    def _infer_parameter_dtype(model, param_name, empty_param):
-        try:
-            old_param = model.get_parameter_or_buffer(param_name)
-        except AttributeError:
-            # Need this for LORA, as there some params are not *parameters* of sorts
-            base_param_name, local_param_name = param_name.rsplit(".", 1)
-            submodule = model.get_submodule(base_param_name)
-            old_param = getattr(submodule, local_param_name)
+    # Broadcast non-persistent buffers (e.g. inv_freq from RotaryEmbedding)
+    # that are excluded from state_dict.  On non-rank-0 meta-init these are
+    # still on the meta device with no data; rank 0 has the correct values.
+    _sync_non_persistent_buffers(model, {})
 
-        is_torch_e4m3fn_available = hasattr(torch, "float8_e4m3fn")
-        casting_dtype = None
-        is_param_float8_e4m3fn = is_torch_e4m3fn_available and empty_param.dtype == torch.float8_e4m3fn
-
-        if empty_param.dtype.is_floating_point and not is_param_float8_e4m3fn:
-            casting_dtype = old_param.dtype
-
-        return old_param is not None and old_param.is_contiguous(), casting_dtype
-
-    def _cast_and_contiguous(tensor, to_contiguous, dtype):
-        if dtype is not None:
-            tensor = tensor.to(dtype=dtype)
-        if to_contiguous:
-            tensor = tensor.contiguous()
-        return tensor
-
-    if dist.get_rank() == 0:
-        for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
-            full_param = full_param.detach().cuda()
-            mesh = sharded_param.device_mesh
-            dist.broadcast(full_param, src=0)
-            sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
-            to_contiguous, casting_dtype = _infer_parameter_dtype(
-                model,
-                param_name,
-                full_param,
-            )
-            sharded_tensor = _cast_and_contiguous(sharded_tensor, to_contiguous, casting_dtype)
-            sharded_sd[param_name] = sharded_tensor
-    # We need this else to have a matching `broadcast` for all of the ranks, else we deadlock
-    else:
-        for param_name, sharded_param in meta_sharded_sd.items():
-            full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
-            mesh = sharded_param.device_mesh
-            dist.broadcast(full_tensor, src=0)
-            sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
-            to_contiguous, casting_dtype = _infer_parameter_dtype(
-                model,
-                param_name,
-                full_tensor,
-            )
-            sharded_tensor = _cast_and_contiguous(sharded_tensor, to_contiguous, casting_dtype)
-            sharded_sd[param_name] = sharded_tensor
-
-    # we set `assign=True` because our params can be on meta device
-    model.load_state_dict(sharded_sd, assign=True)
-
-    # Broadcast non-persistent buffers (e.g. inv_freq from RotaryEmbedding) that
-    # are excluded from state_dict.  On non-rank-0 meta-init these are still on
-    # meta device with no data; rank 0 has the correctly computed values.
-    _sync_non_persistent_buffers(model, sharded_sd)
-
-    # If we don't offload FSDP2 Module to CPU and then back to GPU,
-    # it will occupy a large amount of reserved GPU memory，which can not be released using torch.cuda.empty_cache()
-    # even if we are using cpu_offload
-    # TODO (erictang000): this requires an additional offload + backload, see if this can be avoided
-    # Credit: https://github.com/volcengine/verl/pull/1667
-    offload_fsdp2_model_to_cpu(model)
-
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-
-    if not cpu_offload:
-        load_fsdp2_model_to_gpu(model)
+    if cpu_offload:
+        # Caller asked for CPU-resident params; the offload path is still
+        # broken for FSDP2 but we leave the request explicit so a future fix
+        # has an obvious hook.
+        offload_fsdp2_model_to_cpu(model)
     return model
 
 
@@ -465,18 +261,6 @@ def create_device_mesh(world_size, fsdp_size):
     return device_mesh
 
 
-def get_sharding_strategy(device_mesh):
-    from torch.distributed.fsdp import ShardingStrategy
-
-    if device_mesh.ndim == 1:
-        sharding_strategy = ShardingStrategy.FULL_SHARD
-    elif device_mesh.ndim == 2:
-        sharding_strategy = ShardingStrategy.HYBRID_SHARD
-    else:
-        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
-    return sharding_strategy
-
-
 """
 Adapted from Cruise.
 """
@@ -554,56 +338,36 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
 
     lora_params = OrderedDict()
     prefix_list = [
-        # fsdp
-        "_fsdp_wrapped_module.base_model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.layers.",
-        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
-        # fsdp2
         "base_model.model.",
         "base_model.model.model.",
         "base_model.model.model.layers.",
         "base_model.model.model.language_model.layers.",
     ]
-    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
             if name.endswith(".model") or name.endswith(".layers"):
                 continue
-            if fsdp_version(submodule) > 0:
-                with FSDP.summon_full_params(submodule, writeback=False):
-                    sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
-                    sub_lora_params = {
-                        f"{prefix}.{name}": (
-                            param.full_tensor().detach().cpu()
-                            if hasattr(param, "full_tensor")
-                            else param.detach().cpu()
-                        )
-                        for name, param in sub_lora_params.items()
-                    }
-                    lora_params.update(sub_lora_params)
-                    submodule._is_root = False
-                torch.cuda.empty_cache()
+            sub_lora_params = get_peft_model_state_dict(fsdp_module, state_dict=submodule.state_dict())
+            sub_lora_params = {
+                f"{name}.{param_name}": (
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                )
+                for param_name, param in sub_lora_params.items()
+            }
+            lora_params.update(sub_lora_params)
+            torch.cuda.empty_cache()
     return lora_params
 
 
-def collect_lora_params(module: FSDP) -> OrderedDict:
+def collect_lora_params(module) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
-    requires `module._fsdp_wrapped_module` to be a `PeftModel`
+    requires `module` to be a `PeftModel` (or an FSDP2-wrapped one).
     """
-    lora_params = OrderedDict()
-    peft_model = getattr(module, "_fsdp_wrapped_module", module)
-    if fsdp_version(module) > 0:
-        with FSDP.summon_full_params(module, writeback=False):
-            # If base model is synced, we can get the full state dict from peft model
-            lora_params = get_peft_model_state_dict(peft_model)
-            lora_params = {
-                name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
-                for name, param in lora_params.items()
-            }
-        torch.cuda.empty_cache()
-    else:
-        lora_params = get_peft_model_state_dict(peft_model)
+    lora_params = get_peft_model_state_dict(module)
+    lora_params = {
+        name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+        for name, param in lora_params.items()
+    }
+    torch.cuda.empty_cache()
     return lora_params

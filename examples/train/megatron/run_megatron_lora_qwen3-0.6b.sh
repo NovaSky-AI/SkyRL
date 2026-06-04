@@ -45,7 +45,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.lora.init_method=$LORA_A_INIT_METHOD \
   trainer.gradient_checkpointing=true \
   trainer.policy.model.lora.target_modules="all-linear" \
-  trainer.use_sample_packing=true \
+  trainer.remove_microbatch_padding=true \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
