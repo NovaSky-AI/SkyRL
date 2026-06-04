@@ -74,6 +74,8 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
+| `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
+| `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
@@ -97,9 +99,30 @@ python -m skyrl.train.main_sft [key=value overrides...]
 See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI entrypoint and
 [`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.
 
+## Minibatch packing (controller-level FFD, Megatron only)
+
+When `use_sequence_packing=true`, `SFTTrainer` collates with
+`PackedDataCollator` instead of `DefaultCollator`. Every training step:
+
+1. The controller's collator runs FFD bin-packing over the global
+   mini-batch using `max_length` as the bin capacity.
+2. The bin count is forced to a multiple of `dp_size` via empty-bin
+   padding (`min_bin_count`/`bin_count_multiple` knobs in
+   [`bin_packing._adjust_bin_count`](../../../skyrl/train/dataset/bin_packing.py)).
+3. Each bin becomes one row of the dispatched `TrainingInputBatch`. SkyRL additionally
+   tracks some metadata for demarcating sequences.
+
+Example overrides on top of `run_sft_megatron_tulu3_50k.sh`:
+
+```bash
+bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
+    use_sequence_packing=true \
+    max_tokens_per_microbatch=4096
+```
+
+
 ## Limitations
 
-- **No evaluation support.** : Currently we do not support using an evaluation dataset.
 - **Limited `train_on_what` options**: Supports training on all or the last assistant message.
 - **Two data formats only.** Supports chat-template (`messages` column) and Alpaca (`instruction`/`output` columns). Raw pre-tokenized or plain-text continuation formats are not supported.
 - **Single dataset.** No built-in multi-dataset mixing or weighting. Only one `dataset_name` + `dataset_split` pair can be specified.

@@ -156,3 +156,51 @@ class TestFSDPConfigOverrides:
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.fsdp_config.reshard_after_forward is False
+
+
+class TestMaxTokensPerMicrobatch:
+    """``max_tokens_per_microbatch`` is the FFD bin capacity.
+
+    It must be ``>= max_length`` (any single sequence fits in a bin) but need
+    not be a multiple of ``max_length``.
+    """
+
+    def _packed_cfg(self, **overrides) -> SFTConfig:
+        cfg = SFTConfig(
+            strategy="megatron",
+            max_length=128,
+            remove_microbatch_padding=True,
+            use_sequence_packing=True,
+        )
+        cfg.model.path = "test/my-model"
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        return cfg
+
+    def test_none_resolves_to_max_length(self):
+        cfg = self._packed_cfg(max_tokens_per_microbatch=None)
+        validate_sft_cfg(cfg)
+        assert cfg.resolved_bin_capacity() == 128
+
+    def test_equal_to_max_length_accepted(self):
+        cfg = self._packed_cfg(max_tokens_per_microbatch=128)
+        validate_sft_cfg(cfg)
+        assert cfg.resolved_bin_capacity() == 128
+
+    def test_non_multiple_above_max_length_accepted(self):
+        # The old "must be a multiple of max_length" rule is gone: any budget
+        # >= max_length is a valid bin capacity.
+        cfg = self._packed_cfg(max_tokens_per_microbatch=200)
+        validate_sft_cfg(cfg)
+        assert cfg.resolved_bin_capacity() == 200
+
+    def test_below_max_length_rejected(self):
+        cfg = self._packed_cfg(max_tokens_per_microbatch=64)
+        with pytest.raises(ValueError, match="must be >= max_length"):
+            validate_sft_cfg(cfg)
+
+    def test_bridge_sets_worker_micro_batch_size_to_one(self):
+        # Each bin row is one worker micro-batch.
+        cfg = self._packed_cfg(max_tokens_per_microbatch=256, micro_train_batch_size_per_gpu=4)
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.micro_train_batch_size_per_gpu == 1
