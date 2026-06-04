@@ -1124,7 +1124,7 @@ class SkyRLTrainBackend(AbstractBackend):
         ``checkpoints_base`` (expected to be shared storage), so staging next to
         it keeps the directory visible to both processes.
         """
-        staging_root = str(os.path.dirname(reference_path))
+        staging_root = os.path.dirname(os.path.abspath(reference_path))
         os.makedirs(staging_root, exist_ok=True)
         return staging_root
 
