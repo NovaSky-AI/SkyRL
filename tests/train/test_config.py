@@ -422,3 +422,61 @@ class TestMaxSeqLenValidation:
         cfg.trainer.algorithm.max_seq_len = 4096
 
         validate_cfg(cfg)
+
+
+class TestTorchProfilerConfigValidation:
+    """``TorchProfilerConfig.validate()`` rejects unusable profiler settings up
+    front (so an enabled run fails fast instead of silently degrading), and is a
+    no-op when profiling is disabled."""
+
+    @staticmethod
+    def _cfg(**overrides):
+        from skyrl.train.config.config import TorchProfilerConfig
+
+        return TorchProfilerConfig(enable=True, **overrides)
+
+    def test_disabled_skips_all_checks(self):
+        from skyrl.train.config.config import TorchProfilerConfig
+
+        # Garbage values must be tolerated while disabled (the default state).
+        TorchProfilerConfig(enable=False, export_type="bogus", activities=["gpu"], ranks=[], active=0).validate()
+
+    def test_defaults_are_valid_when_enabled(self):
+        self._cfg().validate()  # must not raise
+
+    def test_empty_ranks_rejected(self):
+        with pytest.raises(ValueError, match=r"ranks.*non-empty"):
+            self._cfg(ranks=[]).validate()
+
+    def test_unknown_activity_rejected(self):
+        with pytest.raises(ValueError, match=r"activities"):
+            self._cfg(activities=["cpu", "gpu"]).validate()
+
+    def test_activities_case_insensitive(self):
+        self._cfg(activities=["CPU", "CUDA"]).validate()  # must not raise
+
+    def test_unknown_export_type_rejected(self):
+        with pytest.raises(ValueError, match=r"export_type"):
+            self._cfg(export_type="bogus").validate()
+
+    def test_stacks_requires_with_stack(self):
+        with pytest.raises(ValueError, match=r"with_stack"):
+            self._cfg(export_type="stacks", with_stack=False).validate()
+        # With with_stack=True it is accepted.
+        self._cfg(export_type="stacks", with_stack=True).validate()
+
+    def test_negative_schedule_field_rejected(self):
+        with pytest.raises(ValueError, match=r"skip_first"):
+            self._cfg(skip_first=-1).validate()
+
+    def test_active_must_be_at_least_one(self):
+        with pytest.raises(ValueError, match=r"active"):
+            self._cfg(active=0).validate()
+
+    def test_validate_cfg_invokes_profiler_validation(self):
+        # The RL entrypoint validator must surface profiler config errors.
+        cfg = _make_validated_test_config()
+        cfg.trainer.policy.torch_profiler_config.enable = True
+        cfg.trainer.policy.torch_profiler_config.export_type = "bogus"
+        with pytest.raises(ValueError, match=r"export_type"):
+            validate_cfg(cfg)

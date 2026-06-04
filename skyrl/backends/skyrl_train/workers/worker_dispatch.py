@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
+from loguru import logger
 from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -418,6 +419,60 @@ class WorkerDispatch:
         """Update algorithm config fields on all workers for a model."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
+
+    # ------------------------------------------------------------------
+    # torch.profiler control. Dispatched via "pass_through" to every worker.
+    # Deliberately do NOT call _ensure_on_gpu so they don't perturb the
+    # colocation offload state machine. Each is best-effort: a profiler fault
+    # must never abort the training loop.
+    # ------------------------------------------------------------------
+
+    def start_profile(self, model: str) -> None:
+        """Arm the torch profiler on ``model``'s workers (before the loop)."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile"))
+        except Exception as e:
+            logger.warning(f"[profiler] start_profile dispatch for {model} failed: {e}")
+
+    def profile_step(self, model: str) -> None:
+        """Advance the torch profiler schedule by one global step on ``model``."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+        except Exception as e:
+            logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
+
+    def stop_profile(self, model: str) -> None:
+        """Stop the torch profiler on ``model``'s workers (after the loop)."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
+        except Exception as e:
+            logger.warning(f"[profiler] stop_profile dispatch for {model} failed: {e}")
+
+    def dump_profiler_summary(self, model: str) -> Optional[List]:
+        """Collect the per-rank last-window kernel self-time summaries for ``model``.
+
+        Returns a per-actor list (one entry per worker): profiled ranks return a
+        dict ``{"window_count", "pairs"}``; other ranks return None. Returns None
+        when the model is unknown or dispatch fails.
+
+        NOTE: not invoked by SkyRL's own trainers (which rely on the high-level
+        trace files). This is the dispatch-side entry of a forward-looking
+        low-level API for downstream consumers that want per-kernel self-time
+        attribution without re-parsing traces -- see ``Worker.dump_profiler_summary``.
+        """
+        if model not in self._actor_groups:
+            return None
+        try:
+            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"))
+        except Exception as e:
+            logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
+            return None
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""

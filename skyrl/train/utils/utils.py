@@ -270,6 +270,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "or negative to keep all checkpoints"
         )
 
+    cfg.trainer.policy.torch_profiler_config.validate()
+
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()
     available_policy_losses = PolicyLossRegistry.list_available()

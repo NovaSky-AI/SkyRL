@@ -134,6 +134,61 @@ class TestLoraConfigOverrides:
         assert skyrl_cfg.trainer.policy.model.lora.rank == 0
 
 
+class TestTorchProfilerConfigOverrides:
+    """torch_profiler_config bridges to policy.torch_profiler_config."""
+
+    def test_disabled_by_default(self):
+        cfg = _sft_cfg_from_overrides([])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.torch_profiler_config.enable is False
+
+    def test_enable_and_schedule_propagate(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.skip_first=3",
+                "torch_profiler_config.active=2",
+                "torch_profiler_config.repeat=0",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
+            ]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        prof = skyrl_cfg.trainer.policy.torch_profiler_config
+        assert prof.enable is True
+        assert prof.skip_first == 3
+        assert prof.active == 2
+        assert prof.repeat == 0
+        assert prof.save_path == "/tmp/sft_prof"
+
+    def test_capture_flags_propagate(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.profile_memory=true",
+                "torch_profiler_config.with_stack=false",
+                "torch_profiler_config.activities=[cuda]",
+            ]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        prof = skyrl_cfg.trainer.policy.torch_profiler_config
+        assert prof.profile_memory is True
+        assert prof.with_stack is False
+        assert list(prof.activities) == ["cuda"]
+
+    def test_invalid_profiler_config_rejected_by_sft_validation(self):
+        # validate_sft_cfg (run by build_skyrl_config_for_sft) must surface
+        # profiler config errors on the SFT path, not just the RL path.
+        cfg = _sft_cfg_from_overrides(
+            [
+                "model.path=test/my-model",
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.export_type=bogus",
+            ]
+        )
+        with pytest.raises(ValueError, match=r"export_type"):
+            build_skyrl_config_for_sft(cfg)
+
+
 class TestFSDPConfigOverrides:
     """FSDP config overrides propagate when strategy=fsdp."""
 

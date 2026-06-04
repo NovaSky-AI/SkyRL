@@ -156,11 +156,87 @@ class MegatronDDPConfig(BaseConfig):
     average_in_collective: bool = True
 
 
+TORCH_PROFILER_ACTIVITIES = ("cpu", "cuda")
+TORCH_PROFILER_EXPORT_TYPES = ("chrome_trace", "stacks")
+
+
 @dataclass
-class MegatronTorchProfilerConfig(BaseConfig):
+class TorchProfilerConfig(BaseConfig):
+    """Configuration for the ``torch.profiler``-based training-loop profiler.
+
+    Mirrors ``torch.profiler.profile`` + ``torch.profiler.schedule`` so every
+    knob is overridable. Defaults reproduce the previous hardcoded behavior
+    (CPU+CUDA, ``record_shapes``+``with_stack``) but are now fully configurable.
+    The trainer drives it (``start`` before the loop, one ``step`` per global
+    step, ``stop`` after); the schedule decides which steps are recorded.
+
+    Scope: this profiles **only the policy model's training step**
+    (forward/backward + optimizer). In an RL run it does **not** profile the
+    critic or ref models, and it does **not** profile generation/inference --
+    only the policy training compute on the configured ``ranks``.
+    """
+
     enable: bool = False
-    ranks: List[int] = field(default_factory=list)
+    ranks: List[int] = field(default_factory=lambda: [0])
     save_path: Optional[str] = None
+    """Trace output dir. Defaults to ``{ckpt_path}/profiler_traces`` when None."""
+
+    # torch.profiler.schedule -- one cycle = wait + warmup + active steps.
+    skip_first: int = 10
+    """Steps to skip before the schedule begins (warmup/steady-state)."""
+    wait: int = 0
+    warmup: int = 1
+    active: int = 1
+    """Number of steps recorded per cycle."""
+    repeat: int = 1
+    """Number of cycles. 0 = repeat for the whole run."""
+
+    # torch.profiler.profile capture knobs.
+    activities: List[str] = field(default_factory=lambda: ["cpu", "cuda"])
+    record_shapes: bool = True
+    profile_memory: bool = False
+    with_stack: bool = True
+    with_flops: bool = False
+    with_modules: bool = False
+    export_type: str = "chrome_trace"
+    """``chrome_trace`` -> ``*.pt.trace.json`` (HTA-friendly) or ``stacks`` ->
+    flamegraph-style self-CUDA-time stacks (requires ``with_stack=True``)."""
+
+    def validate(self) -> None:
+        """Validate the profiler config. No-op when disabled.
+
+        Called from both ``validate_cfg`` (RL) and ``validate_sft_cfg`` (SFT) so
+        an invalid config fails fast at startup rather than silently degrading
+        (e.g. an unknown ``export_type`` would otherwise fall through to the
+        chrome-trace branch, and an unknown ``activities`` entry would disable
+        profiling mid-run via the wrapper's exception isolation).
+        """
+        if not self.enable:
+            return
+        if not self.ranks:
+            raise ValueError("`torch_profiler_config.ranks` must be non-empty when profiling is enabled.")
+        bad_activities = [a for a in self.activities if a.lower() not in TORCH_PROFILER_ACTIVITIES]
+        if bad_activities:
+            raise ValueError(
+                f"invalid `torch_profiler_config.activities` entries {bad_activities}. "
+                f"Each must be one of {list(TORCH_PROFILER_ACTIVITIES)}."
+            )
+        if self.export_type not in TORCH_PROFILER_EXPORT_TYPES:
+            raise ValueError(
+                f"invalid `torch_profiler_config.export_type`: {self.export_type!r}. "
+                f"Must be one of {list(TORCH_PROFILER_EXPORT_TYPES)}."
+            )
+        if self.export_type == "stacks" and not self.with_stack:
+            raise ValueError(
+                "`torch_profiler_config.export_type='stacks'` requires `with_stack=true` "
+                "(torch.profiler.export_stacks needs stack records)."
+            )
+        for name in ("skip_first", "wait", "warmup", "repeat"):
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"`torch_profiler_config.{name}` must be >= 0, got {value}.")
+        if self.active < 1:
+            raise ValueError(f"`torch_profiler_config.active` must be >= 1, got {self.active}.")
 
 
 @dataclass
@@ -207,7 +283,6 @@ class MegatronConfig(BaseConfig):
     moe_router_dtype: str = "fp32"
     """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
-    torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
@@ -273,6 +348,10 @@ class PolicyConfig(BaseConfig):
     record_memory: bool = False
     """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
+    torch_profiler_config: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
+    """Backend-agnostic ``torch.profiler`` config (FSDP + Megatron). When
+    ``enable`` is true the trainer drives the profiler around the training loop
+    and writes traces to ``save_path``. See :class:`TorchProfilerConfig`."""
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
     model_config_kwargs: dict = field(default_factory=dict)
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).

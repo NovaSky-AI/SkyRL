@@ -147,7 +147,7 @@
             - skyrl.train.config.config.MegatronConfig
             - skyrl.train.config.config.MegatronDDPConfig
             - skyrl.train.config.config.MegatronLoraConfig
-            - skyrl.train.config.config.MegatronTorchProfilerConfig
+            - skyrl.train.config.config.TorchProfilerConfig
         - heading: Placement
           description: ""
           objects:

@@ -188,6 +188,41 @@ class RayPPOTrainer:
         """Check if critic model is configured."""
         return bool(self.cfg.trainer.critic.model.path)
 
+    @property
+    def _torch_profiler_enabled(self) -> bool:
+        """Whether the trainer should drive the torch profiler on policy workers.
+        Gates all profiler RPC dispatch so non-profiling runs pay nothing."""
+        return self.cfg.trainer.policy.torch_profiler_config.enable
+
+    def _profiler_start(self) -> None:
+        """Arm the torch profiler on the policy workers before the training loop.
+
+        No-op unless profiling is enabled. Shared by every trainer flavor
+        (sync / fully-async / one-step async) so the driving logic lives in one
+        place; subclasses that override ``train()`` call this at loop start.
+        """
+        if self._torch_profiler_enabled:
+            self.dispatch.start_profile("policy")
+
+    def _profiler_step(self) -> None:
+        """Advance the torch profiler schedule once per global step.
+
+        No-op unless profiling is enabled. One call == one full global step
+        (not per minibatch); the torch schedule decides which steps are
+        recorded. Call exactly once per global step from every ``train()``.
+        """
+        if self._torch_profiler_enabled:
+            self.dispatch.profile_step("policy")
+
+    def _profiler_stop(self) -> None:
+        """Stop/flush the torch profiler after the training loop.
+
+        No-op unless profiling is enabled. Call from a ``finally`` so an open
+        kineto trace window isn't leaked when the loop raises.
+        """
+        if self._torch_profiler_enabled:
+            self.dispatch.stop_profile("policy")
+
     def _build_train_dataloader_and_compute_training_steps(self):
         """
         Hook for constructing the training dataloader. Subclasses can override
@@ -290,224 +325,236 @@ class RayPPOTrainer:
         # as well as hf model at step end
         will_save_ckpts = False
         hf_model_save = False
-        for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            self._current_epoch = epoch
-            self._fire("on_epoch_start")
-            # ``step_started`` tracks the on_step_start/on_step_end pairing taking
-            # dynamic-sampling into account (which span multiple inner iterations
-            # before completing a logical step).
-            step_started = False
-            for _, rand_prompts in enumerate(self.train_dataloader):
-                if not step_started:
-                    self._fire("on_step_start")
-                    step_started = True
-                    # Open the train-rollout metrics window once per logical
-                    # step; paused so only the generation spans count toward the
-                    # throughput denominator (dynamic sampling may generate more
-                    # than once before the step completes).
-                    if self._vllm_metrics_scraper is not None:
-                        await self._vllm_metrics_scraper.start("vllm/train")
-                        self._vllm_metrics_scraper.pause()
-                with Timer("step", self.all_timings):
-                    # for colocate_all=true, inference engine is always on GPU when starting the training step
+        self._profiler_start()
+        try:
+            for epoch in range(start_epoch, self.cfg.trainer.epochs):
+                self._current_epoch = epoch
+                self._fire("on_epoch_start")
+                # ``step_started`` tracks the on_step_start/on_step_end pairing taking
+                # dynamic-sampling into account (which span multiple inner iterations
+                # before completing a logical step).
+                step_started = False
+                for _, rand_prompts in enumerate(self.train_dataloader):
+                    if not step_started:
+                        self._fire("on_step_start")
+                        step_started = True
+                        # Open the train-rollout metrics window once per logical
+                        # step; paused so only the generation spans count toward the
+                        # throughput denominator (dynamic sampling may generate more
+                        # than once before the step completes).
+                        if self._vllm_metrics_scraper is not None:
+                            await self._vllm_metrics_scraper.start("vllm/train")
+                            self._vllm_metrics_scraper.pause()
+                    with Timer("step", self.all_timings):
+                        # for colocate_all=true, inference engine is always on GPU when starting the training step
 
-                    # 0. truncate data to have even shards
-                    rand_prompts = self._remove_tail_data(rand_prompts)
-                    generator_input, uids = prepare_generator_input(
-                        rand_prompts,
-                        self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(
-                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
-                        ),
-                        self.cfg.environment.env_class,
-                        "train",
-                        self.global_step,
-                    )
-
-                    # 1.1. generation phase
-                    if self._vllm_metrics_scraper is not None:
-                        self._vllm_metrics_scraper.resume()
-                    with Timer("generate", self.all_timings):
-                        generator_output: GeneratorOutput = await self.generate(generator_input)
-                    if self._vllm_metrics_scraper is not None:
-                        self._vllm_metrics_scraper.pause()
-
-                    if self.cfg.generator.step_wise_trajectories:
-                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
-
-                    # dynamic sampling
-                    if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
-                        if keep_sampling:  # continue sampling
-                            # update progress bar for current batch (but not global step)
-                            pbar.update(1)
-                            continue
-
-                    if self.colocate_all:
-                        # if we are not continuing sampling, we sleep the inference engine
-                        await self.inference_engine_client.sleep()
-
-                    # The train rollout for this step is done generating; close
-                    # its metrics window. ``vllm/eval/*`` is collected separately
-                    # around eval below.
-                    vllm_metrics: Dict[str, float] = {}
-                    if self._vllm_metrics_scraper is not None:
-                        vllm_metrics = await self._vllm_metrics_scraper.stop()
-
-                    # 1.2 postprocess rewards (and merge step-wise turns if enabled)
-                    with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
-
-                    # 2. print example just for debugging
-                    log_interval = self.cfg.trainer.log_example_interval
-                    if log_interval > 0 and self.global_step % log_interval == 0:
-                        vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                        log_example(
-                            logger,
-                            prompt=generator_input["prompts"][0],
-                            response=vis,
-                            reward=generator_output["rewards"][0],
+                        # 0. truncate data to have even shards
+                        rand_prompts = self._remove_tail_data(rand_prompts)
+                        generator_input, uids = prepare_generator_input(
+                            rand_prompts,
+                            self.cfg.generator.n_samples_per_prompt,
+                            get_sampling_params_for_backend(
+                                self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                            ),
+                            self.cfg.environment.env_class,
+                            "train",
+                            self.global_step,
                         )
 
-                    # 3. Convert GeneratorOutput to TrainingInputBatch
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
+                        # 1.1. generation phase
+                        if self._vllm_metrics_scraper is not None:
+                            self._vllm_metrics_scraper.resume()
+                        with Timer("generate", self.all_timings):
+                            generator_output: GeneratorOutput = await self.generate(generator_input)
+                        if self._vllm_metrics_scraper is not None:
+                            self._vllm_metrics_scraper.pause()
 
-                    # 4. Inference and calculate values, log probs, rewards, kl divergence
-                    with Timer("fwd_logprobs_values_reward", self.all_timings):
-                        training_input = self.fwd_logprobs_values_reward(training_input)
+                        if self.cfg.generator.step_wise_trajectories:
+                            # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
+                            # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
+                            uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
 
-                    # 5. apply kl divergence penalty to rewards
-                    if self.cfg.trainer.algorithm.use_kl_in_reward:
-                        with Timer("apply_reward_kl_penalty", self.all_timings):
-                            training_input = self.apply_reward_kl_penalty(training_input)
+                        # dynamic sampling
+                        if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                            generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
+                            if keep_sampling:  # continue sampling
+                                # update progress bar for current batch (but not global step)
+                                pbar.update(1)
+                                continue
 
-                    # 6. calculate advantages and returns
-                    with Timer("compute_advantages_and_returns", self.all_timings):
-                        training_input = self.compute_advantages_and_returns(training_input)
-                        # remove some unwanted keys
-                        for key in ["rewards"]:
-                            training_input.pop(key)
-                        training_input.metadata.pop("uids")
-                        training_input.metadata.pop("is_last_step", None)
+                        if self.colocate_all:
+                            # if we are not continuing sampling, we sleep the inference engine
+                            await self.inference_engine_client.sleep()
 
-                    if self.cfg.trainer.dump_data_batch:
-                        # dump data to file
-                        with Timer("dump_data_batch"):
-                            self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+                        # The train rollout for this step is done generating; close
+                        # its metrics window. ``vllm/eval/*`` is collected separately
+                        # around eval below.
+                        vllm_metrics: Dict[str, float] = {}
+                        if self._vllm_metrics_scraper is not None:
+                            vllm_metrics = await self._vllm_metrics_scraper.stop()
 
-                    # 7. train policy/critic model
-                    # Policy model is backloaded to GPU during training
-                    with Timer("train_critic_and_policy", self.all_timings):
-                        status = self.train_critic_and_policy(training_input)
+                        # 1.2 postprocess rewards (and merge step-wise turns if enabled)
+                        with Timer("postprocess_generator_output", self.all_timings):
+                            generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
-                    self._fire("on_step_end", batch=training_input, metrics=status)
-                    step_started = False
+                        # 2. print example just for debugging
+                        log_interval = self.cfg.trainer.log_example_interval
+                        if log_interval > 0 and self.global_step % log_interval == 0:
+                            vis = self.tokenizer.decode(generator_output["response_ids"][0])
+                            log_example(
+                                logger,
+                                prompt=generator_input["prompts"][0],
+                                response=vis,
+                                reward=generator_output["rewards"][0],
+                            )
 
-                    # Capture callback-driven triggers, then reset.
-                    force_save = self._training_control.should_save
-                    force_eval = self._training_control.should_evaluate
-                    self._training_control.should_save = False
-                    self._training_control.should_evaluate = False
+                        # 3. Convert GeneratorOutput to TrainingInputBatch
+                        with Timer("convert_to_training_input", self.all_timings):
+                            training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
 
-                    # 8. conditionally save checkpoints and hf model
-                    is_epoch_end = self.global_step % len(self.train_dataloader) == 0
-                    hf_model_save = self.cfg.trainer.hf_save_interval > 0 and (
-                        is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                        # 4. Inference and calculate values, log probs, rewards, kl divergence
+                        with Timer("fwd_logprobs_values_reward", self.all_timings):
+                            training_input = self.fwd_logprobs_values_reward(training_input)
+
+                        # 5. apply kl divergence penalty to rewards
+                        if self.cfg.trainer.algorithm.use_kl_in_reward:
+                            with Timer("apply_reward_kl_penalty", self.all_timings):
+                                training_input = self.apply_reward_kl_penalty(training_input)
+
+                        # 6. calculate advantages and returns
+                        with Timer("compute_advantages_and_returns", self.all_timings):
+                            training_input = self.compute_advantages_and_returns(training_input)
+                            # remove some unwanted keys
+                            for key in ["rewards"]:
+                                training_input.pop(key)
+                            training_input.metadata.pop("uids")
+                            training_input.metadata.pop("is_last_step", None)
+
+                        if self.cfg.trainer.dump_data_batch:
+                            # dump data to file
+                            with Timer("dump_data_batch"):
+                                self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+
+                        # 7. train policy/critic model
+                        # Policy model is backloaded to GPU during training
+                        with Timer("train_critic_and_policy", self.all_timings):
+                            status = self.train_critic_and_policy(training_input)
+
+                            # Advance the torch profiler schedule once per global step
+                            # (no-op unless profiling is enabled). One schedule step ==
+                            # one full RL global step; the schedule decides which are recorded.
+                            self._profiler_step()
+
+                        self._fire("on_step_end", batch=training_input, metrics=status)
+                        step_started = False
+
+                        # Capture callback-driven triggers, then reset.
+                        force_save = self._training_control.should_save
+                        force_eval = self._training_control.should_evaluate
+                        self._training_control.should_save = False
+                        self._training_control.should_evaluate = False
+
+                        # 8. conditionally save checkpoints and hf model
+                        is_epoch_end = self.global_step % len(self.train_dataloader) == 0
+                        hf_model_save = self.cfg.trainer.hf_save_interval > 0 and (
+                            is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                        )
+                        ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+                            is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
+                        )
+                        will_save_ckpts = force_save or ckpt_interval_save
+                        if will_save_ckpts:
+                            with Timer("save_checkpoints", self.all_timings):
+                                ckpt_path = self.save_checkpoints()
+                            self._fire("on_save", ckpt_path=ckpt_path)
+                        if hf_model_save:
+                            with Timer("save_hf_model", self.all_timings):
+                                self.save_models()
+
+                        # 9. conditionally sync policy and ref at the end of the epoch
+                        if (
+                            self.cfg.trainer.update_ref_every_epoch
+                            and self.ref_model is not None
+                            and is_epoch_end
+                            and epoch != self.cfg.trainer.epochs - 1  # skip updating ref at the end of the last epoch
+                        ):
+                            with Timer("update_ref_with_policy", self.all_timings):
+                                self.update_ref_with_policy()
+
+                        # 10. Prepare weights for sampling
+                        with Timer("sync_weights", self.all_timings):
+                            await self.dispatch.save_weights_for_sampler()
+
+                    # 11. set logs
+                    logger.info(status)
+                    # Throughput metrics
+                    train_time = self.all_timings.get("train_critic_and_policy", 0.0)
+                    if train_time > 0 and training_input.get("attention_mask") is not None:
+                        total_tokens = int(training_input["attention_mask"].sum().item())
+                        self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
+                            train_time * self._num_training_gpus
+                        )
+                    # log epoch info
+                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    interval_eval = self.cfg.trainer.eval_interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval_interval == 0
+                        or self.global_step == self.total_training_steps
                     )
-                    ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
-                        is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
-                    )
-                    will_save_ckpts = force_save or ckpt_interval_save
-                    if will_save_ckpts:
-                        with Timer("save_checkpoints", self.all_timings):
-                            ckpt_path = self.save_checkpoints()
-                        self._fire("on_save", ckpt_path=ckpt_path)
-                    if hf_model_save:
-                        with Timer("save_hf_model", self.all_timings):
-                            self.save_models()
+                    if force_eval or interval_eval:
+                        # Open the eval-rollout window; the scraper itself measures
+                        # the generation spans via resume()/pause() inside eval().
+                        if self._vllm_metrics_scraper is not None:
+                            await self._vllm_metrics_scraper.start("vllm/eval")
+                            self._vllm_metrics_scraper.pause()
+                        self._fire("on_eval_start")
+                        with Timer("eval", self.all_timings):
+                            eval_metrics = await self.eval(vllm_metrics_scraper=self._vllm_metrics_scraper)
+                            self.all_metrics.update(eval_metrics)
+                        self._fire("on_eval_end", metrics=eval_metrics)
+                        if self._vllm_metrics_scraper is not None:
+                            vllm_metrics.update(await self._vllm_metrics_scraper.stop())
 
-                    # 9. conditionally sync policy and ref at the end of the epoch
+                    log_payload = {
+                        **self.all_metrics,
+                        **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                        # vllm/train/* = train rollout, vllm/eval/* = eval rollout,
+                        # each over its own generation time (owned by the scraper).
+                        **vllm_metrics,
+                    }
+
+                    if self._ray_gpu_monitor is not None:
+                        log_payload.update(self._ray_gpu_monitor.flush())
+
+                    self._fire("on_log", logs=log_payload)
+
+                    self.tracker.log(log_payload, step=self.global_step, commit=True)
+                    self.all_metrics = {}
+                    self.all_timings = {}
+
+                    # update progress bar after logging
+                    pbar.update(1)
+
+                    self.global_step += 1
+
                     if (
-                        self.cfg.trainer.update_ref_every_epoch
-                        and self.ref_model is not None
-                        and is_epoch_end
-                        and epoch != self.cfg.trainer.epochs - 1  # skip updating ref at the end of the last epoch
+                        self.cfg.trainer.max_training_steps is not None
+                        and self.global_step > self.cfg.trainer.max_training_steps
                     ):
-                        with Timer("update_ref_with_policy", self.all_timings):
-                            self.update_ref_with_policy()
+                        logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                        stop_training = True
+                        break
 
-                    # 10. Prepare weights for sampling
-                    with Timer("sync_weights", self.all_timings):
-                        await self.dispatch.save_weights_for_sampler()
+                    del training_input, generator_output
 
-                # 11. set logs
-                logger.info(status)
-                # Throughput metrics
-                train_time = self.all_timings.get("train_critic_and_policy", 0.0)
-                if train_time > 0 and training_input.get("attention_mask") is not None:
-                    total_tokens = int(training_input["attention_mask"].sum().item())
-                    self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
-                        train_time * self._num_training_gpus
-                    )
-                # log epoch info
-                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                interval_eval = self.cfg.trainer.eval_interval > 0 and (
-                    self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
-                )
-                if force_eval or interval_eval:
-                    # Open the eval-rollout window; the scraper itself measures
-                    # the generation spans via resume()/pause() inside eval().
-                    if self._vllm_metrics_scraper is not None:
-                        await self._vllm_metrics_scraper.start("vllm/eval")
-                        self._vllm_metrics_scraper.pause()
-                    self._fire("on_eval_start")
-                    with Timer("eval", self.all_timings):
-                        eval_metrics = await self.eval(vllm_metrics_scraper=self._vllm_metrics_scraper)
-                        self.all_metrics.update(eval_metrics)
-                    self._fire("on_eval_end", metrics=eval_metrics)
-                    if self._vllm_metrics_scraper is not None:
-                        vllm_metrics.update(await self._vllm_metrics_scraper.stop())
+                self._fire("on_epoch_end")
 
-                log_payload = {
-                    **self.all_metrics,
-                    **{f"timing/{k}": v for k, v in self.all_timings.items()},
-                    # vllm/train/* = train rollout, vllm/eval/* = eval rollout,
-                    # each over its own generation time (owned by the scraper).
-                    **vllm_metrics,
-                }
-
-                if self._ray_gpu_monitor is not None:
-                    log_payload.update(self._ray_gpu_monitor.flush())
-
-                self._fire("on_log", logs=log_payload)
-
-                self.tracker.log(log_payload, step=self.global_step, commit=True)
-                self.all_metrics = {}
-                self.all_timings = {}
-
-                # update progress bar after logging
-                pbar.update(1)
-
-                self.global_step += 1
-
-                if (
-                    self.cfg.trainer.max_training_steps is not None
-                    and self.global_step > self.cfg.trainer.max_training_steps
-                ):
-                    logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
-                    stop_training = True
+                if stop_training:
                     break
-
-                del training_input, generator_output
-
-            self._fire("on_epoch_end")
-
-            if stop_training:
-                break
+        finally:
+            # Always stop/flush the profiler when the training loop exits --
+            # including via an exception -- so the open kineto trace window
+            # isn't leaked. No-op when profiling is disabled.
+            self._profiler_stop()
 
         pbar.close()
         if self.colocate_all:

@@ -42,7 +42,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -704,7 +704,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
-        self.profiler: Profiler = None
+        # self.profiler is initialized on the Worker base; populated in init_model.
         self._is_lora = self.cfg.policy.model.lora.rank > 0
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.
@@ -806,9 +806,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # create profiler
-        if self.cfg.policy.megatron_config.torch_profiler_config.enable:
-            self.profiler = Profiler(self.cfg.policy.megatron_config.torch_profiler_config)
+        # create profiler (driven by the trainer via start/profile_step/stop RPCs)
+        self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
         # create optimizer (skipped for inference-only flows; Megatron's
         # DistributedOptimizer eagerly materializes fp32 master + AdamW state

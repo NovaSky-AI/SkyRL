@@ -53,9 +53,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_TP \
-  trainer.policy.megatron_config.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
-  trainer.policy.megatron_config.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
-  trainer.policy.megatron_config.torch_profiler_config.save_path=$SAVE_PATH \
+  trainer.policy.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
+  trainer.policy.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
+  trainer.policy.torch_profiler_config.save_path=$SAVE_PATH \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \

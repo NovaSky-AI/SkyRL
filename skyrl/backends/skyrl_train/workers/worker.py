@@ -233,6 +233,10 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
+        # torch.profiler wrapper. Constructed in ``init_model`` when
+        # ``policy.torch_profiler_config.enable`` is set; driven by the trainer
+        # via the start_profile/profile_step/stop_profile RPCs below.
+        self.profiler = None
 
         if self.cfg.algorithm.temperature is None:
             raise ValueError("`cfg.algorithm.temperature` must be set")
@@ -291,6 +295,56 @@ class Worker(DistributedTorchRayActor):
     def set_algorithm_config(self, **kwargs) -> None:
         for key, value in kwargs.items():
             setattr(self.cfg.algorithm, key, value)
+
+    # ------------------------------------------------------------------
+    # torch.profiler control RPCs (dispatched by the trainer via "pass_through").
+    #
+    # These live on the shared Worker base so they're on the snapshotted Ray
+    # actor method table of every PolicyWorker (Megatron + FSDP) without a
+    # subclass. They no-op when ``self.profiler`` is None (profiling disabled
+    # or rank not selected), so the trainer can call them on every step. The
+    # ``Profiler`` itself is exception-isolated; these are an extra guard so a
+    # profiler fault can never abort a training step.
+    # ------------------------------------------------------------------
+
+    def start_profile(self) -> None:
+        """Arm the profiler before the training loop (no-op when disabled)."""
+        if self.profiler is not None:
+            self.profiler.start()
+
+    def profile_step(self) -> None:
+        """Advance the profiler schedule by one global step (no-op when disabled).
+
+        Call exactly once per global step. ``torch.profiler``'s schedule decides
+        which steps are actually recorded; trace files are written automatically
+        at the close of each active window.
+        """
+        if self.profiler is not None:
+            self.profiler.step()
+
+    def stop_profile(self) -> None:
+        """Stop the profiler after the training loop, flushing any open window."""
+        if self.profiler is not None:
+            self.profiler.stop()
+
+    def dump_profiler_summary(self):
+        """Return this rank's last-window kernel self-time summary, or None.
+
+        Pickle-safe dict (``{"window_count", "pairs": [(name, self_us), ...]}``)
+        or None when profiling is disabled / no profiler on this rank. The
+        low-level per-kernel attribution data path for downstream consumers; the
+        trace files remain the high-level (HTA) source.
+
+        NOTE: SkyRL itself does not call this RPC (or ``get_kernel_summary``) in
+        its own training loop -- the high-level trace files are SkyRL's
+        deliverable. This is a deliberately-provided forward-looking API for
+        downstream consumers that want per-kernel self-time attribution without
+        re-parsing the on-disk trace. Keep it wired end-to-end (Profiler ->
+        Worker -> WorkerDispatch) so such a consumer needs only to call
+        ``dispatch.dump_profiler_summary("policy")``; do not remove it as
+        "dead code".
+        """
+        return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
