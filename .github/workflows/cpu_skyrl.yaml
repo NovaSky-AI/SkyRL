@@ -44,7 +44,7 @@ jobs:
         uvx ruff check
     - name: Run pytest
       run: |
-        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests/tx/models/test_qwen3_5.py
+        uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
         uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
     - name: Run engine benchmarks
       run: |
