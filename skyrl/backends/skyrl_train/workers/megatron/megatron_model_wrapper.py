@@ -12,7 +12,6 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
-    postprocess_packed_seqs,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -39,13 +38,36 @@ def _build_packed_targets(
     sequences: torch.Tensor,
     attention_mask: torch.Tensor,
     packed_seq_params,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
 ) -> torch.Tensor:
     """Pack full target token IDs without context-parallel sharding."""
-    attention_mask = attention_mask.to(device=sequences.device, dtype=torch.bool)
     cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=sequences.device, dtype=torch.long)
-    total_padded_tokens = cu_padded[-1]
+    total_padded_tokens = int(cu_padded[-1].item())
 
     targets = torch.zeros((total_padded_tokens,), dtype=sequences.dtype, device=sequences.device)
+    if sub_seq_lengths is not None:
+        cu_padded_cpu = cu_padded.detach().cpu().tolist()
+        seg_idx = 0
+        for row_idx, row_lens in enumerate(sub_seq_lengths):
+            row_offset = 0
+            for seq_len in row_lens:
+                seq_len = int(seq_len)
+                if seg_idx + 1 >= len(cu_padded_cpu):
+                    raise ValueError("sub_seq_lengths contains more sub-sequences than packed_seq_params")
+                packed_start = cu_padded_cpu[seg_idx]
+                targets[packed_start : packed_start + seq_len] = sequences[
+                    row_idx, row_offset : row_offset + seq_len
+                ]
+                row_offset += cu_padded_cpu[seg_idx + 1] - cu_padded_cpu[seg_idx]
+                seg_idx += 1
+        if seg_idx != len(cu_padded_cpu) - 1:
+            raise ValueError(
+                f"sub_seq_lengths describes {seg_idx} sub-sequences, "
+                f"but packed_seq_params describes {len(cu_padded_cpu) - 1}"
+            )
+        return targets.unsqueeze(0)
+
+    attention_mask = attention_mask.to(device=sequences.device, dtype=torch.bool)
     token_offsets = attention_mask.to(torch.long).cumsum(dim=1) - 1
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     targets[packed_indices[attention_mask]] = sequences[attention_mask]
@@ -130,6 +152,7 @@ class MegatronModelWrapper:
                     cp_group=mpu.get_context_parallel_group(),
                     chunk_size=self.cfg.logprobs_chunk_size,
                     attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(
@@ -161,6 +184,7 @@ class MegatronModelWrapper:
             position_ids = batch["position_ids"]
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
+            batch["sub_seq_lengths_list"] = sub_seq_lengths
 
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
@@ -170,9 +194,9 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = None
-                if sub_seq_lengths is None:
-                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
+                batch["packed_targets"] = _build_packed_targets(
+                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                )
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -191,17 +215,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.remove_microbatch_padding and sub_seq_lengths is not None:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                    sub_seq_lengths=sub_seq_lengths,
-                )
-            elif not self.remove_microbatch_padding:
+            if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
@@ -319,6 +333,7 @@ class MegatronModelWrapper:
                     cp_group=mpu.get_context_parallel_group(),
                     chunk_size=self.cfg.logprobs_chunk_size,
                     attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(
@@ -402,6 +417,7 @@ class MegatronModelWrapper:
                         data["attention_mask"],
                         loss_mask,
                         mpu.get_context_parallel_group(),
+                        sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     )
                 else:
                     action_logits = logits[:, -num_actions - 1 : -1, :]
@@ -500,11 +516,11 @@ class MegatronModelWrapper:
             # entries covering all sub-seqs, not one per row.
             #
             # It arrives as a ``TensorList`` data field.
-            # ``preprocess/postprocess_packed_seqs`` are typed
-            # ``list[list[int]]``, so convert tensors -> python lists here at
-            # the forward_step boundary, keeping those signatures unchanged.
+            # ``preprocess_packed_seqs`` and the packed-logprob scatter use
+            # ``list[list[int]]``, so convert tensors -> python lists here.
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
+            batch["sub_seq_lengths_list"] = sub_seq_lengths
 
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
@@ -514,9 +530,9 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = None
-                if sub_seq_lengths is None:
-                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
+                batch["packed_targets"] = _build_packed_targets(
+                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                )
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -535,17 +551,7 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if self.remove_microbatch_padding and sub_seq_lengths is not None:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                    sub_seq_lengths=sub_seq_lengths,
-                )
-            elif not self.remove_microbatch_padding:
+            if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
