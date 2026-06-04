@@ -201,17 +201,29 @@ async def test_megatron_policy_weight_sync(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "remove_microbatch_padding", "lora"),
+    (
+        "worker_type",
+        "tp",
+        "pp",
+        "cp",
+        "ep",
+        "etp",
+        "gpus_per_node",
+        "remove_microbatch_padding",
+        "lora",
+        "cp_comm_type",
+    ),
     [
-        ("policy", 2, 1, 1, 1, None, 2, False, False),
+        ("policy", 2, 1, 1, 1, None, 2, False, False, None),
         # ref has same forward pass as policy - just duplicate one test to test setup
-        ("ref", 2, 1, 1, 1, None, 2, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, True),
-        ("policy", 1, 1, 2, 1, None, 2, True, False),
-        ("policy", 2, 1, 2, 1, None, 4, True, False),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False),
+        ("ref", 2, 1, 1, 1, None, 2, False, False, None),
+        ("policy", 2, 2, 1, 1, None, 4, False, False, None),
+        ("policy", 2, 2, 1, 1, None, 4, True, False, None),
+        ("policy", 2, 2, 1, 1, None, 4, True, True, None),
+        ("policy", 1, 1, 2, 1, None, 2, True, False, None),
+        ("policy", 1, 1, 2, 1, None, 2, True, False, "a2a"),
+        ("policy", 2, 1, 2, 1, None, 4, True, False, None),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, None),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -220,13 +232,24 @@ async def test_megatron_policy_weight_sync(
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_lora",
         "cp_2_policy_seq_packing",
+        "cp_2_policy_seq_packing_a2a",
         "tp_2_cp_2_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
     ],
 )
 @pytest.mark.megatron
 async def test_megatron_forward(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, remove_microbatch_padding, lora
+    ray_init_fixture,
+    worker_type,
+    tp,
+    pp,
+    cp,
+    ep,
+    etp,
+    gpus_per_node,
+    remove_microbatch_padding,
+    lora,
+    cp_comm_type,
 ):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
@@ -242,6 +265,9 @@ async def test_megatron_forward(
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     batch = get_test_training_batch(max(4, gpus_per_node))
+
+    if cp_comm_type is not None:
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["cp_comm_type"] = cp_comm_type
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -446,15 +472,18 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "remove_microbatch_padding",
         "use_entropy_loss",
         "lora",
+        "cp_comm_type",
     ),
     [
-        ("policy", 2, 2, 1, 1, 1, 4, True, False, False),
-        ("policy", 2, 2, 1, 1, 1, 4, True, True, False),
-        ("policy", 2, 2, 1, 1, 1, 4, True, False, True),
-        ("policy", 2, 2, 1, 1, 1, 4, False, False, False),
-        ("policy", 2, 1, 2, 1, 1, 4, True, False, False),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False, False),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False, True),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, False, None),
+        ("policy", 2, 2, 1, 1, 1, 4, True, True, False, None),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, True, None),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, False, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, False, False, "a2a"),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, False, None),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, True, None),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
@@ -462,13 +491,26 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",
         "tp2_cp2_policy_seq_packing_no_entropy_loss",
+        "tp2_cp2_policy_seq_packing_with_entropy_loss",
+        "tp2_cp2_policy_seq_packing_no_entropy_loss_a2a",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing_lora",
     ],
 )
 @pytest.mark.megatron
 async def test_megatron_train(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, remove_microbatch_padding, use_entropy_loss, lora
+    ray_init_fixture,
+    worker_type,
+    tp,
+    pp,
+    cp,
+    ep,
+    etp,
+    gpus_per_node,
+    remove_microbatch_padding,
+    use_entropy_loss,
+    lora,
+    cp_comm_type,
 ):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
@@ -486,6 +528,8 @@ async def test_megatron_train(
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     cfg.trainer.algorithm.use_kl_loss = False
+    if cp_comm_type is not None:
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["cp_comm_type"] = cp_comm_type
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
@@ -542,6 +586,7 @@ async def test_megatron_train(
         assert "policy_lr" in result.metrics
         assert "loss_metrics/clip_ratio" in result.metrics
         assert "policy_entropy" in result.metrics
+        assert result.metrics["policy_entropy"] > 0
         for k, v in result.metrics.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
         if ep > 1:

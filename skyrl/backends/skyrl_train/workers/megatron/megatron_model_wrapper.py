@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
+    postprocess_packed_seqs,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -20,6 +21,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
     vocab_parallel_entropy,
+    vocab_parallel_entropy_packed_sequences,
 )
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -115,7 +117,7 @@ class MegatronModelWrapper:
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            if packed_seq_params is not None:
+            if packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
                     packed_targets,
@@ -127,6 +129,7 @@ class MegatronModelWrapper:
                     inference_only=True,
                     cp_group=mpu.get_context_parallel_group(),
                     chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=data["attention_mask"],
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(
@@ -156,15 +159,20 @@ class MegatronModelWrapper:
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
+            sub_seq_lengths_field = batch.get("sub_seq_lengths")
+            sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
 
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
+                batch["packed_targets"] = None
+                if sub_seq_lengths is None:
+                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -183,7 +191,17 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if not self.remove_microbatch_padding:
+            if self.remove_microbatch_padding and sub_seq_lengths is not None:
+                outputs = postprocess_packed_seqs(
+                    outputs,
+                    packed_seq_params,
+                    attention_mask,
+                    micro_batch_size,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
+                )
+            elif not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
@@ -288,7 +306,7 @@ class MegatronModelWrapper:
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            if packed_seq_params is not None:
+            if packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
                     packed_targets,
@@ -300,6 +318,7 @@ class MegatronModelWrapper:
                     inference_only=False,
                     cp_group=mpu.get_context_parallel_group(),
                     chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=data["attention_mask"],
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(
@@ -373,16 +392,26 @@ class MegatronModelWrapper:
                 return loss, metrics
 
             # RL path: add optional KL/entropy terms
-            # entropy loss
-            if packed_seq_params is not None and loss_config.use_entropy_loss:
-                raise NotImplementedError("Entropy loss is not implemented for packed Megatron logits")
+            with torch.set_grad_enabled(loss_config.use_entropy_loss):
+                if packed_seq_params is not None and packed_targets is not None:
+                    entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
+                        logits,
+                        packed_seq_params.cu_seqlens_q_padded,
+                        sequences.shape[1],
+                        num_actions,
+                        data["attention_mask"],
+                        loss_mask,
+                        mpu.get_context_parallel_group(),
+                    )
+                else:
+                    action_logits = logits[:, -num_actions - 1 : -1, :]
+                    entropy_BS = vocab_parallel_entropy(action_logits)
+                    entropy = masked_mean(entropy_BS, loss_mask)
+                    entropy_for_loss = entropy
+
             if loss_config.use_entropy_loss:
-                action_logits = logits[:, -num_actions - 1 : -1, :]
-                entropy_BS = vocab_parallel_entropy(action_logits)
-                entropy = masked_mean(entropy_BS, loss_mask)
-                entropy_loss_term = entropy * loss_config.entropy_loss_coef
+                entropy_loss_term = entropy_for_loss * loss_config.entropy_loss_coef
             else:
-                entropy = torch.tensor(0.0, device=logits.device)
                 entropy_loss_term = torch.tensor(0.0, device=logits.device)
 
             if loss_config.use_kl_loss:
@@ -485,7 +514,9 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
+                batch["packed_targets"] = None
+                if sub_seq_lengths is None:
+                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
                 new_attention_mask = None
                 new_position_ids = None
             else:
@@ -504,7 +535,17 @@ class MegatronModelWrapper:
                 packed_seq_params=packed_seq_params,
             )
 
-            if not self.remove_microbatch_padding:
+            if self.remove_microbatch_padding and sub_seq_lengths is not None:
+                outputs = postprocess_packed_seqs(
+                    outputs,
+                    packed_seq_params,
+                    attention_mask,
+                    micro_batch_size,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
+                )
+            elif not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
