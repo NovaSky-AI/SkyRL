@@ -40,12 +40,14 @@ class MegatronModelWrapper:
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
+        is_vlm: bool = False,
     ):
         self.cfg = config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
+        self.is_vlm = is_vlm
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -65,6 +67,18 @@ class MegatronModelWrapper:
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
+
+    def _assert_vlm_supported(self):
+        """Guard the VLM parallelism constraints carried over from the FSDP path.
+
+        3D RoPE and multimodal token positions make sample/microbatch packing,
+        context parallelism, and sequence parallelism unsafe for VLMs today.
+        """
+        assert not self.remove_microbatch_padding, "VLM + microbatch padding removal unsupported"
+        assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
+        assert (
+            mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
+        ), "VLM + sequence parallelism unsupported"
 
     def forward(
         self,
@@ -86,6 +100,8 @@ class MegatronModelWrapper:
         Returns:
             torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data):
@@ -124,11 +140,20 @@ class MegatronModelWrapper:
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
+            # VLM image tensors (Qwen-style). Only the first pipeline stage runs
+            # the vision tower; later stages receive hidden states and never see
+            # these tensors. The TensorList carries one variable-shape tensor per
+            # sample, concatenated here into the dense layout the model expects.
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -137,7 +162,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
 
@@ -146,6 +171,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                **vlm_inputs,
             )
 
             if self.remove_microbatch_padding:
@@ -224,6 +250,8 @@ class MegatronModelWrapper:
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         # Resolve loss function
@@ -434,11 +462,19 @@ class MegatronModelWrapper:
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
 
+            # VLM image tensors (Qwen-style). See the note in ``forward``: only
+            # the first pipeline stage consumes these; the TensorList is one
+            # variable-shape tensor per sample, concatenated into a dense batch.
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 new_attention_mask = None
@@ -448,7 +484,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
 
@@ -457,6 +493,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                **vlm_inputs,
             )
 
             if self.remove_microbatch_padding:

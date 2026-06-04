@@ -333,6 +333,11 @@ class MegatronWorker:
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
+        # HF config means a vision tower is present. Megatron's TransformerConfig
+        # has no such field, so this must be read off the HF config.
+        self.is_vlm = hasattr(hf_config, "vision_config") and hf_config.vision_config is not None
+
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
@@ -632,6 +637,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
+            is_vlm=self.is_vlm,
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
@@ -673,6 +679,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 rollout_expert_indices = micro.get("rollout_expert_indices")
                 if rollout_expert_indices is not None:
                     rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+                vlm_inputs = {}
+                if micro.get("pixel_values") is not None:
+                    vlm_inputs["pixel_values"] = micro.get("pixel_values")
+                    vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
+
                 micro_dicts.append(
                     {
                         "sequences": sequences,
@@ -680,6 +692,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         "position_ids": position_ids,
                         "num_actions": num_actions,
                         "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                        **vlm_inputs,
                     }
                 )
 
@@ -719,6 +732,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
+
             micro_buffer.append(
                 {
                     "sequences": sequences,
@@ -732,6 +750,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    **vlm_inputs,
                 }
             )
 
@@ -823,6 +842,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
+
             micro_buffer.append(
                 {
                     "sequences": sequences,
@@ -838,6 +862,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     # used with global sequence packing
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    **vlm_inputs,
                 }
             )
 
@@ -1196,6 +1221,12 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             rollout_expert_indices = micro.get("rollout_expert_indices")
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            vlm_inputs = {}
+            if micro.get("pixel_values") is not None:
+                vlm_inputs["pixel_values"] = micro.get("pixel_values")
+                vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
+
             micro_dicts.append(
                 {
                     "sequences": sequences,
@@ -1203,6 +1234,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": num_actions,
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                    **vlm_inputs,
                 }
             )
 
@@ -1287,7 +1319,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method

@@ -8,7 +8,7 @@ import json
 
 import pytest
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from skyrl.train.config.sft_config import SFTConfig, TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
@@ -26,6 +26,14 @@ def tokenizer():
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     return tok
+
+
+@pytest.fixture(scope="module")
+def vlm_processor():
+    proc = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
+    if proc.tokenizer.pad_token is None:
+        proc.tokenizer.pad_token = proc.tokenizer.eos_token
+    return proc
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +126,37 @@ def test_chat_truncation(tokenizer):
     # If the prompt alone fills the budget, result is None -- also acceptable
 
 
+def test_chat_vlm(vlm_processor):
+    """A user+image+assistant conversation tokenizes with vision tokens."""
+    example = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hi"},
+                    {
+                        "type": "image",
+                        "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+    result = tokenize_chat_example(example, vlm_processor.tokenizer, processor=vlm_processor)
+
+    assert result is not None
+    ids = result["input_ids"]
+    assert isinstance(ids, list)
+    assert all(isinstance(t, int) for t in ids)
+
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|vision_start|>") in ids
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|image_pad|>") in ids
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|vision_end|>") in ids
+    assert "pixel_values" in result
+    assert "image_grid_thw" in result
+
+
 # ---------------------------------------------------------------------------
 # tokenize_sft_example
 # ---------------------------------------------------------------------------
@@ -168,18 +207,24 @@ def test_alpaca_truncated_response(tokenizer):
 # ---------------------------------------------------------------------------
 
 
-def _make_example(input_ids, num_actions):
+def _make_example(input_ids, num_actions, image_grid=None):
     """Helper to create a tokenized example dict for collation tests.
 
     Mirrors ``_tokenize_chat_last_assistant``: loss_mask is num_actions long,
-    all 1s (train on every response token).
+    all 1s (train on every response token). When ``image_grid`` is given, attach
+    matching ``image_grid_thw`` / ``pixel_values`` tensors.
     """
-    return {
+    example = {
         "input_ids": input_ids,
         "attention_mask": [1] * len(input_ids),
         "num_actions": num_actions,
         "loss_mask": [1] * num_actions,
     }
+    if image_grid:
+        example["image_grid_thw"] = torch.tensor(image_grid)
+        patches = sum(int(thw.prod()) for thw in example["image_grid_thw"])
+        example["pixel_values"] = torch.ones(patches, patches * 3)
+    return example
 
 
 def test_collate_shapes(tokenizer):
@@ -258,6 +303,20 @@ def test_collate_metadata(tokenizer):
     batch = collate_sft_batch(examples, tokenizer)
 
     assert batch.metadata["response_length"] == 3
+
+
+def test_collate_vlm(vlm_processor):
+    """Examples with vision tensors collate into the expected TensorList shapes."""
+    examples = [
+        _make_example([1, 2, 3, 4, 5], 2, image_grid=[[1, 3, 3]]),
+        _make_example(list(range(7)), 3, image_grid=[[1, 2, 2]]),
+    ]
+    batch = collate_sft_batch(examples, vlm_processor.tokenizer)
+
+    assert (batch["image_grid_thw"][0] == torch.tensor([[1, 3, 3]])).all().item()
+    assert (batch["image_grid_thw"][1] == torch.tensor([[1, 2, 2]])).all().item()
+    assert batch["pixel_values"][0].shape == (9, 27)
+    assert batch["pixel_values"][1].shape == (4, 12)
 
 
 # ---------------------------------------------------------------------------
