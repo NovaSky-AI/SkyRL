@@ -514,53 +514,33 @@ class MegatronWorker:
         device = torch.cuda.current_device()
 
         if microbatch_iterator is not None:
-            for microbatch in microbatch_iterator:
-                microbatch.to(device)
-                sequences = microbatch["sequences"]
-                attention_mask = microbatch["attention_mask"]
-                num_actions = microbatch.metadata["response_length"]
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
-                rollout_expert_indices = microbatch.get("rollout_expert_indices")
-                if rollout_expert_indices is not None:
-                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-                micro_dicts.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": num_actions,
-                        "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    }
-                )
+            micro_batches = microbatch_iterator
         else:
-            micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
-            micro_batches = data.chunk(micro_bsz)
-            for micro in micro_batches:
-                micro.to(device)
-                sequences = micro["sequences"]
-                attention_mask = micro["attention_mask"]
-                num_actions = micro.metadata["response_length"]
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
-                rollout_expert_indices = micro.get("rollout_expert_indices")
-                if rollout_expert_indices is not None:
-                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-                micro_dicts.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": num_actions,
-                        "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    }
-                )
+            micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+
+        for micro in micro_batches:
+            micro.to(device)
+            attention_mask = micro["attention_mask"]
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+            micro_dicts.append(
+                {
+                    "sequences": micro["sequences"],
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": micro.metadata["response_length"],
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                }
+            )
 
         if use_token_batching:
             # Pad microbatches to uniform batch size for Megatron compatibility
             max_micro_bsz = max(m["sequences"].shape[0] for m in micro_dicts) if micro_dicts else 1
             for i, m in enumerate(micro_dicts):
-                micro_dicts[i] = self._pad_forward_microbatch_to_size(m, max_micro_bsz)
+                micro_dicts[i] = self._pad_microbatch_to_size(m, max_micro_bsz)
             mbs = max_micro_bsz
         else:
             mbs = micro_dicts[0]["sequences"].shape[0] if micro_dicts else 1
@@ -590,37 +570,6 @@ class MegatronWorker:
 
         clear_router_replay()
         return output["output"]
-
-    def _pad_forward_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
-        """Pad a forward micro-batch dict to target_batch_size."""
-        current_bsz = micro_dict["sequences"].shape[0]
-        if current_bsz >= target_batch_size:
-            return micro_dict
-
-        pad_count = target_batch_size - current_bsz
-        device = micro_dict["sequences"].device
-
-        padded = {}
-        for key, value in micro_dict.items():
-            if key in ("num_actions",):
-                padded[key] = value
-                continue
-            if value is None:
-                padded[key] = None
-                continue
-            if isinstance(value, torch.Tensor):
-                if key == "attention_mask":
-                    pad_tensor = torch.ones((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                elif key == "position_ids":
-                    seq_len = value.shape[1]
-                    pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
-                else:
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                padded[key] = torch.cat([value, pad_tensor], dim=0)
-            else:
-                padded[key] = value
-
-        return padded
 
     def _reorder_megatron_forward_output(
         self, output: TrainingOutputBatch, microbatch_iterator, micro_dicts, padded_mbs
@@ -803,11 +752,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
     def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
-        """Pad a micro-batch dict to target_batch_size with dummy samples.
+        """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
 
-        Padded samples have loss_mask=0 so they don't contribute to the loss.
-        This is needed because Megatron's forward_backward_func requires uniform
-        micro_batch_size across all microbatches (especially with PP > 1).
+        Padded samples have loss_mask/action_mask=0 so they don't contribute to the loss
+        (forward micro-batches carry neither key, so this is inert there). This is needed
+        because Megatron's forward_backward_func requires uniform micro_batch_size across all
+        microbatches (especially with PP > 1). Scalar keys (``num_actions``,
+        ``num_microbatches``) are passed through unchanged.
         """
         current_bsz = micro_dict["sequences"].shape[0]
         if current_bsz >= target_batch_size:
@@ -996,63 +947,41 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         else:
             microbatch_iterator = None
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch
+        # Build micro-batch dicts expected by forward_backward_mini_batch.
+        # Token-based batching yields TrainingInputBatch microbatches (converted to
+        # Experience here); sample-based BatchIterator yields Experience directly.
         micro_buffer = []
 
         if microbatch_iterator is not None:
-            for microbatch in microbatch_iterator:
-                experience = BaseBatchIterator.batch_to_experience(microbatch)
-                sequences = experience.sequences
-                attention_mask = experience.attention_mask
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
-                rollout_expert_indices = experience.rollout_expert_indices
-                if rollout_expert_indices is not None:
-                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-
-                micro_buffer.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": experience.num_actions,
-                        "old_action_log_probs": experience.action_log_probs,
-                        "base_action_log_probs": experience.base_action_log_probs,
-                        "advantages": experience.advantages,
-                        "loss_mask": experience.loss_mask,
-                        "rollout_action_logprobs": experience.rollout_logprobs,
-                        "action_mask": experience.action_mask,
-                        "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
-                    }
-                )
+            experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
         else:
-            micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
-            for experience in BatchIterator(data, micro_batch_size, drop_last=False):
-                sequences = experience.sequences
-                attention_mask = experience.attention_mask
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
-                rollout_expert_indices = experience.rollout_expert_indices
-                if rollout_expert_indices is not None:
-                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+            experiences = BatchIterator(data, self.cfg.micro_train_batch_size_per_gpu, drop_last=False)
 
-                micro_buffer.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": experience.num_actions,
-                        "old_action_log_probs": experience.action_log_probs,
-                        "base_action_log_probs": experience.base_action_log_probs,
-                        "advantages": experience.advantages,
-                        "loss_mask": experience.loss_mask,
-                        "rollout_action_logprobs": experience.rollout_logprobs,
-                        "action_mask": experience.action_mask,
-                        "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
-                        # used with global sequence packing
-                        "sub_seq_lengths": experience.sub_seq_lengths,
-                    }
-                )
+        for experience in experiences:
+            attention_mask = experience.attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = experience.rollout_expert_indices
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            micro_buffer.append(
+                {
+                    "sequences": experience.sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    # used with global sequence packing (None when token-based batching is active)
+                    "sub_seq_lengths": experience.sub_seq_lengths,
+                }
+            )
 
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
