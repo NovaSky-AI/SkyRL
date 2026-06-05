@@ -362,8 +362,18 @@ class Worker(DistributedTorchRayActor):
             inference_engine_cfg, inference_world_size=inference_world_size
         )
 
-        # Create sender on all ranks
-        # Strategy implementations may have different logic for different ranks
+        # Engine-specific hook: let the strategy fill any init-info fields it
+        # derives from the trainer's live weights (no-op for the push backends;
+        # sharded_rdt fills the full param-name list it bakes its plan over).
+        # Runs before initialize_receivers, which may consume those fields.
+        self._transfer_strategy_cls.populate_init_info(
+            init_info, weight_extractor=getattr(self, "weight_extractor", None)
+        )
+
+        # Create the sender on all ranks, and (rank 0) initialize the receivers
+        # CONCURRENTLY: the broadcast backend needs create_sender (which joins a
+        # NCCL group) and the receiver init in flight together or it deadlocks.
+        # Each strategy picks the right inference-side init via initialize_receivers.
         tasks = [
             asyncio.to_thread(
                 self._transfer_strategy_cls.create_sender,
@@ -371,15 +381,18 @@ class Worker(DistributedTorchRayActor):
                 inference_client=inference_engine_client,
             ),
         ]
-
-        # Only rank 0 initializes receivers on inference engines
-        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
-        # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
+            tasks.append(self._transfer_strategy_cls.initialize_receivers(init_info, inference_engine_client))
 
         results = await asyncio.gather(*tasks)
-        self._weight_transfer_sender = results[0]  # sender is always first task
+        sender = results[0]  # sender is always the first task
+
+        # Engine-specific hook: bind this worker to the sender (no-op default;
+        # sharded_rdt's sender drives gather_layer/free_group on it and the
+        # inference workers pull weight slices from it over NIXL).
+        sender.bind_trainer_worker(self)
+
+        self._weight_transfer_sender = sender
 
         # # Register signal handlers for termination only on rank 0
         # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
@@ -484,16 +497,22 @@ class PPORayActorGroup:
         colocate_all: bool = False,
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
+        rdt_master_actor: bool = False,
     ) -> None:
         """
         Args:
             pg: Placement group for the worker group. Accepts a single PlacementGroup, or None.
                 Note that if colocate_all is True, the number of bundles in the placement group must match world_size.
+            rdt_master_actor: When True (sharded_rdt weight-sync backend), create the
+                rank-0 actor as a *named* actor with ``enable_tensor_transport=True``
+                so the vLLM inference workers can resolve it by name and pull weight
+                slices from it over NIXL. Default False — no effect on other backends.
         """
         self.cfg = cfg
         self._num_nodes = num_nodes
         self._num_gpus_per_node = num_gpus_per_node
         self.ray_actor_type = ray_actor_type
+        self._rdt_master_actor = rdt_master_actor
 
         # custom resources, see https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
         self._resources = resources
@@ -569,6 +588,24 @@ class PPORayActorGroup:
         }
         if sched is not None:
             actor_options["scheduling_strategy"] = sched
+
+        if self._rdt_master_actor:
+            # sharded_rdt: the rank-0 actor serves NIXL weight-slice pulls from the
+            # vLLM inference workers, which resolve it via ray.get_actor(name). It
+            # must be created named + tensor-transport-enabled (a @ray.remote/.options
+            # kwarg in ray 2.51.x). max_concurrency>1 lets it service inbound
+            # produce/gather calls on the actor threadpool while the driver coroutine
+            # awaits. enable_tensor_transport is harmless for the other ranks but only
+            # rank 0 is resolved by name, so only it needs the name.
+            from skyrl.backends.skyrl_train.weight_sync import RDT_TRAINER_ACTOR_NAME
+
+            actor_options["name"] = RDT_TRAINER_ACTOR_NAME
+            actor_options["enable_tensor_transport"] = True
+            actor_options["max_concurrency"] = 8
+            try:
+                actor_options["namespace"] = ray.get_runtime_context().namespace or None
+            except Exception:  # noqa: BLE001
+                pass
 
         master_actor = self.ray_actor_type.options(**actor_options).remote(
             cfg=self.cfg,

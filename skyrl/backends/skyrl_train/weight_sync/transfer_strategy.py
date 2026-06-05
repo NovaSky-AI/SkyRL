@@ -7,7 +7,7 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
 
@@ -84,6 +84,16 @@ class WeightTransferSender(ABC):
     def teardown(self) -> None:
         """Clean up resources used by the sender (e.g., destroy process groups)."""
         ...
+
+    def bind_trainer_worker(self, worker: Any) -> None:
+        """Bind the owning trainer worker to this sender.
+
+        Default no-op. Strategies whose sender drives worker-side collectives
+        (e.g. sharded_rdt's ``gather_layer``/``free_group`` + the NIXL producer
+        served from the worker actor) override this to keep a reference. Called
+        on every training rank after the sender is created.
+        """
+        return None
 
 
 class WeightTransferReceiver(ABC):
@@ -184,3 +194,26 @@ class WeightTransferStrategy(ABC):
             A configured WeightTransferReceiver instance.
         """
         ...
+
+    @staticmethod
+    def populate_init_info(init_info: WeightSyncInitInfo, *, weight_extractor: Any) -> None:
+        """Fill init-info fields derived from the trainer's live weights.
+
+        Called on every training rank before receivers are initialized. Default
+        no-op; strategies that must convey the full parameter set up front (e.g.
+        sharded_rdt bakes its replay plan over it) override this. ``weight_extractor``
+        is the trainer worker's WeightExtractor (or None if it has none).
+        """
+        return None
+
+    @staticmethod
+    def initialize_receivers(init_info: WeightSyncInitInfo, inference_client: "InferenceEngineClient"):
+        """Return the awaitable that initializes receivers on the inference side.
+
+        Run on rank 0, CONCURRENTLY with ``create_sender`` — the broadcast
+        backend needs both in flight to form the same NCCL process group, so the
+        caller schedules them together. Default: vLLM's native weight-transfer
+        init (``init_weight_update_communicator``). Strategies with a different
+        inference-side init (e.g. sharded_rdt) override this.
+        """
+        return inference_client.init_weight_update_communicator(init_info)

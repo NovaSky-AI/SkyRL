@@ -97,14 +97,14 @@ skyrl-train = [
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
-    "nixl; sys_platform == 'linux'",
+    "nixl>=1.1.0; sys_platform == 'linux'",
 ]
 
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl; sys_platform == 'linux'",
+    "nixl>=1.1.0; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
@@ -124,7 +124,7 @@ megatron = [
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl; sys_platform == 'linux'",
+    "nixl>=1.1.0; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",

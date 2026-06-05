@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
+    RdtProducerMixin,
     WeightChunk,
     WeightExtractor,
 )
@@ -132,7 +133,7 @@ class FSDPWeightExtractor(WeightExtractor):
         return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
 
 
-class FSDPPolicyWorkerBase(PolicyWorkerBase):
+class FSDPPolicyWorkerBase(RdtProducerMixin, PolicyWorkerBase):
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(

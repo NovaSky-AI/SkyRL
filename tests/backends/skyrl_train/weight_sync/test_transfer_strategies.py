@@ -1,6 +1,7 @@
 import pytest
 
 from skyrl.backends.skyrl_train.weight_sync import (
+    RDT_TRAINER_ACTOR_NAME,
     BroadcastInitInfo,
     BroadcastTransferStrategy,
     BroadcastWeightUpdateRequest,
@@ -8,6 +9,9 @@ from skyrl.backends.skyrl_train.weight_sync import (
     CudaIpcTransferStrategy,
     CudaIpcWeightUpdateRequest,
     LoraLoadRequest,
+    ShardedRdtInitInfo,
+    ShardedRdtTransferStrategy,
+    get_transfer_strategy,
     get_transfer_strategy_cls,
 )
 from skyrl.train.config import InferenceEngineConfig
@@ -23,11 +27,136 @@ class TestGetTransferStrategyCls:
             ("nccl", False, BroadcastTransferStrategy),
             ("gloo", True, BroadcastTransferStrategy),
             ("gloo", False, BroadcastTransferStrategy),
+            # sharded_rdt always selects the RDT strategy (non-colocated only is
+            # enforced later in build_vllm_cli_args, not in strategy selection).
+            ("sharded_rdt", True, ShardedRdtTransferStrategy),
+            ("sharded_rdt", False, ShardedRdtTransferStrategy),
         ],
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
         """Should return correct strategy based on backend and colocate_all."""
         assert get_transfer_strategy_cls(backend, colocate_all) is expected_strategy
+
+    @pytest.mark.parametrize(
+        "backend,colocate_all,expected",
+        [
+            ("nccl", True, "ipc"),
+            ("nccl", False, "nccl"),
+            ("sharded_rdt", True, "sharded_rdt"),
+            ("sharded_rdt", False, "sharded_rdt"),
+        ],
+    )
+    def test_backend_string(self, backend, colocate_all, expected):
+        """get_transfer_strategy maps to the vLLM WeightTransferConfig.backend string."""
+        assert get_transfer_strategy(backend, colocate_all) == expected
+
+
+class TestShardedRdtStrategy:
+    """Tests for the sharded_rdt (NIXL pull) strategy — no GPU/vLLM needed."""
+
+    def _make_ie_cfg(self) -> InferenceEngineConfig:
+        return InferenceEngineConfig(
+            weight_sync_backend="sharded_rdt",
+            model_dtype="bfloat16",
+            override_existing_update_group="enable",
+        )
+
+    def test_create_init_info(self):
+        """create_init_info returns a ShardedRdtInitInfo with the trainer actor name."""
+        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
+        assert isinstance(init_info, ShardedRdtInitInfo)
+        assert init_info.trainer_actor_name == RDT_TRAINER_ACTOR_NAME
+        assert init_info.produce_method_name == "rdt_produce_weights_batched"
+        assert init_info.warmup_method_name == "rdt_warmup"
+        assert init_info.override_existing_receiver is True
+        # names/dtype_names/shapes are filled in later from the weight extractor.
+        assert init_info.names == []
+        assert init_info.strategy_type() is ShardedRdtTransferStrategy
+
+    def test_to_api_payload(self):
+        """to_api_payload matches the vLLM ShardedRDTWeightTransferInitInfo fields."""
+        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
+        init_info.names = ["model.embed_tokens.weight", "model.layers.0.mlp.gate_proj.weight"]
+        init_info.dtype_names = ["bfloat16", "bfloat16"]
+        init_info.shapes = [[4, 8], [16, 8]]
+        payload = init_info.to_api_payload()
+        assert set(payload) == {
+            "trainer_actor_name",
+            "trainer_actor_namespace",
+            "produce_method_name",
+            "names",
+            "dtype_names",
+            "shapes",
+            "warmup_method_name",
+        }
+        # override_existing_receiver is SkyRL-only; must NOT leak into the engine payload.
+        assert "override_existing_receiver" not in payload
+        assert payload["names"] == init_info.names
+        assert payload["produce_method_name"] == "rdt_produce_weights_batched"
+
+    def test_create_receiver_not_supported(self):
+        """RDT has no SkyRL-side receiver (the receiver is the vLLM engine)."""
+        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
+        with pytest.raises(NotImplementedError):
+            ShardedRdtTransferStrategy.create_receiver(init_info)
+
+    def test_populate_init_info_fills_metadata(self):
+        """populate_init_info pulls names/dtypes/shapes from the trainer's extractor."""
+        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
+        assert init_info.names == []  # empty until populated
+
+        class _FakeExtractor:
+            def get_weight_metadata(self, dtype):
+                return {
+                    "names": ["model.embed_tokens.weight", "lm_head.weight"],
+                    "dtype_names": ["bfloat16", "bfloat16"],
+                    "shapes": [[4, 8], [8, 4]],
+                }
+
+        ShardedRdtTransferStrategy.populate_init_info(init_info, weight_extractor=_FakeExtractor())
+        assert init_info.names == ["model.embed_tokens.weight", "lm_head.weight"]
+        assert init_info.dtype_names == ["bfloat16", "bfloat16"]
+        assert init_info.shapes == [[4, 8], [8, 4]]
+
+    def test_initialize_receivers_routes_to_rdt_endpoint(self):
+        """initialize_receivers calls the RDT collective_rpc, not the NCCL init."""
+        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
+        init_info.names = ["a"]
+        init_info.dtype_names = ["bfloat16"]
+        init_info.shapes = [[1]]
+        sentinel = object()
+        captured = {}
+
+        class _FakeClient:
+            def init_weight_transfer_engine_rdt(self, payload):
+                captured["payload"] = payload
+                return sentinel
+
+            def init_weight_update_communicator(self, info):
+                raise AssertionError("RDT must not use the native NCCL init path")
+
+        ret = ShardedRdtTransferStrategy.initialize_receivers(init_info, _FakeClient())
+        assert ret is sentinel
+        assert captured["payload"]["names"] == ["a"]
+        assert "override_existing_receiver" not in captured["payload"]
+
+
+class TestShardedRdtVllmRegistration:
+    """The monkeypatch + factory registration (requires the vLLM wheel)."""
+
+    def test_engine_registered_and_config_relaxed(self):
+        pytest.importorskip("vllm")
+        # Importing the weight_sync package runs rdt_vllm_register.ensure_registered().
+        from vllm.config import WeightTransferConfig
+        from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+
+        import skyrl.backends.skyrl_train.weight_sync  # noqa: F401
+
+        assert "sharded_rdt" in WeightTransferEngineFactory._registry
+        # Literal relaxed so the custom backend validates, without breaking the originals.
+        assert WeightTransferConfig(backend="sharded_rdt").backend == "sharded_rdt"
+        assert WeightTransferConfig(backend="nccl").backend == "nccl"
+        assert WeightTransferConfig(backend="ipc").backend == "ipc"
 
 
 class TestCreateInitInfo:

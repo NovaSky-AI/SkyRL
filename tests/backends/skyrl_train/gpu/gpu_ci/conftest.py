@@ -59,8 +59,19 @@ def _ray_init(extra_env_vars: dict[str, str] | None = None):
     if extra_env_vars:
         env_vars.update(extra_env_vars)
 
-    logger.info(f"Initializing Ray with environment variables: {env_vars}")
-    ray.init(runtime_env={"env_vars": env_vars})
+    runtime_env = {"env_vars": env_vars}
+    # When running these GPU tests from a virtualenv against a pre-existing
+    # (e.g. Anyscale-managed) Ray cluster whose base Python differs from the
+    # driver's, the cluster's workers won't have the venv's packages (vllm,
+    # skyrl, nixl). Setting SKYRL_RAY_PY_EXECUTABLE makes Ray launch this job's
+    # workers with that interpreter so actors import the same env as the driver.
+    # Opt-in only — default behavior (CI, fresh local cluster) is unchanged.
+    py_executable = os.environ.get("SKYRL_RAY_PY_EXECUTABLE")
+    if py_executable:
+        runtime_env["py_executable"] = py_executable
+
+    logger.info(f"Initializing Ray with runtime_env: {runtime_env}")
+    ray.init(runtime_env=runtime_env)
 
 
 @contextlib.contextmanager

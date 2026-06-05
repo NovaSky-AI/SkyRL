@@ -28,6 +28,13 @@ Usage:
 
 import torch
 
+# Importing this registers the SkyRL ``sharded_rdt`` weight-transfer engine into
+# vLLM's factory and relaxes WeightTransferConfig.backend to accept it. vLLM
+# loads this module via --worker-extension-cls before model init on every
+# worker, so the registration is correctly ordered (it must run before
+# GPUWorker.__init__ builds the engine from weight_transfer_config.backend).
+from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register  # noqa: F401
+
 # Workaround for a vLLM layerwise-reload corruption affecting NemotronH/Mamba.
 # MambaMixer2 registers `conv_weights` as a non-persistent buffer that is a
 # view of `self.conv1d.weight.data` (shared storage). vLLM's reload code path
@@ -207,6 +214,74 @@ class NewInferenceWorkerWrap:
 
         from vllm.config import set_current_vllm_config
 
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        model = self.model_runner.model
+
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.receive_weights(
+                typed_update_info,
+                load_weights=model.load_weights,
+            )
+
+        torch.accelerator.synchronize()
+
+    def _inject_rdt_model_device(self) -> None:
+        """Give the sharded_rdt engine the model/device/vllm_config it needs.
+
+        vLLM 0.20.2 builds the weight-transfer engine in GPUWorker.__init__,
+        before the model is loaded and with only (config, parallel_config) — so
+        the sharded_rdt engine has no model/device. This worker extension is
+        mixed into the GPUWorker, so it CAN reach ``self.model_runner.model``,
+        ``self.device``, and ``self.vllm_config`` and inject them. Idempotent.
+        """
+        engine = self.weight_transfer_engine
+        engine.model = self.model_runner.model
+        engine.device = self.device
+        engine.vllm_config = self.vllm_config
+
+    def init_weight_transfer_engine_rdt(self, init_info: dict) -> None:
+        """Initialize the sharded_rdt engine and bake the replay plan.
+
+        Routed here (via collective_rpc) instead of vLLM's native
+        /init_weight_transfer_engine because the native GPUWorker path passes no
+        model and does not wrap the call in set_current_vllm_config — but the
+        sharded_rdt bake drives model.load_weights + layerwise internals and
+        needs both. We inject the model/device, run the (model-free) actor
+        resolution + warmup in init_transfer_engine, then bake under the vLLM
+        config context.
+        """
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config " "to enable weight transfer."
+            )
+        from vllm.config import set_current_vllm_config
+
+        self._inject_rdt_model_device()
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.bake()
+
+    def update_weights_rdt(self, update_info: dict) -> None:
+        """Receive one layer-group of weights via the sharded_rdt engine.
+
+        Mirror of update_weights_nccl: the engine's receive_weights pulls the
+        slices each worker consumes from the trainer actor over NIXL and scatters
+        them in. Bracketed by start_weight_update / finish_weight_update (which
+        run initialize/finalize_layerwise_reload) — the driver calls this once
+        per layer-aligned group between that pair.
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("start_weight_update must be called before update_weights_rdt.")
+
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        self._inject_rdt_model_device()
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
 
