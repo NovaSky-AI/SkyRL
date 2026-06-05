@@ -323,7 +323,7 @@ async def test_megatron_token_based_forward(ray_init_fixture):
         batch = _make_variable_length_batch(seq_lens, num_actions=4)
 
         # Run 1: sample-based baseline
-        cfg = _get_megatron_test_config(tp=2, pp=1, gpus=2)
+        cfg = _get_megatron_test_config(tp=2, pp=2, gpus=4)
         cfg.trainer.max_tokens_per_microbatch = -1
 
         actor_group = init_worker_with_type(

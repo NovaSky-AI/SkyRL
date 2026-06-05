@@ -578,6 +578,13 @@ class MegatronWorker:
         if not isinstance(microbatch_iterator, TokenBasedBatchIterator):
             return output
 
+        # With PP > 1 only the last pipeline stage produces real per-sample logprobs;
+        # other stages return a dummy placeholder (e.g. [1, 1]). There is nothing to
+        # reorder there, and indexing it by microbatch would raise — so return as-is,
+        # matching how the non-token-batched path leaves the placeholder untouched.
+        if not mpu.is_pipeline_last_stage(ignore_virtual=True):
+            return output
+
         log_probs = output["output"]  # shape: [total_padded_samples, num_actions]
 
         # Split by padded_mbs, take only real samples, reorder
