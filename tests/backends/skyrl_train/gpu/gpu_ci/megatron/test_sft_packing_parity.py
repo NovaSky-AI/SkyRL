@@ -68,7 +68,6 @@ AVG_DIFF_TOL = 9e-2
 # ---------------------------------------------------------------------------
 # Test-only worker: returns FULL canonical per-token logprobs.
 # ---------------------------------------------------------------------------
-# Added by Jinghan Yao to keep SFT packed scalar logprob parity covered in GPU CI.
 class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
     """Adds one method returning full ``[B, seq_len-1]`` logprobs in canonical
     (B, T) order, delegating to the SAME production preprocess and packed
