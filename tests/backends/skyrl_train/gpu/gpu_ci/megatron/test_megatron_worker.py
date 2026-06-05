@@ -863,6 +863,7 @@ async def test_megatron_cp_grad_scaling(ray_init_fixture):
         assert isinstance(v_cp, (int, float)), f"{k} should be an int or float"
         assert abs(v_cp - v_nocp) < 1.5e-1, f"diff in {k} too large: CP={v_cp} vs non-CP={v_nocp}"
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("worker_type"),
