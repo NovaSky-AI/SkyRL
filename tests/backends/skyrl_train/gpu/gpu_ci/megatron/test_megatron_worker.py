@@ -772,6 +772,98 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
 
 
 @pytest.mark.asyncio
+@pytest.mark.megatron
+async def test_megatron_cp_grad_scaling(ray_init_fixture):
+    """
+    Regression test for context-parallel (CP) gradient scaling.
+
+    The policy loss uses a *sum* reduction (the advantage pre-scaling carries the
+    normalization), so the final gradient is the sum over every action token in the
+    global batch and is therefore invariant to how that batch is partitioned across
+    DP and CP. We run the SAME batch on 2 GPUs under two layouts:
+
+        - CP off:  TP1 / PP1 / CP1  -> DP2
+        - CP on:   TP1 / PP1 / CP2  -> DP1   (packed path; CP requires remove_microbatch_padding=True)
+
+    and assert the grad norm matches, and other metrics roughly match.
+    """
+
+    def run(tp, pp, cp):
+        cfg = get_test_actor_config()
+        batch = get_test_training_batch(8)
+
+        cfg.trainer.strategy = "megatron"
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        # CP correctness requires the packed/THD logprobs path; the non-packed path
+        # hard-codes cp_group=None. Enable it for both layouts so CP is the only diff.
+        cfg.trainer.remove_microbatch_padding = True
+
+        # Exercise the KL and entropy terms, which previously carried a spurious * cp_size.
+        cfg.trainer.algorithm.use_kl_loss = True
+        cfg.trainer.algorithm.kl_loss_coef = 0.1
+        cfg.trainer.algorithm.use_entropy_loss = True
+        cfg.trainer.algorithm.entropy_loss_coef = 0.01
+
+        cfg.trainer.train_batch_size = 8
+        cfg.trainer.policy_mini_batch_size = len(batch["sequences"])
+        cfg.generator.n_samples_per_prompt = 1
+        cfg.trainer.micro_train_batch_size_per_gpu = 4
+
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        batch.metadata["global_step"] = 0
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+        # optim_step returns the per-worker grad norm (before scaling, after clipping);
+        # all ranks report the same value since it's computed after the DDP all-reduce.
+        grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+
+        ray.shutdown()
+        ray_init_for_tests()
+        return results, grad_norms
+
+    results_nocp, grad_norms_nocp = run(tp=1, pp=1, cp=1)
+    results_cp, grad_norms_cp = run(tp=1, pp=1, cp=2)
+
+    print("grad norms (CP off):", grad_norms_nocp)
+    print("grad norms (CP on): ", grad_norms_cp)
+
+    gn_nocp = grad_norms_nocp[0]
+    gn_cp = grad_norms_cp[0]
+    assert gn_nocp is not None and gn_cp is not None, "optim_step should return a grad norm"
+    assert gn_nocp > 0, f"non-CP grad norm should be positive, got {gn_nocp}"
+    # The grad norm is layout-invariant; the old cp_size over-scaling made CP=2 ~2x larger,
+    # so a 10% band cleanly separates numerical noise from the regression.
+    assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (
+        f"CP grad norm {gn_cp} differs from non-CP grad norm {gn_nocp} by more than 10% "
+        f"(ratio {gn_cp / gn_nocp:.3f});"
+    )
+
+    # Reported metrics should also match across layouts (validates the logprob/KL/entropy
+    # CP gather in addition to the gradient scaling).
+    keys_to_compare = [
+        "policy_loss",
+        "loss_metrics/clip_ratio",
+        "policy_entropy",
+        "policy_kl",
+    ]
+    print("megatron results (CP off):", results_nocp[0])
+    print("megatron results (CP on): ", results_cp[0])
+    for k in keys_to_compare:
+        v_nocp = results_nocp[0].metrics[k]
+        v_cp = results_cp[0].metrics[k]
+        assert isinstance(v_cp, (int, float)), f"{k} should be an int or float"
+        assert abs(v_cp - v_nocp) < 1.5e-1, f"diff in {k} too large: CP={v_cp} vs non-CP={v_nocp}"
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("worker_type"),
     [
