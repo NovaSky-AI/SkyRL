@@ -1172,6 +1172,65 @@ class RemoteInferenceClient:
             {"method": "finish_weight_update"},
         )
 
+    async def init_weight_transfer_engine_rdt(
+        self,
+        init_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Initialize the sharded_rdt weight-transfer engine on all workers.
+
+        Routed via /collective_rpc to NewInferenceWorkerWrap.init_weight_transfer_engine_rdt
+        (rather than the native /init_weight_transfer_engine endpoint) so the
+        worker can inject the model/device and run the bake under
+        set_current_vllm_config — neither of which the native GPUWorker path does.
+
+        Unlike the broadcast init, the sharded_rdt init info is identical for
+        every server (workers pull from a named trainer actor; there are no NCCL
+        rank offsets), so the same payload is fanned out to all servers.
+
+        Args:
+            init_info: asdict(ShardedRDTWeightTransferInitInfo) — trainer actor
+                name/namespace, produce/warmup method names, and the full
+                names/dtype_names/shapes the bake plans over.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "init_weight_transfer_engine_rdt",
+                "kwargs": {"init_info": init_info},
+            },
+        )
+
+    async def update_weights_rdt(
+        self,
+        update_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Receive one layer-group of weights via the sharded_rdt engine.
+
+        Calls NewInferenceWorkerWrap.update_weights_rdt on all workers, which
+        pulls each worker's consumed slices from the trainer actor over NIXL.
+        Called once per layer-aligned group between start_weight_update and
+        finish_weight_update.
+
+        Args:
+            update_info: asdict(ShardedRDTWeightTransferUpdateInfo) — the subset
+                of init names gathered for this group ({"names": [...]}).
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "update_weights_rdt",
+                "kwargs": {"update_info": update_info},
+            },
+        )
+
     async def load_lora_adapter(
         self,
         lora_name: str,

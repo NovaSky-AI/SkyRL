@@ -466,3 +466,202 @@ class TestColocatedIpcWeightUpdateFlow:
             assert "Paris" in text_after, f"IPC weight sync failed - expected 'Paris' but got: {text_after!r}"
 
             print("[SUCCESS] Colocated IPC weight sync test passed!")
+
+
+# -----------------------------------------------------------------
+# Sharded RDT (NIXL pull) Weight Sync Test
+# -----------------------------------------------------------------
+
+# Allowlist mirror for the producer-side op-chain replay (see
+# weight_sync/sharded_rdt_engine.py LazyRDTTensor and the reference example).
+_RDT_TEST_ALLOWED_OPS = frozenset(
+    {
+        "narrow",
+        "view",
+        "reshape",
+        "__getitem__",
+        "unsqueeze",
+        "squeeze",
+        "transpose",
+        "t",
+        "permute",
+        "flatten",
+        "contiguous",
+        "chunk",
+    }
+)
+
+
+@ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
+class RdtTrainer:
+    """Named NIXL trainer actor for the sharded_rdt backend (TP=1, no FSDP).
+
+    Mirrors FSDPTrainWorker in the vllm-rdt-weight-sync reference example
+    (examples/rl/rlhf_sharded_rdt_fsdp_ep.py): the vLLM inference workers pull
+    only the slice each one consumes from this actor over NIXL, driven
+    layer-by-layer. With FSDP world size 1 there is no sharding, so gather_layer
+    simply caches the (whole) named params; produce replays each op chain and
+    clones the resulting slice for NIXL.
+    """
+
+    def __init__(self, model_name: str, device: str = "cuda"):
+        self.device = torch.device(device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(self.device)
+        self._param_lookup = dict(self.model.named_parameters())
+        self._cache = {}
+
+    def ready(self):
+        return True
+
+    def get_weight_metadata(self) -> dict:
+        names, dtype_names, shapes = [], [], []
+        for name, param in self.model.named_parameters():
+            names.append(name)
+            dtype_names.append(str(param.dtype).split(".")[-1])
+            shapes.append(list(param.shape))
+        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+
+    def gather_layer(self, names: list) -> None:
+        for name in names:
+            self._cache[name] = self._param_lookup[name].detach().contiguous()
+
+    def free_group(self, names: list) -> None:
+        for name in names:
+            self._cache.pop(name, None)
+
+    @ray.method(tensor_transport="nixl")
+    def rdt_warmup(self):
+        return torch.zeros(1, device=self.device)
+
+    @ray.method(tensor_transport="nixl")
+    def rdt_produce_weights_batched(self, specs):
+        out = []
+        for name, chain in specs:
+            tensor = self._cache[name]
+            for op_name, args, kwargs_items in chain:
+                assert op_name in _RDT_TEST_ALLOWED_OPS, f"disallowed op {op_name!r}"
+                tensor = getattr(tensor, op_name)(*args, **dict(kwargs_items))
+            out.append(tensor.clone(memory_format=torch.contiguous_format))
+        torch.accelerator.synchronize()
+        return out
+
+
+@pytest_asyncio.fixture(scope="class")
+async def rdt_weight_update_env(class_scoped_ray_init_fixture):
+    """Non-colocated sharded_rdt (NIXL pull) environment, TP=1.
+
+    Trainer (named, tensor-transport) on its own GPU; vLLM server (TP=1,
+    distributed_executor_backend=ray) on another GPU. 2 GPUs total.
+    """
+    from skyrl.backends.skyrl_train.weight_sync import RDT_TRAINER_ACTOR_NAME
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = MODEL
+    # Select the sharded_rdt weight-sync backend (build_vllm_cli_args reads this
+    # and sets WeightTransferConfig(backend="sharded_rdt") + executor=ray).
+    cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
+
+    create_kwargs = dict(
+        model=MODEL,
+        tp_size=1,
+        colocate_all=False,
+        gpu_memory_utilization=0.5,
+        use_new_inference_servers=True,
+        engine_init_kwargs={"load_format": "dummy"},
+    )
+
+    async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
+        trainer = RdtTrainer.options(name=RDT_TRAINER_ACTOR_NAME).remote(MODEL)
+        ray.get(trainer.ready.remote())
+
+        yield {
+            "engines": engines,
+            "trainer": trainer,
+            "client": engines.client,
+            "router_url": engines.client.proxy_url,
+        }
+
+        await engines.client.teardown()
+        ray.kill(trainer)
+    if engines.pg:
+        ray.util.remove_placement_group(engines.pg)
+
+
+@pytest.mark.asyncio(loop_scope="class")
+class TestShardedRdtWeightUpdateFlow:
+    """Weight sync via the sharded_rdt (NIXL pull) backend (non-colocated, TP=1)."""
+
+    async def test_update_weights_rdt(self, rdt_weight_update_env):
+        """
+        Full E2E weight sync test (non-colocated, sharded RDT / NIXL pull):
+        1. Query with dummy weights -> gibberish
+        2. init_weight_transfer_engine_rdt (resolves trainer actor + bakes plan)
+        3. start_weight_update -> per layer-group: gather + update_weights_rdt
+           (workers pull their slices from the trainer over NIXL) + free
+           -> finish_weight_update
+        4. Query again -> correct output
+        """
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
+            RDT_TRAINER_ACTOR_NAME,
+            layerwise_groups,
+        )
+
+        router_url = rdt_weight_update_env["router_url"]
+        trainer = rdt_weight_update_env["trainer"]
+        client = rdt_weight_update_env["client"]
+
+        print("\n[TEST] Running sharded_rdt (NIXL pull) weight sync test")
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as http_client:
+            payload = {
+                "model": MODEL,
+                "prompt": "What is the capital of France?",
+                "max_tokens": 32,
+                "temperature": 0.0,
+            }
+
+            # ===== Step 1: dummy weights -> gibberish =====
+            resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
+            assert resp.status_code == 200
+            text_before = resp.json()["choices"][0]["text"]
+            print(f"[Step 1] Dummy weights output: {text_before!r}")
+            assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
+
+            # ===== Step 2: init engine + bake on the inference side =====
+            meta = ray.get(trainer.get_weight_metadata.remote())
+            namespace = ray.get_runtime_context().namespace or None
+            init_payload = {
+                "trainer_actor_name": RDT_TRAINER_ACTOR_NAME,
+                "trainer_actor_namespace": namespace,
+                "produce_method_name": "rdt_produce_weights_batched",
+                "names": meta["names"],
+                "dtype_names": meta["dtype_names"],
+                "shapes": meta["shapes"],
+                "warmup_method_name": "rdt_warmup",
+            }
+            print(f"[Step 2] init_weight_transfer_engine_rdt: {len(meta['names'])} params")
+            result = await client.init_weight_transfer_engine_rdt(init_payload)
+            for url, resp_data in result.items():
+                assert resp_data["status"] == 200, f"Server {url} RDT init failed: {resp_data}"
+
+            # ===== Step 3: per-layer-group gather + pull =====
+            groups = layerwise_groups(meta["names"])
+            print(f"[Step 3] {len(groups)} layer-aligned groups")
+            await client.start_weight_update(is_checkpoint_format=True)
+            for group_names in groups:
+                ray.get(trainer.gather_layer.remote(group_names))
+                result = await client.update_weights_rdt({"names": group_names})
+                for url, resp_data in result.items():
+                    assert resp_data["status"] == 200, f"Server {url} RDT update failed: {resp_data}"
+                ray.get(trainer.free_group.remote(group_names))
+            await client.finish_weight_update()
+            print("[Step 3] Weight sync complete")
+
+            # ===== Step 4: real weights -> correct output =====
+            resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
+            assert resp.status_code == 200
+            text_after = resp.json()["choices"][0]["text"]
+            print(f"[Step 4] Real weights output: {text_after!r}")
+            assert "Paris" in text_after, f"RDT weight sync failed - expected 'Paris' but got: {text_after!r}"
+
+            print("[SUCCESS] sharded_rdt weight sync test passed!")
