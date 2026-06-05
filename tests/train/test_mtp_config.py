@@ -11,13 +11,28 @@ def test_megatron_config_mtp_defaults():
     cfg = MegatronConfig()
     # None => honor the model's own num_nextn_predict_layers (no SkyRL override).
     assert cfg.mtp_num_layers is None
-    assert cfg.mtp_loss_scaling_factor == 0.1
+    # Decoupled draft-training defaults.
+    assert cfg.mtp_loss_weight == 0.1
+    assert cfg.mtp_loss_type == "soft_ce"
+    assert cfg.mtp_detach_trunk is True
+    assert cfg.mtp_detach_shared_output is False
+    # Deprecated alias is unset by default.
+    assert cfg.mtp_loss_scaling_factor is None
 
 
 def test_megatron_config_mtp_overrides_parse():
-    cfg = build_nested_dataclass(MegatronConfig, {"mtp_num_layers": 2, "mtp_loss_scaling_factor": 0.3})
+    cfg = build_nested_dataclass(
+        MegatronConfig, {"mtp_num_layers": 2, "mtp_loss_weight": 0.3, "mtp_loss_type": "hard_ce"}
+    )
     assert cfg.mtp_num_layers == 2
-    assert cfg.mtp_loss_scaling_factor == 0.3
+    assert cfg.mtp_loss_weight == 0.3
+    assert cfg.mtp_loss_type == "hard_ce"
+
+
+def test_megatron_config_mtp_loss_scaling_factor_back_compat():
+    # The deprecated scaling-factor knob maps onto the explicit loss weight.
+    cfg = build_nested_dataclass(MegatronConfig, {"mtp_loss_scaling_factor": 0.25})
+    assert cfg.mtp_loss_weight == 0.25
 
 
 def test_megatron_config_mtp_force_disable():

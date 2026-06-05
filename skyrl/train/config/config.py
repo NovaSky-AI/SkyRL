@@ -205,12 +205,35 @@ class MegatronConfig(BaseConfig):
     When MTP layers are present, SkyRL adds the Megatron MTP loss to the training step so the heads
     track the updated policy, and the heads are synced to vLLM for speculative decoding (set
     ``generator.inference_engine.speculative_config`` accordingly)."""
-    mtp_loss_scaling_factor: float = 0.1
-    """Scaling coefficient for the MTP auxiliary loss (Megatron ``mtp_loss_scaling_factor``).
-    Only used when MTP layers are active. Higher values train the MTP heads more aggressively at the
-    cost of pulling on the shared trunk; the default matches Megatron/DeepSeek-V3."""
+    mtp_loss_weight: float = 0.1
+    """Weight ``w`` of the decoupled MTP/draft loss in ``policy_loss + w * draft_loss``.
+
+    Replaces the role of Megatron's opaque ``mtp_loss_scaling_factor`` backward-scale. SkyRL now
+    trains the native MTP heads with an *explicit* loss on *detached* trunk hidden states (so the
+    draft gradient never pulls on the policy backbone) and adds it to the policy loss with this
+    weight. Only used when MTP layers are active."""
+    mtp_loss_type: str = "soft_ce"
+    """Supervision for the MTP/draft head:
+
+    - ``"soft_ce"`` (default): soft cross-entropy distillation against the policy's own detached,
+      rolled next-token distribution (matches NeMo-RL's draft training).
+    - ``"hard_ce"``: standard next-token cross-entropy against the ground-truth future tokens
+      (classic MTP-pretraining objective)."""
+    mtp_detach_trunk: bool = True
+    """If True (default, matches NeMo-RL), detach the trunk hidden states feeding the MTP head so
+    only the MTP-head parameters receive the draft gradient. If False, let the draft gradient flow
+    back into the policy backbone (closer to Megatron's native coupled MTP)."""
+    mtp_detach_shared_output: bool = False
+    """If True, also detach the shared embedding/output-layer weight from the draft gradient.
+    Default keeps the shared head trainable by the draft loss (only the trunk hidden is detached)."""
+    mtp_loss_scaling_factor: Optional[float] = None
+    """Deprecated alias for ``mtp_loss_weight`` (kept for back-compat). If set, it overrides
+    ``mtp_loss_weight``."""
 
     def __post_init__(self):
+        # Back-compat: the old `mtp_loss_scaling_factor` knob now maps onto the explicit loss weight.
+        if self.mtp_loss_scaling_factor is not None:
+            self.mtp_loss_weight = self.mtp_loss_scaling_factor
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:

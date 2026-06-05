@@ -417,10 +417,16 @@ class MegatronWorker:
         elif megatron_config.mtp_num_layers is not None:
             provider.mtp_num_layers = megatron_config.mtp_num_layers or None
         if getattr(provider, "mtp_num_layers", None):
-            provider.mtp_loss_scaling_factor = megatron_config.mtp_loss_scaling_factor
+            # The native MTP heads are still *built* (so the megatron-bridge weight mappings
+            # round-trip them to HF / vLLM), but SkyRL trains them with a decoupled, explicit
+            # loss (see MegatronModelWrapper) instead of Megatron's in-forward
+            # process_mtp_loss / MTPLossAutoScaler path. We therefore do not set
+            # provider.mtp_loss_scaling_factor; the explicit weight is megatron_config.mtp_loss_weight.
             logger.info(
-                f"MTP enabled: mtp_num_layers={provider.mtp_num_layers}, "
-                f"mtp_loss_scaling_factor={provider.mtp_loss_scaling_factor}"
+                f"MTP enabled (decoupled): mtp_num_layers={provider.mtp_num_layers}, "
+                f"mtp_loss_type={megatron_config.mtp_loss_type}, "
+                f"mtp_loss_weight={megatron_config.mtp_loss_weight}, "
+                f"mtp_detach_trunk={megatron_config.mtp_detach_trunk}"
             )
 
         provider.finalize()
