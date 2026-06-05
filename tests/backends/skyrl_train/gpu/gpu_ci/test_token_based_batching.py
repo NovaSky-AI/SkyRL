@@ -290,7 +290,7 @@ def _get_megatron_test_config(tp=2, pp=1, gpus=2) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus
@@ -369,7 +369,8 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 
 @pytest.mark.asyncio
 @pytest.mark.megatron
-async def test_megatron_token_based_loss_equivalence(ray_init_fixture):
+@pytest.mark.parametrize("remove_microbatch_padding", [True, False])
+async def test_megatron_token_based_loss_equivalence(ray_init_fixture, remove_microbatch_padding):
     """
     Test that the policy loss from forward_backward matches between sample-based
     and token-based batching for Megatron (TP=2, PP=2).
@@ -377,15 +378,34 @@ async def test_megatron_token_based_loss_equivalence(ray_init_fixture):
     The loss is normalized over the full mini-batch, so packing samples into
     token-based microbatches (rather than fixed-size sample-based microbatches)
     should produce an equivalent loss up to numerical tolerance.
+
+    Parametrized over ``remove_microbatch_padding`` to cover both forward paths,
+    since token-based batching pads uneven microbatches with dummy (single-token)
+    rows. The two paths are held to different tolerances on purpose:
+
+    - dense (``remove_microbatch_padding=False``): each row is attended
+      independently at full width, so real-sample logits are bitwise-stable
+      regardless of the dummy rows or how samples are grouped into microbatches.
+      We expect ~exact equivalence (``1e-6``).
+    - packed/THD (``remove_microbatch_padding=True``): the dummy rows are packed
+      as length-1 segments, which changes the ``cu_seqlens`` layout vs the
+      sample-based grouping. Block-diagonal attention keeps this mathematically
+      equivalent, but the varlen kernel's fp reduction order shifts, giving
+      ~1e-4 noise. Held to ``1e-3`` (matching ``test_megatron_token_based_forward``).
     """
     from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
 
     try:
-        seq_lens = [30, 30, 15, 15, 30, 30, 15, 15]
+        # Varied lengths so token-based packing yields uneven microbatch sizes:
+        # with max_tokens=55 the longest (50) and an unpaired short (10) each land
+        # in their own microbatch and get dummy-padded, exercising dummy partners
+        # of different real lengths (50 and 10), not just one fixed length.
+        seq_lens = [50, 40, 31, 30, 20, 21, 10, 10]
 
         def _make_cfg(max_tokens_per_microbatch):
             cfg = _get_megatron_test_config(tp=2, pp=2, gpus=4)
             cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
+            cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
             cfg.trainer.train_batch_size = len(seq_lens)
             cfg.trainer.policy_mini_batch_size = len(seq_lens)
             cfg.trainer.algorithm.use_kl_loss = False
@@ -407,10 +427,11 @@ async def test_megatron_token_based_loss_equivalence(ray_init_fixture):
         ray.shutdown()
         ray_init_for_tests()
 
-        # Run 2: token-based (packs 2 short seqs or 1 long seq per microbatch)
+        # Run 2: token-based (packs short seqs together; long/unpaired seqs get
+        # their own dummy-padded microbatch)
         batch = _make_variable_length_batch(seq_lens, num_actions=4)
         batch.metadata["global_step"] = 0
-        cfg_token = _make_cfg(max_tokens_per_microbatch=35)
+        cfg_token = _make_cfg(max_tokens_per_microbatch=55)
         actor_group = init_worker_with_type(
             "policy",
             shared_pg=None,
@@ -420,11 +441,15 @@ async def test_megatron_token_based_loss_equivalence(ray_init_fixture):
         )
         results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
 
+        # Dense attention is bitwise-stable across groupings; packed/THD has
+        # ~1e-4 varlen-kernel fp noise from the shifted cu_seqlens layout.
+        tol = 1e-3 if remove_microbatch_padding else 1e-6
+        print(f"\nMegatron loss equivalence (remove_microbatch_padding={remove_microbatch_padding}, tol={tol}):")
         for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
             bl = r_baseline.metrics["policy_loss"]
             tl = r_token.metrics["policy_loss"]
             print(f"  Rank {i}: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl - tl):.6f}")
-            assert abs(bl - tl) < 1e-3, f"Loss mismatch on rank {i}: {bl} vs {tl}"
+            assert abs(bl - tl) < tol, f"Loss mismatch on rank {i}: {bl} vs {tl} (tol={tol})"
 
     finally:
         ray.shutdown()
