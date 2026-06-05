@@ -597,6 +597,62 @@ class MegatronWorker:
         result.metadata = output.metadata
         return result
 
+    def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
+        """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
+
+        Padded samples have loss_mask/action_mask=0 so they don't contribute to the loss
+        (forward micro-batches carry neither key, so this is inert there). This is needed
+        because Megatron's forward_backward_func requires uniform micro_batch_size across all
+        microbatches (especially with PP > 1). Scalar keys (``num_actions``,
+        ``num_microbatches``) are passed through unchanged.
+
+        Defined on the base worker so the shared ``_forward_logprobs`` path works for
+        policy, ref, and critic workers alike.
+        """
+        current_bsz = micro_dict["sequences"].shape[0]
+        if current_bsz >= target_batch_size:
+            return micro_dict
+
+        pad_count = target_batch_size - current_bsz
+        device = micro_dict["sequences"].device
+
+        padded = {}
+        for key, value in micro_dict.items():
+            if key in ("num_actions", "num_microbatches"):
+                padded[key] = value
+                continue
+            if value is None:
+                padded[key] = None
+                continue
+            if isinstance(value, torch.Tensor):
+                if key == "loss_mask":
+                    # Pad with zeros so padded samples don't contribute to loss
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                elif key == "attention_mask":
+                    # Give each dummy row a single valid token rather than a full row of ones.
+                    # A length-1 sequence keeps the row non-degenerate for both forward paths:
+                    # it avoids a fully-masked row (NaN in dense attention's softmax) and a
+                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel), while
+                    # letting the packed path skip nearly all of the dummy's tokens — only 1
+                    # token (aligned up to TP/CP) is packed instead of the full seq_len. The
+                    # row is still excluded from the loss via loss_mask/action_mask=0.
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                    pad_tensor[:, 0] = 1
+                elif key == "position_ids":
+                    # position_ids for padded samples
+                    seq_len = value.shape[1]
+                    pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
+                elif key == "action_mask":
+                    # action_mask should be zeros for padded samples
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                else:
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                padded[key] = torch.cat([value, pad_tensor], dim=0)
+            else:
+                padded[key] = value
+
+        return padded
+
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -750,59 +806,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
-
-    def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
-        """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
-
-        Padded samples have loss_mask/action_mask=0 so they don't contribute to the loss
-        (forward micro-batches carry neither key, so this is inert there). This is needed
-        because Megatron's forward_backward_func requires uniform micro_batch_size across all
-        microbatches (especially with PP > 1). Scalar keys (``num_actions``,
-        ``num_microbatches``) are passed through unchanged.
-        """
-        current_bsz = micro_dict["sequences"].shape[0]
-        if current_bsz >= target_batch_size:
-            return micro_dict
-
-        pad_count = target_batch_size - current_bsz
-        device = micro_dict["sequences"].device
-
-        padded = {}
-        for key, value in micro_dict.items():
-            if key in ("num_actions", "num_microbatches"):
-                padded[key] = value
-                continue
-            if value is None:
-                padded[key] = None
-                continue
-            if isinstance(value, torch.Tensor):
-                if key == "loss_mask":
-                    # Pad with zeros so padded samples don't contribute to loss
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                elif key == "attention_mask":
-                    # Give each dummy row a single valid token rather than a full row of ones.
-                    # A length-1 sequence keeps the row non-degenerate for both forward paths:
-                    # it avoids a fully-masked row (NaN in dense attention's softmax) and a
-                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel), while
-                    # letting the packed path skip nearly all of the dummy's tokens — only 1
-                    # token (aligned up to TP/CP) is packed instead of the full seq_len. The
-                    # row is still excluded from the loss via loss_mask/action_mask=0.
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                    pad_tensor[:, 0] = 1
-                elif key == "position_ids":
-                    # position_ids for padded samples
-                    seq_len = value.shape[1]
-                    pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
-                elif key == "action_mask":
-                    # action_mask should be zeros for padded samples
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                else:
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                padded[key] = torch.cat([value, pad_tensor], dim=0)
-            else:
-                padded[key] = value
-
-        return padded
 
     def forward(
         self,

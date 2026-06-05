@@ -298,27 +298,32 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         seq_len = self.data["sequences"].shape[1]
         num_actions = self.data.metadata["response_length"]
         batch_size = 1
+        # Build on the same device as the real data so the padding microbatch matches
+        # the real microbatches (which are gathered from self.data). The Megatron
+        # forward_backward path moves data to GPU before iterating and does not move
+        # microbatches again, so a hardcoded CPU device mismatches the model.
+        device = self.data["sequences"].device
 
         # Keep the full seq_len for shape uniformity, but mark only a single token as
         # valid in the attention mask. This is loss-neutral (loss_mask=0) and cheap:
         # the packed/THD path then packs just 1 token instead of the whole sequence,
         # and a length-1 sequence keeps both attention paths non-degenerate (no
         # zero-length cu_seqlens segment, no fully-masked-row NaN in dense attention).
-        attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device="cpu")
+        attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device=device)
         attention_mask[:, 0] = 1
 
         data = TrainingInputBatch(
             {
-                "sequences": torch.randint(0, 100, (batch_size, seq_len), device="cpu"),
+                "sequences": torch.randint(0, 100, (batch_size, seq_len), device=device),
                 "attention_mask": attention_mask,
-                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
-                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
-                "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
-                "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
-                "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
+                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device=device),
+                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device=device),
+                "values": 0.5 * torch.ones((batch_size, num_actions), device=device),
+                "returns": 0.5 * torch.ones((batch_size, num_actions), device=device),
+                "advantages": 0.6 * torch.ones((batch_size, num_actions), device=device),
                 # Loss mask is all zeros so padding samples don't contribute to the loss.
-                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device="cpu"),
-                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device=device),
+                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
         data.metadata = self.data.metadata
