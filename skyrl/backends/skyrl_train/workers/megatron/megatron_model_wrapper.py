@@ -514,7 +514,18 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 new_attention_mask = None
-                new_position_ids = None
+                # The trunk ignores position_ids for RoPE + THD packing (rotary comes from
+                # packed_seq_params), so SkyRL normally passes None. But the native MTP block rolls
+                # and re-embeds position_ids per depth, so when MTP is active we must supply them in
+                # the packed layout. This is harmless to the main logits.
+                if mtp_enabled:
+                    new_position_ids = preprocess_packed_seqs(
+                        position_ids,
+                        attention_mask,
+                        pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    )[0]
+                else:
+                    new_position_ids = None
             else:
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,
@@ -549,6 +560,7 @@ class MegatronModelWrapper:
             # Run the policy forward. When MTP is active, a pre-hook records the native MTP block's
             # arguments (we pass NO labels, so GPTModel's process_mtp_loss short-circuits and the
             # main logits stay coupled to the trunk; MTPLossAutoScaler never runs).
+            student_hidden = None
             with maybe_capture_mtp_hidden(model, mtp_enabled, detach_trunk=mtp_detach_trunk) as capture:
                 outputs = model(
                     new_sequences,
@@ -556,21 +568,22 @@ class MegatronModelWrapper:
                     new_attention_mask,
                     packed_seq_params=packed_seq_params,
                 )
+                # Replay the MTP block on *detached* trunk hidden states (decoupled draft forward)
+                # while still inside the capture context (so the MTP block stays in eval mode).
+                if mtp_enabled and capture is not None:
+                    student_hidden = capture.compute_student_hidden_states()
+                    gpt_model = capture.gpt_model
 
             outputs = depad(outputs)
 
-            # Replay the MTP block on *detached* trunk hidden states (decoupled draft forward),
-            # project through the shared output layer, and de-pad into the same
-            # [batch, seq_len, vocab/tp] layout as the main logits so the draft loss can be scored
-            # against the policy's own distribution (or hard labels) in loss_func.
-            if mtp_enabled and capture is not None:
-                student_hidden = capture.compute_student_hidden_states()
-                if student_hidden is not None:
-                    gpt_model = capture.gpt_model
-                    student_logits = project_mtp_hidden_to_logits(
-                        student_hidden, gpt_model, detach_output_weight=mtp_detach_shared_output
-                    )
-                    batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
+            # Project the decoupled MTP hidden states through the shared output layer and de-pad into
+            # the same [batch, seq_len, vocab/tp] layout as the main logits, so the draft loss can be
+            # scored against the policy's own distribution (or hard labels) in loss_func.
+            if student_hidden is not None:
+                student_logits = project_mtp_hidden_to_logits(
+                    student_hidden, gpt_model, detach_output_weight=mtp_detach_shared_output
+                )
+                batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
 
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_backward()

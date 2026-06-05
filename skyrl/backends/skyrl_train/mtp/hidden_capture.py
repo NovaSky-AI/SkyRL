@@ -54,6 +54,7 @@ class MTPHiddenCapture:
         self._args = None
         self._kwargs = None
         self._handles: list = []
+        self._prev_training = None
 
     @property
     def mtp_num_layers(self) -> int:
@@ -74,6 +75,13 @@ class MTPHiddenCapture:
             return
         self._args = None
         self._kwargs = None
+        # Run the MTP block in eval mode for both the in-forward pass and the replay. Megatron's
+        # full-activation-recompute path (recompute_granularity='full' and module.training) routes
+        # through CheckpointFunction, which cannot save the non-tensor PackedSeqParams for backward.
+        # Eval skips that path (dropout is 0 in these configs; gradients still flow), and MTP is a
+        # single tiny layer so keeping its activations is negligible.
+        self._prev_training = mtp.training
+        mtp.eval()
         self._handles.append(mtp.register_forward_pre_hook(self._pre_hook, with_kwargs=True))
         try:
             yield self
@@ -81,6 +89,8 @@ class MTPHiddenCapture:
             for h in self._handles:
                 h.remove()
             self._handles.clear()
+            if self._prev_training:
+                mtp.train()
 
     def compute_student_hidden_states(self) -> Optional[List]:
         """Replay the MTP block on detached trunk hidden states and split per depth.
