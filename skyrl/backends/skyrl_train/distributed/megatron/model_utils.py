@@ -620,9 +620,8 @@ def vocab_parallel_entropy_packed_sequences(
 
     Returns:
         A tuple of (global entropy metric, local entropy term for loss). The
-        local term is normalized by the global action-token count. Megatron DDP
-        later averages gradients across CP ranks, so callers should keep the
-        existing CP-size correction on the entropy loss term.
+        local term is normalized by the global action-token count. Megatron's
+        schedule already applies the CP loss scale for two-output loss funcs.
     """
     entropy_tokens = vocab_parallel_entropy(vocab_parallel_logits).squeeze(0)
     device = entropy_tokens.device
@@ -718,8 +717,6 @@ class AllGatherPackedCPTensor(torch.autograd.Function):
         cp_size = torch.distributed.get_world_size(ctx.cp_group)
         cp_rank = torch.distributed.get_rank(ctx.cp_group)
         (cu_seqlens_padded,) = ctx.saved_tensors
-
-        torch.distributed.all_reduce(grad_output, group=ctx.cp_group)
 
         cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
             cu_seqlens_padded, grad_output.shape[0], grad_output.device
