@@ -131,6 +131,11 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
     when each microbatch contains exactly 1 sample (i.e., when max_tokens
     is set high enough that no packing occurs but low enough that each
     sample gets its own microbatch).
+
+    This also exercises the padding-microbatch path at DP>1: with 2 GPUs the
+    batch splits contiguously into rank0=[20,5] (-> 2 microbatches at max_tokens=20)
+    and rank1=[10,5] (-> 1 microbatch), so rank1 gets a loss-neutral padding
+    microbatch and the loss must still match the sample-based baseline.
     """
     try:
         # Uniform-length sequences to ensure identical batching behavior
@@ -370,40 +375,59 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 @pytest.mark.asyncio
 @pytest.mark.megatron
 @pytest.mark.parametrize("remove_microbatch_padding", [True, False])
-async def test_megatron_token_based_loss_equivalence(ray_init_fixture, remove_microbatch_padding):
+@pytest.mark.parametrize(
+    "tp, pp, gpus, seq_lens, max_tokens",
+    [
+        # DP=1 (PP=2): varied/odd lengths so token-based packing yields uneven
+        # microbatch sizes (the longest and an unpaired short each land alone and
+        # get a dummy-padded partner). Odd lengths (31, 21) keep the packed/THD
+        # fp noise visible. No padding *microbatches* here (DP=1).
+        (2, 2, 4, [50, 40, 31, 30, 20, 21, 10, 10], 55),
+        # DP=2 (PP=1): exercises the padding-*microbatch* path. Mesh dispatch
+        # chunks the batch into two contiguous halves, so with max_tokens=30:
+        #   rank0 = [30,30,30,30] -> 4 microbatches
+        #   rank1 = [15,15,15,15] -> 2 microbatches (+2 padding microbatches)
+        # Padding microbatches only appear when DP ranks bin-pack into different
+        # microbatch counts, i.e. DP > 1.
+        (2, 1, 4, [30, 30, 30, 30, 15, 15, 15, 15], 30),
+    ],
+    ids=["dp1_pp2", "dp2_pp1_padding_microbatch"],
+)
+async def test_megatron_token_based_loss_equivalence(
+    ray_init_fixture, tp, pp, gpus, seq_lens, max_tokens, remove_microbatch_padding
+):
     """
     Test that the policy loss from forward_backward matches between sample-based
-    and token-based batching for Megatron (TP=2, PP=2).
+    and token-based batching for Megatron.
 
     The loss is normalized over the full mini-batch, so packing samples into
     token-based microbatches (rather than fixed-size sample-based microbatches)
     should produce an equivalent loss up to numerical tolerance.
 
-    Parametrized over ``remove_microbatch_padding`` to cover both forward paths,
-    since token-based batching pads uneven microbatches with dummy (single-token)
-    rows. The two paths are held to different tolerances on purpose:
+    Parametrized over two axes:
 
-    - dense (``remove_microbatch_padding=False``): each row is attended
-      independently at full width, so real-sample logits are bitwise-stable
-      regardless of the dummy rows or how samples are grouped into microbatches.
-      We expect ~exact equivalence (``1e-6``).
-    - packed/THD (``remove_microbatch_padding=True``): the dummy rows are packed
-      as length-1 segments, which changes the ``cu_seqlens`` layout vs the
-      sample-based grouping. Block-diagonal attention keeps this mathematically
-      equivalent, but the varlen kernel's fp reduction order shifts, giving
-      ~1e-4 noise. Held to ``1e-3`` (matching ``test_megatron_token_based_forward``).
+    - ``remove_microbatch_padding`` covers both forward paths. Token-based batching
+      pads uneven microbatches with dummy (single-token) rows, and (at DP>1) appends
+      loss-neutral padding microbatches; both are held to different tolerances:
+
+      * dense (``False``): each row is attended independently at full width, so
+        real-sample logits are bitwise-stable regardless of dummy rows / grouping.
+        We expect ~exact equivalence (``1e-6``).
+      * packed/THD (``True``): dummy rows pack as length-1 segments, shifting the
+        ``cu_seqlens`` layout vs the sample-based grouping. Block-diagonal attention
+        keeps this mathematically equivalent, but the varlen kernel's fp reduction
+        order shifts, giving ~1e-4 noise. Held to ``1e-3``.
+
+    - topology covers ``DP=1`` (PP=2) and ``DP=2`` (PP=1). The DP=2 case is the
+      regression guard for padding microbatches (only emitted when DP ranks
+      bin-pack into different microbatch counts).
     """
     from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
 
     try:
-        # Varied lengths so token-based packing yields uneven microbatch sizes:
-        # with max_tokens=55 the longest (50) and an unpaired short (10) each land
-        # in their own microbatch and get dummy-padded, exercising dummy partners
-        # of different real lengths (50 and 10), not just one fixed length.
-        seq_lens = [50, 40, 31, 30, 20, 21, 10, 10]
 
         def _make_cfg(max_tokens_per_microbatch):
-            cfg = _get_megatron_test_config(tp=2, pp=2, gpus=4)
+            cfg = _get_megatron_test_config(tp=tp, pp=pp, gpus=gpus)
             cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
             cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
             cfg.trainer.train_batch_size = len(seq_lens)
@@ -427,11 +451,11 @@ async def test_megatron_token_based_loss_equivalence(ray_init_fixture, remove_mi
         ray.shutdown()
         ray_init_for_tests()
 
-        # Run 2: token-based (packs short seqs together; long/unpaired seqs get
-        # their own dummy-padded microbatch)
+        # Run 2: token-based (packs short seqs together; long/unpaired seqs get their
+        # own dummy-padded microbatch, and at DP>1 short ranks get padding microbatches)
         batch = _make_variable_length_batch(seq_lens, num_actions=4)
         batch.metadata["global_step"] = 0
-        cfg_token = _make_cfg(max_tokens_per_microbatch=55)
+        cfg_token = _make_cfg(max_tokens_per_microbatch=max_tokens)
         actor_group = init_worker_with_type(
             "policy",
             shared_pg=None,

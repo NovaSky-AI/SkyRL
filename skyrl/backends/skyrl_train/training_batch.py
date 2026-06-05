@@ -72,6 +72,14 @@ class TensorList:
     def __getitem__(self, index):
         if isinstance(index, slice):
             return TensorList(self.tensors[index])
+        # Fancy indexing with a 1-D index tensor or list (e.g. the gather in
+        # token-based microbatching). A 0-d tensor indexes a single element.
+        if isinstance(index, torch.Tensor):
+            if index.ndim == 0:
+                return self.tensors[int(index)]
+            return TensorList([self.tensors[int(i)] for i in index.tolist()])
+        if isinstance(index, (list, tuple)):
+            return TensorList([self.tensors[int(i)] for i in index])
         return self.tensors[index]
 
     def to(self, device=None, dtype=None, non_blocking=False):

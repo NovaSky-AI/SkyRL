@@ -9,7 +9,7 @@ uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_tr
 
 import torch
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     TokenBasedBatchIterator,
     balanced_binpacking,
@@ -143,3 +143,41 @@ class TestTokenBasedBatchIterator:
 
         it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=-1)
         assert isinstance(it, SampleBasedBatchIterator)
+
+    def test_padding_microbatch_matches_seq_len(self):
+        """Padding microbatches must share seq_len with real data (not a hardcoded short length),
+        so Megatron sees a uniform seq_length and FSDP/Megatron can extract num_actions log-probs."""
+        batch = self._make_batch([10, 10, 5, 5], num_actions=4)
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
+
+        padding = iterator._create_padding_microbatch()
+        assert padding["sequences"].shape[1] == batch["sequences"].shape[1]
+        assert padding["attention_mask"].shape[1] == batch["attention_mask"].shape[1]
+        # Only a single token is marked valid (full seq_len for shape uniformity, but
+        # cheap to compute in the packed path).
+        assert padding["attention_mask"].sum().item() == padding["attention_mask"].shape[0]
+        assert padding["attention_mask"][:, 0].sum().item() == padding["attention_mask"].shape[0]
+        # Padding rows must not contribute to the loss.
+        assert padding["loss_mask"].sum().item() == 0
+
+    def test_multimodal_tensorlist_microbatching(self):
+        """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /
+        image_grid_thw) via the same index gather used for regular tensors."""
+        seq_lens = [10, 10, 5, 5]
+        batch = self._make_batch(seq_lens, num_actions=4)
+        batch_size = len(seq_lens)
+        # Variable per-sample shapes, like real vision inputs.
+        batch["pixel_values"] = TensorList([torch.randn(3 + i, 8) for i in range(batch_size)])
+        batch["image_grid_thw"] = TensorList([torch.tensor([[1, 2, 2]]) for _ in range(batch_size)])
+
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
+
+        total_pv = 0
+        for microbatch in iterator:
+            if microbatch["loss_mask"].sum() == 0:
+                continue  # skip padding microbatches (no multi-modal fields)
+            pv = microbatch["pixel_values"]
+            assert isinstance(pv, TensorList)
+            assert len(pv) == microbatch["sequences"].shape[0]
+            total_pv += len(pv)
+        assert total_pv == batch_size  # every sample's pixel_values is accounted for

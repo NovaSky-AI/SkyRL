@@ -289,14 +289,28 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch with loss_mask=0 so it doesn't affect the loss."""
-        seq_len = 2
+        # Match the real data's sequence length so every microbatch shares the same
+        # seq_len. Megatron's forward_backward_func / postprocess_packed_seqs /
+        # recover_left_padding size the per-microbatch output as [bsz, seq_len_global]
+        # and scatter with the microbatch's own attention_mask, so the mask width must
+        # equal the global seq_len. A hardcoded short length breaks that (and also
+        # FSDP/Megatron extracting the last `num_actions` action log-probs).
+        seq_len = self.data["sequences"].shape[1]
         num_actions = self.data.metadata["response_length"]
         batch_size = 1
+
+        # Keep the full seq_len for shape uniformity, but mark only a single token as
+        # valid in the attention mask. This is loss-neutral (loss_mask=0) and cheap:
+        # the packed/THD path then packs just 1 token instead of the whole sequence,
+        # and a length-1 sequence keeps both attention paths non-degenerate (no
+        # zero-length cu_seqlens segment, no fully-masked-row NaN in dense attention).
+        attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device="cpu")
+        attention_mask[:, 0] = 1
 
         data = TrainingInputBatch(
             {
                 "sequences": torch.randint(0, 100, (batch_size, seq_len), device="cpu"),
-                "attention_mask": torch.ones((batch_size, seq_len), dtype=int, device="cpu"),
+                "attention_mask": attention_mask,
                 "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
                 "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
                 "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
