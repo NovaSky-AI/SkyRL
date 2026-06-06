@@ -383,6 +383,22 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         await self._run_on_all_engines("resume_generation")
 
+    async def get_spec_decode_metrics(self) -> Optional[Dict[str, int]]:
+        """Sum cumulative speculative-decoding counters across all engines.
+
+        Returns None if no engine reports spec-decode stats (e.g. speculative decoding disabled).
+        """
+        per_engine = await self._run_on_all_engines("get_spec_decode_metrics")
+        totals: Dict[str, int] = {}
+        any_reported = False
+        for stats in per_engine:
+            if not stats:
+                continue
+            any_reported = True
+            for key, value in stats.items():
+                totals[key] = totals.get(key, 0) + int(value)
+        return totals if any_reported else None
+
     # ----------------------------
     # HTTP endpoint related methods
     # ----------------------------

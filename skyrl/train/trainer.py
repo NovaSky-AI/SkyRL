@@ -128,6 +128,9 @@ class RayPPOTrainer:
         self.all_metrics = {}
         self.all_timings = {}
         self.global_step = 0
+        # Previous-step cumulative vLLM spec-decode (MTP draft) counters, used to report a per-step
+        # acceptance rate. See _record_spec_decode_metrics.
+        self._prev_spec_decode = None
 
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None

@@ -664,6 +664,31 @@ class EnvironmentConfig(BaseConfig):
     skyrl_gym: SkyRLGymConfig = field(default_factory=SkyRLGymConfig)
 
 
+@dataclass
+class MTPConfig(BaseConfig):
+    """High-level Multi-Token Prediction (MTP) control.
+
+    This is the single user-facing knob for MTP. When ``enabled``, ``validate_cfg`` propagates it to
+    the training side (``policy.megatron_config.mtp_*`` — build and train ``num_speculative_tokens``
+    native MTP heads with a decoupled draft loss) and the inference side
+    (``generator.inference_engine.speculative_config`` — vLLM MTP speculative decoding with the same
+    number of draft tokens). The trained heads are kept in sync with the policy via weight sync, so
+    the draft tracks the updated policy.
+
+    The trunk hidden states and embeddings feeding the heads are always detached (decoupled) — that
+    is intrinsic to draft/Eagle training, not a tunable, so it is not exposed here."""
+
+    enabled: bool = False
+    """Whether to train MTP draft heads and use them for speculative decoding."""
+    num_speculative_tokens: int = 1
+    """Number of future tokens to predict = number of MTP heads / draft depth. Must be <= the number
+    of MTP layers the model ships (e.g. GLM-4.7-Flash / DeepSeek-V3 ``num_nextn_predict_layers``)."""
+    loss_type: str = "soft_ce"
+    """``"soft_ce"`` (distill against the policy's own next-token distribution) or ``"hard_ce"``."""
+    loss_weight: float = 0.1
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``."""
+
+
 # ---------------------------------------------------------------------------
 # Trainer (top-level)
 # ---------------------------------------------------------------------------
@@ -678,6 +703,7 @@ class TrainerConfig(BaseConfig):
     ref: RefConfig = field(default_factory=RefConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
+    mtp: MTPConfig = field(default_factory=MTPConfig)
     fully_async: FullyAsyncConfig = field(default_factory=FullyAsyncConfig)
     gradient_checkpointing: bool = True
     gradient_checkpointing_use_reentrant: bool = False

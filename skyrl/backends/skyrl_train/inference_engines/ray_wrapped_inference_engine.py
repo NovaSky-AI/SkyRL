@@ -82,6 +82,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
+    async def get_spec_decode_metrics(self):
+        return await self.inference_engine_actor.get_spec_decode_metrics.remote()
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
