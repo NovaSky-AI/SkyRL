@@ -355,6 +355,8 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     inference_only: bool = False,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
 ) -> torch.Tensor:
     """Get log probabilities from TP sharded vocab logits for packed sequences.
 
@@ -372,31 +374,42 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         inference_only (bool, optional): If True, tensors won't be saved for backward pass. Defaults to False.
         cp_group (torch.distributed.ProcessGroup, optional): Context parallelism process group. Defaults to None.
         chunk_size (int, optional): Sequence dimension chunk size for computing the log probabilities.
+        attention_mask (torch.Tensor, optional): Original unpacked attention mask with shape [batch_size, unpacked_seqlen].
+            When provided, packed log probabilities are scattered back to their original padded sequence positions.
+        sub_seq_lengths (list[list[int]], optional): Per-row sub-sequence lengths for controller-side sequence packing.
+            When provided, ``cu_seqlens_padded`` is interpreted as one entry per sub-sequence, and output values are
+            scattered back to the row offsets used by ``PackedDataCollator``.
 
     Returns:
         torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
             The total length is reduced by batch_size due to target shifting (one token per sequence).
     """
+    # This packed logprob path has been verified by Megatron GSM8K E2E runs covering no-CP, CP ring, and CP a2a.
     # Remove batch dimension to work with [T, vocab_size] and [T]
     vocab_parallel_logits = vocab_parallel_logits.squeeze(0)
     target = target.squeeze(0)
 
-    batch_size = cu_seqlens_padded.shape[0] - 1
+    batch_size = len(sub_seq_lengths) if sub_seq_lengths is not None else cu_seqlens_padded.shape[0] - 1
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     cp_rank = 0 if cp_group is None else torch.distributed.get_rank(cp_group)
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device=target.device, dtype=torch.bool)
 
-    # Roll each sequence individually
-    rolled_targets = torch.zeros(target.shape[0] // cp_size, dtype=target.dtype, device=target.device)
-    for i in range(batch_size):
-        start_idx = cu_seqlens_padded[i].item()
-        end_idx = cu_seqlens_padded[i + 1].item()
+    cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+        cu_seqlens_padded, target.shape[0], target.device
+    )
 
-        # Get the sequence targets and roll by -1
-        seq_targets = target[start_idx:end_idx]
-        rolled_seq_targets = seq_targets.roll(shifts=-1, dims=0)
-        rolled_targets[start_idx // cp_size : end_idx // cp_size] = _get_tokens_on_this_cp_rank(
-            rolled_seq_targets, cp_rank, cp_size, seq_dim=0
+    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
+    rolled_targets_full = target[cu_seqlens_padded[seq_indices] + next_offsets]
+    if cp_size > 1:
+        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
+            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
         )
+        rolled_targets = torch.empty(target.shape[0] // cp_size, dtype=target.dtype, device=target.device)
+        current_rank_mask = cp_rank_for_token == cp_rank
+        rolled_targets[local_indices[current_rank_mask]] = rolled_targets_full[current_rank_mask]
+    else:
+        rolled_targets = rolled_targets_full
 
     # Add batch dimension back for DistributedLogprob
     rolled_targets = rolled_targets.unsqueeze(0)
@@ -441,35 +454,111 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         )
 
     if cp_size > 1:
-        # per-sequence cp_allgather
-        final_probs = torch.zeros(probs.shape[0] * cp_size, device=probs.device)
-        for i in range(batch_size):
-            start_idx = cu_seqlens_padded[i].item()
-            end_idx = cu_seqlens_padded[i + 1].item()
-            final_probs[start_idx:end_idx] = allgather_cp_sharded_tensor(
-                probs[start_idx // cp_size : end_idx // cp_size], cp_group, seq_dim=0
-            )
-        probs = final_probs
+        probs = allgather_cp_sharded_packed_tensor(probs, cu_seqlens_padded, cp_group)
 
     out_logprobs = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=probs.dtype, device=probs.device)
-    # Filter out the last token of each sequence
-    for i in range(batch_size):
-        start_idx = cu_seqlens_padded[i].item()
-        end_idx = cu_seqlens_padded[i + 1].item()
+    _, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+        cu_seqlens_padded, probs.shape[0], probs.device
+    )
 
-        # Exclude the last position (which has the rolled target from position 0)
-        if end_idx - start_idx > 0:
-            seq_probs = probs[start_idx : end_idx - 1]
-            # Ensure seq_probs is 1D
-            if seq_probs.dim() > 1:
-                seq_probs = seq_probs.squeeze()
+    if sub_seq_lengths is not None:
+        row_indices, row_offsets, seq_lens = _packed_subseq_row_indices_offsets_and_lens(
+            cu_seqlens_padded, sub_seq_lengths, probs.device
+        )
+        valid_counts = torch.clamp(seq_lens - 1, min=0)
+        packed_mask = seq_offsets < valid_counts[seq_indices]
+        output_cols = row_offsets[seq_indices[packed_mask]] + seq_offsets[packed_mask]
+        output_rows = row_indices[seq_indices[packed_mask]]
+        output_in_bounds = output_cols < unpacked_seqlen - 1
+        out_logprobs[output_rows[output_in_bounds], output_cols[output_in_bounds]] = probs[packed_mask][
+            output_in_bounds
+        ]
+        return out_logprobs
 
-            # Ensure we don't exceed the unpacked sequence length
-            seq_len = min(seq_probs.shape[0], unpacked_seqlen - 1)
-            if seq_len > 0:
-                out_logprobs[i, :seq_len] = seq_probs[:seq_len]
+    if attention_mask is not None:
+        seq_lens = attention_mask.sum(dim=1, dtype=torch.long)
+        token_ordinals = attention_mask.to(torch.long).cumsum(dim=1)
+        output_mask = attention_mask[:, :-1] & (token_ordinals[:, :-1] < seq_lens.unsqueeze(1))
+        valid_counts = torch.clamp(seq_lens - 1, min=0)
+        packed_mask = seq_offsets < valid_counts[seq_indices]
+        out_logprobs[output_mask] = probs[packed_mask]
+        return out_logprobs
+
+    valid_counts = torch.clamp(seq_lens_padded - 1, min=0)
+    packed_mask = (seq_offsets < valid_counts[seq_indices]) & (seq_offsets < unpacked_seqlen - 1)
+    out_logprobs[seq_indices[packed_mask], seq_offsets[packed_mask]] = probs[packed_mask]
 
     return out_logprobs
+
+
+def _packed_subseq_row_indices_offsets_and_lens(
+    cu_seqlens_padded: torch.Tensor, sub_seq_lengths: list[list[int]], device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return per-packed-segment row metadata for controller-side sequence packing."""
+    cu_seqlens_cpu = cu_seqlens_padded.detach().cpu().tolist()
+    padded_lens = [cu_seqlens_cpu[i + 1] - cu_seqlens_cpu[i] for i in range(len(cu_seqlens_cpu) - 1)]
+
+    row_indices: list[int] = []
+    row_offsets: list[int] = []
+    seq_lens: list[int] = []
+    seg_idx = 0
+    for row_idx, row_lens in enumerate(sub_seq_lengths):
+        row_offset = 0
+        for seq_len in row_lens:
+            if seg_idx >= len(padded_lens):
+                raise ValueError("sub_seq_lengths contains more sub-sequences than cu_seqlens_padded")
+            row_indices.append(row_idx)
+            row_offsets.append(row_offset)
+            seq_lens.append(int(seq_len))
+            row_offset += padded_lens[seg_idx]
+            seg_idx += 1
+
+    if seg_idx != len(padded_lens):
+        raise ValueError(
+            f"sub_seq_lengths describes {seg_idx} sub-sequences, but cu_seqlens_padded describes {len(padded_lens)}"
+        )
+
+    return (
+        torch.tensor(row_indices, dtype=torch.long, device=device),
+        torch.tensor(row_offsets, dtype=torch.long, device=device),
+        torch.tensor(seq_lens, dtype=torch.long, device=device),
+    )
+
+
+def _packed_sequence_indices(
+    cu_seqlens_padded: torch.Tensor, total_tokens: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
+    token_indices = torch.arange(total_tokens, device=device)
+    seq_indices = torch.searchsorted(cu_seqlens_padded[1:], token_indices, right=True)
+    seq_offsets = token_indices - cu_seqlens_padded[seq_indices]
+    seq_lens_padded = cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+    return cu_seqlens_padded, token_indices, seq_indices, seq_offsets, seq_lens_padded
+
+
+def _packed_cp_rank_and_local_indices(
+    cu_seqlens_padded: torch.Tensor,
+    seq_indices: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    seq_lens_padded: torch.Tensor,
+    cp_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if cp_size == 1:
+        return torch.zeros_like(seq_indices), cu_seqlens_padded[seq_indices] + seq_offsets
+
+    seq_lens_for_token = seq_lens_padded[seq_indices]
+    chunk_size = torch.div(seq_lens_for_token, 2 * cp_size, rounding_mode="floor")
+    chunk_indices = torch.div(seq_offsets, chunk_size, rounding_mode="floor")
+    rank_for_token = torch.where(chunk_indices < cp_size, chunk_indices, 2 * cp_size - chunk_indices - 1)
+    within_chunk_offsets = seq_offsets - chunk_indices * chunk_size
+    within_rank_offsets = torch.where(
+        chunk_indices < cp_size,
+        within_chunk_offsets,
+        chunk_size + within_chunk_offsets,
+    )
+    local_starts = torch.div(cu_seqlens_padded[:-1], cp_size, rounding_mode="floor")
+    local_indices = local_starts[seq_indices] + within_rank_offsets
+    return rank_for_token, local_indices
 
 
 def _get_tokens_on_this_cp_rank(
@@ -511,6 +600,135 @@ def _get_tokens_on_this_cp_rank(
 
 def allgather_cp_sharded_tensor(tensor, cp_group, seq_dim=1):  # , unpadded_seqlen=None):
     return AllGatherCPTensor.apply(tensor, cp_group, seq_dim)  # , unpadded_seqlen)
+
+
+def allgather_cp_sharded_packed_tensor(tensor, cu_seqlens_padded, cp_group):
+    return AllGatherPackedCPTensor.apply(tensor, cu_seqlens_padded, cp_group)
+
+
+def vocab_parallel_entropy_packed_sequences(
+    vocab_parallel_logits: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    unpacked_seqlen: int,
+    num_actions: int,
+    attention_mask: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    cp_group: Optional[torch.distributed.ProcessGroup],
+    sub_seq_lengths: Optional[list[list[int]]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute action-token entropy directly on TP+CP sharded packed logits.
+
+    Returns:
+        A tuple of (global entropy metric, local entropy term for loss). The
+        local term is normalized by the global action-token count. Megatron's
+        schedule already applies the CP loss scale for two-output loss funcs.
+    """
+    entropy_tokens = vocab_parallel_entropy(vocab_parallel_logits).squeeze(0)
+    device = entropy_tokens.device
+    dtype = entropy_tokens.dtype
+
+    attention_mask = attention_mask.to(device=device, dtype=torch.bool)
+    cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
+    batch_size = attention_mask.shape[0]
+
+    action_weights = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=dtype, device=device)
+    if loss_mask is None:
+        action_weights[:, -num_actions:] = 1.0
+    else:
+        action_weights[:, -num_actions:] = loss_mask.to(device=device, dtype=dtype)
+
+    packed_weights = torch.zeros((int(cu_seqlens_padded[-1].item()),), dtype=dtype, device=device)
+    if sub_seq_lengths is not None:
+        _, _, seq_indices, seq_offsets, _ = _packed_sequence_indices(cu_seqlens_padded, packed_weights.shape[0], device)
+        row_indices, row_offsets, seq_lens = _packed_subseq_row_indices_offsets_and_lens(
+            cu_seqlens_padded, sub_seq_lengths, device
+        )
+        valid_counts = torch.clamp(seq_lens - 1, min=0)
+        packed_mask = seq_offsets < valid_counts[seq_indices]
+        output_cols = row_offsets[seq_indices[packed_mask]] + seq_offsets[packed_mask]
+        output_rows = row_indices[seq_indices[packed_mask]]
+        output_in_bounds = output_cols < action_weights.shape[1]
+        packed_weights[torch.arange(packed_weights.shape[0], device=device)[packed_mask][output_in_bounds]] = (
+            action_weights[output_rows[output_in_bounds], output_cols[output_in_bounds]]
+        )
+    else:
+        seq_lens = attention_mask.sum(dim=1, dtype=torch.long)
+        token_ordinals = attention_mask.to(torch.long).cumsum(dim=1)
+        output_mask = attention_mask[:, :-1] & (token_ordinals[:, :-1] < seq_lens.unsqueeze(1))
+
+        token_offsets = token_ordinals - 1
+        packed_indices = cu_seqlens_padded[:-1].unsqueeze(1) + token_offsets
+        packed_weights[packed_indices[:, :-1][output_mask]] = action_weights[output_mask]
+
+    cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
+    if cp_size > 1:
+        cp_rank = torch.distributed.get_rank(cp_group)
+        _, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+            cu_seqlens_padded, packed_weights.shape[0], device
+        )
+        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
+            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
+        )
+        local_weights = torch.zeros_like(entropy_tokens)
+        current_rank_mask = cp_rank_for_token == cp_rank
+        local_weights[local_indices[current_rank_mask]] = packed_weights[current_rank_mask]
+    else:
+        local_weights = packed_weights
+
+    local_entropy_sum = (entropy_tokens * local_weights).sum()
+    local_count = local_weights.sum()
+    global_count = local_count.detach().clone()
+    global_entropy_sum = local_entropy_sum.detach().clone()
+    if cp_size > 1:
+        torch.distributed.all_reduce(global_count, group=cp_group)
+        torch.distributed.all_reduce(global_entropy_sum, group=cp_group)
+    global_count = global_count.clamp(min=1.0)
+
+    entropy = global_entropy_sum / global_count
+    entropy_for_loss = local_entropy_sum / global_count
+    return entropy, entropy_for_loss
+
+
+class AllGatherPackedCPTensor(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, cu_seqlens_padded: torch.Tensor, cp_group: torch.distributed.ProcessGroup):
+        cp_size = torch.distributed.get_world_size(cp_group)
+        cp_rank_chunks = [torch.empty_like(tensor) for _ in range(cp_size)]
+        torch.distributed.all_gather(tensor_list=cp_rank_chunks, tensor=tensor, group=cp_group)
+
+        total_tokens = tensor.shape[0] * cp_size
+        cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+            cu_seqlens_padded, total_tokens, tensor.device
+        )
+        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
+            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
+        )
+
+        gathered = torch.stack(cp_rank_chunks, dim=0)
+        output = gathered[cp_rank_for_token, local_indices]
+
+        ctx.cp_group = cp_group
+        ctx.save_for_backward(cu_seqlens_padded)
+        ctx.local_tokens = tensor.shape[0]
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        cp_size = torch.distributed.get_world_size(ctx.cp_group)
+        cp_rank = torch.distributed.get_rank(ctx.cp_group)
+        (cu_seqlens_padded,) = ctx.saved_tensors
+
+        cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+            cu_seqlens_padded, grad_output.shape[0], grad_output.device
+        )
+        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
+            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
+        )
+
+        local_rank_mask = cp_rank_for_token == cp_rank
+        grad_input = torch.zeros(ctx.local_tokens, dtype=grad_output.dtype, device=grad_output.device)
+        grad_input[local_indices[local_rank_mask]] = grad_output[local_rank_mask]
+        return grad_input, None, None
 
 
 class AllGatherCPTensor(torch.autograd.Function):

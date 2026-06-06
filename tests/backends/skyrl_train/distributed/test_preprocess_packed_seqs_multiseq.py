@@ -255,16 +255,13 @@ class TestSubSeqLengths:
         assert packed[0].tolist() == [1, 2, 3, 4, 5, 10, 11, 12, 13, 20, 21]
 
 
-class TestMultiSeqCPRoundTrip:
-    """preprocess -> (identity model) -> postprocess round-trip with CP > 1.
+class TestMultiSeqCPLayout:
+    """preprocess CP sharding layout with CP > 1.
 
-    The CP zigzag in preprocess_packed_seqs and the un-zigzag in
-    postprocess_packed_seqs are pure index manipulation, so they can be
-    exercised on CPU by mocking the context-parallel rank/world-size and the
-    all_gather collective. We simulate an *identity* model: each CP rank's
-    "model output" is exactly the CP-sharded buffer that preprocess hands it.
-    Reassembling all ranks' outputs through postprocess must recover the same
-    full THD layout that the (tested) cp_size==1 path produces.
+    The CP zigzag in preprocess_packed_seqs is pure index manipulation, so it
+    can be exercised on CPU by mocking the context-parallel rank/world-size.
+    We analytically reassemble each CP rank's shard in the test to verify the
+    sharded buffers recover the full row layout.
     """
 
     @staticmethod
@@ -295,7 +292,6 @@ class TestMultiSeqCPRoundTrip:
 
     def _run_roundtrip(self, tp_size, cp_size, sub_seq_lengths):
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            postprocess_packed_seqs,
             preprocess_packed_seqs,
         )
 
@@ -303,11 +299,9 @@ class TestMultiSeqCPRoundTrip:
         batch_size, seq_len = input_ids.shape
 
         # ---- ground truth: the full (un-sharded) padded THD layout ----
-        # Under the identity model, postprocess must reassemble each row's
+        # Under the identity model, analytically reassembling each row's
         # sub-seqs (each padded to align_size) back-to-back from column 0 with
-        # the rest zero. ``_build_batch`` already produces exactly that layout
-        # in ``input_ids`` (the same row layout the PackedDataCollator
-        # collator emits), so the row buffer is just input_ids cast to float.
+        # the rest zero should recover ``input_ids`` cast to float.
         # NOTE: we deliberately do NOT use the cp_size==1 path as ground truth
         # here -- the cp==1 align_size is ``tp_size`` whereas the cp>1
         # align_size is ``tp_size*cp_size*2``, so the two assume *different*
@@ -315,7 +309,7 @@ class TestMultiSeqCPRoundTrip:
         # analytic layout below is align_size-consistent and a stronger target.
         gt = input_ids.to(torch.float32)
 
-        # ---- CP > 1: preprocess each rank, gather, postprocess ----
+        # ---- CP > 1: preprocess each rank, then analytically reassemble ----
         per_rank_out = []
         params_cp = None
         for cp_rank in range(cp_size):
@@ -333,32 +327,44 @@ class TestMultiSeqCPRoundTrip:
         for r in range(1, cp_size):
             assert per_rank_out[r].shape == per_rank_out[0].shape
 
-        # postprocess on the local (cp_rank=0) output; all_gather supplies the
-        # other ranks' outputs. Run it under cp_rank=0's mpu.
-        with patch(
-            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
-            _mock_mpu(tp_size=tp_size, cp_size=cp_size, cp_rank=0),
-        ):
-
-            def _fake_all_gather(output_list, _tensor, group=None):
-                for j in range(cp_size):
-                    output_list[j].copy_(per_rank_out[j])
-
-            with patch(
-                "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.torch.distributed.all_gather",
-                side_effect=_fake_all_gather,
-            ):
-                recovered = postprocess_packed_seqs(
-                    per_rank_out[0],
-                    params_cp,
-                    attention_mask,
-                    batch_size,
-                    seq_len,
-                    post_process=True,
-                    sub_seq_lengths=sub_seq_lengths,
-                )
+        recovered = self._reassemble_cp_shards(per_rank_out, params_cp, batch_size, seq_len, cp_size, sub_seq_lengths)
 
         return gt, recovered
+
+    @staticmethod
+    def _reassemble_cp_shards(per_rank_out, params_cp, batch_size, seq_len, cp_size, sub_seq_lengths):
+        cu_padded = params_cp.cu_seqlens_q_padded.tolist()
+        output = torch.zeros((batch_size, seq_len), dtype=per_rank_out[0].dtype)
+
+        flat_sub_idx_of_row_start = []
+        running = 0
+        for row_lens in sub_seq_lengths:
+            flat_sub_idx_of_row_start.append(running)
+            running += len(row_lens)
+
+        for row_idx, row_lens in enumerate(sub_seq_lengths):
+            row_first_sub = flat_sub_idx_of_row_start[row_idx]
+            row_last_sub_exclusive = row_first_sub + len(row_lens)
+            row_global_start = cu_padded[row_first_sub]
+            for seg in range(row_first_sub, row_last_sub_exclusive):
+                local_segment_len = (cu_padded[seg + 1] - cu_padded[seg]) // cp_size
+                half_seqlen = local_segment_len // 2
+                padded_segment_len = local_segment_len * cp_size
+                packed_start_idx = cu_padded[seg] // cp_size
+                dest_off = cu_padded[seg] - row_global_start
+
+                tmp = torch.empty(padded_segment_len, dtype=per_rank_out[0].dtype)
+                for cp_rank in range(cp_size):
+                    rank_tokens = per_rank_out[cp_rank][0]
+                    front = rank_tokens[packed_start_idx : packed_start_idx + half_seqlen]
+                    back = rank_tokens[packed_start_idx + half_seqlen : packed_start_idx + local_segment_len]
+                    tmp[cp_rank * half_seqlen : (cp_rank + 1) * half_seqlen] = front
+                    tmp[
+                        padded_segment_len - (cp_rank + 1) * half_seqlen : padded_segment_len - cp_rank * half_seqlen
+                    ] = back
+                output[row_idx, dest_off : dest_off + padded_segment_len] = tmp
+
+        return output
 
     def test_roundtrip_recovers_full_layout_cp2(self):
         # tp=1, cp=2 -> align_size=4. Sub-seq lengths chosen so each row has
