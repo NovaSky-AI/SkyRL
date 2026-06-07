@@ -2,7 +2,9 @@
 
 These use a fake MTP block (no Megatron) to verify the capture records the block's
 arguments and that the decoupled replay detaches the trunk hidden states so the
-draft gradient never reaches the policy backbone.
+draft gradient never reaches the policy backbone. The capture is model-agnostic
+(GPTModel for DeepSeek/GLM/Qwen3-Next, MambaModel for Qwen3.5/NemotronH); the fakes
+below stand in for either base class.
 
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/mtp/test_hidden_capture.py
 """
@@ -14,44 +16,70 @@ import torch
 import torch.nn as nn
 
 # Stub out megatron.core.utils.unwrap_model so hidden_capture imports on CPU.
+# (hidden_capture also tries megatron.core.transformer.multi_token_prediction.get_mtp_layer_offset,
+# which is absent here, so it falls back to offset 0 — the single-stage / no-PP case.)
 _fake_mcore_utils = types.ModuleType("megatron.core.utils")
 _fake_mcore_utils.unwrap_model = lambda m: m
 sys.modules.setdefault("megatron", types.ModuleType("megatron"))
 sys.modules.setdefault("megatron.core", types.ModuleType("megatron.core"))
 sys.modules["megatron.core.utils"] = _fake_mcore_utils
 
+from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits  # noqa: E402
 from skyrl.backends.skyrl_train.mtp.hidden_capture import MTPHiddenCapture  # noqa: E402
 
 
 class _FakeMTPBlock(nn.Module):
-    """Mimics MultiTokenPredictionBlock: returns cat([trunk; mtp_0], dim=0)."""
+    """Mimics MultiTokenPredictionBlock: returns cat([trunk; mtp_0; ...; mtp_{k-1}], dim=0)."""
 
-    def __init__(self, hidden):
+    def __init__(self, hidden, num_layers=1):
         super().__init__()
-        self.w = nn.Parameter(torch.ones(hidden))
+        self.num_layers = num_layers
+        # One distinct weight per MTP depth so each depth's output is separable.
+        self.w = nn.ParameterList([nn.Parameter(torch.ones(hidden) * (i + 1)) for i in range(num_layers)])
 
     def forward(self, hidden_states, **kwargs):
-        mtp_0 = hidden_states * self.w  # depends on params AND trunk hidden
-        return torch.cat([hidden_states, mtp_0], dim=0)
+        # depends on params AND trunk hidden, like the real block.
+        chunks = [hidden_states] + [hidden_states * self.w[i] for i in range(self.num_layers)]
+        return torch.cat(chunks, dim=0)
 
 
 class _FakeGPT(nn.Module):
+    """Stands in for any Megatron model exposing a native ``.mtp`` block + ``.config``."""
+
     def __init__(self, hidden=4, mtp_num_layers=1):
         super().__init__()
-        self.mtp = _FakeMTPBlock(hidden)
+        self.mtp = _FakeMTPBlock(hidden, num_layers=mtp_num_layers)
         self.config = types.SimpleNamespace(mtp_num_layers=mtp_num_layers)
 
 
-def _run(detach_trunk):
-    gpt = _FakeGPT()
-    capture = MTPHiddenCapture(gpt, detach_trunk=detach_trunk)
+class _FakeMamba(_FakeGPT):
+    """Stands in for MambaModel: same MTP surface plus the shared-output-layer surface the
+    adapter's projection uses (``output_layer`` + tied ``shared_embedding_or_output_weight``)."""
+
+    def __init__(self, hidden=4, vocab=5, mtp_num_layers=1):
+        super().__init__(hidden=hidden, mtp_num_layers=mtp_num_layers)
+        self.share_embeddings_and_output_weights = True
+        self._out_weight = nn.Parameter(torch.randn(vocab, hidden))
+
+    def shared_embedding_or_output_weight(self):
+        return self._out_weight
+
+    def output_layer(self, hidden, weight=None):
+        w = weight if weight is not None else self._out_weight
+        # [seq, batch, hidden] @ [hidden, vocab] -> [seq, batch, vocab]; mirror Megatron's (logits, bias).
+        return hidden @ w.t(), None
+
+
+def _run(detach_trunk, model_cls=_FakeGPT, mtp_num_layers=1):
+    model = model_cls(mtp_num_layers=mtp_num_layers)
+    capture = MTPHiddenCapture(model, detach_trunk=detach_trunk)
     s, b, h = 3, 2, 4
     trunk = torch.randn(s, b, h, requires_grad=True)
     with capture.capture():
-        # Simulate GPTModel's in-forward MTP call (records kwargs via the pre-hook).
-        _ = gpt.mtp(hidden_states=trunk, position_ids=torch.zeros(b, s))
+        # Simulate the model's in-forward MTP call (records kwargs via the pre-hook).
+        _ = model.mtp(hidden_states=trunk, position_ids=torch.zeros(b, s))
     student = capture.compute_student_hidden_states()
-    return gpt, trunk, student
+    return model, trunk, student
 
 
 def test_capture_returns_one_chunk_per_mtp_depth():
@@ -60,27 +88,66 @@ def test_capture_returns_one_chunk_per_mtp_depth():
     assert student[0].shape == (3, 2, 4)
 
 
+def test_capture_returns_one_chunk_per_depth_multilayer():
+    # chunk[-num_layers:] must return exactly this stage's MTP-depth outputs.
+    _, _, student = _run(detach_trunk=True, mtp_num_layers=2)
+    assert student is not None and len(student) == 2
+    assert all(chunk.shape == (3, 2, 4) for chunk in student)
+
+
 def test_replay_detaches_trunk_when_detach_trunk_true():
-    gpt, trunk, student = _run(detach_trunk=True)
+    model, trunk, student = _run(detach_trunk=True)
     student[0].sum().backward()
     # The MTP-head parameter receives gradient...
-    assert gpt.mtp.w.grad is not None and gpt.mtp.w.grad.abs().sum() > 0
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
     # ...but the trunk hidden states do NOT (decoupled).
     assert trunk.grad is None
 
 
 def test_replay_couples_trunk_when_detach_trunk_false():
-    gpt, trunk, student = _run(detach_trunk=False)
+    model, trunk, student = _run(detach_trunk=False)
     student[0].sum().backward()
-    assert gpt.mtp.w.grad is not None and gpt.mtp.w.grad.abs().sum() > 0
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
     # With detach disabled, the gradient flows back into the trunk hidden states.
     assert trunk.grad is not None and trunk.grad.abs().sum() > 0
 
 
+def test_capture_is_model_agnostic_mambamodel():
+    # The capture must work identically for a MambaModel-like base (Qwen3.5), exposing the same
+    # .mtp surface. capture.model is the unwrapped model (renamed from the old GPTModel-specific attr).
+    model, trunk, student = _run(detach_trunk=True, model_cls=_FakeMamba)
+    assert isinstance(MTPHiddenCapture(model).model, _FakeMamba)
+    assert student is not None and len(student) == 1
+    assert student[0].shape == (3, 2, 4)
+
+
+def test_project_to_logits_decoupled_end_to_end():
+    # End-to-end through the adapter: capture (detached) -> shared output layer -> student logits.
+    # The draft gradient reaches the MTP head + shared output weight, never the trunk.
+    model, trunk, student = _run(detach_trunk=True, model_cls=_FakeMamba)
+    logits = project_mtp_hidden_to_logits(student, model)
+    assert len(logits) == 1
+    # [seq, batch, vocab] -> transposed to [batch, seq, vocab].
+    assert logits[0].shape == (2, 3, 5)
+    logits[0].sum().backward()
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
+    assert model._out_weight.grad is not None and model._out_weight.grad.abs().sum() > 0
+    assert trunk.grad is None
+
+
+def test_project_to_logits_detach_shared_output():
+    # detach_output_weight=True isolates the shared embedding/output weight from the draft gradient.
+    model, trunk, student = _run(detach_trunk=True, model_cls=_FakeMamba)
+    logits = project_mtp_hidden_to_logits(student, model, detach_output_weight=True)
+    logits[0].sum().backward()
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
+    assert model._out_weight.grad is None
+
+
 def test_no_capture_when_block_absent():
-    gpt = _FakeGPT()
-    gpt.mtp = None
-    capture = MTPHiddenCapture(gpt, detach_trunk=True)
+    model = _FakeGPT()
+    model.mtp = None
+    capture = MTPHiddenCapture(model, detach_trunk=True)
     with capture.capture():
         pass
     assert capture.compute_student_hidden_states() is None

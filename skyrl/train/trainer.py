@@ -841,6 +841,25 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
+    async def _record_spec_decode_metrics(self) -> None:
+        """Record the vLLM speculative-decoding (MTP draft) acceptance rate for this rollout step.
+
+        Reads the engines' cumulative draft/accept counters and logs the per-step delta as
+        ``vllm/draft_acceptance_rate`` (+ raw counts). No-op when speculative decoding is disabled or
+        the backend doesn't expose the stats. Best-effort: never fails the training step.
+        """
+        from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
+            acceptance_rate_metrics,
+        )
+
+        try:
+            cumulative = await self.inference_engine_client.get_spec_decode_metrics()
+        except Exception as e:
+            logger.warning(f"Failed to read vLLM spec-decode metrics: {e}")
+            return
+        metrics, self._prev_spec_decode = acceptance_rate_metrics(cumulative, self._prev_spec_decode)
+        self.all_metrics.update(metrics)
+
     async def generate(
         self,
         input_batch: GeneratorInput,
@@ -860,6 +879,9 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
         generator_output.pop("rollout_metrics", None)
+
+        # vLLM speculative-decoding (MTP draft) acceptance rate for this rollout step.
+        await self._record_spec_decode_metrics()
 
         validate_generator_output(
             len(input_batch["prompts"]),

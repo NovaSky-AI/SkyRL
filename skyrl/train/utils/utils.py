@@ -218,6 +218,39 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
+def _apply_mtp_config(cfg: SkyRLTrainConfig):
+    """Propagate the high-level ``trainer.mtp`` knob to the training + inference configs.
+
+    When MTP is enabled, build/train ``num_speculative_tokens`` native MTP heads (Megatron) with the
+    decoupled draft loss, and enable vLLM MTP speculative decoding with the same draft depth. When
+    disabled, force the MTP heads off so they are neither built nor run.
+    """
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is None:
+        return
+
+    mcfg = cfg.trainer.policy.megatron_config
+    if not mtp.enabled:
+        # Explicit 0 force-disables MTP even on MTP-capable models.
+        mcfg.mtp_num_layers = 0
+        return
+
+    assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
+    # Training side: build + train this many native MTP heads with the decoupled draft loss.
+    mcfg.mtp_num_layers = mtp.num_speculative_tokens
+    mcfg.mtp_loss_type = mtp.loss_type
+    mcfg.mtp_loss_weight = mtp.loss_weight
+
+    # Inference side: vLLM MTP speculative decoding with the same draft depth. Don't clobber an
+    # explicit user-provided speculative_config.
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.speculative_config is None:
+        ie_cfg.speculative_config = {
+            "method": "mtp",
+            "num_speculative_tokens": mtp.num_speculative_tokens,
+        }
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -231,6 +264,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+
+    # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
+    # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
+    # side (vLLM MTP speculative decoding) so both stay consistent.
+    _apply_mtp_config(cfg)
+
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
         PolicyLossRegistry,
@@ -676,6 +715,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
+        env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -714,6 +757,16 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
+    # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
+    # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
+    # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
+    # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
+    for var_name in ("UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_LINK_MODE", "UV_PYTHON"):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     return env_vars
 

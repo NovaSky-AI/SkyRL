@@ -1,3 +1,4 @@
+import os
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
@@ -242,11 +243,13 @@ class MegatronModelWrapper:
         # ------------------------------------------------------------------
         # If the model was built with native MTP heads (policy.megatron_config.mtp_num_layers),
         # train them with an explicit, decoupled loss instead of Megatron's in-forward
-        # process_mtp_loss / MTPLossAutoScaler path. We keep the heads running inside GPTModel.forward
-        # (so we don't have to reconstruct rotary embeddings) but pass NO labels, so process_mtp_loss
-        # short-circuits and no MTP gradient is coupled onto the trunk. A forward hook captures the
-        # MTP block's hidden states (with its trunk input optionally detached) and we project + score
-        # them ourselves. Only active during training (not forward_only / logprob-only passes).
+        # process_mtp_loss / MTPLossAutoScaler path. This is model-agnostic: any model that exposes a
+        # native MTP block works (GPTModel for DeepSeek/GLM/Qwen3-Next, MambaModel for Qwen3.5/
+        # NemotronH). We keep the heads running inside the model's forward (so we don't have to
+        # reconstruct rotary embeddings) but pass NO labels, so process_mtp_loss short-circuits and no
+        # MTP gradient is coupled onto the trunk. A forward hook captures the MTP block's hidden states
+        # (with its trunk input optionally detached) and we project + score them ourselves. Only
+        # active during training (not forward_only / logprob-only passes).
         model_config = get_model_config(self.actor_module[0])
         mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
         mcfg = self.cfg.policy.megatron_config
@@ -254,6 +257,19 @@ class MegatronModelWrapper:
         mtp_loss_weight = float(getattr(mcfg, "mtp_loss_weight", 0.1))
         mtp_detach_trunk = bool(getattr(mcfg, "mtp_detach_trunk", True))
         mtp_detach_shared_output = bool(getattr(mcfg, "mtp_detach_shared_output", False))
+
+        if os.environ.get("MTP_DEBUG"):
+            from megatron.core.utils import unwrap_model as _uw
+
+            _gm = _uw(self.actor_module[0])
+            print(
+                f"[MTP_DEBUG] forward_only={forward_only} mtp_enabled={mtp_enabled} "
+                f"model_config.mtp_num_layers={getattr(model_config, 'mtp_num_layers', 'MISSING')} "
+                f"unwrapped_type={type(_gm).__name__} has_mtp_attr={hasattr(_gm, 'mtp')} "
+                f"mtp_is_none={getattr(_gm, 'mtp', None) is None} "
+                f"mtp_process={getattr(_gm, 'mtp_process', 'MISSING')}",
+                flush=True,
+            )
 
         # Resolve loss function
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -558,9 +574,10 @@ class MegatronModelWrapper:
                 )
 
             # Run the policy forward. When MTP is active, a pre-hook records the native MTP block's
-            # arguments (we pass NO labels, so GPTModel's process_mtp_loss short-circuits and the
+            # arguments (we pass NO labels, so the model's process_mtp_loss short-circuits and the
             # main logits stay coupled to the trunk; MTPLossAutoScaler never runs).
             student_hidden = None
+            student_model = None
             with maybe_capture_mtp_hidden(model, mtp_enabled, detach_trunk=mtp_detach_trunk) as capture:
                 outputs = model(
                     new_sequences,
@@ -572,7 +589,7 @@ class MegatronModelWrapper:
                 # while still inside the capture context (so the MTP block stays in eval mode).
                 if mtp_enabled and capture is not None:
                     student_hidden = capture.compute_student_hidden_states()
-                    gpt_model = capture.gpt_model
+                    student_model = capture.model
 
             outputs = depad(outputs)
 
@@ -581,7 +598,7 @@ class MegatronModelWrapper:
             # scored against the policy's own distribution (or hard labels) in loss_func.
             if student_hidden is not None:
                 student_logits = project_mtp_hidden_to_logits(
-                    student_hidden, gpt_model, detach_output_weight=mtp_detach_shared_output
+                    student_hidden, student_model, detach_output_weight=mtp_detach_shared_output
                 )
                 batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
 

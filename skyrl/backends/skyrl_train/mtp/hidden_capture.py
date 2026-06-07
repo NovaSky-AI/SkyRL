@@ -3,11 +3,16 @@
 # This is the SkyRL analogue of NeMo-RL's ``HiddenStateCapture``
 # (https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/megatron/draft/hidden_capture.py).
 #
-# Megatron's ``GPTModel`` runs its native MTP block (``self.mtp``) inside the forward whenever
-# ``self.mtp_process`` is set. Crucially, ``MultiTokenPredictionBlock.forward`` passes the trunk
-# hidden states through as the *first* chunk of its output, and ``process_mtp_loss`` returns that
-# chunk as the hidden states for the *main* logits. So we must NOT tamper with the in-forward call:
-# the main policy logits have to stay connected to the trunk for the policy loss to train it.
+# Works for any Megatron model that builds native MTP heads and exposes ``self.mtp`` (the shared
+# ``MultiTokenPredictionBlock``): ``GPTModel`` (DeepSeek-V3 / GLM / Qwen3-Next, ...) and
+# ``MambaModel`` (Qwen3.5 / NemotronH, ...). Both run ``self.mtp(...)`` + ``process_mtp_loss(...)``
+# inside ``forward`` and surface the same output layout, so the capture below is model-agnostic.
+#
+# Megatron runs its native MTP block (``self.mtp``) inside the forward whenever ``self.mtp_process``
+# is set. Crucially, ``MultiTokenPredictionBlock.forward`` passes the trunk hidden states through as
+# a passthrough chunk of its output, and ``process_mtp_loss`` returns that chunk as the hidden states
+# for the *main* logits. So we must NOT tamper with the in-forward call: the main policy logits have
+# to stay connected to the trunk for the policy loss to train it.
 #
 # Instead we:
 #   1. register a forward pre-hook on ``self.mtp`` that simply *records* the keyword arguments
@@ -32,11 +37,27 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 
-def _unwrap_gpt_model(model):
-    """Return the underlying GPTModel from a (possibly DDP/Float16) wrapper."""
+def _unwrap_model(model):
+    """Return the underlying Megatron model (GPTModel / MambaModel / ...) from a wrapper."""
     from megatron.core.utils import unwrap_model
 
     return unwrap_model(model)
+
+
+def _mtp_layer_offset(mtp_block) -> int:
+    """Number of passthrough chunks ahead of this stage's MTP-depth chunks.
+
+    ``MultiTokenPredictionBlock.forward`` chunks its input into ``1 + offset`` passthrough chunks
+    (the trunk hidden states plus any MTP outputs forwarded from earlier pipeline/VP stages),
+    appends one new chunk per MTP depth, and concatenates everything along dim 0. ``offset`` is 0 in
+    the common single-stage case; we resolve it via megatron-core so the replay split below is also
+    correct under PP/VPP. Falls back to 0 if the helper is unavailable (older megatron-core)."""
+    try:
+        from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
+
+        return int(get_mtp_layer_offset(mtp_block.config, getattr(mtp_block, "vp_stage", None)))
+    except Exception:
+        return 0
 
 
 class MTPHiddenCapture:
@@ -49,7 +70,7 @@ class MTPHiddenCapture:
     """
 
     def __init__(self, model, detach_trunk: bool = True):
-        self.gpt_model = _unwrap_gpt_model(model)
+        self.model = _unwrap_model(model)
         self.detach_trunk = detach_trunk
         self._args = None
         self._kwargs = None
@@ -58,7 +79,7 @@ class MTPHiddenCapture:
 
     @property
     def mtp_num_layers(self) -> int:
-        return int(getattr(self.gpt_model.config, "mtp_num_layers", 0) or 0)
+        return int(getattr(self.model.config, "mtp_num_layers", 0) or 0)
 
     def _pre_hook(self, _module, args, kwargs):
         # Record (do not modify) the arguments Megatron built for the MTP block.
@@ -68,7 +89,7 @@ class MTPHiddenCapture:
 
     @contextmanager
     def capture(self):
-        mtp = getattr(self.gpt_model, "mtp", None)
+        mtp = getattr(self.model, "mtp", None)
         if mtp is None:
             # Model has no MTP heads on this rank/stage; nothing to capture.
             yield self
@@ -106,13 +127,16 @@ class MTPHiddenCapture:
         if hidden is not None and self.detach_trunk:
             kwargs["hidden_states"] = hidden.detach()
 
-        # MultiTokenPredictionBlock returns the concatenated hidden states
-        # [trunk; mtp_0; mtp_1; ...] along the sequence (dim 0).
-        captured = self.gpt_model.mtp(*self._args, **kwargs)
+        mtp = self.model.mtp
+        # MultiTokenPredictionBlock concatenates, along dim 0:
+        #   [<1 + offset> passthrough chunks (trunk + earlier-stage MTP outputs)]
+        #   + [<mtp_num_layers> new MTP-depth chunks produced on this stage].
+        # We want this stage's new MTP-depth chunks (the last `num_layers`).
+        captured = mtp(*self._args, **kwargs)
         num_layers = self.mtp_num_layers
-        chunks = list(torch.chunk(captured, 1 + num_layers, dim=0))
-        # Drop the (passthrough) trunk chunk; keep the per-MTP-depth chunks.
-        return chunks[1:]
+        total_chunks = 1 + _mtp_layer_offset(mtp) + num_layers
+        chunks = list(torch.chunk(captured, total_chunks, dim=0))
+        return chunks[-num_layers:]
 
 
 @contextmanager

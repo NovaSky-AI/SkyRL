@@ -405,9 +405,11 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # Multi-Token Prediction (MTP) head configuration.
-        # DeepSeek-V3 / GLM-4.7-Flash bridges set provider.mtp_num_layers from the HF config's
-        # num_nextn_predict_layers. We layer SkyRL's explicit config on top:
+        # Multi-Token Prediction (MTP) head configuration. Model-agnostic: megatron-bridge populates
+        # provider.mtp_num_layers from whichever HF key the model uses — DeepSeek/GLM via
+        # num_nextn_predict_layers, Qwen3.5/Qwen3-Next via the generic
+        # (mtp_num_hidden_layers -> mtp_num_layers) config mapping. We layer SkyRL's explicit config
+        # on top:
         #   - enable_mtp=False (ref worker): force MTP off (the heads don't affect ref logprobs
         #     and would only waste compute/memory).
         #   - mtp_num_layers set: override the model default (0 force-disables).

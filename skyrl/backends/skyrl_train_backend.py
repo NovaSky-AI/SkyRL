@@ -1227,6 +1227,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
         "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
         "language_model_only": cfg.generator.inference_engine.language_model_only,
+        "speculative_config": cfg.generator.inference_engine.speculative_config,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

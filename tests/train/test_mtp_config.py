@@ -88,3 +88,24 @@ def test_apply_mtp_config_does_not_clobber_explicit_speculative_config():
     cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 5}
     _apply_mtp_config(cfg)
     assert cfg.generator.inference_engine.speculative_config["num_speculative_tokens"] == 5
+
+
+def test_local_engine_builder_accepts_speculative_config():
+    # Regression: the colocated local-engine path must accept + forward speculative_config to vLLM.
+    # It was only wired into the standalone HTTP-server path (build_vllm_cli_args), so colocated runs
+    # (the common MTP path) silently ran with spec decode OFF -> 0 drafted / 0 accepted tokens.
+    #
+    # Kept lightweight on purpose: we assert the engine builder *accepts* a speculative_config kwarg
+    # (the parameter that was missing), rather than calling the from-config wrapper. The wrapper lives
+    # in main_base, whose import chain (trainer -> ppo_utils) does a Ray auto-init at import time and
+    # would touch the live cluster under the session-scoped ray fixture.
+    import inspect
+
+    from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+        create_ray_wrapped_inference_engines,
+    )
+
+    params = inspect.signature(create_ray_wrapped_inference_engines).parameters
+    assert "speculative_config" in params, "engine builder must accept speculative_config (MTP spec decode)"
+    # Default must be None so non-spec-decode runs are unaffected.
+    assert params["speculative_config"].default is None
