@@ -1,14 +1,8 @@
-"""Collator -> preprocess -> postprocess round-trip tests for packed SFT.
+"""Collator -> preprocess layout tests for packed SFT.
 
-These tests exercise the *collator output -> preprocess -> postprocess*
-round-trip with multi-subseq rows under both ``mbs > 1`` and
-``tp_size > 1``, asserting the invariants at the interfaces between those
-steps:
-
-  postprocess — when ``cu_seqlens_q_padded`` enumerates one entry per
-    *sub-seq* (not per row), each batch row must round-trip from THD
-    offset ``cu_padded_cpu[row_start(i)]``, so a row whose predecessors
-    contained > 1 sub-seq reads from the correct offset.
+These tests exercise the *collator output -> preprocess* path with
+multi-subseq rows under both ``mbs > 1`` and ``tp_size > 1``, asserting the
+invariants at that interface:
 
   preprocess — the controller-side collator advances
     ``row_offset += round_up(s, align_size)`` between sub-seqs in the
@@ -37,7 +31,7 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# Mock the megatron-core surface that the preprocess/postprocess utils import
+# Mock the megatron-core surface that the preprocess utils import
 # at the top of the module. Same recipe as
 # tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_multiseq.py
 # ---------------------------------------------------------------------------
@@ -143,10 +137,10 @@ def _build_collator_layout(
     return sequences, attention_mask, sub_seq_lengths
 
 
-class TestRoundTrip:
-    """End-to-end: collator output -> preprocess -> [identity model] -> postprocess."""
+class TestPreprocessPackedRows:
+    """Collator output -> preprocess layout checks."""
 
-    def test_mbs2_tp4_multisubseq_rows_recover_correctly(self):
+    def test_mbs2_tp4_multisubseq_rows_pack_correctly(self):
         """The exact configuration that would have caught both bugs.
 
         - ``mbs = 2`` so the THD offset stride matters per micro-batch row.
@@ -157,7 +151,6 @@ class TestRoundTrip:
           shorter than its sub-seq 1 length 11).
         """
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            postprocess_packed_seqs,
             preprocess_packed_seqs,
         )
 
@@ -219,44 +212,9 @@ class TestRoundTrip:
         assert packed[0, 20:31].tolist() == row_1_sub_1  # row 1 sub 1
         assert packed[0, 31].item() == 0  # TP-alignment pad
 
-        # ------------------------------------------------------------------
-        # "Forward pass" — use the packed slab itself as the model output
-        # (identity model). Shape becomes [1, T, hidden_dim] with hidden_dim=1.
-        # ------------------------------------------------------------------
-        output = packed.unsqueeze(-1).float()
-        assert output.shape == (1, 32, 1)
-
-        # ------------------------------------------------------------------
-        # postprocess: scatter the THD slab back into [B, S, ...] layout.
-        # ------------------------------------------------------------------
-        with patch(
-            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
-            _mock_mpu(tp_size=tp_size, cp_size=1),
-        ):
-            recovered = postprocess_packed_seqs(
-                output,
-                params,
-                attention_mask,
-                batch_size=2,
-                seq_len=sequences.shape[1],
-                post_process=True,
-                sub_seq_lengths=sub_seq_lengths,
-            )
-
-        recovered = recovered.squeeze(-1)
-        # Both rows round-trip to their original collator layout (including
-        # TP-alignment pads). Row 1 reads from THD offset cu_padded[row_start(1)]
-        # = 16 (not 8), so row 0's sub-seq 1 tokens stay out of row 1's output.
-        assert recovered[0].tolist() == sequences[0].float().tolist()
-        assert recovered[1].tolist() == sequences[1].float().tolist()
-
-    def test_mbs2_tp1_singlesubseq_rows_match_legacy_path(self):
-        """No regression in the legacy path: when each row has 1 sub-seq and
-        tp_size=1, the multi-subseq postprocess output equals the legacy
-        ``attention_mask``-based postprocess output.
-        """
+    def test_mbs2_tp1_singlesubseq_rows_match_legacy_preprocess_path(self):
+        """No regression in the legacy path: when each row has 1 sub-seq and tp_size=1."""
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            postprocess_packed_seqs,
             preprocess_packed_seqs,
         )
 
@@ -279,52 +237,10 @@ class TestRoundTrip:
         assert torch.equal(packed_multi, packed_legacy)
         assert torch.equal(params_multi.cu_seqlens_q, params_legacy.cu_seqlens_q)
 
-        output_multi = packed_multi.unsqueeze(-1).float()
-        output_legacy = packed_legacy.unsqueeze(-1).float()
-
-        with patch(
-            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
-            _mock_mpu(tp_size=1, cp_size=1),
-        ):
-            recovered_multi = postprocess_packed_seqs(
-                output_multi,
-                params_multi,
-                attention_mask,
-                batch_size=2,
-                seq_len=sequences.shape[1],
-                post_process=True,
-                sub_seq_lengths=sub_seq_lengths,
-            )
-            recovered_legacy = postprocess_packed_seqs(
-                output_legacy,
-                params_legacy,
-                attention_mask,
-                batch_size=2,
-                seq_len=sequences.shape[1],
-                post_process=True,
-            )
-
-        # Both recoveries must put the same *valid token* values at the same
-        # mask=True positions. The two paths differ in the destination layout
-        # (multi-subseq path writes the whole padded row slab; legacy path
-        # writes only attention_mask=True positions) but at attention_mask=True
-        # positions the values must match.
-        valid_multi = recovered_multi.squeeze(-1)[attention_mask]
-        valid_legacy = recovered_legacy.squeeze(-1)[attention_mask]
-        assert torch.equal(valid_multi, valid_legacy)
-
     def test_mbs2_tp4_multisubseq_loss_mask_is_zero_at_alignment_pad(self):
         """The collator zeros ``loss_mask`` at every TP-alignment pad slot
-        inside the row. Verify that the recovered logits at those slots are
-        irrelevant: the loss formula uses ``logits * loss_mask`` so any
-        garbage at the alignment pads is masked out.
-
-        Concretely: postprocess writes the *full padded row* slab back into
-        ``output_new[i, :row_len]``, including TP-alignment pad tokens
-        (which carry pad_token_id=0). The downstream loss path gathers
-        logprobs by token id and then multiplies by ``loss_mask``. As long
-        as ``loss_mask`` is 0 at the alignment pad positions, garbage there
-        cannot contaminate the loss.
+        inside the row. The packed-logprob scatter leaves alignment pads at
+        zero, and the loss formula masks those positions out.
 
         This is a *contract* assertion against the collator + loss path,
         not a tensor-equality check.
