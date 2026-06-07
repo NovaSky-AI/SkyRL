@@ -272,6 +272,7 @@ constraints = [
 overrides = [
     { name = "megatron-core", marker = "sys_platform == 'linux'", git = "https://github.com/NVIDIA/Megatron-LM?rev=cefc2520158c7ceba3f9adbe4b547a6f7a118da1" },
     { name = "ml-dtypes", marker = "sys_platform == 'linux'", specifier = ">=0.5.0" },
+    { name = "nixl-cu13", marker = "sys_platform == 'never'" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux'", specifier = "==2.11.0" },
     { name = "transformers", marker = "sys_platform == 'linux'", specifier = ">=5.6.1,<=5.8.0" },

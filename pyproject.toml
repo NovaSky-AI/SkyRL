@@ -224,6 +224,11 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    # The `nixl` meta-package pulls BOTH nixl-cu12 and nixl-cu13 on Linux; both
+    # ship a top-level `nixl_ep` that collide, and cu13 (libcudart.so.13) wins,
+    # breaking vLLM model inspection on this CUDA-12 env (torch cu128 / vllm
+    # cu129). Exclude cu13 so only nixl-cu12 (libcudart.so.12) is installed.
+    "nixl-cu13; sys_platform == 'never'",
 ]
 
 [tool.uv.extra-build-dependencies]
