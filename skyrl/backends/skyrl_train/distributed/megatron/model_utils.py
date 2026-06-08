@@ -421,6 +421,70 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None
 
 
+def _fused_lm_head_logprob_apply(
+    backend: str,
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    chunk_size: int,
+    tp_group: torch.distributed.ProcessGroup,
+    inference_only: bool,
+) -> torch.Tensor:
+    """Dispatch the fused LM-head token-logprob to the requested backend.
+
+    ``"torch"`` (default) -> :class:`FusedLinearChunkedDistributedLogprob` (pure-PyTorch, runs
+    anywhere). ``"triton"`` -> the vendored flash-style Triton kernel
+    (``FusedLinearLogprobTriton``, GPU only), which tiles over the vocab dim so the per-chunk
+    logits never materialize. The Triton backend transparently falls back to the torch backend
+    (with a warning) when Triton / its module is unavailable, so it is always safe to request.
+
+    Both backends have the SAME forward contract and return this rank's per-token log-prob
+    tensor ``[B, S]`` (already TP-combined). ``return_entropy`` is intentionally NOT exposed
+    here: the fused *entropy* metric is served by ``_fused_vocab_parallel_entropy_from_hidden`` /
+    ``from_parallel_hidden_to_entropy_packed_sequences`` (no-grad), matching the torch path.
+    """
+    if backend == "triton":
+        try:
+            from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+                TRITON_AVAILABLE,
+                FusedLinearLogprobTriton,
+                is_cuda_available,
+            )
+
+            if not (TRITON_AVAILABLE and is_cuda_available):
+                raise ImportError("triton is not installed or no CUDA device is available")
+            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
+                hidden,
+                weight,
+                target,
+                vocab_start_index,
+                vocab_end_index,
+                chunk_size,
+                tp_group,
+                inference_only,
+                False,  # return_entropy: logprob-only here
+            )
+        except (ImportError, RuntimeError) as e:
+            warnings.warn(
+                f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
+                "pure-PyTorch backend. Install triton (and run on GPU) to use the fused Triton kernel.",
+                stacklevel=2,
+            )
+
+    return FusedLinearChunkedDistributedLogprob.apply(  # type: ignore[no-any-return]
+        hidden,
+        weight,
+        target,
+        vocab_start_index,
+        vocab_end_index,
+        chunk_size,
+        tp_group,
+        inference_only,
+    )
+
+
 def from_parallel_logits_to_logprobs(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
@@ -658,6 +722,7 @@ def from_parallel_hidden_to_logprobs(
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -671,6 +736,9 @@ def from_parallel_hidden_to_logprobs(
     (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
     ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
     temperature-agnostic.
+
+    ``fused_backend`` selects the kernel: ``"torch"`` (default) or ``"triton"`` (falls back to
+    torch when unavailable). See :func:`_fused_lm_head_logprob_apply`.
     """
     if temperature != 1.0:
         lm_head_weight = lm_head_weight / temperature
@@ -685,7 +753,8 @@ def from_parallel_hidden_to_logprobs(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    logprobs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    logprobs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         target,
@@ -720,6 +789,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -728,7 +798,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
     ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
     ``temperature`` is applied by dividing the weight (see
-    ``from_parallel_hidden_to_logprobs``).
+    ``from_parallel_hidden_to_logprobs``). ``fused_backend`` selects the kernel
+    (``"torch"`` / ``"triton"``); see :func:`_fused_lm_head_logprob_apply`.
     """
     if temperature != 1.0:
         lm_head_weight = lm_head_weight / temperature
@@ -763,7 +834,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    probs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    probs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         rolled_targets,

@@ -1,0 +1,21 @@
+SkyRL
+Copyright NovaSky-AI and contributors
+
+This product includes software developed at third parties, redistributed under
+the Apache License, Version 2.0:
+
+  - verl (https://github.com/volcengine/verl)
+    Copyright 2023-2024 Bytedance Ltd. and/or its affiliates
+
+    The fused linear-cross-entropy Triton kernels in
+    skyrl/backends/skyrl_train/distributed/megatron/fused_linear_logprob_triton.py
+    are adapted from verl/utils/kernel/{kernels.py,linear_cross_entropy.py}.
+    Portions of those kernels are:
+        Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+  - NeMo-Aligner / NeMo-RL (https://github.com/NVIDIA-NeMo/RL)
+    Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+
+    Portions of
+    skyrl/backends/skyrl_train/distributed/megatron/model_utils.py are ported
+    from NeMo-Aligner by way of NeMo-RL.
