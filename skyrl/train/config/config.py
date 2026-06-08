@@ -229,6 +229,21 @@ class MegatronConfig(BaseConfig):
     mtp_loss_scaling_factor: Optional[float] = None
     """Deprecated alias for ``mtp_loss_weight`` (kept for back-compat). If set, it overrides
     ``mtp_loss_weight``."""
+    mtp_loss_chunk_size: Optional[int] = 1024
+    """Sequence-chunk size for the decoupled MTP/draft loss. The draft loss materializes full
+    ``[batch, seq, vocab]`` softmax tensors; at large vocab (e.g. Qwen3.5's 248K) computing the whole
+    response at once OOMs. Chunking the loss over the sequence (with gradient checkpointing) bounds
+    peak memory to one chunk's vocab tensors -- numerically identical, only activation memory differs.
+    ``None`` disables chunking (whole sequence at once). Lower it if the draft loss still OOMs.
+    Ignored when ``mtp_loss_topk`` is set (top-k never materializes the full vocab, so no chunking)."""
+    mtp_loss_topk: Optional[int] = None
+    """If set, use a **top-k** approximation of the soft-CE draft loss: distill only the teacher's top-k
+    tokens (renormalized over that set) instead of the full vocabulary. Memory is ``O(seq*k)`` instead
+    of ``O(seq*vocab)``, which both fits and avoids allocator fragmentation at large vocab (e.g.
+    Qwen3.5's 248K) -- where even the chunked full-vocab loss OOMs/fragments. Scales to any
+    tensor-parallel size (incl. cross-node): the per-rank top-k is reconciled across the TP group with
+    all-reduce. Only applies to ``mtp_loss_type="soft_ce"``. ``None`` uses the exact full-vocab loss.
+    Typical: 64-128 (acceptance is governed by the top tokens, so the dropped tail is benign)."""
 
     def __post_init__(self):
         # Back-compat: the old `mtp_loss_scaling_factor` knob now maps onto the explicit loss weight.

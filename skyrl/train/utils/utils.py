@@ -768,6 +768,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_CACHE_DIR",
         "UV_LINK_MODE",
         "UV_PYTHON",
+        "UV_OFFLINE",
         "MTP_DEBUG",
         "PYTORCH_CUDA_ALLOC_CONF",
     ):

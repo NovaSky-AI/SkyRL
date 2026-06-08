@@ -62,26 +62,31 @@ def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.T
 
 
 def _vocab_parallel_softmax(vocab_parallel_logits, group):
-    """Global softmax over a TP-sharded vocab dim, using in-place ops to avoid extra full-vocab
-    allocations. Mirrors NeMo-RL's ``_compute_distributed_softmax``."""
+    """Global softmax over a TP-sharded vocab dim. Allocates a single full-vocab output tensor (the
+    ``- logits_max`` subtraction) and does the rest in place on it; the input is NOT mutated (so it is
+    safe even when the caller passes float32 logits, where ``.float()`` is a no-op). Mirrors NeMo-RL's
+    ``_compute_distributed_softmax``."""
     logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
-    # `- logits_max` allocates once (frees the input copy); everything after is in place.
-    exp_logits = (vocab_parallel_logits - logits_max).exp_()
+    exp_logits = (vocab_parallel_logits - logits_max).exp_()  # new buffer, then in place
     sum_exp = exp_logits.sum(dim=-1, keepdim=True)
     torch.distributed.all_reduce(sum_exp, op=torch.distributed.ReduceOp.SUM, group=group)
     return exp_logits.div_(sum_exp)
 
 
 def _vocab_parallel_log_softmax(vocab_parallel_logits, group):
-    """Global log-softmax over a TP-sharded vocab dim. Mirrors NeMo-RL's
-    ``_compute_distributed_log_softmax``; the single ``.exp()`` temporary is summed and freed."""
+    """Global log-softmax over a TP-sharded vocab dim. Uses ``torch.logsumexp`` (a fused
+    ``[.,.,V]->[.,.,1]`` reduction) so it never materializes a full-vocab ``exp`` temporary -- the key
+    memory fix at a 248K vocab, where that temp is multiple GiB (NeMo-RL's
+    ``_compute_distributed_log_softmax`` allocates it via an explicit ``.exp().sum()``). Allocates one
+    full-vocab output buffer; the input is NOT mutated."""
     logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
-    shifted = vocab_parallel_logits - logits_max
-    sum_exp = shifted.exp().sum(dim=-1, keepdim=True)
-    torch.distributed.all_reduce(sum_exp, op=torch.distributed.ReduceOp.SUM, group=group)
-    return shifted.sub_(sum_exp.log_())
+    shifted = vocab_parallel_logits - logits_max  # new buffer (input untouched); values now <= 0
+    # exp() of the *local* logsumexp recovers this shard's sum-of-exp, which reduces across TP.
+    local_sum_exp = torch.logsumexp(shifted, dim=-1, keepdim=True).exp_()
+    torch.distributed.all_reduce(local_sum_exp, op=torch.distributed.ReduceOp.SUM, group=group)
+    return shifted.sub_(local_sum_exp.log_())  # in place on the owned buffer -> log-softmax
 
 
 class _VocabParallelSoftCrossEntropy(torch.autograd.Function):
@@ -115,9 +120,54 @@ class _VocabParallelSoftCrossEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         student_probs, target_probs = ctx.saved_tensors
-        # d(H(p, q))/d(student_logit_v) = softmax(student)_v - softmax(teacher)_v
-        grad_student = (student_probs - target_probs) * grad_output.unsqueeze(-1)
+        # d(H(p, q))/d(student_logit_v) = softmax(student)_v - softmax(teacher)_v. Done in place on
+        # student_probs (a private buffer from forward, used nowhere else) to avoid allocating extra
+        # full-vocab temporaries during backward -- at a 248K vocab each would be multiple GiB.
+        grad_student = student_probs.sub_(target_probs).mul_(grad_output.unsqueeze(-1))
         return grad_student.to(ctx.input_dtype), None, None
+
+
+def _masked_mean_or_global(per_token_loss, mask, global_normalization_factor):
+    """Masked mean of a ``[batch, seq]`` per-token loss, using either the local token count or a
+    provided global valid-token count as the denominator."""
+    if global_normalization_factor is not None:
+        return (per_token_loss * mask).sum() / global_normalization_factor.clamp(min=1.0)
+    return masked_mean(per_token_loss, mask)
+
+
+def _chunked_masked_loss(per_token_fn, sliceable_args, mask, chunk_size, global_normalization_factor):
+    """Masked-mean loss computed in ``chunk_size`` slices along the sequence dim.
+
+    ``per_token_fn(*sliced_args)`` returns the ``[batch, chunk]`` per-token loss for a slice. Each
+    chunk is gradient-checkpointed, so the (large, full-vocab) softmax tensors are recomputed in
+    backward instead of all being held at once -- this bounds peak memory to a *single* chunk's vocab
+    tensors. Required for large-vocab models (Qwen3.5's 248K vocab) where the full-sequence softmax
+    OOMs even after the lean kernel. The result is numerically identical to the un-chunked masked mean
+    (same global denominator); only the activation memory differs.
+    """
+    import torch.utils.checkpoint as checkpoint
+
+    seq_len = sliceable_args[0].shape[1]
+    masked_sum = None
+    for start in range(0, seq_len, chunk_size):
+        end = min(start + chunk_size, seq_len)
+        sliced = [a[:, start:end] for a in sliceable_args]
+        chunk_mask = mask[:, start:end]
+
+        def _chunk_masked_sum(*args, _m=chunk_mask):
+            return (per_token_fn(*args) * _m).sum()
+
+        chunk_sum = checkpoint.checkpoint(_chunk_masked_sum, *sliced, use_reentrant=False)
+        masked_sum = chunk_sum if masked_sum is None else masked_sum + chunk_sum
+
+    if masked_sum is None:  # empty sequence
+        masked_sum = mask.sum() * 0.0
+    denom = (
+        global_normalization_factor.clamp(min=1.0)
+        if global_normalization_factor is not None
+        else mask.sum().clamp(min=1.0)
+    )
+    return masked_sum / denom
 
 
 def draft_soft_ce(
@@ -126,6 +176,7 @@ def draft_soft_ce(
     mask: torch.Tensor,
     global_normalization_factor: Optional[torch.Tensor] = None,
     vocab_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+    chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
     """Masked-mean soft cross-entropy between draft (student) and policy (teacher).
 
@@ -138,22 +189,137 @@ def draft_soft_ce(
             When ``None``, uses the local masked mean.
         vocab_parallel_group: TP group when logits are vocab-sharded; ``None`` for
             full-vocab logits (single device / FSDP).
+        chunk_size: If set, compute the loss in sequence-chunks of this size with gradient
+            checkpointing to bound peak memory (large-vocab models). ``None`` computes the whole
+            sequence at once. The result is identical either way.
 
     Returns:
         Scalar loss.
     """
-    if vocab_parallel_group is not None and torch.distributed.get_world_size(vocab_parallel_group) > 1:
-        per_token_loss = _VocabParallelSoftCrossEntropy.apply(
-            student_logits, teacher_logits, vocab_parallel_group
-        )
-    else:
-        teacher_probs = F.softmax(teacher_logits.float(), dim=-1)
-        student_log_probs = F.log_softmax(student_logits.float(), dim=-1)
-        per_token_loss = -(teacher_probs * student_log_probs).sum(dim=-1)
+    use_vp = vocab_parallel_group is not None and torch.distributed.get_world_size(vocab_parallel_group) > 1
 
-    if global_normalization_factor is not None:
-        return (per_token_loss * mask).sum() / global_normalization_factor.clamp(min=1.0)
-    return masked_mean(per_token_loss, mask)
+    def per_token(student, teacher):
+        if use_vp:
+            return _VocabParallelSoftCrossEntropy.apply(student, teacher, vocab_parallel_group)
+        teacher_probs = F.softmax(teacher.float(), dim=-1)
+        student_log_probs = F.log_softmax(student.float(), dim=-1)
+        return -(teacher_probs * student_log_probs).sum(dim=-1)
+
+    if chunk_size is not None and student_logits.shape[1] > chunk_size:
+        return _chunked_masked_loss(
+            per_token, (student_logits, teacher_logits), mask, chunk_size, global_normalization_factor
+        )
+    return _masked_mean_or_global(per_token(student_logits, teacher_logits), mask, global_normalization_factor)
+
+
+class _VocabParallelTopkSoftCE(torch.autograd.Function):
+    """Top-k approximation of the soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v``
+    that never materializes a full-vocab softmax.
+
+    Only the teacher's top-k tokens are distilled, with teacher and student renormalized over that set.
+    Memory is ``O(seq * k)`` instead of ``O(seq * vocab)`` -- it fits at a 248K vocab *and* avoids the
+    allocator fragmentation that the full-vocab / chunked paths cause.
+
+    Parallelism: the vocab is sharded over the tensor-parallel ``group``. We take **each rank's local
+    top-k** of its shard and reconcile the softmax normalizers and the per-token cross-entropy across
+    the group with ``all_reduce`` (MAX for the stable-softmax shift, SUM for the denominators and the
+    loss). No ``all_gather`` / global-index gather is needed because student and teacher share the same
+    vocab partition, so a rank's local top-k indices address both. This works for ANY tensor-parallel
+    size and is correct across nodes (the collectives run over the configured ``group``); ``group=None``
+    / world-size 1 is the single-device path. The distilled set is the union of the per-rank top-k
+    (<= ``k * tp_size`` tokens) -- a benign, richer signal at larger TP, not a correctness issue.
+
+    Backward is manual (scatter the ``softmax(student) - softmax(teacher)`` gradient back to this rank's
+    own top-k columns), so no gradient flows through the collectives.
+    """
+
+    @staticmethod
+    def forward(ctx, student_logits, teacher_logits, k, group, roll_shift):
+        ws = torch.distributed.get_world_size(group) if group is not None else 1
+
+        def ar(t, op):
+            if ws > 1:
+                torch.distributed.all_reduce(t, op=op, group=group)
+            return t
+
+        k_eff = min(int(k), teacher_logits.shape[-1])
+        # Teacher's local top-k (teacher is detached). When roll_shift != 0, teacher_logits is the
+        # UN-rolled policy logits: position t's draft target is the policy distribution at t+roll_shift,
+        # so we top-k the policy logits once (no full-vocab copy) and roll only the small [B, S, k]
+        # result -- avoiding a ~[S, vocab] rolled-teacher copy. The wrapped boundary positions are
+        # zeroed by the caller's shifted loss mask.
+        t_vals, t_idx = teacher_logits.topk(k_eff, dim=-1)
+        if roll_shift:
+            t_vals = torch.roll(t_vals, shifts=-int(roll_shift), dims=1)
+            t_idx = torch.roll(t_idx, shifts=-int(roll_shift), dims=1)
+        t_vals = t_vals.float()
+        # student at position t, teacher's top-k indices for position t (already rolled).
+        s_vals = student_logits.gather(-1, t_idx).float()
+
+        # Stable-softmax shift = global max over the union (across the TP group).
+        t_max = ar(t_vals.max(dim=-1, keepdim=True).values.clone(), torch.distributed.ReduceOp.MAX)
+        s_max = ar(s_vals.max(dim=-1, keepdim=True).values.clone(), torch.distributed.ReduceOp.MAX)
+
+        # Teacher probs over the union (denominator summed across the group).
+        t_exp = (t_vals - t_max).exp()
+        t_denom = ar(t_exp.sum(dim=-1, keepdim=True), torch.distributed.ReduceOp.SUM)
+        t_p = t_exp / t_denom
+
+        # Student probs / log-probs over the union (denominator summed across the group).
+        s_exp = (s_vals - s_max).exp()
+        s_denom = ar(s_exp.sum(dim=-1, keepdim=True), torch.distributed.ReduceOp.SUM)
+        q_s = s_exp / s_denom
+        s_logp = (s_vals - s_max) - s_denom.log()
+
+        # Per-rank partial CE summed across the group -> soft CE over the global union.
+        per_token_loss = ar(-(t_p * s_logp).sum(dim=-1), torch.distributed.ReduceOp.SUM)
+
+        ctx.save_for_backward(q_s, t_p, t_idx)
+        ctx.vocab_size = student_logits.shape[-1]
+        ctx.input_dtype = student_logits.dtype
+        return per_token_loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        q_s, t_p, t_idx = ctx.saved_tensors
+        # d(H(p,q))/d(student_logit_v) = softmax(student)_v - softmax(teacher)_v, over the union; zero
+        # elsewhere. Scatter the k per-token grads back to this rank's own vocab columns.
+        grad_topk = (q_s - t_p) * grad_output.unsqueeze(-1)
+        grad_student = torch.zeros(
+            *t_idx.shape[:-1], ctx.vocab_size, dtype=grad_topk.dtype, device=grad_topk.device
+        )
+        grad_student.scatter_(-1, t_idx, grad_topk)
+        return grad_student.to(ctx.input_dtype), None, None, None, None
+
+
+def draft_soft_ce_topk(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    mask: torch.Tensor,
+    k: int,
+    global_normalization_factor: Optional[torch.Tensor] = None,
+    vocab_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+    roll_shift: int = 0,
+) -> torch.Tensor:
+    """Masked-mean **top-k** soft cross-entropy between draft (student) and policy (teacher).
+
+    Distills only the teacher's top-``k`` tokens (renormalized over that set) -- ``O(seq*k)`` memory,
+    no full-vocab softmax, so it fits + avoids fragmentation at large vocab. See
+    :class:`_VocabParallelTopkSoftCE` for the (parallelism-scalable) implementation. Approximate: drops
+    the teacher tail, which is benign for a draft head (acceptance is governed by the top tokens).
+
+    Args mirror :func:`draft_soft_ce`, plus:
+        k: number of top teacher tokens to distill.
+        roll_shift: if non-zero, ``teacher_logits`` is the *un-rolled* policy logits and the draft
+            target for position ``t`` is the policy distribution at ``t + roll_shift`` (= the MTP-depth
+            roll). Top-k is taken on the un-rolled logits and only the small ``[B, S, k]`` result is
+            rolled, avoiding a full ``[S, vocab]`` rolled-teacher copy. ``0`` means ``teacher_logits``
+            is already aligned/rolled (the caller's ``build_teacher_logits`` path).
+    """
+    per_token_loss = _VocabParallelTopkSoftCE.apply(
+        student_logits, teacher_logits.detach(), k, vocab_parallel_group, roll_shift
+    )
+    return _masked_mean_or_global(per_token_loss, mask, global_normalization_factor)
 
 
 def _onehot_vp_logits(
@@ -186,6 +352,7 @@ def draft_hard_ce(
     global_normalization_factor: Optional[torch.Tensor] = None,
     vocab_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
     vocab_start_index: Optional[int] = None,
+    chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
     """Masked-mean hard cross-entropy of the draft head against next-token labels.
 
@@ -200,19 +367,23 @@ def draft_hard_ce(
         global_normalization_factor: see :func:`draft_soft_ce`.
         vocab_parallel_group: TP group when logits are vocab-sharded.
         vocab_start_index: This rank's vocab offset (required when TP-sharded).
+        chunk_size: see :func:`draft_soft_ce`. Sequence-chunked + checkpointed when set.
     """
-    if vocab_parallel_group is not None and torch.distributed.get_world_size(vocab_parallel_group) > 1:
+    use_vp = vocab_parallel_group is not None and torch.distributed.get_world_size(vocab_parallel_group) > 1
+    if use_vp:
         assert vocab_start_index is not None, "vocab_start_index is required for vocab-parallel hard CE"
-        # Hard CE == soft CE with a one-hot teacher; reuse the distributed soft-CE
-        # path so the global (TP) softmax / gradient logic lives in one place.
-        teacher_onehot = _onehot_vp_logits(labels, student_logits, vocab_start_index)
-        per_token_loss = _VocabParallelSoftCrossEntropy.apply(
-            student_logits, teacher_onehot, vocab_parallel_group
-        )
-    else:
-        log_probs = F.log_softmax(student_logits.float(), dim=-1)
-        per_token_loss = -log_probs.gather(dim=-1, index=labels.unsqueeze(-1).long()).squeeze(-1)
 
-    if global_normalization_factor is not None:
-        return (per_token_loss * mask).sum() / global_normalization_factor.clamp(min=1.0)
-    return masked_mean(per_token_loss, mask)
+    def per_token(student, lbl):
+        if use_vp:
+            # Hard CE == soft CE with a one-hot teacher; reuse the distributed soft-CE path so the
+            # global (TP) softmax / gradient logic lives in one place.
+            teacher_onehot = _onehot_vp_logits(lbl, student, vocab_start_index)
+            return _VocabParallelSoftCrossEntropy.apply(student, teacher_onehot, vocab_parallel_group)
+        log_probs = F.log_softmax(student.float(), dim=-1)
+        return -log_probs.gather(dim=-1, index=lbl.unsqueeze(-1).long()).squeeze(-1)
+
+    if chunk_size is not None and student_logits.shape[1] > chunk_size:
+        return _chunked_masked_loss(
+            per_token, (student_logits, labels), mask, chunk_size, global_normalization_factor
+        )
+    return _masked_mean_or_global(per_token(student_logits, labels), mask, global_normalization_factor)
