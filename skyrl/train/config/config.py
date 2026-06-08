@@ -218,6 +218,10 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     """When True, training and inference share the same GPUs."""
     colocate_policy_ref: bool = True
+    """When colocate_all is False, True (default) still colocates policy and ref
+    on the same GPUs (one shared placement group). Set this item to False to place
+    policy and ref on separate GPUs (their own placement groups); needed when
+    a large model's policy and ref shards can't both fit on one GPU."""
     policy_num_nodes: int = 1
     policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
