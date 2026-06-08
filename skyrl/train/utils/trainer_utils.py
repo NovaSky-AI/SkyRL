@@ -771,7 +771,7 @@ def build_dataloader(
     seeded_generator.manual_seed(cfg.trainer.seed)
 
     num_workers = cfg.data.dataloader.num_workers
-    assert num_workers is not None, "num_workers is resolved to an int in SkyRLTrainConfig.__post_init__"
+    assert num_workers is not None, "dataloader `num_workers` should be non-null"
 
     dataloader = StatefulDataLoader(
         dataset,
