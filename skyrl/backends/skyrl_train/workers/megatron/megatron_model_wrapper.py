@@ -261,13 +261,19 @@ class MegatronModelWrapper:
         if os.environ.get("MTP_DEBUG"):
             from megatron.core.utils import unwrap_model as _uw
 
+            from skyrl.backends.skyrl_train.mtp.hidden_capture import _resolve_mtp_host
+
             _gm = _uw(self.actor_module[0])
+            _host = _resolve_mtp_host(_gm)
+            _lm = getattr(_gm, "language_model", None)
             print(
                 f"[MTP_DEBUG] forward_only={forward_only} mtp_enabled={mtp_enabled} "
                 f"model_config.mtp_num_layers={getattr(model_config, 'mtp_num_layers', 'MISSING')} "
-                f"unwrapped_type={type(_gm).__name__} has_mtp_attr={hasattr(_gm, 'mtp')} "
-                f"mtp_is_none={getattr(_gm, 'mtp', None) is None} "
-                f"mtp_process={getattr(_gm, 'mtp_process', 'MISSING')}",
+                f"unwrapped_type={type(_gm).__name__} top_has_mtp={getattr(_gm, 'mtp', None) is not None} "
+                f"has_language_model={_lm is not None} "
+                f"lm_has_mtp={getattr(_lm, 'mtp', None) is not None if _lm is not None else 'NA'} "
+                f"resolved_host={type(_host).__name__} host_mtp_is_none={getattr(_host, 'mtp', None) is None} "
+                f"host_mtp_process={getattr(_host, 'mtp_process', 'MISSING')}",
                 flush=True,
             )
 

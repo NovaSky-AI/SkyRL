@@ -44,6 +44,27 @@ def _unwrap_model(model):
     return unwrap_model(model)
 
 
+def _resolve_mtp_host(model):
+    """Return the submodule that actually owns the native MTP block (``.mtp``).
+
+    For a plain ``GPTModel`` / ``MambaModel`` that is the model itself. For vision-language wrappers
+    (e.g. Qwen3.5-VL's ``Qwen3VLModel``) the text backbone *and* its MTP head are nested one level
+    down at ``model.language_model`` (the bridge maps the heads to ``language_model.mtp.*``), so the
+    top-level model has no ``.mtp`` and the capture would otherwise silently find nothing. We descend
+    through the common ``.language_model`` nesting until we find a module exposing ``.mtp``; if none
+    does, return the top-level model unchanged (capture then yields ``None``, as before)."""
+    seen = set()
+    cur = model
+    for _ in range(4):  # bounded descent guard against pathological nesting / cycles
+        if cur is None or id(cur) in seen:
+            break
+        seen.add(id(cur))
+        if getattr(cur, "mtp", None) is not None:
+            return cur
+        cur = getattr(cur, "language_model", None)
+    return model
+
+
 def _mtp_layer_offset(mtp_block) -> int:
     """Number of passthrough chunks ahead of this stage's MTP-depth chunks.
 
@@ -70,7 +91,11 @@ class MTPHiddenCapture:
     """
 
     def __init__(self, model, detach_trunk: bool = True):
-        self.model = _unwrap_model(model)
+        # Resolve the module that owns the MTP block: the unwrapped model itself for plain
+        # GPT/Mamba models, or the nested ``.language_model`` for VL wrappers (e.g. Qwen3.5-VL).
+        # capture.model is also what the caller projects through (output_layer / shared weight),
+        # so it must be the same module that holds the heads.
+        self.model = _resolve_mtp_host(_unwrap_model(model))
         self.detach_trunk = detach_trunk
         self._args = None
         self._kwargs = None

@@ -763,7 +763,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
     # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
     # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
-    for var_name in ("UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_LINK_MODE", "UV_PYTHON"):
+    for var_name in (
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_LINK_MODE",
+        "UV_PYTHON",
+        "MTP_DEBUG",
+        "PYTORCH_CUDA_ALLOC_CONF",
+    ):
         if value := os.environ.get(var_name):
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
