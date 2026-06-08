@@ -1980,9 +1980,17 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         labels_verl = (target - vocab_start_index) + rank * local_vocab
         labels_verl = torch.where(target_mask, _OOV_LABEL_SENTINEL, labels_verl).to(torch.int64).contiguous()
 
-        # hidden must be contiguous & 2D for the kernel; verl upcasts internally. We pass the
-        # weight dtype-matched hidden (caller already replicated/SP-gathered it).
-        hidden_2d = hidden.reshape(B * S, H).contiguous()
+        # hidden must be contiguous & 2D for the kernel. The kernel's ``tl.dot(hidden, weight.T)``
+        # requires BOTH operands to share a dtype, so cast hidden to the LM-head weight dtype here
+        # — exactly what the pure-torch ``FusedLinearLogprob`` does (``hidden.to(weight.dtype) @
+        # weight.t()``) and what ``ColumnParallelLinear`` does before its bf16 GEMM. On a real
+        # hybrid model the pre-head hidden is fp32 (final norm) while the head is bf16, so without
+        # this the kernel asserts "Both operands must be same dtype. Got fp32 and bf16". When the
+        # dtypes already match (e.g. the fp32/fp32 and bf16/bf16 test cases) this is a no-op.
+        # The saved hidden_2d is therefore in weight dtype, so the backward GEMMs match too; we
+        # restore the original hidden dtype on the returned grad (see backward).
+        ctx_hidden_dtype = hidden.dtype
+        hidden_2d = hidden.reshape(B * S, H).to(weight.dtype).contiguous()
         weight_c = weight.contiguous()
 
         # temperature is pre-baked into `hidden` by the caller -> pass 1.0 here.
@@ -2020,6 +2028,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             )
             ctx.B, ctx.S, ctx.H = B, S, H
             ctx.tp_group = tp_group
+            ctx.hidden_dtype = ctx_hidden_dtype
 
         return log_probs
 
@@ -2071,8 +2080,11 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             tp_group,
         )
 
-        # d_hidden is this rank's PARTIAL (verl does not all-reduce it); reshape back to [B, S, H].
-        d_hidden = d_hidden_2d.reshape(B, S, H)
+        # d_hidden is this rank's PARTIAL (verl does not all-reduce it); reshape back to [B, S, H]
+        # and restore the original hidden dtype (forward cast hidden to the weight dtype for the
+        # kernel; autograd needs the grad in the leaf's dtype — mirrors the pure-torch path's
+        # ``.to(grad_hidden.dtype)``).
+        d_hidden = d_hidden_2d.reshape(B, S, H).to(ctx.hidden_dtype)
 
         # (hidden, weight, target, vstart, vend, chunk, tp_group, inference_only)
         return d_hidden, d_weight, None, None, None, None, None, None
