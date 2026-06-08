@@ -108,6 +108,14 @@ def test_default_save_path_used_when_none(tmp_path):
     assert prof.save_path == default
 
 
+def test_cloud_save_path_falls_back_to_local(tmp_path):
+    # ckpt_path (and thus the derived default save_path) can be a cloud URI, which
+    # torch.profiler can't write to. The wrapper must fall back to a local dir so
+    # the trace isn't silently lost.
+    prof = Profiler(_ProfCfg(save_path="s3://my-bucket/run/profiler_traces"), default_save_path=str(tmp_path))
+    assert prof.save_path == "./profiler_traces"
+
+
 def test_kernel_summary_none_when_disabled(tmp_path):
     prof = Profiler(_ProfCfg(enable=False), default_save_path=str(tmp_path))
     assert prof.get_kernel_summary() is None

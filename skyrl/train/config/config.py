@@ -215,6 +215,10 @@ class TorchProfilerConfig(BaseConfig):
             return
         if not self.ranks:
             raise ValueError("`torch_profiler_config.ranks` must be non-empty when profiling is enabled.")
+        # An empty `activities` passes the membership check below vacuously, but
+        # `torch.profiler.profile(activities=[])` records nothing -- fail fast instead.
+        if not self.activities:
+            raise ValueError("`torch_profiler_config.activities` must be non-empty when profiling is enabled.")
         bad_activities = [a for a in self.activities if a.lower() not in TORCH_PROFILER_ACTIVITIES]
         if bad_activities:
             raise ValueError(

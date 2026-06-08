@@ -4,6 +4,8 @@ import torch
 import torch.distributed
 from loguru import logger
 
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
 # Map config activity strings to torch ProfilerActivity members.
 _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
@@ -61,6 +63,16 @@ class Profiler:
             return
         self.config = config
         self.save_path = config.save_path or default_save_path or "./profiler_traces"
+        # torch.profiler writes traces with the local filesystem only. ``save_path``
+        # commonly defaults to ``{ckpt_path}/profiler_traces``, and ckpt_path can be a
+        # cloud URI (s3://, gs://) -- which torch can't write to, so the trace would be
+        # silently lost. Fall back to a local dir so profiling still produces output.
+        if is_cloud_path(self.save_path):
+            logger.warning(
+                f"[Profiler] cloud save_path {self.save_path!r} is not writable by torch.profiler; "
+                f"falling back to local './profiler_traces'."
+            )
+            self.save_path = "./profiler_traces"
         self.ranks = list(config.ranks)
         self.export_type = getattr(config, "export_type", "chrome_trace")
         self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0

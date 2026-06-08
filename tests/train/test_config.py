@@ -452,6 +452,12 @@ class TestTorchProfilerConfigValidation:
         with pytest.raises(ValueError, match=r"activities"):
             self._cfg(activities=["cpu", "gpu"]).validate()
 
+    def test_empty_activities_rejected(self):
+        # An empty list profiles nothing; the membership check would pass it
+        # vacuously, so it needs its own guard.
+        with pytest.raises(ValueError, match=r"activities.*non-empty"):
+            self._cfg(activities=[]).validate()
+
     def test_activities_case_insensitive(self):
         self._cfg(activities=["CPU", "CUDA"]).validate()  # must not raise
 
