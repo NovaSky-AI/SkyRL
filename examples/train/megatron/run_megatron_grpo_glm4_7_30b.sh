@@ -110,7 +110,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.45 \
+  generator.inference_engine.gpu_memory_utilization=0.5 \
   trainer.logger="$LOGGER" \
   trainer.project_name="glm4_7_30b_grpo" \
   trainer.run_name="glm4_7_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
