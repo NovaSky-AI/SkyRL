@@ -130,6 +130,10 @@ class MegatronModelWrapper:
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
         self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
+        # Backend selector for the fused LM-head kernel: "torch" (default, pure-PyTorch) or
+        # "triton" (vendored flash-style kernel, GPU only, falls back to torch when unavailable).
+        # Composes with `fused_lm_head_logprob` — it is a kernel choice, not a second on/off switch.
+        self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
         # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
         # sequences inside their own forward; SkyRL sample packing would then
         # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
@@ -235,6 +239,7 @@ class MegatronModelWrapper:
                     attention_mask=data["attention_mask"],
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -248,6 +253,7 @@ class MegatronModelWrapper:
                     cp_group=None,
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
@@ -502,6 +508,7 @@ class MegatronModelWrapper:
                     attention_mask=data["attention_mask"],
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -515,6 +522,7 @@ class MegatronModelWrapper:
                     cp_group=None,
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(

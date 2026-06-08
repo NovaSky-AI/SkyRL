@@ -796,6 +796,16 @@ class TrainerConfig(BaseConfig):
     O(chunk·vocab//TP)+O(S·H) — required to fit very long contexts (e.g. 262k).
     Numerically matches the default path; see
     ``model_utils.FusedLinearChunkedDistributedLogprob``."""
+    fused_lm_head_logprob_backend: str = "torch"
+    """Implementation for the fused LM-head path (ignored when ``fused_lm_head_logprob`` is
+    ``False``). This is a *backend selector*, NOT a second on/off switch:
+    ``"torch"`` — the default pure-PyTorch chunked kernel
+    (``model_utils.FusedLinearChunkedDistributedLogprob``); runs anywhere (CPU/GPU), no extra deps.
+    ``"triton"`` — vendored flash-style Triton kernel (ported from verl,
+    ``fused_linear_logprob_triton.FusedLinearLogprobTriton``); tiles over vocab so the per-chunk
+    logits never materialize (lower memory floor + faster on GPU). Requires GPU + ``triton``; falls
+    back to ``"torch"`` with a warning if Triton is unavailable. Numerically equivalent to the torch
+    backend (verified in ``tests/.../megatron/test_fused_linear_logprob*.py``)."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -812,6 +822,16 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "logprobs_chunk_size=None (no chunking) is only supported with the Megatron backend. "
                 f"Set a positive integer for strategy={self.strategy!r}."
+            )
+        if self.fused_lm_head_logprob and self.strategy != "megatron":
+            raise ValueError(
+                "fused_lm_head_logprob=True is only supported with the Megatron backend, "
+                f"got strategy={self.strategy!r}."
+            )
+        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+            raise ValueError(
+                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"got {self.fused_lm_head_logprob_backend!r}."
             )
 
 
