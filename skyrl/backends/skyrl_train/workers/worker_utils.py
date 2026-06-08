@@ -348,6 +348,12 @@ class TokenBasedBatchIterator(BaseBatchIterator):
     def __len__(self):
         return len(self._microbatches) + self._num_padding_microbatches
 
+    @property
+    def num_padding_microbatches(self) -> int:
+        """Number of purely-padding microbatches appended to equalize the microbatch
+        count across DP ranks (each carries no real samples / loss_mask all zero)."""
+        return self._num_padding_microbatches
+
     def __iter__(self) -> Iterator[TrainingInputBatch]:
         for microbatch_indices in self._microbatches:
             yield self._create_microbatch_from_indices(microbatch_indices)

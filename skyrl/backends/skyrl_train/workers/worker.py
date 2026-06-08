@@ -745,6 +745,15 @@ class PolicyWorkerBase(Worker):
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # NOTE: Sum loss metrics because scaling is already applied at the advantage level
         result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+
+        # Token-based batching diagnostics: total microbatches this rank ran and how many
+        # were purely-padding (added to equalize the microbatch count across DP ranks).
+        # Added before all-reduce so they are averaged across DP (num_microbatches is
+        # identical on every rank; num_padding_microbatches reports the per-rank average).
+        if self.cfg.max_tokens_per_microbatch > 0:
+            result["num_microbatches"] = float(len(microbatch_iterator))
+            result["num_padding_microbatches"] = float(getattr(microbatch_iterator, "num_padding_microbatches", 0))
+
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
 

@@ -144,6 +144,14 @@ class TestTokenBasedBatchIterator:
         it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=-1)
         assert isinstance(it, SampleBasedBatchIterator)
 
+    def test_num_padding_microbatches_property(self):
+        """num_padding_microbatches is exposed for metrics; without distributed init no
+        padding microbatches are added, so len() equals the real microbatch count."""
+        batch = self._make_batch([10, 10, 5, 5])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)
+        assert iterator.num_padding_microbatches == 0
+        assert len(iterator) == len(iterator._microbatches) + iterator.num_padding_microbatches
+
     def test_padding_microbatch_matches_seq_len(self):
         """Padding microbatches must share seq_len with real data (not a hardcoded short length),
         so Megatron sees a uniform seq_length and FSDP/Megatron can extract num_actions log-probs."""

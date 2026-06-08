@@ -116,6 +116,14 @@ async def test_fsdp_token_based_forward_backward(ray_init_fixture, worker_type):
                 assert "policy_entropy" in r.metrics
                 assert len(r.loss_fn_outputs) > 0
 
+            # Token-based microbatch-count diagnostics (gated on max_tokens_per_microbatch > 0).
+            # 2 GPUs -> DP=2; with seq_lens=[30,30,15,15] @ max_tokens=30 the ranks bin-pack
+            # into uneven microbatch counts, so the short rank gets padding microbatches.
+            assert "num_microbatches" in r.metrics, "missing num_microbatches metric"
+            assert "num_padding_microbatches" in r.metrics, "missing num_padding_microbatches metric"
+            assert r.metrics["num_microbatches"] > 0
+            assert r.metrics["num_padding_microbatches"] > 0, "expected padding microbatches at DP=2"
+
         # Also verify optim_step works
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         print(f"  {worker_type}: forward_backward + optim_step completed successfully")
@@ -464,6 +472,29 @@ async def test_megatron_token_based_loss_equivalence(
             cfg=cfg_token,
         )
         results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+
+        # Token-based batching exposes microbatch-count diagnostics. They are gated on
+        # max_tokens_per_microbatch > 0, so the sample-based baseline must not have them.
+        dp_size = gpus // (tp * pp)
+        for r in results_baseline:
+            assert "num_microbatches" not in r.metrics
+            assert "num_padding_microbatches" not in r.metrics
+        for r in results_token:
+            assert "num_microbatches" in r.metrics, "missing num_microbatches metric"
+            assert "num_padding_microbatches" in r.metrics, "missing num_padding_microbatches metric"
+            assert r.metrics["num_microbatches"] > 0
+            if dp_size > 1:
+                # Uneven bin-packing across DP ranks -> some ranks get padding microbatches
+                # (averaged across DP, so a positive fractional value).
+                assert (
+                    r.metrics["num_padding_microbatches"] > 0
+                ), f"expected padding microbatches at DP={dp_size}, got {r.metrics['num_padding_microbatches']}"
+            else:
+                assert r.metrics["num_padding_microbatches"] == 0, "no padding microbatches expected at DP=1"
+        print(
+            f"  num_microbatches={results_token[0].metrics['num_microbatches']}, "
+            f"num_padding_microbatches={results_token[0].metrics['num_padding_microbatches']}"
+        )
 
         # Dense attention is bitwise-stable across groupings; packed/THD has
         # ~1e-4 varlen-kernel fp noise from the shifted cu_seqlens layout.

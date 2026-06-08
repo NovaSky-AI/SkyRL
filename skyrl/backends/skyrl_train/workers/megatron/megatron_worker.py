@@ -612,7 +612,7 @@ class MegatronWorker:
         (forward micro-batches carry neither key, so this is inert there). This is needed
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
         microbatches (especially with PP > 1). Scalar keys (``num_actions``,
-        ``num_microbatches``) are passed through unchanged.
+        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
 
         Defined on the base worker so the shared ``_forward_logprobs`` path works for
         policy, ref, and critic workers alike.
@@ -626,7 +626,7 @@ class MegatronWorker:
 
         padded = {}
         for key, value in micro_dict.items():
-            if key in ("num_actions", "num_microbatches"):
+            if key in ("num_actions", "num_microbatches", "num_real_microbatches"):
                 padded[key] = value
                 continue
             if value is None:
@@ -1002,8 +1002,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
+        # Count microbatches that carry real (non-padding) samples. Token-based batching
+        # appends fully-padding microbatches (loss_mask all zero) so every DP rank runs the
+        # same number of forward passes; those contribute 0 to KL/entropy and to mean metrics
+        # but would otherwise inflate the denominators. `num_real_microbatches` lets the loss
+        # normalize KL/entropy over real microbatches only.
+        num_real_microbatches = sum(1 for m in micro_buffer if m["loss_mask"].sum().item() > 0)
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
+            m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
             return WorkerOutput()
@@ -1049,10 +1056,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
-        for metrics in metrics_list:
+        for m_batch, metrics in zip(micro_buffer, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
                 all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
+            # ...) are meaningless and would drag down the mean-reduced metrics. Summed
+            # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
+            # excluding them here keeps both reductions correct.
+            if m_batch["loss_mask"].sum().item() == 0:
+                continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -1067,6 +1080,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+
+        # Token-based batching diagnostics: total microbatches this rank ran and how many
+        # were purely-padding (added to equalize the microbatch count across DP ranks).
+        # Added before all-reduce so they are averaged across DP (num_microbatches is
+        # identical on every rank; num_padding_microbatches reports the per-rank average).
+        if use_token_batching:
+            status["num_microbatches"] = float(len(micro_buffer))
+            status["num_padding_microbatches"] = float(len(micro_buffer) - num_real_microbatches)
+
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
