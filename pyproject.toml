@@ -97,14 +97,14 @@ skyrl-train = [
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
-    "nixl; sys_platform == 'linux'",
+    "nixl-cu12; sys_platform == 'linux'",
 ]
 
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl; sys_platform == 'linux'",
+    "nixl-cu12; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
@@ -124,7 +124,7 @@ megatron = [
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl; sys_platform == 'linux'",
+    "nixl-cu12; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
@@ -224,11 +224,6 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
-    # The `nixl` meta-package pulls BOTH nixl-cu12 and nixl-cu13 on Linux; both
-    # ship a top-level `nixl_ep` that collide, and cu13 (libcudart.so.13) wins,
-    # breaking vLLM model inspection on this CUDA-12 env (torch cu128 / vllm
-    # cu129). Exclude cu13 so only nixl-cu12 (libcudart.so.12) is installed.
-    "nixl-cu13; sys_platform == 'never'",
 ]
 
 [tool.uv.extra-build-dependencies]
