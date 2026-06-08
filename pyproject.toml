@@ -222,7 +222,7 @@ override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
-    "megatron-core>=0.16.0; sys_platform == 'linux'",
+    "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
 
@@ -297,8 +297,8 @@ torchvision = [
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "a85628c803dc1713fcd26d2bb1908cde69d62317" }
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8382dc343b07b068a827ca20bae860633df3baa0", marker = "sys_platform == 'linux'"}
-# megatron-core dev branch: https://github.com/NVIDIA/Megatron-LM/tree/dev latest as of 6/5/26
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "cefc2520158c7ceba3f9adbe4b547a6f7a118da1", marker = "sys_platform == 'linux'"}
+# megatron-core main branch: https://github.com/NVIDIA/Megatron-LM/tree/main latest as of 6/8/26
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7d7b3a6c9a53238c543c3e0b43e11026", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
