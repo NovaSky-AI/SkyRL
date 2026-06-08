@@ -27,22 +27,5 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     assert args.tensor_parallel_size == cfg.generator.inference_engine.tensor_parallel_size
     assert vllm.platforms.current_platform.device_type == "cuda"
 
-
-@pytest.mark.vllm
-def test_build_vllm_cli_args_speculative_config_mtp(monkeypatch):
-    """speculative_config is passed through to vLLM for MTP draft decoding."""
-    import vllm.platforms
-    from vllm.platforms.interface import UnspecifiedPlatform
-
-    monkeypatch.setattr(vllm.platforms, "_current_platform", UnspecifiedPlatform())
-
-    cfg = SkyRLTrainConfig()
-    # Default: no speculative decoding.
-    args = build_vllm_cli_args(cfg)
-    assert getattr(args, "speculative_config", None) is None
-
-    # Enable MTP speculative decoding.
-    spec = {"method": "mtp", "num_speculative_tokens": 1}
-    cfg.generator.inference_engine.speculative_config = spec
-    args = build_vllm_cli_args(cfg)
-    assert args.speculative_config == spec
+    # NOTE: the MTP speculative_config wiring test lives in
+    # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py

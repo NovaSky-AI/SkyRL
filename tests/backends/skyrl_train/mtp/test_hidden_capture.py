@@ -144,6 +144,52 @@ def test_project_to_logits_detach_shared_output():
     assert model._out_weight.grad is None
 
 
+class _FakeVL(nn.Module):
+    """Stands in for a vision-language wrapper (e.g. Qwen3.5-VL ``Qwen3VLModel``): the text backbone
+    and its MTP head are nested at ``.language_model``, and the top-level model has no ``.mtp``."""
+
+    def __init__(self, hidden=4, vocab=5, mtp_num_layers=1):
+        super().__init__()
+        self.language_model = _FakeMamba(hidden=hidden, vocab=vocab, mtp_num_layers=mtp_num_layers)
+        # Deliberately NO top-level .mtp / .config — mirrors the real VL wrapper.
+
+
+def test_capture_descends_into_language_model_for_vl_wrapper():
+    # Regression: Qwen3.5-VL nests the GPTModel + MTP head at model.language_model.mtp. The capture
+    # must resolve that host instead of looking for a (nonexistent) top-level .mtp, otherwise no
+    # student hidden states are produced and the draft loss is silently never computed.
+    from skyrl.backends.skyrl_train.mtp.hidden_capture import _resolve_mtp_host
+
+    model = _FakeVL(mtp_num_layers=1)
+    assert getattr(model, "mtp", None) is None  # top-level has no MTP block...
+    host = _resolve_mtp_host(model)
+    assert host is model.language_model  # ...capture resolves the nested language model.
+
+    capture = MTPHiddenCapture(model, detach_trunk=True)
+    assert capture.model is model.language_model
+    assert capture.mtp_num_layers == 1
+
+    s, b, h = 3, 2, 4
+    trunk = torch.randn(s, b, h, requires_grad=True)
+    with capture.capture():
+        _ = model.language_model.mtp(hidden_states=trunk, position_ids=torch.zeros(b, s))
+    student = capture.compute_student_hidden_states()
+    assert student is not None and len(student) == 1
+    assert student[0].shape == (3, 2, 4)
+    # End-to-end projection through the nested language model's shared output layer.
+    logits = project_mtp_hidden_to_logits(student, capture.model)
+    assert logits[0].shape == (2, 3, 5)
+
+
+def test_resolve_mtp_host_returns_model_when_no_mtp_anywhere():
+    from skyrl.backends.skyrl_train.mtp.hidden_capture import _resolve_mtp_host
+
+    bare = _FakeGPT()
+    bare.mtp = None
+    # No .mtp on the model and no .language_model nesting -> return the model unchanged.
+    assert _resolve_mtp_host(bare) is bare
+
+
 def test_no_capture_when_block_absent():
     model = _FakeGPT()
     model.mtp = None

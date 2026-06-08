@@ -18,6 +18,47 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
 )
 
 
+def test_vocab_parallel_soft_ce_matches_reference(monkeypatch):
+    # The memory-lean _VocabParallelSoftCrossEntropy (NeMo-RL-style einsum + in-place softmax) must
+    # match the plain full-vocab soft CE in both forward and gradient. We stub the TP all-reduce to a
+    # no-op so a single shard behaves like the full (un-sharded) vocab, exercising the kernel on CPU.
+    import torch.distributed as dist
+
+    from skyrl.backends.skyrl_train.mtp.soft_ce import _VocabParallelSoftCrossEntropy
+
+    monkeypatch.setattr(dist, "all_reduce", lambda t, op=None, group=None: t)
+
+    torch.manual_seed(0)
+    student = torch.randn(2, 4, 7, requires_grad=True)
+    teacher = torch.randn(2, 4, 7)
+    g_out = torch.randn(2, 4)
+
+    loss = _VocabParallelSoftCrossEntropy.apply(student, teacher, object())
+    loss.backward(g_out)
+    got_loss, got_grad = loss.detach(), student.grad.detach()
+
+    student2 = student.detach().clone().requires_grad_(True)
+    ref = -(F.softmax(teacher, -1) * F.log_softmax(student2, -1)).sum(-1)
+    ref.backward(g_out)
+
+    assert torch.allclose(got_loss, ref.detach(), atol=1e-5)
+    assert torch.allclose(got_grad, student2.grad, atol=1e-5)
+
+
+def test_vocab_parallel_soft_ce_preserves_input_dtype(monkeypatch):
+    # Backward must return a grad in the student logits' original dtype (e.g. bf16), not fp32.
+    import torch.distributed as dist
+
+    from skyrl.backends.skyrl_train.mtp.soft_ce import _VocabParallelSoftCrossEntropy
+
+    monkeypatch.setattr(dist, "all_reduce", lambda t, op=None, group=None: t)
+
+    student = torch.randn(1, 3, 5, dtype=torch.bfloat16, requires_grad=True)
+    teacher = torch.randn(1, 3, 5, dtype=torch.bfloat16)
+    _VocabParallelSoftCrossEntropy.apply(student, teacher, object()).sum().backward()
+    assert student.grad.dtype == torch.bfloat16
+
+
 def test_soft_ce_matches_reference():
     torch.manual_seed(0)
     student = torch.randn(2, 5, 7, requires_grad=True)

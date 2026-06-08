@@ -61,52 +61,63 @@ def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.T
     return rolled
 
 
-class _VocabParallelSoftCrossEntropy(torch.autograd.Function):
-    """Soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v``
-    when ``student``/``teacher`` logits are sharded across the vocab (TP) dim.
+def _vocab_parallel_softmax(vocab_parallel_logits, group):
+    """Global softmax over a TP-sharded vocab dim, using in-place ops to avoid extra full-vocab
+    allocations. Mirrors NeMo-RL's ``_compute_distributed_softmax``."""
+    logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
+    torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
+    # `- logits_max` allocates once (frees the input copy); everything after is in place.
+    exp_logits = (vocab_parallel_logits - logits_max).exp_()
+    sum_exp = exp_logits.sum(dim=-1, keepdim=True)
+    torch.distributed.all_reduce(sum_exp, op=torch.distributed.ReduceOp.SUM, group=group)
+    return exp_logits.div_(sum_exp)
 
-    Forward reduces across the tensor-parallel group so the softmax denominators
-    and the teacher/student dot product are computed over the *global* vocab.
-    Backward returns the classic cross-entropy gradient
-    ``softmax(student) - softmax(teacher)`` (the teacher is treated as a
-    constant; no gradient flows to it). This is the TP analogue of NeMo-RL's
-    ``DistributedCrossEntropy``.
+
+def _vocab_parallel_log_softmax(vocab_parallel_logits, group):
+    """Global log-softmax over a TP-sharded vocab dim. Mirrors NeMo-RL's
+    ``_compute_distributed_log_softmax``; the single ``.exp()`` temporary is summed and freed."""
+    logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
+    torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
+    shifted = vocab_parallel_logits - logits_max
+    sum_exp = shifted.exp().sum(dim=-1, keepdim=True)
+    torch.distributed.all_reduce(sum_exp, op=torch.distributed.ReduceOp.SUM, group=group)
+    return shifted.sub_(sum_exp.log_())
+
+
+class _VocabParallelSoftCrossEntropy(torch.autograd.Function):
+    """Soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v`` when
+    ``student``/``teacher`` logits are sharded across the vocab (TP) dim.
+
+    Memory-lean port of NeMo-RL's ``DistributedCrossEntropy`` (``nemo_rl/distributed/model_utils.py``):
+    the per-token cross-entropy is a single ``einsum`` (no full-vocab product tensor) and the student
+    log-prob buffer is reused **in place** for the backward softmax, so only two full-vocab tensors
+    are kept (vs ~6-8 in the naive form -- the difference is several GiB at a 248K vocab). Forward
+    all-reduces across the TP group so the softmax normalizers and the teacher/student dot are over
+    the *global* vocab. Backward returns the classic cross-entropy gradient
+    ``softmax(student) - softmax(teacher)`` (teacher is a detached target; no gradient flows to it).
     """
 
     @staticmethod
     def forward(ctx, student_vp_logits, teacher_vp_logits, tp_group):
-        student = student_vp_logits.float()
-        teacher = teacher_vp_logits.float()
-
-        def global_softmax(logits):
-            local_max = logits.max(dim=-1, keepdim=True).values
-            torch.distributed.all_reduce(local_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-            shifted = logits - local_max
-            exp = shifted.exp()
-            sum_exp = exp.sum(dim=-1, keepdim=True)
-            torch.distributed.all_reduce(sum_exp, group=tp_group)
-            log_sum_exp = local_max + sum_exp.log()
-            return exp / sum_exp, log_sum_exp
-
-        student_softmax, student_lse = global_softmax(student)
-        teacher_softmax, _ = global_softmax(teacher)
-
-        # dot = sum_v teacher_softmax_v * student_logit_v  (global over vocab)
-        dot = (teacher_softmax * student).sum(dim=-1, keepdim=True)
-        torch.distributed.all_reduce(dot, group=tp_group)
-
-        # soft CE = sum_v teacher_p_v * (log_sum_exp - student_logit_v)
-        #         = log_sum_exp - dot                (since sum_v teacher_p_v = 1)
-        per_token_loss = (student_lse - dot).squeeze(-1)
-
-        ctx.save_for_backward(student_softmax, teacher_softmax)
-        return per_token_loss
+        ctx.input_dtype = student_vp_logits.dtype
+        # Detached teacher target distribution (global softmax over the sharded vocab).
+        target_probs = _vocab_parallel_softmax(teacher_vp_logits.float(), tp_group)
+        # Student global log-probs; the same buffer is turned into softmax(student) in place below.
+        student_log_probs = _vocab_parallel_log_softmax(student_vp_logits.float(), tp_group)
+        # soft CE = -sum_v p_teacher_v * log q_student_v: dot over the local shard, then reduce.
+        per_token_loss = torch.einsum("...v,...v->...", target_probs, student_log_probs).neg_()
+        torch.distributed.all_reduce(per_token_loss, op=torch.distributed.ReduceOp.SUM, group=tp_group)
+        # exp_ in place: log_softmax(student) -> softmax(student) for the gradient (no new alloc).
+        student_probs = student_log_probs.exp_()
+        ctx.save_for_backward(student_probs, target_probs)
+        return per_token_loss.contiguous()
 
     @staticmethod
     def backward(ctx, grad_output):
-        student_softmax, teacher_softmax = ctx.saved_tensors
-        grad_student = (student_softmax - teacher_softmax) * grad_output.unsqueeze(-1)
-        return grad_student.to(student_softmax.dtype), None, None
+        student_probs, target_probs = ctx.saved_tensors
+        # d(H(p, q))/d(student_logit_v) = softmax(student)_v - softmax(teacher)_v
+        grad_student = (student_probs - target_probs) * grad_output.unsqueeze(-1)
+        return grad_student.to(ctx.input_dtype), None, None
 
 
 def draft_soft_ce(
