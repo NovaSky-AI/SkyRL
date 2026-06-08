@@ -206,3 +206,138 @@ def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_siz
         assert r["fwd_ok"], f"forward mismatch rank={rank}: {r}"
         assert r["gh_ok"], f"grad-hidden mismatch rank={rank}: {r}"
         assert r["gw_ok"], f"grad-weight mismatch rank={rank}: {r}"
+
+
+# ======================================================================================
+# Entropy dual-output parity (verl's (log_probs, entropy) pattern) for the Triton backend.
+#
+# The adapter surfaces verl's already-computed per-token entropy when return_entropy=True. We
+# assert it matches the STOCK ``vocab_parallel_entropy`` over the same materialized logit shard
+# (entropy is target-INDEPENDENT, so out-of-vocab targets must not change it), and that the
+# entropy backward (verl's dentropy term, wired into efficient_entropy_backward) produces
+# grad-hidden / grad-weight matching the stock entropy path. This is what lets the fused path
+# serve RL losses (which need entropy), not just SFT cross_entropy.
+# ======================================================================================
+
+
+def _direct_fused_entropy(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_ent):
+    """Drive FusedLinearLogprobTriton.apply(..., return_entropy=True); backward only the entropy
+    output (seed its grad, leave logprob grad unused) and return (entropy, grad_hidden, grad_weight)."""
+    leaf_h = hidden.detach().clone().requires_grad_(True)
+    leaf_w = weight_shard.detach().clone().requires_grad_(True)
+    lp, ent = FusedLinearLogprobTriton.apply(
+        leaf_h, leaf_w, target_shifted, vstart, vend, chunk_size, dist.group.WORLD, False, True
+    )
+    ent.backward(grad_ent.clone())
+    return ent.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
+
+
+def _stock_entropy(hidden, weight_shard, chunk_size, grad_ent):
+    """Stock per-token entropy over the materialized logit shard via vocab_parallel_entropy."""
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import vocab_parallel_entropy
+
+    leaf_h = hidden.detach().clone().requires_grad_(True)
+    leaf_w = weight_shard.detach().clone().requires_grad_(True)
+    logits = leaf_h @ leaf_w.t()  # [B, S, V // TP]
+    ent = vocab_parallel_entropy(logits)  # [B, S], uses mpu TP group == WORLD here
+    ent.backward(grad_ent.clone())
+    return ent.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
+
+
+def _entropy_worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
+    import megatron.core.parallel_state as mpu
+
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    # The stock entropy reference (vocab_parallel_entropy) all-reduces over
+    # mpu.get_tensor_model_parallel_group(), so we must initialize Megatron's model-parallel
+    # state. With tensor_model_parallel_size=world_size the TP group spans all ranks — the same
+    # membership as the WORLD group the fused path uses as its tp_group — so both sides reduce
+    # over identical ranks. (The logprob test sidesteps this by referencing dist.group.WORLD.)
+    mpu.initialize_model_parallel(tensor_model_parallel_size=world_size)
+    _prev_force_ieee = fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION
+    fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = dtype_str == "fp32"
+    try:
+        torch.cuda.set_device(0)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16 if dtype_str == "bf16" else torch.float32
+        torch.manual_seed(0)
+
+        batch_size, seq_len, hidden_size, vocab_size = 3, 24, 128, 256
+        hidden = (torch.randn(batch_size, seq_len, hidden_size, device=device) * 0.5).to(dtype)
+        weight_full = (torch.randn(vocab_size, hidden_size, device=device) * 0.1).to(dtype)
+        target_high = vocab_size + 50 if with_oov else vocab_size
+        target = torch.randint(0, target_high, (batch_size, seq_len), device=device, dtype=torch.long)
+
+        assert vocab_size % world_size == 0
+        shard = vocab_size // world_size
+        vstart, vend = rank * shard, (rank + 1) * shard
+        weight_shard = weight_full[vstart:vend].contiguous()
+        target_shifted = target.roll(shifts=-1, dims=-1)
+
+        grad_ent = torch.linspace(
+            0.3, 1.1, steps=batch_size * seq_len, device=device, dtype=torch.float32
+        ).reshape(batch_size, seq_len)
+
+        ent_ref, gh_ref, gw_ref = _stock_entropy(hidden, weight_shard, chunk_size, grad_ent)
+        ent_fused, gh_fused, gw_fused = _direct_fused_entropy(
+            hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_ent
+        )
+
+        tol = _tol_for_dtype(dtype)
+        ret_dict[rank] = {
+            "ent_ok": bool(torch.allclose(ent_fused.float(), ent_ref.float(), **tol)),
+            "gh_ok": bool(torch.allclose(gh_fused.float(), gh_ref.float(), **tol)),
+            "gw_ok": bool(torch.allclose(gw_fused.float(), gw_ref.float(), **tol)),
+            "ent_dtype": str(ent_fused.dtype),
+            "ent_max_abs": float((ent_fused.float() - ent_ref.float()).abs().max()),
+            "gh_max_abs": float((gh_fused.float() - gh_ref.float()).abs().max()),
+            "gw_max_abs": float((gw_fused.float() - gw_ref.float()).abs().max()),
+        }
+    finally:
+        fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = _prev_force_ieee
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
+
+
+def _run_entropy(world_size, chunk_size, with_oov, dtype_str):
+    ctx = mp.get_context("spawn")
+    manager = ctx.Manager()
+    ret = manager.dict()
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+    mp.spawn(
+        _entropy_worker,
+        args=(world_size, port, chunk_size, with_oov, dtype_str, ret),
+        nprocs=world_size,
+        join=True,
+    )
+    return dict(ret)
+
+
+@pytest.mark.parametrize("dtype_str", ["fp32", "bf16"])
+@pytest.mark.parametrize("world_size", [1, 2])
+@pytest.mark.parametrize("with_oov", [False, True])
+def test_fused_triton_entropy_matches_stock(dtype_str, world_size, with_oov):
+    """Triton fused per-token entropy (return_entropy=True) matches stock vocab_parallel_entropy.
+
+    Covers the forward entropy value AND the entropy backward (grad-hidden + grad-weight via verl's
+    dentropy term). Entropy is target-independent, so out-of-vocab targets must leave it unchanged.
+    fp32 = tight IEEE sanity check; bf16 = production TF32 path at bf16 tolerance.
+    """
+    if world_size > 1 and torch.cuda.device_count() < world_size:
+        pytest.skip(f"need >= {world_size} CUDA devices for TP={world_size}")
+    chunk_size = 8
+    results = _run_entropy(world_size, chunk_size, with_oov, dtype_str)
+    assert len(results) == world_size
+    for rank, r in results.items():
+        assert r["ent_dtype"] == "torch.float32", r
+        assert r["ent_ok"], f"entropy forward mismatch rank={rank}: {r}"
+        assert r["gh_ok"], f"entropy grad-hidden mismatch rank={rank}: {r}"
+        assert r["gw_ok"], f"entropy grad-weight mismatch rank={rank}: {r}"
