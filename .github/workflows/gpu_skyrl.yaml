@@ -52,5 +52,7 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
-          anyscale job submit -f ci/anyscale_gpu_ci.yaml --timeout 10000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-tx-gpu-ci --timeout 10000
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          JOB_NAME="skyrl-tx-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}"
+          anyscale job submit -f ci/anyscale_gpu_ci.yaml --name "$JOB_NAME" --timeout 10000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 10000

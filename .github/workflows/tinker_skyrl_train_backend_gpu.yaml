@@ -68,5 +68,7 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
-          anyscale job submit -f ci/anyscale_tinker_skyrl_train_backend_gpu.yaml --timeout 5000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name tinker-skyrl-train-backend-gpu --timeout 5000
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          JOB_NAME="tinker-skyrl-train-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}"
+          anyscale job submit -f ci/anyscale_tinker_skyrl_train_backend_gpu.yaml --name "$JOB_NAME" --timeout 5000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 5000
