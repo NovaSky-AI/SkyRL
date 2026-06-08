@@ -36,6 +36,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     build_teacher_logits,
     draft_hard_ce,
     draft_soft_ce,
+    draft_soft_ce_topk,
     shift_mask_for_mtp,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import (
@@ -257,6 +258,8 @@ class MegatronModelWrapper:
         mtp_loss_weight = float(getattr(mcfg, "mtp_loss_weight", 0.1))
         mtp_detach_trunk = bool(getattr(mcfg, "mtp_detach_trunk", True))
         mtp_detach_shared_output = bool(getattr(mcfg, "mtp_detach_shared_output", False))
+        mtp_loss_chunk_size = getattr(mcfg, "mtp_loss_chunk_size", 1024)
+        mtp_loss_topk = getattr(mcfg, "mtp_loss_topk", None)
 
         if os.environ.get("MTP_DEBUG"):
             from megatron.core.utils import unwrap_model as _uw
@@ -361,19 +364,42 @@ class MegatronModelWrapper:
                                 layer_mask,
                                 vocab_parallel_group=tp_grp,
                                 vocab_start_index=tp_rank * vocab_size_tp,
+                                chunk_size=mtp_loss_chunk_size,
                             )
                         )
                     else:
-                        teacher_logits = build_teacher_logits(teacher_src, layer_idx, detach=True)
-                        per_layer_losses.append(
-                            draft_soft_ce(
-                                student_logits,
-                                teacher_logits,
-                                layer_mask,
-                                vocab_parallel_group=tp_grp,
+                        if mtp_loss_topk:
+                            # Top-k draft loss: O(seq*k) memory, no full-vocab softmax (fits + avoids
+                            # fragmentation at large vocab). Reconciled across the TP group, so it
+                            # scales to any tensor-parallel size incl. cross-node. Pass the *un-rolled*
+                            # policy logits + roll_shift so top-k runs on the policy's own logits (no
+                            # ~[S, vocab] rolled-teacher copy); only the small [B, S, k] top-k is rolled.
+                            per_layer_losses.append(
+                                draft_soft_ce_topk(
+                                    student_logits,
+                                    teacher_src,
+                                    layer_mask,
+                                    k=mtp_loss_topk,
+                                    vocab_parallel_group=tp_grp,
+                                    roll_shift=layer_idx + 1,
+                                )
                             )
-                        )
-                draft_loss = torch.stack(per_layer_losses).mean()
+                        else:
+                            teacher_logits = build_teacher_logits(teacher_src, layer_idx, detach=True)
+                            per_layer_losses.append(
+                                draft_soft_ce(
+                                    student_logits,
+                                    teacher_logits,
+                                    layer_mask,
+                                    vocab_parallel_group=tp_grp,
+                                    chunk_size=mtp_loss_chunk_size,
+                                )
+                            )
+                draft_loss = torch.stack(per_layer_losses).mean() 
+                # Drop the dict's reference, this microbatch's autograd graph still holds the
+                # tensor for its own backward, after which it is freed instead of lingering.
+                del data["mtp_student_logits"]
+                student_logits_list = None
 
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
