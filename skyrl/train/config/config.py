@@ -55,7 +55,7 @@ class DataLoaderConfig(BaseConfig):
         metadata={
             "help": (
                 "Keep DataLoader workers alive across epochs instead of respawning them at "
-                "every epoch boundary. Setting this requires num_workers above 0."
+                "every epoch boundary. Setting this requires `num_workers > 0`"
             )
         },
     )
