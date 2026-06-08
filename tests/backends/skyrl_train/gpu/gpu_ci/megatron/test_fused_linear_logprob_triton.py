@@ -14,6 +14,13 @@ integration (on top of upstream #1841) dispatches to this same kernel from
 ``model_utils.from_parallel_hidden_to_logprobs(..., fused_backend="triton")``; here we drive the
 autograd Function directly so the test is independent of the wrapper/dispatch plumbing.
 
+Precision: the fp32 parametrizations flip the kernel into bitwise-faithful IEEE fp32 (via
+``FORCE_FP32_IEEE_PRECISION = True``) and assert the kernel math is EXACT at a tight 1e-4
+tolerance — a committed, reproducible "the kernel is mathematically correct" sanity check. The
+bf16 parametrizations run at PRODUCTION precision (the flag stays False => the fast TF32 Hopper
+path that ``apply()`` uses in production) and check the looser ~2e-2 bf16 tolerance. The flag is
+set/reset inside each spawned worker and is reliably reset in a finally block so it never leaks.
+
 Requires a CUDA device AND triton (the kernel is GPU-only); skipped otherwise.
 
     uv run --isolated --extra dev --extra megatron -- pytest -s \
@@ -27,6 +34,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from skyrl.backends.skyrl_train.distributed.megatron import fused_linear_logprob_triton
 from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
     TRITON_AVAILABLE,
     FusedLinearLogprobTriton,
@@ -79,7 +87,7 @@ def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_siz
 
 
 def _tol_for_dtype(dtype):
-    # bf16 inputs: ~2e-2; fp32 inputs: tight ~1e-4.
+    # bf16 inputs: ~2e-2 (production-precision path); fp32 inputs: tight ~1e-4 (IEEE sanity check).
     if dtype == torch.bfloat16:
         return dict(atol=2e-2, rtol=2e-2)
     return dict(atol=1e-4, rtol=1e-4)
@@ -93,6 +101,17 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
     # gloo is fine for the tiny TP all-reduces (verl's kernel itself runs on CUDA tensors; only
     # the all-reduce of label-logit / softmax-stats crosses ranks, and those are small).
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    # PRECISION CONTRACT (deliberate, see fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION):
+    #   * fp32 parametrizations flip the kernel into bitwise-faithful IEEE fp32 so we can assert the
+    #     kernel MATH IS EXACT against the IEEE-fp32 PyTorch reference at the tight 1e-4 tolerance.
+    #     This is the committed, reproducible "kernel is mathematically correct" sanity check.
+    #   * bf16 parametrizations run the kernel at PRODUCTION precision (flag False => TF32 fast path),
+    #     i.e. exactly what apply() does in production, checked at the looser ~2e-2 bf16 tolerance.
+    # We set/reset the module-level flag here (inside the spawned worker) because mp spawn starts a
+    # fresh interpreter — a parent-process monkeypatch would not propagate to the child. The
+    # try/finally guarantees we never leak True out of an fp32 case.
+    _prev_force_ieee = fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION
+    fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = dtype_str == "fp32"
     try:
         torch.cuda.set_device(0)
         device = torch.device("cuda")
@@ -136,6 +155,9 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
             "gw_max_abs": float((gw_fused.float() - gw_ref.float()).abs().max()),
         }
     finally:
+        # Reliably reset the precision flag so a True never leaks into a later (e.g. bf16) run that
+        # happens to reuse this interpreter; then tear down the process group.
+        fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = _prev_force_ieee
         dist.destroy_process_group()
 
 
@@ -167,7 +189,8 @@ def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_siz
     world_size=1 checks the kernel math in isolation; world_size=2 checks the vocab-parallel
     online-softmax all-reduce (label-logit + softmax denom), the out-of-shard / fully-OOV target
     masking, and that the per-shard hidden/weight grads match the stock shard reference. fp32 is
-    the tight-tolerance case; bf16 exercises the kernel's internal upcast path.
+    the tight-tolerance IEEE sanity check (kernel flipped to FORCE_FP32_IEEE_PRECISION=True);
+    bf16 exercises the PRODUCTION default (fast TF32) precision path at the looser bf16 tolerance.
     """
     if world_size > 1 and torch.cuda.device_count() < world_size:
         pytest.skip(

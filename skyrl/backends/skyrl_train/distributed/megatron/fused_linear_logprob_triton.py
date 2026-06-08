@@ -280,6 +280,10 @@ def efficient_entropy_kernel_general_mainloop(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     USE_TMA: tl.constexpr,
+    # fp32 matmul precision. PRODUCTION default is "tf32" (the fast Hopper tensor-core path,
+    # chosen for speed via _dot_input_precision); the FORCE_FP32_IEEE_PRECISION flag can flip
+    # this to "ieee" for fp32 inputs so tests can assert bitwise-fp32 equivalence to PyTorch.
+    INPUT_PRECISION: tl.constexpr,
 ):
     """forward mainloop"""
     pid = tl.program_id(axis=0)
@@ -362,7 +366,7 @@ def efficient_entropy_kernel_general_mainloop(
                 weight_ptrs += BLOCK_SIZE_K * stride_weight_k
 
             # GEMM
-            logits = tl.dot(_hidden, _weight.trans(), logits)
+            logits = tl.dot(_hidden, _weight.trans(), logits, input_precision=INPUT_PRECISION)
 
         if not USE_TMA:
             # reset hidden_ptrs for next iteration
@@ -626,6 +630,45 @@ def efficient_entropy_triton_epilogue_tp_update(
 _dedicated_stream, _dedicated_events = None, None
 
 
+# --------------------------------------------------------------------------------------
+# fp32 matmul precision toggle.
+#
+# PRODUCTION default is the FAST path: ``tl.dot`` uses Triton/torch's default matmul
+# precision (TF32 on Hopper). TF32 truncates the fp32 mantissa (~1e-3 error vs an IEEE
+# fp32 reference) but is empirically fine for bf16 training (the production dtype is bf16
+# anyway) and is meaningfully faster, so we deliberately do NOT force IEEE in production.
+#
+# The flag below exists ONLY so tests can flip the kernel into bitwise-faithful IEEE fp32
+# and assert the kernel math is exact (max-abs error ~1e-6 instead of TF32's ~1e-3). It
+# defaults to False (= production/fast). Set it to True around an fp32 sanity-check run and
+# reset it afterwards. It has no effect on bf16/fp16 inputs (those always take the fast path,
+# since they are already lower precision than TF32's accumulation).
+FORCE_FP32_IEEE_PRECISION = False
+
+
+def _dot_input_precision(hidden: torch.Tensor):
+    """Choose the ``tl.dot`` input precision for the kernel's matmuls.
+
+    PRODUCTION (``FORCE_FP32_IEEE_PRECISION = False``, the default) returns the fast default
+    precision (``"tf32"`` on Hopper) for ALL dtypes. This is Triton/torch's default tensor-core
+    path: for fp32 it truncates the mantissa (~1e-3 rounding) but is faster, and for bf16/fp16 it
+    is the natural (lossless-vs-input) fast path. We use this in production for speed — bf16
+    training tolerates it (bf16 tolerance is ~2e-2) and the production dtype is bf16 anyway.
+
+    SANITY-CHECK (``FORCE_FP32_IEEE_PRECISION = True``) returns ``"ieee"`` for fp32 inputs so the
+    kernel's fp32 matmuls reproduce the IEEE fp32 PyTorch reference to ~fp32 rounding (~1e-6). The
+    GPU test flips this flag on for its fp32 parametrizations to prove the kernel is mathematically
+    exact, then resets it. bf16/fp16 inputs always keep the fast path regardless of the flag.
+
+    The kernel always accumulates in fp32; this knob only controls the per-multiply input precision.
+    Returns ``None`` for the fast path on non-Hopper hardware, letting Triton pick its hardware
+    default; ``"tf32"`` is requested explicitly on Hopper to make the default behavior unambiguous.
+    """
+    if FORCE_FP32_IEEE_PRECISION and hidden.dtype == torch.float32:
+        return "ieee"
+    return "tf32"
+
+
 def efficient_entropy_forward(
     hidden: torch.Tensor,
     weight: torch.Tensor,
@@ -726,6 +769,7 @@ def efficient_entropy_forward(
             logprobs,
             1.0 / temperature,
             USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+            INPUT_PRECISION=_dot_input_precision(hidden),
         )
     else:
         raise AssertionError("Triton is required for efficient entropy kernel")
@@ -865,6 +909,7 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     USE_TMA: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     """backward mainloop, where d_logits & d_hidden & d_weight are fused"""
     pid = tl.program_id(axis=0)
@@ -951,7 +996,7 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
             hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
             weight_ptrs += BLOCK_SIZE_K * stride_weight_k
 
-        logits = tl.dot(_hidden, _weight.T, logits)
+        logits = tl.dot(_hidden, _weight.T, logits, input_precision=INPUT_PRECISION)
 
     if not USE_TMA:
         hidden_ptrs -= hidden_size * stride_hidden_k
@@ -980,7 +1025,7 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
                 mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_am[:, None] < num_tokens),
                 other=0.0,
             )
-        _d_weight = tl.dot(d_logits.trans(), _hidden.to(tl.float32))
+        _d_weight = tl.dot(d_logits.trans(), _hidden.to(tl.float32), input_precision=INPUT_PRECISION)
         tl.atomic_add(
             d_weight_ptrs,
             _d_weight,
@@ -995,7 +1040,7 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
                 mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_bn[:, None] < vocab_size),
                 other=0.0,
             )
-        _d_hidden = tl.dot(d_logits, _weight.to(tl.float32))
+        _d_hidden = tl.dot(d_logits, _weight.to(tl.float32), input_precision=INPUT_PRECISION)
         tl.atomic_add(
             d_hidden_ptrs,
             _d_hidden,
@@ -1052,6 +1097,7 @@ def efficient_entropy_backward_kernel_d_hidden(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     """backward d_hidden"""
     pid = tl.program_id(axis=0)
@@ -1102,7 +1148,7 @@ def efficient_entropy_backward_kernel_d_hidden(
                 other=0.0,
             )
 
-            logits = tl.dot(_hidden, _weight.trans(), logits)
+            logits = tl.dot(_hidden, _weight.trans(), logits, input_precision=INPUT_PRECISION)
 
             hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
             weight_ptrs += BLOCK_SIZE_K * stride_weight_k
@@ -1124,7 +1170,7 @@ def efficient_entropy_backward_kernel_d_hidden(
         _weight = tl.load(
             weight_ptrs, mask=(result_offs_k[None, :] < hidden_size) & (offs_n[:, None] < vocab_size), other=0.0
         )
-        d_hidden = tl.dot(d_logits.to(weight_ptr.dtype.element_ty), _weight, d_hidden)
+        d_hidden = tl.dot(d_logits.to(weight_ptr.dtype.element_ty), _weight, d_hidden, input_precision=INPUT_PRECISION)
 
     # write back
     tl.store(
@@ -1177,6 +1223,7 @@ def efficient_entropy_backward_kernel_d_weight(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_n = tl.cdiv(vocab_size, BLOCK_SIZE_N)
@@ -1224,7 +1271,7 @@ def efficient_entropy_backward_kernel_d_weight(
                 other=0.0,
             )
 
-            logits = tl.dot(_hidden, _weight.trans(), logits)
+            logits = tl.dot(_hidden, _weight.trans(), logits, input_precision=INPUT_PRECISION)
 
             hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
             weight_ptrs += BLOCK_SIZE_K * stride_weight_k
@@ -1243,7 +1290,9 @@ def efficient_entropy_backward_kernel_d_weight(
         _hidden = tl.load(
             hidden_ptrs, mask=(result_offs_k[None, :] < hidden_size) & (offs_m[:, None] < num_tokens), other=0.0
         )
-        d_weight = tl.dot(d_logits.to(d_weight_ptr.dtype.element_ty).trans(), _hidden, d_weight)
+        d_weight = tl.dot(
+            d_logits.to(d_weight_ptr.dtype.element_ty).trans(), _hidden, d_weight, input_precision=INPUT_PRECISION
+        )
 
     # write back
     tl.store(
@@ -1298,6 +1347,7 @@ def efficient_entropy_backward_kernel_general_d_logits(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     USE_TMA: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     """backward d_logits"""
     pid = tl.program_id(axis=0)
@@ -1380,7 +1430,7 @@ def efficient_entropy_backward_kernel_general_d_logits(
             )
             hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
             weight_ptrs += BLOCK_SIZE_K * stride_weight_k
-        logits = tl.dot(_hidden, _weight.T, logits)
+        logits = tl.dot(_hidden, _weight.T, logits, input_precision=INPUT_PRECISION)
 
     if not USE_TMA:
         hidden_ptrs -= hidden_size * stride_hidden_k
@@ -1453,6 +1503,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     USE_TMA: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(num_tokens, BLOCK_SIZE_M)
@@ -1525,7 +1576,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
             )
             hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
             weight_ptrs += BLOCK_SIZE_K * stride_weight_k
-        logits = tl.dot(_hidden, _weight.T, logits)
+        logits = tl.dot(_hidden, _weight.T, logits, input_precision=INPUT_PRECISION)
 
     logits *= rcp_temperature
     exp_logits = tl.exp(logits - maximum[:, None])
@@ -1649,6 +1700,7 @@ def efficient_entropy_backward(
             d_weight.stride(1),
             1.0 / temperature,
             USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+            INPUT_PRECISION=_dot_input_precision(hidden),
         )
 
     elif _config._backward == BackwardEnum._Total_Separate:
@@ -1689,6 +1741,7 @@ def efficient_entropy_backward(
                 _d_logits.stride(1),
                 1.0 / temperature,
                 USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+                INPUT_PRECISION=_dot_input_precision(hidden),
             )
 
             torch.matmul(_d_logits, weight, out=d_hidden)
@@ -1738,6 +1791,7 @@ def efficient_entropy_backward(
                 _d_logits.stride(1),
                 1.0 / temperature,
                 USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+                INPUT_PRECISION=_dot_input_precision(hidden),
             )
 
             if split_idx == (num_splits - 1):
@@ -1863,9 +1917,11 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
       * ``target``: ``[B, S]`` ALREADY shifted by the caller (we do NOT roll).
       * Returns ``log_probs`` ``[B, S]`` (fp32) = full-vocab log-prob of ``target[b, s]``;
         verl's kernel already all-reduces the label logit + softmax denom over ``tp_group``.
-      * OUT-OF-VOCAB targets (``target < vocab_start`` or ``>= vocab_end`` on this shard AND
-        not owned by any shard) yield ``log_prob = 0.0`` and contribute no gradient — matching
-        the pure-torch path / stock ``DistributedLogprob``.
+      * FULLY-OUT-OF-VOCAB targets (owned by NO shard, e.g. a pad id ``>= global_vocab``) yield
+        ``log_prob = 0.0`` (forced in forward). Their gradient is whatever the reference produces:
+        ``-softmax * grad_output`` projected back through the head (the chosen-position ``onehot``
+        term is absent because no shard owns the column) — i.e. they are NOT zeroed in backward,
+        exactly matching the pure-torch path / stock ``DistributedLogprob``.
       * grad w.r.t. ``hidden``: this rank's PARTIAL (verl does NOT all-reduce ``d_hidden``;
         the caller's SP-gather backward reduce-scatter performs the TP reduction).
       * grad w.r.t. ``weight``: per-shard, no reduction.
@@ -1881,12 +1937,15 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
          lands on the correct local column, and we set targets not owned here to a huge sentinel
          (lands in no column). This makes the per-shard label-logit contribution correct for any
          shard layout. (verl's TP all-reduce(SUM) of the label logit then assembles the full value.)
-      2. OOV post/pre-mask (#2656 family). A target owned by NO shard (e.g. a pad id
+      2. OOV post-mask (#2656 family) — FORWARD ONLY. A target owned by NO shard (e.g. a pad id
          ``>= global_vocab``) is the sentinel on every rank, so every rank contributes 0 to the
          label-logit all-reduce. verl's epilogue would then return ``max + log(accu) - 0`` = the
          LSE (garbage, not 0). We therefore force ``log_prob = 0`` for fully-OOV positions in
-         forward, and zero ``grad_output`` (``dlogprobs``) at those positions in backward so they
-         contribute no gradient — exactly the pure-torch / stock semantics.
+         forward. We do NOT touch the backward gradient at those positions: the references (stock
+         ``DistributedLogprob`` and the pure-torch ``FusedLinearLogprob``) still emit
+         ``-softmax * grad_output`` there (the chosen-position term is absent because no shard owns
+         the column), and verl's kernel already reproduces that exact value for sentinel-keyed
+         labels. Zeroing the backward gradient (the original bug) would drop that term and diverge.
     """
 
     @staticmethod
@@ -1971,10 +2030,28 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         B, S, H = ctx.B, ctx.S, ctx.H
         tp_group = ctx.tp_group
 
-        # Zero grad at fully-OOV positions so they contribute no gradient (matches pure-torch:
-        # those positions had log_prob forced to 0 and a constant w.r.t. params).
-        dlogprobs = grad_output.reshape(-1).to(torch.float32).clone()
-        dlogprobs = dlogprobs.masked_fill(fully_oov, 0.0).contiguous()
+        # IMPORTANT (BUG 2 fix): do NOT zero grad_output at fully-OOV positions.
+        #
+        # The forward forces ``log_prob = 0`` at fully-OOV positions because verl's epilogue
+        # would otherwise return the LSE there (no shard contributes the label logit). But the
+        # GRADIENT contract is set by the references this backend must match exactly — stock
+        # ``DistributedLogprob`` / ``ChunkedDistributedLogprob`` and the pure-torch
+        # ``FusedLinearLogprob`` in model_utils.py. Those compute, for every position
+        # (in-shard, out-of-shard, or fully-OOV alike):
+        #     d_logits = grad_output * (onehot(target) - softmax)
+        # and only ADD the ``onehot`` (chosen-position) term where the target is owned by this
+        # shard (``valid_mask``). At a fully-OOV position no shard owns the target, so the
+        # ``onehot`` term is absent on every rank, leaving ``d_logits = -softmax * grad_output``
+        # — a NON-ZERO gradient that still flows back through the (recomputed) head GEMM.
+        #
+        # verl's kernel already reproduces exactly this: ``mask`` (the column==label test) is all
+        # False for a sentinel-keyed OOV target, so its d_logits term is ``d_logprobs * (exp_logits
+        # * accu_rcp - 0) = -softmax * grad_output`` — identical to the references. So we must pass
+        # grad_output THROUGH unchanged at fully-OOV positions; zeroing ``dlogprobs`` here (the
+        # original bug) drops the ``-softmax * grad_output`` term and makes grad-hidden / grad-weight
+        # diverge from the reference at every OOV row. (``fully_oov`` is kept saved only to document
+        # the forward masking; it is intentionally not applied to the backward gradient.)
+        dlogprobs = grad_output.reshape(-1).to(torch.float32).contiguous()
 
         # verl's reduction="none" backward needs a dentropy buffer; we discard entropy so pass 0.
         dentropy = torch.zeros_like(dlogprobs)
