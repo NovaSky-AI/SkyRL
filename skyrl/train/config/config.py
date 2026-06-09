@@ -665,6 +665,15 @@ class TrainerConfig(BaseConfig):
     samples based on their token counts (from attention_mask) instead of using a fixed sample count.
     -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
     Applies to both forward and training micro-batching."""
+    recompute_old_logprobs_per_minibatch: bool = False
+    """When True, compute the pre-training policy logprobs (and critic values) per mini-batch using
+    the same mini-batch + DP partition as the training step, instead of a single full-batch forward.
+    This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
+    what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
+    first inner step. Mainly relevant with THD packing (remove_microbatch_padding=True) or
+    max_tokens_per_microbatch > 0, where the full-batch vs per-mini-batch packing otherwise differ and
+    introduce a small (~1e-4) old-vs-recomputed logprob mismatch. Defaults to False to preserve
+    existing numerics."""
     update_ref_every_epoch: bool = False
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""

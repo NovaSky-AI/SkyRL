@@ -508,3 +508,94 @@ async def test_megatron_token_based_loss_equivalence(
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+async def test_megatron_per_minibatch_forward_matches_forward_backward(ray_init_fixture):
+    """
+    Validate ``trainer.recompute_old_logprobs_per_minibatch``: computing the policy "old" logprobs
+    per mini-batch (matching the training step's mini-batch + DP partition) yields logprobs that
+    match what forward_backward recomputes, whereas a single full-batch forward does NOT.
+
+    At DP>1 the full-batch forward and the per-mini-batch forward_backward dispatch a given sample
+    to different ranks and pack it with different neighbors, so their THD/``cu_seqlens`` layouts —
+    and thus the resulting logprobs — differ (the old-vs-recomputed mismatch the flag fixes). This
+    reproduces that at TP=2/PP=1/4 GPUs (DP=2), packed/THD only (the main path).
+
+    Compares three logprob tensors (all reordered to original sample order):
+      A = full-batch forward            (old behavior)
+      B = per-mini-batch forward        (recompute_old_logprobs_per_minibatch behavior)
+      FB = per-mini-batch forward_backward  (what training actually recomputes)
+    Asserts B ≈ FB (the fix matches training packing) and A is further from FB than B (the full-batch
+    packing diverges -> why the flag is needed).
+
+    Uses uniform full-length sequences so (1) the extracted last-``num_actions`` logprobs are real
+    tokens (the test batch is right-padded, so shorter sequences' response positions would be pad),
+    and (2) each per-mini-batch chunk packs into a single uniform microbatch -> forward_backward's
+    loss_fn_outputs come back clean (no dummy rows / padding microbatches) and in original order.
+    """
+    from skyrl.backends.skyrl_train.distributed.dispatch import (
+        loss_fn_outputs_to_tensor,
+    )
+
+    try:
+        # Uniform full length (odd -> TP-alignment-padded packing) so the packing layout is
+        # sensitive to grouping. 8 samples, 2 mini-batches of 4. DP=2 -> each rank gets 2 samples
+        # per mini-batch but 4 samples in the full-batch forward.
+        seq_lens = [41] * 8
+        num_actions = 4
+        boundaries = [(0, 4), (4, 8)]
+        batch = _make_variable_length_batch(seq_lens, num_actions=num_actions)
+        batch.metadata["global_step"] = 0
+
+        cfg = _get_megatron_test_config(tp=2, pp=1, gpus=4)  # DP=2
+        cfg.trainer.remove_microbatch_padding = True  # packed/THD is the main path
+        # Large enough that the full-batch forward packs all 4 of a rank's samples into one
+        # microbatch (4 THD segments), while each 2-sample per-mini-batch chunk packs into its own
+        # (2 segments) -> different cu_seqlens for the same sample across the two paths.
+        cfg.trainer.max_tokens_per_microbatch = 4 * 42
+        cfg.trainer.algorithm.use_kl_loss = False
+
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        def _fwd_logprobs(data):
+            results = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=data))
+            out = WorkerOutput.cat(actor_group.actor_infos, results)
+            return loss_fn_outputs_to_tensor(out.loss_fn_outputs, key="logprobs")
+
+        def _fb_logprobs(data):
+            results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
+            out = WorkerOutput.cat(actor_group.actor_infos, results)
+            return loss_fn_outputs_to_tensor(out.loss_fn_outputs, key="logprobs")
+
+        # No optim_step between any call, so the policy weights are unchanged throughout.
+        full_batch_fwd = _fwd_logprobs(batch)  # A: old behavior
+        per_mb_fwd = torch.cat([_fwd_logprobs(batch.slice(s, e)) for s, e in boundaries], dim=0)  # B: the fix
+        per_mb_fb = torch.cat([_fb_logprobs(batch.slice(s, e)) for s, e in boundaries], dim=0)  # FB: training
+
+        assert full_batch_fwd.shape == per_mb_fwd.shape == per_mb_fb.shape
+
+        b_fb = (per_mb_fwd - per_mb_fb).abs().max().item()
+        a_fb = (full_batch_fwd - per_mb_fb).abs().max().item()
+        a_b = (full_batch_fwd - per_mb_fwd).abs().max().item()
+        print(
+            f"\nper-mb fwd vs fwd_bwd (b_fb)={b_fb:.2e}  full-batch fwd vs fwd_bwd (a_fb)={a_fb:.2e}  "
+            f"full-batch vs per-mb fwd (a_b)={a_b:.2e}"
+        )
+
+        # Fix: per-mini-batch forward uses the same packing as forward_backward -> matching logprobs.
+        assert b_fb < 1e-3, f"per-minibatch forward should match forward_backward (same packing): {b_fb}"
+        # Necessity: the full-batch forward packs the same samples differently (different DP partition
+        # + different microbatch composition), so it diverges from what training recomputes more than
+        # the per-mini-batch forward does. This is the old-vs-recomputed mismatch the flag eliminates.
+        assert a_fb > b_fb, f"full-batch forward should diverge from training more than per-mb: a_fb={a_fb} b_fb={b_fb}"
+
+    finally:
+        ray.shutdown()
