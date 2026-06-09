@@ -40,19 +40,23 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton
     FusedLinearLogprobTriton,
 )
 
-# Module-level skip: the whole file needs a GPU and triton.
-pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available() and TRITON_AVAILABLE),
-    reason="Triton fused LM-head log-prob requires a CUDA device and triton",
-)
+# Module-level markers: this is a megatron-backend GPU test (selected by the megatron GPU CI job
+# via ``-m megatron``), and the whole file additionally needs a GPU and triton.
+pytestmark = [
+    pytest.mark.megatron,
+    pytest.mark.skipif(
+        not (torch.cuda.is_available() and TRITON_AVAILABLE),
+        reason="Triton fused LM-head log-prob requires a CUDA device and triton",
+    ),
+]
 
 
 def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_seed):
-    """Drive FusedLinearLogprobTriton.apply directly (bypasses model_utils dispatch).
+    """Drive FusedLinearLogprobTriton.apply directly (bypasses the model_utils dispatcher).
 
     The public entry point shifts targets internally; here we pass an ALREADY-shifted target and
-    compare against a directly-driven stock reference, so this path is independent of whether
-    model_utils has been wired to select the Triton backend yet.
+    compare against a directly-driven stock reference, so the Triton kernel is exercised in
+    isolation from the ``_fused_linear_logprob_apply`` backend selection.
     """
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
@@ -234,7 +238,9 @@ def _direct_fused_entropy(hidden, weight_shard, target_shifted, vstart, vend, ch
 
 def _stock_entropy(hidden, weight_shard, chunk_size, grad_ent):
     """Stock per-token entropy over the materialized logit shard via vocab_parallel_entropy."""
-    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import vocab_parallel_entropy
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+        vocab_parallel_entropy,
+    )
 
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
@@ -278,9 +284,9 @@ def _entropy_worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret
         weight_shard = weight_full[vstart:vend].contiguous()
         target_shifted = target.roll(shifts=-1, dims=-1)
 
-        grad_ent = torch.linspace(
-            0.3, 1.1, steps=batch_size * seq_len, device=device, dtype=torch.float32
-        ).reshape(batch_size, seq_len)
+        grad_ent = torch.linspace(0.3, 1.1, steps=batch_size * seq_len, device=device, dtype=torch.float32).reshape(
+            batch_size, seq_len
+        )
 
         ent_ref, gh_ref, gw_ref = _stock_entropy(hidden, weight_shard, chunk_size, grad_ent)
         ent_fused, gh_fused, gw_fused = _direct_fused_entropy(

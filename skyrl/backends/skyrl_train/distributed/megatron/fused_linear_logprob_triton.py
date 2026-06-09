@@ -1945,7 +1945,8 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
          ``DistributedLogprob`` and the pure-torch ``FusedLinearLogprob``) still emit
          ``-softmax * grad_output`` there (the chosen-position term is absent because no shard owns
          the column), and verl's kernel already reproduces that exact value for sentinel-keyed
-         labels. Zeroing the backward gradient (the original bug) would drop that term and diverge.
+         labels. Zeroing the backward gradient at those positions would drop that term and diverge
+         from the references, so the backward is left untouched.
     """
 
     @staticmethod
@@ -2017,6 +2018,8 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         log_probs = log_probs.masked_fill(fully_oov, 0.0)
 
         if not inference_only:
+            # NB: ``fully_oov`` is intentionally NOT saved — the backward gradient is left untouched
+            # at fully-OOV positions (see backward), so there is nothing for it to gate.
             ctx.save_for_backward(
                 hidden_2d,
                 weight_c,
@@ -2024,7 +2027,6 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
                 _maximum,
                 _accumulate,
                 _entropy_b,
-                fully_oov.reshape(-1),
             )
             ctx.B, ctx.S, ctx.H = B, S, H
             ctx.tp_group = tp_group
@@ -2035,11 +2037,11 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple:
         grad_output = grad_outputs[0]  # [B, S], grad of full-vocab logprob
-        (hidden_2d, weight_c, labels_verl, _maximum, _accumulate, _entropy_b, fully_oov) = ctx.saved_tensors
+        (hidden_2d, weight_c, labels_verl, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
         B, S, H = ctx.B, ctx.S, ctx.H
         tp_group = ctx.tp_group
 
-        # IMPORTANT (BUG 2 fix): do NOT zero grad_output at fully-OOV positions.
+        # IMPORTANT: do NOT zero grad_output at fully-OOV positions.
         #
         # The forward forces ``log_prob = 0`` at fully-OOV positions because verl's epilogue
         # would otherwise return the LSE there (no shard contributes the label logit). But the
@@ -2056,11 +2058,17 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         # verl's kernel already reproduces exactly this: ``mask`` (the column==label test) is all
         # False for a sentinel-keyed OOV target, so its d_logits term is ``d_logprobs * (exp_logits
         # * accu_rcp - 0) = -softmax * grad_output`` — identical to the references. So we must pass
-        # grad_output THROUGH unchanged at fully-OOV positions; zeroing ``dlogprobs`` here (the
-        # original bug) drops the ``-softmax * grad_output`` term and makes grad-hidden / grad-weight
-        # diverge from the reference at every OOV row. (``fully_oov`` is kept saved only to document
-        # the forward masking; it is intentionally not applied to the backward gradient.)
-        dlogprobs = grad_output.reshape(-1).to(torch.float32).contiguous()
+        # grad_output THROUGH unchanged at fully-OOV positions; zeroing ``dlogprobs`` here would drop
+        # the ``-softmax * grad_output`` term and make grad-hidden / grad-weight diverge from the
+        # reference at every OOV row.
+        #
+        # With set_materialize_grads(False) (return_entropy path), grad_output may be None if the
+        # log-prob output is unused downstream; treat it as zeros (logprobs are always used in
+        # practice, but stay robust to match the torch Function's contract).
+        if grad_output is None:
+            dlogprobs = torch.zeros(B * S, dtype=torch.float32, device=hidden_2d.device)
+        else:
+            dlogprobs = grad_output.reshape(-1).to(torch.float32).contiguous()
 
         # verl's reduction="none" backward needs a dentropy buffer; we discard entropy so pass 0.
         dentropy = torch.zeros_like(dlogprobs)
