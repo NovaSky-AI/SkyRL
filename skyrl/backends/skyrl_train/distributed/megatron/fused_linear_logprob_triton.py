@@ -1899,7 +1899,7 @@ _OOV_LABEL_SENTINEL = torch.iinfo(torch.int64).max
 
 
 def _verl_logprob_kernel_available() -> bool:
-    return TRITON_AVAILABLE
+    return TRITON_AVAILABLE and is_cuda_available
 
 
 class FusedLinearLogprobTriton(torch.autograd.Function):
