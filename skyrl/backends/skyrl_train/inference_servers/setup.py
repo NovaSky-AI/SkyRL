@@ -5,10 +5,12 @@ from typing import List, Optional, Tuple
 
 import ray
 from loguru import logger
+from ray.exceptions import RayTaskError
 from ray.util.placement_group import placement_group as ray_placement_group
 
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
+from skyrl.train.utils.ray_logging import reraise_with_actor_diagnostics
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -27,6 +29,23 @@ from .vllm_router import VLLMRouter
 
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
 VLLM_START_PORT = 8000
+
+
+def _start_server_groups(server_groups: List[ServerGroup]) -> None:
+    """Start all groups and block until every server actor reports ready."""
+    # Start all server groups in parallel (non-blocking)
+    all_refs = [ref for g in server_groups for ref in g.start(blocking=False)]
+    try:
+        # Wait for all servers to be ready in one shot
+        ray.get(all_refs)
+    except RayTaskError as e:
+        # Engine init runs inside the actor's start(), so its failure arrives as a
+        # RayTaskError from the still-alive actor
+        reraise_with_actor_diagnostics(
+            e,
+            [actor for g in server_groups for actor in g.get_actors()],
+            "Inference server actor(s) failed during startup.",
+        )
 
 
 @dataclass
@@ -136,16 +155,7 @@ def create_inference_servers(
             for i in range(num_decode)
         ]
 
-        # Start all prefill and decode groups in parallel (non-blocking)
-        all_refs = []
-        for g in prefill_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        for g in decode_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
+        _start_server_groups(prefill_server_groups + decode_server_groups)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
         prefill_urls = [info.url for g in prefill_server_groups for info in g.server_infos]
@@ -192,13 +202,7 @@ def create_inference_servers(
             for i in range(ie_cfg.num_engines)
         ]
 
-        # Start all engine groups in parallel (non-blocking)
-        all_refs = []
-        for g in server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
+        _start_server_groups(server_groups)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
         server_urls = [info.url for g in server_groups for info in g.server_infos]
