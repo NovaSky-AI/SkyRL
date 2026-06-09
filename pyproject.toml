@@ -20,7 +20,7 @@ dependencies = [
     "transformers>=5.6.1,<=5.8.0",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
-    "peft",
+    "peft==0.18.1",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
 ]
@@ -81,7 +81,7 @@ skyrl-train = [
     "torchdata",
     "omegaconf",
     "ray==2.51.1",
-    "peft",
+    "peft==0.18.1",
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
