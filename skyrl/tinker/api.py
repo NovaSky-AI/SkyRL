@@ -795,9 +795,18 @@ async def get_sampler(sampler_id: str, session: AsyncSession = Depends(get_sessi
     sampling_db = await session.get(SamplingSessionDB, sampler_id)
     if sampling_db is None:
         raise HTTPException(status_code=404, detail="Sampler not found")
+    if sampling_db.base_model is not None:
+        base_model = sampling_db.base_model
+    else:
+        # Sampling session was created from a model_path — resolve the
+        # underlying base model from the source training run so the SDK can
+        # load the matching tokenizer.
+        path = types.TinkerPath.parse(sampling_db.model_path)
+        model = await get_model(session, path.primary_id)
+        base_model = model.base_model
     return GetSamplerResponse(
         sampler_id=sampling_db.sampling_session_id,
-        base_model=sampling_db.base_model or "",
+        base_model=base_model,
         model_path=sampling_db.model_path,
     )
 
