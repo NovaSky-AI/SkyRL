@@ -6,6 +6,7 @@ import typing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Optional
+from unittest.mock import patch
 
 import pytest
 from omegaconf import OmegaConf
@@ -257,3 +258,35 @@ class TestMaxSeqLenValidation:
         cfg.trainer.algorithm.max_seq_len = 4096
 
         validate_cfg(cfg)
+
+
+class TestRouterReplayValidation:
+    """Tests for rollout routing replay (R3) config validation."""
+
+    @pytest.mark.parametrize(
+        "strategy",
+        [pytest.param("fsdp", id="fsdp"), pytest.param("megatron", id="megatron")],
+    )
+    @pytest.mark.parametrize(
+        "ref_replay_enabled",
+        [pytest.param(False, id="ref_off_warns"), pytest.param(True, id="ref_on_no_warning")],
+    )
+    def test_validate_cfg_warns_on_r3_ref_kl_mismatch(self, strategy: str, ref_replay_enabled: bool) -> None:
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = strategy
+        cfg.trainer.algorithm.use_kl_loss = True
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.generator.inference_engine.distributed_executor_backend = "mp"
+        backend_config_attr = f"{strategy}_config"
+        getattr(cfg.trainer.policy, backend_config_attr).moe_enable_routing_replay = True
+        getattr(cfg.trainer.ref, backend_config_attr).moe_enable_routing_replay = ref_replay_enabled
+
+        with patch("skyrl.train.utils.utils.logger") as mock_logger:
+            validate_cfg(cfg)
+
+        mismatch_warnings = [
+            call for call in mock_logger.warning.call_args_list if "moe_enable_routing_replay" in call.args[0]
+        ]
+        assert (
+            bool(mismatch_warnings) != ref_replay_enabled
+        ), "the ref routing-mismatch warning should fire exactly when the ref is not replaying"

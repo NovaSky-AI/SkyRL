@@ -494,12 +494,34 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
         assert (
             ie_cfg.distributed_executor_backend == "mp"
         ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
-        assert (
-            cfg.trainer.strategy == "megatron"
-        ), "rollout router replay (r3) is only supported with Megatron training backend"
-        assert (
+        assert cfg.trainer.strategy in (
+            "megatron",
+            "fsdp",
+        ), "rollout router replay (r3) is only supported with the Megatron or FSDP training backend"
+        replay_enabled = (
             cfg.trainer.policy.megatron_config.moe_enable_routing_replay
-        ), "moe_enable_routing_replay must be True to consume rollout expert indices"
+            if cfg.trainer.strategy == "megatron"
+            else cfg.trainer.policy.fsdp_config.moe_enable_routing_replay
+        )
+        assert replay_enabled, "moe_enable_routing_replay must be True to consume rollout expert indices"
+        ref_replay_enabled = (
+            cfg.trainer.ref.megatron_config.moe_enable_routing_replay
+            if cfg.trainer.strategy == "megatron"
+            else cfg.trainer.ref.fsdp_config.moe_enable_routing_replay
+        )
+        kl_uses_ref_logprobs = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        if kl_uses_ref_logprobs and not ref_replay_enabled:
+            logger.warning(
+                "KL uses ref logprobs, but the ref worker is not replaying rollout routing "
+                f"(trainer.ref.{cfg.trainer.strategy}_config.moe_enable_routing_replay=False): "
+                "KL will compare replay-routed policy logprobs against naturally-routed ref "
+                "logprobs. Co-enable it on the ref to remove this routing mismatch."
+            )
+
+    if cfg.trainer.strategy == "fsdp" and cfg.trainer.policy.fsdp_config.moe_enable_routing_replay:
+        assert (
+            ie_cfg.enable_return_routed_experts
+        ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
     pp_size = ie_cfg.pipeline_parallel_size
     tp_pp_size = tp_size * pp_size

@@ -142,19 +142,37 @@ can impact convergence of RL runs, and impact whether corrections like routing r
 SkyRL supports rollout routing replay (R3), first introduced by [Ma et al.](https://arxiv.org/pdf/2510.11370) to help eliminate trainer/inference mismatch for MoE at the source. Rollout routing replay works by recording expert 
 routing decisions for MoE layers at inference time, and replaying the same per-layer expert routing decisions at training time, which helps reduce mismatched logprobs.
 
+R3 is supported on both the `megatron` and `fsdp` backends:
+- On Megatron: drives Megatron-Core's native `RouterReplay`.
+- On FSDP: a forward hook on each HuggingFace MoE router replays the rollout's expert choices, recomputing the gate weights from the current router logits so the gate stays trainable.
+
+Megatron backend:
+
 ```yaml
 generator:
   inference_engine:
     enable_return_routed_experts: True    # pass through argument to vLLM
     distributed_executor_backend: "mp"    # temporarily needed to work around hanging issues with other backends
-...
 trainer:
   policy:
     megatron_config:
       moe_enable_routing_replay: True     # enables Megatron native RoutingReplay feature
 ```
 
-To enable rollout router replay, set `generator.inference_engine.enable_return_routed_experts=True`, `trainer.policy.megatron_config.moe_enable_routing_replay=True`, and use the `mp` distributed_executor_backend for vLLM. Note that 
+FSDP backend:
+
+```yaml
+generator:
+  inference_engine:
+    enable_return_routed_experts: True    # pass through argument to vLLM
+    distributed_executor_backend: "mp"    # temporarily needed to work around hanging issues with other backends
+trainer:
+  policy:
+    fsdp_config:
+      moe_enable_routing_replay: True     # installs the HF MoE router-replay hooks
+```
+
+To enable rollout router replay, set `generator.inference_engine.enable_return_routed_experts=True`, the backend's `moe_enable_routing_replay=True` (`trainer.policy.megatron_config.moe_enable_routing_replay` for Megatron or `trainer.policy.fsdp_config.moe_enable_routing_replay` for FSDP), and use the `mp` distributed_executor_backend for vLLM. Note that 
 R3 does induce additional training bias when mini-batching, since routing decisions are fixed for all mini-batches in a training batch. However, it has been shown to be important for stabilizing large-scale MoE training, particularly
 in models adopting a DeepSeek-V3 like architecture (notably the GLM family) due to the use of sigmoid-based affinity scoring instead of softmax for top-k routing.
 

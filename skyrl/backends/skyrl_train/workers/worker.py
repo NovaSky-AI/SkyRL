@@ -813,6 +813,7 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                rollout_expert_indices=experience.rollout_expert_indices,
             )
             # loss function
             # TODO: recompute advantages
@@ -943,6 +944,12 @@ class PolicyWorkerBase(Worker):
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
+        # Release the routing-replay context now that backward is done;
+        # the next forward re-arms it
+        ctx = getattr(self.model, "router_replay_ctx", None)
+        if ctx is not None and ctx.active:
+            ctx.clear()
+
         return status
 
     def optim_step(self) -> float:
@@ -1056,6 +1063,7 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=False,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                rollout_expert_indices=experience.rollout_expert_indices,
             )
             policy_loss, _ = current_loss_fn(
                 action_log_probs,
@@ -1122,6 +1130,7 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.algorithm.temperature,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                rollout_expert_indices=micro_batch.get("rollout_expert_indices"),
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1391,6 +1400,7 @@ class RefWorkerBase(Worker):
                 return_output=False,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                rollout_expert_indices=micro_batch.get("rollout_expert_indices"),
             )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(

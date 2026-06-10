@@ -27,6 +27,10 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.hf_router_replay import (
+    HFRouterReplayContext,
+    align_replay_indices,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
@@ -81,11 +85,14 @@ class HFModelWrapper(nn.Module):
         meta_init: bool = False,
         language_model_only: bool = False,
         logprobs_chunk_size: int = 1024,
+        moe_enable_routing_replay: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
+        self.moe_enable_routing_replay = moe_enable_routing_replay
+        self.router_replay_ctx = HFRouterReplayContext()
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.remove_microbatch_padding = remove_microbatch_padding
         self.is_vlm = False
@@ -256,6 +263,7 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
+        rollout_expert_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
@@ -281,6 +289,7 @@ class HFModelWrapper(nn.Module):
         sequences_fwd = sequences
         position_ids_fwd = position_ids
         attention_mask_fwd = attention_mask
+        nnz_indices = None
         if self.remove_microbatch_padding:
             with torch.no_grad():
                 # Removes padding to get a packed tensor. `unpad_input` expects 3 dimensional tensor so we unsqueeze first
@@ -307,6 +316,27 @@ class HFModelWrapper(nn.Module):
             sequences_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
+
+        replay_active = False
+        if self.moe_enable_routing_replay and rollout_expert_indices is not None:
+            if rollout_expert_indices.shape[:2] != sequences.shape:
+                raise ValueError(
+                    f"rollout_expert_indices batch/seq dims {tuple(rollout_expert_indices.shape[:2])} "
+                    f"do not match sequences shape {tuple(sequences.shape)}"
+                )
+            self.router_replay_ctx.set(
+                align_replay_indices(
+                    rollout_expert_indices,
+                    num_layers=self.model.config.num_hidden_layers,
+                    nnz_indices=nnz_indices,
+                    sp_size=self.sequence_parallel_size,
+                )
+            )
+            replay_active = True
+        elif self.moe_enable_routing_replay:
+            # A forward without indices must not replay a previous batch's selections
+            # (possible if an exception skipped the worker's post-backward clear).
+            self.router_replay_ctx.clear()
 
         if self.is_vlm:
             # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
@@ -335,6 +365,11 @@ class HFModelWrapper(nn.Module):
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
         else:
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+
+        # When not training, no need to preserve the replay context past the forward
+        # (no backward / gradient-checkpoint recompute re-reads it); release it now
+        if replay_active and not torch.is_grad_enabled():
+            self.router_replay_ctx.clear()
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
