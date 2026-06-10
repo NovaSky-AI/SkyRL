@@ -681,6 +681,12 @@ class CreateSamplingSessionResponse(BaseModel):
     sampling_session_id: str
 
 
+class GetSamplerResponse(BaseModel):
+    sampler_id: str
+    base_model: str
+    model_path: str | None = None
+
+
 class SupportedModel(BaseModel):
     model_name: str
 
@@ -781,6 +787,19 @@ async def create_sampling_session(request: CreateSamplingSessionRequest, session
     session.add(sampling_db)
     await session.commit()
     return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
+
+
+@app.get("/api/v1/samplers/{sampler_id}", response_model=GetSamplerResponse)
+async def get_sampler(sampler_id: str, session: AsyncSession = Depends(get_session)):
+    """Get sampler (sampling session) information."""
+    sampling_db = await session.get(SamplingSessionDB, sampler_id)
+    if sampling_db is None:
+        raise HTTPException(status_code=404, detail="Sampler not found")
+    return GetSamplerResponse(
+        sampler_id=sampling_db.sampling_session_id,
+        base_model=sampling_db.base_model or "",
+        model_path=sampling_db.model_path,
+    )
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)

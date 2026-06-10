@@ -249,6 +249,10 @@ def test_sample(service_client, use_lora):
     else:
         sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
+    # The sampling client should be able to fetch its tokenizer via /api/v1/samplers/{id}.
+    sampler_tokenizer = sampling_client.get_tokenizer()
+    assert sampler_tokenizer.encode("hello") == tokenizer.encode("hello")
+
     # Sample from the model (base or LoRA)
     prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     num_samples_per_request = [1, 2]
