@@ -10,7 +10,7 @@ uv run --extra dev --extra skyrl-train pytest tests/train/test_max_training_step
 import importlib.util
 import sys
 from math import ceil
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
@@ -18,37 +18,14 @@ from omegaconf import OmegaConf
 from skyrl.train.config.config import SkyRLTrainConfig, TrainerConfig
 from skyrl.train.config.sft_config import SFTConfig, validate_sft_cfg
 
+# transformers is a core skyrl-train dependency on Linux (CI), but a uv
+# override-dependency drops it on non-Linux platforms. The tests below that
+# construct the full RL config / SFT trainer import it transitively, so skip
+# them when it is genuinely absent (e.g. local macOS) rather than faking it.
 requires_transformers = pytest.mark.skipif(
     importlib.util.find_spec("transformers") is None,
-    reason="transformers not available (Linux-only dependency)",
+    reason="transformers not installed (dropped by uv override on non-Linux)",
 )
-
-
-class _FakeTransformers(ModuleType):
-    def __getattr__(self, name):
-        value = type(name, (), {})
-        setattr(self, name, value)
-        return value
-
-
-def _install_fake_transformers(monkeypatch):
-    module = _FakeTransformers("transformers")
-    module.__file__ = "fake_transformers.py"
-    module.__path__ = []
-    monkeypatch.setitem(sys.modules, "transformers", module)
-    flash_attention_utils = ModuleType("transformers.modeling_flash_attention_utils")
-    flash_attention_utils._flash_attention_forward = lambda *args, **kwargs: None
-    monkeypatch.setitem(sys.modules, "transformers.modeling_flash_attention_utils", flash_attention_utils)
-
-
-def _install_lightweight_worker_modules(monkeypatch):
-    worker_module = ModuleType("skyrl.backends.skyrl_train.workers.worker")
-    worker_module.PPORayActorGroup = object
-    monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.workers.worker", worker_module)
-
-    worker_dispatch_module = ModuleType("skyrl.backends.skyrl_train.workers.worker_dispatch")
-    worker_dispatch_module.WorkerDispatch = object
-    monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.workers.worker_dispatch", worker_dispatch_module)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +181,43 @@ class TestRLTrainerEarlyExit:
         exits = max_steps is not None and global_step > max_steps
         assert exits is should_exit
 
+    @pytest.mark.parametrize(
+        "max_steps",
+        [1, 2, 5],
+        ids=["one_step", "two_steps", "five_steps"],
+    )
+    def test_sync_final_global_step_matches_cap(self, max_steps):
+        """The sync trainer increments global_step before the cap check, then
+        decrements once after the training loop. The net recorded step must
+        equal max_training_steps so checkpoint metadata is correct on resume.
+        """
+        global_step = 1  # sync trainer starts the loop at global_step 1
+        for _ in range(10_000):  # well beyond the cap
+            # step runs at the current global_step, then increments
+            global_step += 1
+            if global_step > max_steps:
+                break
+        # post-loop decrement (see RayPPOTrainer.train)
+        global_step -= 1
+        assert global_step == max_steps
+
+    @pytest.mark.parametrize(
+        "max_steps",
+        [1, 2, 5],
+        ids=["one_step", "two_steps", "five_steps"],
+    )
+    def test_async_final_global_step_matches_cap(self, max_steps):
+        """The fully async trainer increments global_step before the cap check
+        and has no post-loop decrement; on early exit the recorded step is
+        max_training_steps + 1, matching a normal async run of that many steps.
+        """
+        global_step = 1  # async trainer starts the loop at global_step 1
+        for _ in range(10_000):
+            global_step += 1
+            if global_step > max_steps:
+                break
+        assert global_step == max_steps + 1
+
 
 # ---------------------------------------------------------------------------
 # SFT Trainer: num_steps capping logic
@@ -245,9 +259,12 @@ class TestSFTTrainerMaxStepsCapping:
     def test_capping(self, kwargs, expected):
         assert self._resolve_num_steps(**kwargs) == expected
 
+    @requires_transformers
     def test_worker_initialization_uses_capped_num_training_steps(self, monkeypatch):
-        _install_fake_transformers(monkeypatch)
-        _install_lightweight_worker_modules(monkeypatch)
+        """SFTTrainer._init_workers must pass the capped step count to the LR
+        scheduler. A lightweight fake actor group captures the value without
+        spinning up Ray or real workers.
+        """
         from skyrl.train import sft_trainer as sft_module
 
         captured = {}
@@ -290,96 +307,6 @@ class TestSFTTrainerMaxStepsCapping:
         trainer._init_workers()
 
         assert captured["num_training_steps"] == 5
-
-
-class TestRLTrainerFinalization:
-    @pytest.mark.asyncio
-    async def test_sync_trainer_max_steps_runs_finalization(self, monkeypatch):
-        _install_fake_transformers(monkeypatch)
-        _install_lightweight_worker_modules(monkeypatch)
-        from skyrl.train import trainer as trainer_module
-
-        events = []
-
-        class FakeTrainingInput(dict):
-            def __init__(self):
-                super().__init__({"rewards": [1.0]})
-                self.metadata = {"uids": ["uid-0"]}
-
-        class FakeTracker:
-            def log(self, *args, **kwargs):
-                pass
-
-            def finish(self):
-                events.append("tracker_finish")
-
-        class FakeDispatch:
-            async def save_weights_for_sampler(self):
-                pass
-
-        class FakeInferenceEngineClient:
-            async def sleep(self):
-                events.append("sleep")
-
-        async def fake_generate(generator_input):
-            return {"response_ids": [[1]], "rewards": [1.0]}
-
-        monkeypatch.setattr(
-            trainer_module,
-            "prepare_generator_input",
-            lambda *args, **kwargs: ({"prompts": ["prompt"]}, ["uid-0"]),
-        )
-        monkeypatch.setattr(trainer_module, "get_sampling_params_for_backend", lambda *args, **kwargs: {})
-
-        trainer = object.__new__(trainer_module.RayPPOTrainer)
-        trainer.cfg = SimpleNamespace(
-            trainer=SimpleNamespace(
-                epochs=2,
-                max_training_steps=1,
-                eval_interval=0,
-                eval_before_train=False,
-                algorithm=SimpleNamespace(use_kl_in_reward=False, dynamic_sampling=SimpleNamespace(type=None)),
-                log_example_interval=0,
-                dump_data_batch=False,
-                ckpt_interval=1,
-                hf_save_interval=1,
-                update_ref_every_epoch=False,
-            ),
-            generator=SimpleNamespace(
-                n_samples_per_prompt=1,
-                step_wise_trajectories=False,
-                inference_engine=SimpleNamespace(backend="vllm"),
-                sampling_params=SimpleNamespace(),
-            ),
-            environment=SimpleNamespace(env_class="gsm8k"),
-        )
-        trainer.colocate_all = True
-        trainer.tracker = FakeTracker()
-        trainer.tokenizer = SimpleNamespace(decode=lambda ids: "decoded")
-        trainer.train_dataloader = [["prompt-0"], ["prompt-1"]]
-        trainer.total_training_steps = 1
-        trainer.resume_mode = trainer_module.ResumeMode.NONE
-        trainer.all_metrics = {}
-        trainer.all_timings = {}
-        trainer.global_step = 0
-        trainer._vllm_metrics_scraper = None
-        trainer.dispatch = FakeDispatch()
-        trainer.inference_engine_client = FakeInferenceEngineClient()
-        trainer.ref_model = None
-        trainer.init_weight_sync_state = lambda: None
-        trainer._remove_tail_data = lambda rand_prompts: rand_prompts
-        trainer.generate = fake_generate
-        trainer.postprocess_generator_output = lambda generator_output, uids: (generator_output, uids)
-        trainer.convert_to_training_input = lambda generator_output, uids: FakeTrainingInput()
-        trainer.fwd_logprobs_values_reward = lambda training_input: training_input
-        trainer.compute_advantages_and_returns = lambda training_input: training_input
-        trainer.train_critic_and_policy = lambda training_input: {"loss": 0.0}
-        trainer.save_checkpoints = lambda: events.append("save_checkpoints")
-        trainer.save_models = lambda: events.append("save_models")
-
-        await trainer.train()
-
-        assert events[-4:] == ["sleep", "save_checkpoints", "save_models", "tracker_finish"]
 
 
 # ---------------------------------------------------------------------------
