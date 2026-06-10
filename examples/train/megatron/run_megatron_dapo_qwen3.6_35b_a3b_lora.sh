@@ -64,7 +64,7 @@ OPTIMIZER_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 
-# Qwen3.5 flags
+# Qwen3.6 flags
 REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY"}}' # auto prefill backend can crash
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
