@@ -345,8 +345,8 @@ class IpcTrainer:
         for name, param in self.model.named_parameters():
             weight = param.detach().contiguous()
             tensor_refs.append(weight)
-            handle = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: handle})
+            _, handle_args = reduce_tensor(weight)
+            ipc_handles.append({gpu_uuid: handle_args})
             names.append(name)
             dtype_names.append(str(weight.dtype).split(".")[-1])
             shapes.append(list(weight.shape))

@@ -5,7 +5,7 @@ This module provides NewInferenceWorkerWrap, a vLLM worker extension that
 enables chunked weight updates from training to inference using the
 start/update/finish lifecycle:
 
-    start_weight_update   ->  one or more update_weights_ipc  ->  finish_weight_update
+    skyrl_start_weight_update -> one or more update_weights_ipc -> skyrl_finish_weight_update
 
 This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
@@ -13,11 +13,12 @@ than all at once.
 
 Used only with the new inference path (_SKYRL_USE_NEW_INFERENCE=1).
 
-TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, vLLM will
-natively support start_weight_update / update_weights / finish_weight_update
-on GPUWorker with dedicated HTTP endpoints. At that point this worker extension
-can be removed and SkyRL can call the native endpoints directly instead of
-routing through /collective_rpc.
+TODO: migrate to vLLM's native RLHF endpoints and remove this worker extension:
+- The endpoints: POST /init_weight_transfer_engine, /start_weight_update, /update_weights,
+  and /finish_weight_update, backed by the native GPUWorker methods:
+  https://github.com/vllm-project/vllm/blob/v0.22.1/vllm/entrypoints/serve/rlhf/api_router.py#L113-L165
+- Blocked on closing the two gaps above natively: set_current_vllm_config wrapping
+  and the packed-IPC chunk format.
 
 Usage:
     Pass as --worker-extension-cls to vLLM:
@@ -63,9 +64,9 @@ class NewInferenceWorkerWrap:
     vLLM worker extension for chunked weight sync (new inference path).
 
     Provides a three-phase weight update protocol via collective_rpc:
-        1. start_weight_update: Prepare model for receiving weights
+        1. skyrl_start_weight_update: Prepare model for receiving weights
         2. update_weights_ipc: Receive and load one chunk of weights
-        3. finish_weight_update: Finalize the model after all chunks
+        3. skyrl_finish_weight_update: Finalize the model after all chunks
 
     Attributes accessed from the host GPUWorker (via mixin inheritance):
         self.weight_transfer_engine
@@ -74,7 +75,7 @@ class NewInferenceWorkerWrap:
         self.device
     """
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    def skyrl_start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """
         Prepare the model for a new weight update.
 
@@ -91,8 +92,8 @@ class NewInferenceWorkerWrap:
         """
         if getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError(
-                "start_weight_update called while a weight update is "
-                "already active. Call finish_weight_update first."
+                "skyrl_start_weight_update called while a weight update is "
+                "already active. Call skyrl_finish_weight_update first."
             )
 
         if is_checkpoint_format:
@@ -127,7 +128,7 @@ class NewInferenceWorkerWrap:
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -198,7 +199,7 @@ class NewInferenceWorkerWrap:
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -218,7 +219,7 @@ class NewInferenceWorkerWrap:
 
         torch.accelerator.synchronize()
 
-    def finish_weight_update(self) -> None:
+    def skyrl_finish_weight_update(self) -> None:
         """
         Finalize the current weight update.
 
@@ -227,7 +228,7 @@ class NewInferenceWorkerWrap:
         Must be called after all update_weights_ipc calls are done.
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+            raise RuntimeError("skyrl_start_weight_update must be called before skyrl_finish_weight_update.")
 
         if self._skyrl_is_checkpoint_format:
             from vllm.config import set_current_vllm_config

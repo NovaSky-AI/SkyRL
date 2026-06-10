@@ -1058,23 +1058,30 @@ class RemoteInferenceClient:
         """
         Update model weights via vLLM native /update_weights. Used for full parameter fine-tuning.
 
+        vLLM requires wrapping /update_weights calls with /start_weight_update and
+        /finish_weight_update since 0.21.0's https://github.com/vllm-project/vllm/pull/39212:
+        https://github.com/vllm-project/vllm/blob/v0.22.1/vllm/v1/worker/gpu_worker.py#L1037-L1040
+        This method makes both wrapping calls itself, which is valid because the
+        single call carries the full weight set (no chunking across calls).
+
         For LoRA weight sync, use load_lora_adapter() instead.
 
         Args:
             update_info: Dict with keys expected by vLLM (names, dtype_names, shapes, packed, etc.)
 
         Returns:
-            Dict mapping server_url to response.
+            Dict mapping server_url to /update_weights response.
         """
-        return await self._call_all_servers(
-            "/update_weights",
-            {"update_info": update_info},
-        )
+        await self._call_all_servers("/start_weight_update", {"is_checkpoint_format": True})
+        results = await self._call_all_servers("/update_weights", {"update_info": update_info})
+        await self._call_all_servers("/finish_weight_update")
+        return results
 
-    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
-    # these three methods from /collective_rpc to the native vLLM endpoints
-    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
-    # the NewInferenceWorkerWrap worker extension.
+    # TODO: migrate off the worker extension:
+    # 1. Switch these methods from /collective_rpc to `vllm>=0.22.0`'s native RLHF
+    #    endpoints (/start_weight_update, /update_weights, /finish_weight_update;
+    #    https://github.com/vllm-project/vllm/pull/39212).
+    # 2. Remove the NewInferenceWorkerWrap worker extension.
 
     async def start_weight_update(
         self,
@@ -1083,8 +1090,8 @@ class RemoteInferenceClient:
         """
         Start a new chunked weight update via /collective_rpc.
 
-        Calls the NewInferenceWorkerWrap.start_weight_update method on all
-        workers. For checkpoint-format weights this initializes layerwise
+        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on
+        all workers. For checkpoint-format weights this initializes layerwise
         reload. Must be called before any update_weights_ipc calls.
 
         Args:
@@ -1097,7 +1104,7 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/collective_rpc",
             {
-                "method": "start_weight_update",
+                "method": "skyrl_start_weight_update",
                 "kwargs": {"is_checkpoint_format": is_checkpoint_format},
             },
         )
@@ -1161,7 +1168,7 @@ class RemoteInferenceClient:
         """
         Finish the current chunked weight update via /collective_rpc.
 
-        Calls NewInferenceWorkerWrap.finish_weight_update on all workers.
+        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
         For checkpoint-format weights, runs layerwise postprocessing.
 
         Returns:
@@ -1169,7 +1176,7 @@ class RemoteInferenceClient:
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "finish_weight_update"},
+            {"method": "skyrl_finish_weight_update"},
         )
 
     async def load_lora_adapter(
