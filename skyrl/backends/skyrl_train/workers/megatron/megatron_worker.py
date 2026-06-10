@@ -418,6 +418,26 @@ class MegatronWorker:
             provider.mtp_num_layers = None
         elif megatron_config.mtp_num_layers is not None:
             provider.mtp_num_layers = megatron_config.mtp_num_layers or None
+        # When MTP training is requested (trainer.mtp.enabled), the model must actually resolve to
+        # >= 1 head — otherwise the draft loss would silently no-op (the wrapper keys off
+        # model_config.mtp_num_layers). _apply_mtp_config no longer forces a head count, so a model
+        # whose checkpoint ships no MTP layers lands here with mtp_num_layers=None; users who want
+        # to train fresh heads from scratch can still force-build them via
+        # policy.megatron_config.mtp_num_layers (note vLLM's `method: mtp` would also need the HF
+        # config to declare them).
+        mtp_cfg = getattr(self.cfg, "mtp", None)
+        if (
+            enable_mtp
+            and mtp_cfg is not None
+            and getattr(mtp_cfg, "enabled", False)
+            and not getattr(provider, "mtp_num_layers", None)
+        ):
+            raise ValueError(
+                "trainer.mtp.enabled=true but the model resolved to 0 MTP heads "
+                "(the checkpoint's HF config declares none and policy.megatron_config.mtp_num_layers "
+                "is unset). Use an MTP-capable checkpoint, or set "
+                "policy.megatron_config.mtp_num_layers to force-build fresh heads."
+            )
         if getattr(provider, "mtp_num_layers", None):
             # The native MTP heads are still *built* (so the megatron-bridge weight mappings
             # round-trip them to HF / vLLM), but SkyRL trains them with a decoupled, explicit

@@ -5,7 +5,6 @@ from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.dataset.replay_buffer import Experience
 
-
 # Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
 # The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are
 # pre-scaled (by num_microbatches * dp_size) so that summing recovers the correct minibatch
@@ -68,9 +67,7 @@ def all_reduce_metrics(
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
     sum_metrics = {
-        k: v
-        for k, v in metrics.items()
-        if sum_loss_metrics and k.endswith("_loss") and k not in MEAN_LOSS_METRICS
+        k: v for k, v in metrics.items() if sum_loss_metrics and k.endswith("_loss") and k not in MEAN_LOSS_METRICS
     }
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics

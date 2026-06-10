@@ -221,9 +221,14 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 def _apply_mtp_config(cfg: SkyRLTrainConfig):
     """Propagate the high-level ``trainer.mtp`` knob to the training + inference configs.
 
-    When MTP is enabled, build/train ``num_speculative_tokens`` native MTP heads (Megatron) with the
-    decoupled draft loss, and enable vLLM MTP speculative decoding with the same draft depth. When
-    disabled, force the MTP heads off so they are neither built nor run.
+    When MTP is enabled, train the model's native MTP heads (Megatron builds as many as the
+    checkpoint ships — typically one; override via ``policy.megatron_config.mtp_num_layers``) with
+    the decoupled draft loss, and enable vLLM MTP speculative decoding with
+    ``num_speculative_tokens`` draft tokens per step. The draft depth is deliberately decoupled
+    from the trained head count: vLLM drafts depth > 1 by reusing the (single) MTP head
+    autoregressively, so e.g. ``num_speculative_tokens=3`` with a 1-head checkpoint is valid and
+    does NOT build extra (randomly initialized) heads on the training side. When disabled, force
+    the MTP heads off so they are neither built nor run.
     """
     mtp = getattr(cfg.trainer, "mtp", None)
     if mtp is None:
@@ -236,8 +241,15 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         return
 
     assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
-    # Training side: build + train this many native MTP heads with the decoupled draft loss.
-    mcfg.mtp_num_layers = mtp.num_speculative_tokens
+    if mcfg.mtp_num_layers == 0:
+        raise ValueError(
+            "trainer.mtp.enabled=true but trainer.policy.megatron_config.mtp_num_layers=0 "
+            "(explicit force-disable). Remove the mtp_num_layers override or disable trainer.mtp."
+        )
+    # Training side: train the checkpoint's native MTP heads with the decoupled draft loss.
+    # mcfg.mtp_num_layers is intentionally left untouched (None => the megatron-bridge infers the
+    # head count from the model's own HF config); MegatronWorker fails loudly if the model resolves
+    # to zero heads while MTP is enabled.
     mcfg.mtp_loss_type = mtp.loss_type
     mcfg.mtp_loss_weight = mtp.loss_weight
 

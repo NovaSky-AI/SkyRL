@@ -74,7 +74,9 @@ def _mtp_layer_offset(mtp_block) -> int:
     the common single-stage case; we resolve it via megatron-core so the replay split below is also
     correct under PP/VPP. Falls back to 0 if the helper is unavailable (older megatron-core)."""
     try:
-        from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
+        from megatron.core.transformer.multi_token_prediction import (
+            get_mtp_layer_offset,
+        )
 
         return int(get_mtp_layer_offset(mtp_block.config, getattr(mtp_block, "vp_stage", None)))
     except Exception:
@@ -90,13 +92,20 @@ class MTPHiddenCapture:
     output layer.
     """
 
-    def __init__(self, model, detach_trunk: bool = True):
+    def __init__(self, model, detach_trunk: bool = True, detach_shared_embedding: bool = False):
         # Resolve the module that owns the MTP block: the unwrapped model itself for plain
         # GPT/Mamba models, or the nested ``.language_model`` for VL wrappers (e.g. Qwen3.5-VL).
         # capture.model is also what the caller projects through (output_layer / shared weight),
         # so it must be the same module that holds the heads.
         self.model = _resolve_mtp_host(_unwrap_model(model))
         self.detach_trunk = detach_trunk
+        # The MTP block re-embeds the rolled input ids through the model's shared embedding
+        # (``embedding=self.embedding`` in its kwargs) — a second gradient path into the shared
+        # embedding weight, separate from the output projection. When the caller wants the shared
+        # weights fully isolated from the draft loss (``mtp_detach_shared_output``), the replay must
+        # detach this path too, else tied-embedding models still train the lm_head through the
+        # lookup (slime's MTP-RL patch detaches the same two paths).
+        self.detach_shared_embedding = detach_shared_embedding
         self._args = None
         self._kwargs = None
         self._handles: list = []
@@ -148,9 +157,25 @@ class MTPHiddenCapture:
         import torch
 
         kwargs = dict(self._kwargs)
-        hidden = kwargs.get("hidden_states")
-        if hidden is not None and self.detach_trunk:
+        if self.detach_trunk:
+            hidden = kwargs.get("hidden_states")
+            # The detach below only patches the *keyword* argument. Megatron currently calls
+            # ``self.mtp(...)`` with kwargs only (GPTModel + MambaModel); if a future version passes
+            # hidden_states positionally, the detach would silently no-op and the draft gradient
+            # would couple back into the policy trunk — fail loudly instead.
+            assert hidden is not None, (
+                "MTP capture: 'hidden_states' was not passed to the MTP block as a keyword argument "
+                "(megatron-core call convention changed?); cannot detach the trunk for decoupled "
+                "draft training."
+            )
             kwargs["hidden_states"] = hidden.detach()
+        if self.detach_shared_embedding and kwargs.get("embedding") is not None:
+            orig_embedding = kwargs["embedding"]
+
+            def _detached_embedding(*emb_args, **emb_kwargs):
+                return orig_embedding(*emb_args, **emb_kwargs).detach()
+
+            kwargs["embedding"] = _detached_embedding
 
         mtp = self.model.mtp
         # MultiTokenPredictionBlock concatenates, along dim 0:
@@ -165,11 +190,11 @@ class MTPHiddenCapture:
 
 
 @contextmanager
-def maybe_capture_mtp_hidden(model, enabled: bool, detach_trunk: bool = True):
+def maybe_capture_mtp_hidden(model, enabled: bool, detach_trunk: bool = True, detach_shared_embedding: bool = False):
     """Context manager returning an ``MTPHiddenCapture`` when ``enabled``, else ``None``."""
     if not enabled:
         yield None
         return
-    capture = MTPHiddenCapture(model, detach_trunk=detach_trunk)
+    capture = MTPHiddenCapture(model, detach_trunk=detach_trunk, detach_shared_embedding=detach_shared_embedding)
     with capture.capture():
         yield capture

@@ -845,8 +845,10 @@ class RayPPOTrainer:
         """Record the vLLM speculative-decoding (MTP draft) acceptance rate for this rollout step.
 
         Reads the engines' cumulative draft/accept counters and logs the per-step delta as
-        ``vllm/draft_acceptance_rate`` (+ raw counts). No-op when speculative decoding is disabled or
-        the backend doesn't expose the stats. Best-effort: never fails the training step.
+        ``vllm/draft_acceptance_rate`` (+ raw counts), plus one ``vllm/draft_acceptance_rate_pos_k``
+        per draft position when num_speculative_tokens > 1 (per-depth acceptance decay). No-op when
+        speculative decoding is disabled or the backend doesn't expose the stats. Best-effort:
+        never fails the training step.
         """
         from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
             acceptance_rate_metrics,

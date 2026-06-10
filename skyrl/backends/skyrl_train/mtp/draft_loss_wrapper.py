@@ -64,7 +64,11 @@ def combine_policy_and_draft_loss(
     """
     draft_losses = []
     for layer_idx, student_logits in enumerate(student_logits_per_layer):
-        layer_mask = shift_mask_for_mtp(mask, layer_idx)
+        # Hard CE's target is the *token* ``seq[t+k+2]`` — one position past the soft-CE teacher
+        # (a *distribution* read at ``t+k+1``) — so its validity mask needs one extra shift, or the
+        # last in-range position of every row trains against a zeroed/pad label.
+        mask_shift = layer_idx + 1 if cfg.loss_type == "hard_ce" else layer_idx
+        layer_mask = shift_mask_for_mtp(mask, mask_shift)
         if cfg.loss_type == "hard_ce":
             assert hard_labels is not None, "hard_ce requires hard_labels"
             layer_labels = torch.roll(hard_labels, shifts=-(layer_idx + 1), dims=1)

@@ -22,14 +22,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl.backends.skyrl_train.utils.ppo_utils import (
-    PolicyLossRegistry,
-    compute_approx_kl,
-)
-from skyrl.backends.skyrl_train.utils.replay_utils import (
-    setup_per_microbatch_replay_backward,
-    setup_per_microbatch_replay_forward,
-)
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
 from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
@@ -38,6 +30,15 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     draft_soft_ce,
     draft_soft_ce_topk,
     shift_mask_for_mtp,
+    unpadded_vocab_shard_width,
+)
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    compute_approx_kl,
+)
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    setup_per_microbatch_replay_backward,
+    setup_per_microbatch_replay_forward,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     build_mtp_next_token_labels,
@@ -257,9 +258,19 @@ class MegatronModelWrapper:
         mtp_loss_type = getattr(mcfg, "mtp_loss_type", "soft_ce")
         mtp_loss_weight = float(getattr(mcfg, "mtp_loss_weight", 0.1))
         mtp_detach_trunk = bool(getattr(mcfg, "mtp_detach_trunk", True))
-        mtp_detach_shared_output = bool(getattr(mcfg, "mtp_detach_shared_output", False))
+        mtp_detach_shared_output = bool(getattr(mcfg, "mtp_detach_shared_output", True))
         mtp_loss_chunk_size = getattr(mcfg, "mtp_loss_chunk_size", 1024)
         mtp_loss_topk = getattr(mcfg, "mtp_loss_topk", None)
+
+        if mtp_enabled:
+            # The decoupled draft training records the MTP block's inputs with a forward pre-hook
+            # and replays the block afterwards; module hooks do not fire inside CUDA-graph replay,
+            # so the capture would silently see nothing and the draft loss would vanish.
+            assert (
+                not getattr(model_config, "enable_cuda_graph", False)
+                and not getattr(model_config, "external_cuda_graph", False)
+                and getattr(model_config, "cuda_graph_impl", "none") in (None, "none")
+            ), "MTP draft training uses forward hooks and cannot be combined with Megatron CUDA graphs"
 
         if os.environ.get("MTP_DEBUG"):
             from megatron.core.utils import unwrap_model as _uw
@@ -350,11 +361,29 @@ class MegatronModelWrapper:
                 # Undo the in-place temperature scaling so the teacher is the true policy
                 # distribution (student logits are produced unscaled).
                 teacher_src = logits if temperature == 1.0 else logits * temperature
+                # Megatron may pad the global vocab to divide across TP (should_pad_vocab); padded
+                # weight rows are never trained, so their logits would leak probability mass into
+                # the teacher softmax and could steal teacher top-k slots. Slice this rank's shard
+                # to its true width (a view; autograd zero-fills the tail's grad). model_config here
+                # is the bridge provider, whose vocab_size is the true (unpadded) HF vocab; the
+                # vocab_start_index passed to hard CE keeps the PADDED stride (global column offset).
+                true_shard_width = unpadded_vocab_shard_width(
+                    getattr(model_config, "vocab_size", None), vocab_size_tp, tp_rank
+                )
+                if true_shard_width != vocab_size_tp:
+                    teacher_src = teacher_src[..., :true_shard_width]
                 hard_labels = build_mtp_next_token_labels(sequences) if mtp_loss_type == "hard_ce" else None
 
                 per_layer_losses = []
                 for layer_idx, student_logits in enumerate(student_logits_list):
-                    layer_mask = shift_mask_for_mtp(draft_mask, layer_idx)
+                    if true_shard_width != vocab_size_tp:
+                        student_logits = student_logits[..., :true_shard_width]
+                    # The hard label for position t at depth k is the *token* seq[t+k+2] — one
+                    # position past the soft-CE teacher (a *distribution* read at t+k+1) — so its
+                    # validity mask needs one extra shift. Without it, the last in-range position of
+                    # every row trains against a zeroed/pad label.
+                    mask_shift = layer_idx + 1 if mtp_loss_type == "hard_ce" else layer_idx
+                    layer_mask = shift_mask_for_mtp(draft_mask, mask_shift)
                     if mtp_loss_type == "hard_ce":
                         layer_labels = torch.roll(hard_labels, shifts=-(layer_idx + 1), dims=1)
                         per_layer_losses.append(
@@ -610,7 +639,15 @@ class MegatronModelWrapper:
             # main logits stay coupled to the trunk; MTPLossAutoScaler never runs).
             student_hidden = None
             student_model = None
-            with maybe_capture_mtp_hidden(model, mtp_enabled, detach_trunk=mtp_detach_trunk) as capture:
+            with maybe_capture_mtp_hidden(
+                model,
+                mtp_enabled,
+                detach_trunk=mtp_detach_trunk,
+                # Full shared-weight isolation also requires detaching the MTP block's re-embedding
+                # of the rolled input ids (the second gradient path into the tied embedding/lm_head,
+                # next to the output projection handled in project_mtp_hidden_to_logits).
+                detach_shared_embedding=mtp_detach_shared_output,
+            ) as capture:
                 outputs = model(
                     new_sequences,
                     new_position_ids,

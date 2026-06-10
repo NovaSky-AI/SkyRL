@@ -79,6 +79,30 @@ def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.T
     return mask * rolled
 
 
+def unpadded_vocab_shard_width(
+    true_vocab_size: Optional[int],
+    vocab_shard_width: int,
+    tp_rank: int,
+) -> int:
+    """Width of this rank's vocab shard excluding Megatron's padded tail.
+
+    When the global vocab is padded to divide across TP (``should_pad_vocab``), the padding occupies
+    the tail of the last rank(s)' shards (the vocab is partitioned contiguously). Padded weight rows
+    are never trained (zero-filled by the HF conversion), so their logits must not enter the draft
+    loss: in the teacher softmax they leak ~uniform probability mass, and in the teacher top-k they
+    can steal slots from real tokens. Callers slice ``logits[..., :width]`` — a view, so autograd
+    zero-fills the padded tail's gradient and per-rank widths may differ (the loss collectives only
+    reduce ``[..., 1]``/``[...]``-shaped tensors, never the vocab dim).
+
+    Returns ``vocab_shard_width`` unchanged when ``true_vocab_size`` is ``None`` (unknown) or the
+    shard holds no padding.
+    """
+    if true_vocab_size is None:
+        return vocab_shard_width
+    start = tp_rank * vocab_shard_width
+    return max(0, min(vocab_shard_width, true_vocab_size - start))
+
+
 def _vocab_parallel_softmax(vocab_parallel_logits, group):
     """Global softmax over a TP-sharded vocab dim. Allocates a single full-vocab output tensor (the
     ``- logits_max`` subtraction) and does the rest in place on it; the input is NOT mutated (so it is
@@ -301,13 +325,13 @@ class _VocabParallelTopkSoftCE(torch.autograd.Function):
     def backward(ctx, grad_output):
         q_s, t_p, t_idx = ctx.saved_tensors
         # d(H(p,q))/d(student_logit_v) = softmax(student)_v - softmax(teacher)_v, over the union; zero
-        # elsewhere. Scatter the k per-token grads back to this rank's own vocab columns.
+        # elsewhere. Scatter the k per-token grads back to this rank's own vocab columns. The full-vocab
+        # buffer is allocated directly in the input dtype (the only fp32->input cast is the tiny [.., k]
+        # grad); an fp32 buffer here would double the largest transient of the whole loss.
         grad_topk = (q_s - t_p) * grad_output.unsqueeze(-1)
-        grad_student = torch.zeros(
-            *t_idx.shape[:-1], ctx.vocab_size, dtype=grad_topk.dtype, device=grad_topk.device
-        )
-        grad_student.scatter_(-1, t_idx, grad_topk)
-        return grad_student.to(ctx.input_dtype), None, None, None, None
+        grad_student = torch.zeros(*t_idx.shape[:-1], ctx.vocab_size, dtype=ctx.input_dtype, device=grad_topk.device)
+        grad_student.scatter_(-1, t_idx, grad_topk.to(ctx.input_dtype))
+        return grad_student, None, None, None, None
 
 
 def draft_soft_ce_topk(
@@ -401,7 +425,5 @@ def draft_hard_ce(
         return -log_probs.gather(dim=-1, index=lbl.unsqueeze(-1).long()).squeeze(-1)
 
     if chunk_size is not None and student_logits.shape[1] > chunk_size:
-        return _chunked_masked_loss(
-            per_token, (student_logits, labels), mask, chunk_size, global_normalization_factor
-        )
+        return _chunked_masked_loss(per_token, (student_logits, labels), mask, chunk_size, global_normalization_factor)
     return _masked_mean_or_global(per_token(student_logits, labels), mask, global_normalization_factor)

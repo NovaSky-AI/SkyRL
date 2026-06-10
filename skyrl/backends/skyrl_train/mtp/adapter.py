@@ -57,10 +57,15 @@ def project_mtp_hidden_to_logits(hidden_states_per_layer, model, detach_output_w
     output_weight = None
     if getattr(model, "share_embeddings_and_output_weights", False):
         output_weight = model.shared_embedding_or_output_weight()
-        if detach_output_weight:
-            # Optionally isolate the shared embedding/output-layer from the draft
-            # gradient too (default keeps NeMo's behaviour: only the trunk hidden
-            # states are detached).
+    if detach_output_weight:
+        # Isolate the output projection from the draft gradient: detach the shared/tied weight,
+        # or — for untied models — pass the output layer's own weight explicitly as a detached
+        # tensor (ColumnParallelLinear uses a provided ``weight`` verbatim). Mirrors slime's
+        # MTP-RL megatron patch. Combined with the capture's detached re-embedding, the draft
+        # loss then trains only the MTP-head parameters.
+        if output_weight is None:
+            output_weight = getattr(model.output_layer, "weight", None)
+        if output_weight is not None:
             output_weight = output_weight.detach()
 
     logits_per_layer = []
