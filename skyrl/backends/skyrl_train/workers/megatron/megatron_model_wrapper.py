@@ -395,7 +395,7 @@ class MegatronModelWrapper:
                                     chunk_size=mtp_loss_chunk_size,
                                 )
                             )
-                draft_loss = torch.stack(per_layer_losses).mean() 
+                draft_loss = torch.stack(per_layer_losses).mean()
                 # Drop the dict's reference, this microbatch's autograd graph still holds the
                 # tensor for its own backward, after which it is freed instead of lingering.
                 del data["mtp_student_logits"]

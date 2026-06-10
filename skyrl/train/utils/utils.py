@@ -771,6 +771,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_OFFLINE",
         "MTP_DEBUG",
         "PYTORCH_CUDA_ALLOC_CONF",
+        # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
+        "CUDA_LAUNCH_BLOCKING",
+        "PYTHONFAULTHANDLER",
+        "TORCH_SHOW_CPP_STACKTRACES",
+        "TORCH_USE_CUDA_DSA",
+        "NCCL_DEBUG",
     ):
         if value := os.environ.get(var_name):
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")

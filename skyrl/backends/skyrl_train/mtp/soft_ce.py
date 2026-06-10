@@ -51,14 +51,32 @@ def build_teacher_logits(
 def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.Tensor:
     """Roll a ``[batch, seq]`` loss mask to align with an MTP teacher/label.
 
-    Positions that wrap around the sequence end have no valid target, so they
-    are zeroed. This mirrors how Megatron's ``roll_tensor`` zeros the wrapped
-    boundary inside ``process_mtp_loss``.
+    MTP depth ``k`` supervises position ``t`` against a target read at ``t + k + 1``
+    (the policy distribution / label for ``seq[t + k + 2]``). For that supervision to
+    be valid, BOTH the *source* position ``t`` (where the draft head produced its
+    logits) and the *target* position ``t + k + 1`` (where the teacher/label is read)
+    must be real tokens. We therefore require ``mask[t] AND mask[t + shift]``:
+
+    * ``rolled = roll(mask, -shift)`` is the target-side validity ``mask[t + shift]``,
+      with the wrapped tail zeroed (no valid target past the sequence end).
+    * multiplying by the original ``mask`` re-applies the source-side validity.
+
+    The source-side ``AND`` is what makes this correct under **left padding** (and any
+    padding layout): rolling a left-padded mask left turns the last pad slot into a
+    ``1`` (its target is the first real token), which would otherwise pull a de-padded
+    *zero-logit* (→ uniform) pad position into the loss and inflate it by up to
+    ``log(V)`` per leaked position. Re-ANDing the source mask drops those positions, so
+    the loss no longer depends on the de-pad zero-fill happening to be masked out.
+
+    Note: each de-padded row holds a single sequence, so the one wrapped boundary is
+    handled by zeroing ``rolled``'s tail. If multiple sequences are ever packed into a
+    single row, per-sequence boundaries would need ``roll_tensor``-style cu_seqlens
+    handling here.
     """
     shift = mtp_layer_number + 1
     rolled = torch.roll(mask, shifts=-shift, dims=1)
     rolled[:, -shift:] = 0
-    return rolled
+    return mask * rolled
 
 
 def _vocab_parallel_softmax(vocab_parallel_logits, group):

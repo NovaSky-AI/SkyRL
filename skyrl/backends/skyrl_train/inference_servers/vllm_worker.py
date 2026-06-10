@@ -84,6 +84,10 @@ class WorkerWrap:
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         # Unpickle request to restore the original object type
         assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
         request = pickle.loads(request)
@@ -94,6 +98,7 @@ class WorkerWrap:
 
         with torch.device(self.device), set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(weights_iterator=iter(weight_list))
+            _reload_spec_decode_drafter(self.model_runner, weight_list)
 
         for weight in weight_list:
             del weight
