@@ -874,6 +874,8 @@ def _build_trainer(tokenizer, sft_cfg):
     trainer = object.__new__(SFTTrainer)
     trainer.sft_cfg = sft_cfg
     trainer.tokenizer = tokenizer
+    trainer.is_vlm = False
+    trainer.processor = None
     return trainer
 
 
