@@ -500,6 +500,14 @@ class MegatronWorker:
         # The underlying offloadable module is `self.actor_module` instead of `self.model`.
         return self.actor_module
 
+    def _drop_pixel_values_on_non_first_pp_stage(self, data: TrainingInputBatch) -> None:
+        """
+        Drop ``pixel_values`` from the batch on every pipeline stage except the first.
+        Do this prior to moving to GPU to save memory
+        """
+        if mpu.get_pipeline_model_parallel_rank() != 0 and data.get("pixel_values") is not None:
+            data["pixel_values"] = None
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
@@ -670,6 +678,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_dicts = []
             device = torch.cuda.current_device()
             for micro in micro_batches:
+                self._drop_pixel_values_on_non_first_pp_stage(micro)
                 micro.to(device)
                 sequences = micro["sequences"]
                 attention_mask = micro["attention_mask"]
@@ -683,6 +692,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 vlm_inputs = {}
                 if micro.get("pixel_values") is not None:
                     vlm_inputs["pixel_values"] = micro.get("pixel_values")
+                if micro.get("image_grid_thw") is not None:
                     vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
 
                 micro_dicts.append(
@@ -718,6 +728,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -735,6 +746,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             vlm_inputs = {}
             if experience.pixel_values is not None:
                 vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
                 vlm_inputs["image_grid_thw"] = experience.image_grid_thw
 
             micro_buffer.append(
@@ -828,6 +840,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -845,6 +858,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             vlm_inputs = {}
             if experience.pixel_values is not None:
                 vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
                 vlm_inputs["image_grid_thw"] = experience.image_grid_thw
 
             micro_buffer.append(
@@ -1222,11 +1236,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
-            vlm_inputs = {}
-            if micro.get("pixel_values") is not None:
-                vlm_inputs["pixel_values"] = micro.get("pixel_values")
-                vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
-
             micro_dicts.append(
                 {
                     "sequences": sequences,
@@ -1234,7 +1243,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": num_actions,
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    **vlm_inputs,
                 }
             )
 

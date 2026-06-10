@@ -564,14 +564,17 @@ def _tokenize_chat_last_assistant(
     # token ids and any image tensors back out.
     processing_class = processor or tokenizer
 
+    length_kwargs = {}
+    if max_length is not None and processor is None:
+        length_kwargs = dict(truncation=True, max_length=max_length)
+
     # Tokenize prompt (everything except last assistant message)
     prompt_ids = processing_class.apply_chat_template(
         messages[:-1],
         add_generation_prompt=True,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
         return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
@@ -580,14 +583,21 @@ def _tokenize_chat_last_assistant(
         messages,
         add_generation_prompt=False,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
         return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
     full_input_ids = _unbatch(full_ids["input_ids"])
     full_prompt_ids = _unbatch(prompt_ids["input_ids"])
+
+    # VLM samples can't be safely truncated (it would drop image placeholder tokens
+    # and break image/text alignment), so drop anything that exceeds the limit.
+    if processor is not None and max_length is not None and len(full_input_ids) > max_length:
+        logger.warning(
+            f"Dropping VLM sample longer than max_length={max_length}, consider increasing max_length if you see this warning too much"
+        )
+        return None
 
     vlm_kwargs = {}  # We only support Qwen-style image kwargs at the moment
     if "pixel_values" in full_ids and "image_grid_thw" in full_ids:
@@ -595,14 +605,6 @@ def _tokenize_chat_last_assistant(
             pixel_values=full_ids["pixel_values"],
             image_grid_thw=full_ids["image_grid_thw"],
         )
-        # If truncation dropped some <|image_pad|> tokens, the image tensors no
-        # longer match the text and the sample must be skipped.
-        merge_size = processor.image_processor.merge_size
-        n_image_pads = full_input_ids.count(tokenizer.convert_tokens_to_ids("<|image_pad|>"))
-        expected_image_pads = sum(int(thw.prod() // (merge_size**2)) for thw in full_ids["image_grid_thw"])
-        if n_image_pads != expected_image_pads:
-            logger.warning("Dropping sample due to truncated image, consider increasing max_length")
-            return None
 
     num_actions = len(full_input_ids) - len(full_prompt_ids)
     if num_actions <= 0:
@@ -724,8 +726,8 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         loss_masks.append([0] * action_pad + ex["loss_mask"])
 
         if batch_has_images:
-            pixel_values.append(ex["pixel_values"])
-            image_grid_thw.append(ex["image_grid_thw"])
+            pixel_values.append(torch.as_tensor(ex["pixel_values"]))
+            image_grid_thw.append(torch.as_tensor(ex["image_grid_thw"]))
 
     batch = TrainingInputBatch(
         {

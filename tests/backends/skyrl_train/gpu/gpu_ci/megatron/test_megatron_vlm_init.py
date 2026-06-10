@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_vlm_init.py
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_vlm_init.py
 """
 
 import pytest
@@ -51,9 +51,8 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     Returns a VLM training batch with one image per sample.
 
-    Builds a batch of ``batch_size`` identical sequences with variable amounts of
-    left/right padding, the corresponding ``pixel_values`` / ``image_grid_thw``
-    TensorLists, and dummy loss/log-prob fields.
+    Builds a batch of ``batch_size`` sequences with variable amounts of
+    left padding
     """
     assert batch_size % 4 == 0, "batch size must be divisible by 4"
     num_repeats = batch_size // 4
@@ -89,19 +88,15 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     image_grid_thw = [processor_output["image_grid_thw"]] * batch_size
     attention_masks = [[1] * len(seq) for seq in sequences]
     num_actions = 15
-    # max seq len a few tokens longer than the longest sequence so we always pad
-    max_seq_length = max(len(seq) for seq in sequences) + 7
 
     pad_token_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
     pad_before = [4, 0, 1, 6] * num_repeats
-    pad_after = [max_seq_length - len(seq) - pad_before[i] for i, seq in enumerate(sequences)]
-    loss_masks = torch.stack(
-        [torch.cat([torch.ones(num_actions - pad_after[i]), torch.zeros(pad_after[i])]) for i in range(batch_size)]
-    )
+    loss_masks = torch.ones(batch_size, num_actions)
 
-    for i, (pb, pa) in enumerate(zip(pad_before, pad_after)):
-        sequences[i] = [pad_token_id] * pb + sequences[i] + [pad_token_id] * pa
-        attention_masks[i] = [0] * pb + attention_masks[i] + [0] * pa
+    for i, pb in enumerate(pad_before):
+        trunc = len(sequences[i]) - pb
+        sequences[i] = [pad_token_id] * pb + sequences[i][:trunc]
+        attention_masks[i] = [0] * pb + attention_masks[i][:trunc]
 
     attention_masks = torch.tensor(attention_masks)
     sequences = torch.tensor(sequences)
@@ -128,28 +123,23 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node"),
+    ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 2, 1, 1, 1, None, 2),
+        ("policy", 2, 1, 2),
+        ("policy", 1, 2, 4),
     ],
     ids=[
         "tp2_pp1_policy",
+        "tp1_pp2_policy",
     ],
 )
 @pytest.mark.megatron
-async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node):
-    """
-    Test that the Megatron VLM forward pass produces finite log-probs that line
-    up with a plain HuggingFace forward over the same images and tokens.
-    """
+async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
     cfg = get_test_actor_config(model_name=MODEL_NAME)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
-    cfg.trainer.policy.megatron_config.context_parallel_size = cp
-    cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
-    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.remove_microbatch_padding = False
     batch = get_test_training_batch(max(4, gpus_per_node))
 
@@ -171,14 +161,57 @@ async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, cp, e
         pad_width = num_actions - action_log_probs_megatron.shape[1]
         action_log_probs_megatron = torch.nn.functional.pad(action_log_probs_megatron, (0, pad_width))
 
+    # Check only the non-padding response tokens (padding positions can be -inf).
+    response_mask = batch["attention_mask"][:, -num_actions:].bool()
+    action_log_probs_megatron_masked = action_log_probs_megatron[response_mask]
+
+    assert not action_log_probs_megatron_masked.isnan().any()
+    assert not action_log_probs_megatron_masked.isinf().any()
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+async def test_vlm_sft_hf_parity(ray_init_fixture):
+    cfg = get_test_actor_config(model_name=MODEL_NAME)
+    cfg.trainer.strategy = "megatron"
+    # fp32 + fused (non-flash) attention so the two forwards are numerically
+    # comparable; flash attention requires fp16/bf16.
+    cfg.trainer.bf16 = False
+    cfg.trainer.flash_attn = False
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = 1
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = None
+    cfg.trainer.remove_microbatch_padding = False
+    batch = get_test_training_batch(batch_size=4)
+
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=1,
+        cfg=cfg,
+    )
+
+    action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
+    megatron_output = WorkerOutput.cat(actor_group.actor_infos, ray.get(action_log_probs_refs))
+    action_log_probs_megatron = loss_fn_outputs_to_tensor(megatron_output.loss_fn_outputs, key="logprobs")
+
+    num_actions = batch.metadata["response_length"]
+    if action_log_probs_megatron.shape[1] < num_actions:
+        pad_width = num_actions - action_log_probs_megatron.shape[1]
+        action_log_probs_megatron = torch.nn.functional.pad(action_log_probs_megatron, (0, pad_width))
+
     ray.shutdown()
     ray_init_for_tests()
 
     @ray.remote(num_gpus=1)
     def run_hf_forward(batch, model_name):
-        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, dtype=torch.bfloat16)
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, dtype=torch.float32)
         model = AutoModelForImageTextToText.from_pretrained(
-            model_name, config=config, trust_remote_code=True, dtype=torch.bfloat16
+            model_name, config=config, trust_remote_code=True, dtype=torch.float32
         )
         model.eval()
         model.to("cuda")
@@ -204,7 +237,7 @@ async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, cp, e
             mm_token_type_ids.to("cuda"),
         )
 
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad():
             output = model(
                 sequences_fwd,
                 attention_mask=attention_mask,
@@ -217,31 +250,89 @@ async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, cp, e
 
         return attention_mask.to("cpu").detach(), action_log_probs.to("cpu").detach(), num_actions
 
-    attention_mask, action_log_probs, num_actions = ray.get(run_hf_forward.remote(batch, MODEL_NAME))
+    attention_mask, action_log_probs_hf, num_actions = ray.get(run_hf_forward.remote(batch, MODEL_NAME))
 
     # Compare only the non-padding response tokens.
     response_mask = attention_mask[:, -num_actions:].bool()
-    action_log_probs_megatron_masked = action_log_probs_megatron[response_mask]
+    megatron_masked = action_log_probs_megatron[response_mask]
+    hf_masked = action_log_probs_hf[response_mask]
 
-    assert not action_log_probs_megatron_masked.isnan().any()
-    assert not action_log_probs_megatron_masked.isinf().any()
+    max_abs_diff = (megatron_masked - hf_masked).abs().max().item()
+    mean_abs_diff = (megatron_masked - hf_masked).abs().mean().item()
+    print(
+        f"VLM SFT HF parity | response_tokens={int(response_mask.sum().item())} "
+        f"max_abs_diff={max_abs_diff:.6f} mean_abs_diff={mean_abs_diff:.6f}"
+    )
+    assert max_abs_diff < 5e-1, f"Max diff {max_abs_diff} is too large"
+    assert mean_abs_diff < 9e-2, f"Avg diff {mean_abs_diff} is too large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tp", "cp", "sequence_parallel_size", "remove_microbatch_padding", "gpus_per_node", "expected_substring"),
+    [
+        (1, 1, 1, True, 2, "microbatch padding"),
+        (2, 1, 2, False, 2, "sequence parallelism"),
+    ],
+    ids=[
+        "microbatch_padding",
+        "sequence_parallel",
+    ],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_unsupported_parallelism_raises(
+    ray_init_fixture, tp, cp, sequence_parallel_size, remove_microbatch_padding, gpus_per_node, expected_substring
+):
+    cfg = get_test_actor_config(model_name=MODEL_NAME)
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = None
+    cfg.trainer.policy.sequence_parallel_size = sequence_parallel_size
+    cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
+    batch = get_test_training_batch(max(4, gpus_per_node))
+
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
+
+    action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
+    with pytest.raises(Exception) as excinfo:
+        ray.get(action_log_probs_refs)
+    assert expected_substring in str(excinfo.value)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
+        ("policy", 1, 1, 4),
+        ("policy", 2, 1, 4),
         ("policy", 1, 2, 4),
+        ("policy", 2, 2, 4),
     ],
     ids=[
-        "tp1_pp2",
+        "tp1_pp1_dp4",
+        "tp2_pp1_dp2",
+        "tp1_pp2_dp2",
+        "tp2_pp2_dp1",
     ],
 )
 @pytest.mark.megatron
 async def test_vlm_train(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
     """
-    Full SFT loop: build an SFTTrainer for a VLM, run 5 train steps on a fixed
-    image batch, and assert the loss decreases.
+    Parallelism sweep: build an SFTTrainer for a VLM and run 5 train steps on a
+    fixed image batch under each TP/PP/DP combination, asserting the loss
+    decreases. With 4 GPUs the combos cover pure DP (DP=4), TP only (DP=2),
+    PP only (DP=2, exercises the PP-rank-0-only image dispatch), and the
+    TP+PP combo (DP=1).
     """
     batch_size = gpus_per_node * 4
     batch_examples = get_test_training_batch(batch_size=batch_size)
@@ -249,6 +340,7 @@ async def test_vlm_train(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
     sft_config = SFTConfig(
         model=ModelConfig(path=MODEL_NAME),
         strategy="megatron",
+        num_steps=5,
         placement=SFTPlacementConfig(num_gpus_per_node=gpus_per_node),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=tp,
@@ -264,5 +356,4 @@ async def test_vlm_train(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
         step_i_outputs = trainer.train_step(batch_examples, training_step_i)
         training_losses.append(step_i_outputs["loss"])
 
-    print(training_losses)
     assert training_losses[0] > training_losses[-1]
