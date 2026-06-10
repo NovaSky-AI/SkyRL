@@ -664,7 +664,13 @@ class TrainerConfig(BaseConfig):
     """Maximum number of tokens per microbatch. When > 0, microbatches are formed by bin-packing
     samples based on their token counts (from attention_mask) instead of using a fixed sample count.
     -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
-    Applies to both forward and training micro-batching."""
+    Applies to both forward and training micro-batching.
+
+    NOTE: this is a *soft* cap. Sequences are never split across microbatches, so a single sequence
+    longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
+    cap (no error, no truncation). The true peak microbatch size is therefore
+    ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``. To keep the cap meaningful (and
+    avoid OOM), set it ``>= max_prompt_length + max_generate_length`` so any single sequence fits."""
     recompute_old_logprobs_per_minibatch: bool = False
     """When True, compute the pre-training policy logprobs (and critic values) per mini-batch using
     the same mini-batch + DP partition as the training step, instead of a single full-batch forward.

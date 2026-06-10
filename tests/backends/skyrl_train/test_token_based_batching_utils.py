@@ -60,6 +60,30 @@ class TestBalancedBinpacking:
             total = sum(token_counts[i] for i in mb)
             assert total <= max_tokens
 
+    def test_oversized_sequence_gets_own_microbatch(self):
+        """A single sequence longer than max_tokens is never split: it lands alone in its own
+        microbatch that exceeds the (soft) cap, while the other sequences still pack normally."""
+        token_counts = [100, 10, 10]
+        max_tokens = 50
+        result = balanced_binpacking(token_counts, max_tokens)
+
+        # Every sequence is placed exactly once.
+        assert sorted(idx for mb in result for idx in mb) == [0, 1, 2]
+        # The oversized sequence (index 0) is alone in its own microbatch, exceeding the cap.
+        oversized_mb = next(mb for mb in result if 0 in mb)
+        assert oversized_mb == [0]
+        assert sum(token_counts[i] for i in oversized_mb) > max_tokens
+        # The remaining (fitting) sequences still respect the cap.
+        for mb in result:
+            if mb == oversized_mb:
+                continue
+            assert sum(token_counts[i] for i in mb) <= max_tokens
+
+    def test_single_oversized_sequence(self):
+        """A lone sequence longer than max_tokens still yields one microbatch (no error/split)."""
+        result = balanced_binpacking([100], 50)
+        assert result == [[0]]
+
 
 class TestTokenBasedBatchIterator:
     def _make_batch(self, seq_lens, num_actions=4):
