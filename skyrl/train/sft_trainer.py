@@ -55,6 +55,7 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.batch_prefetcher import BatchPrefetcher
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -812,6 +813,7 @@ class SFTTrainer:
         # Stateful dataloaders, built in train() once data is tokenized.
         self.train_dataloader: StatefulDataLoader | None = None
         self.eval_dataloader: StatefulDataLoader | None = None
+        self._checkpoint_dataloader_state: dict | None = None
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
@@ -1850,6 +1852,14 @@ class SFTTrainer:
         # their state across the (conceptual) epoch boundaries.
         data_iter = iter(self.train_dataloader)
 
+        prefetch_enabled = self.sft_cfg.prefetch_data
+        prefetcher: Optional[BatchPrefetcher] = (
+            BatchPrefetcher(lambda _step: next(data_iter, None), thread_name_prefix="sft-prefetch")
+            if prefetch_enabled
+            else None
+        )
+        logger.info(f"SFT data prefetch (double-buffering): {'ENABLED' if prefetch_enabled else 'disabled'}")
+
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
@@ -1858,10 +1868,15 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Fetch the next batch; on epoch exhaustion, close the epoch and
-                    # restart the iterator (reshuffles the random/sequential samplers).
+                    # Consume a collated-ahead batch when available. ``None``
+                    # marks iterator exhaustion, so epoch transitions remain owned
+                    # by StatefulDataLoader and its sampler.
                     with Timer("data_loading", all_timings):
-                        batch = next(data_iter, None)
+                        if prefetcher is not None and prefetcher.pending_step() == self.global_step:
+                            batch = prefetcher.get(self.global_step)
+                            self._checkpoint_dataloader_state = None
+                        else:
+                            batch = next(data_iter, None)
                     if batch is None:
                         self._fire("on_epoch_end")
                         current_epoch += 1
@@ -1870,6 +1885,13 @@ class SFTTrainer:
                         data_iter = iter(self.train_dataloader)
                         with Timer("data_loading", all_timings):
                             batch = next(data_iter)
+
+                    if prefetcher is not None and self.global_step < num_steps:
+                        # Advancing the iterator in the worker moves the live
+                        # dataloader state one batch ahead. Preserve the state after
+                        # the current batch so checkpoints still resume exactly.
+                        self._checkpoint_dataloader_state = self.train_dataloader.state_dict()
+                        prefetcher.submit(self.global_step + 1)
 
                     self._fire("on_step_start", batch=batch)
 
@@ -1965,6 +1987,13 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
+            # Always tear down the prefetch thread (drains any in-flight
+            # batch and joins the worker) so neither the background thread
+            # nor the dataset reference is leaked, even on exception. No-op
+            # when prefetch is disabled.
+            if prefetcher is not None:
+                prefetcher.shutdown()
+            self._checkpoint_dataloader_state = None
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)
@@ -2040,7 +2069,8 @@ class SFTTrainer:
             dataloader_save_path = os.path.join(global_step_folder, "data.pt")
             try:
                 with io.open_file(dataloader_save_path, "wb") as f:
-                    torch.save(self.train_dataloader.state_dict(), f)
+                    dataloader_state = self._checkpoint_dataloader_state or self.train_dataloader.state_dict()
+                    torch.save(dataloader_state, f)
                 logger.info(f"Saved dataloader state to {dataloader_save_path}")
             except Exception as e:
                 logger.warning(f"Failed to save dataloader state: {e}")
