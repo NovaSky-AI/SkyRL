@@ -83,6 +83,7 @@ def _api_server(port: int, backend_config: dict | None = None):
         cmd = [
             "uv",
             "run",
+            "--isolated",
             "--extra",
             "tinker",
             "--extra",
@@ -282,13 +283,9 @@ def test_delete_then_train_remaining(service_client):
             api_key=TINKER_API_KEY, base_url=f"http://0.0.0.0:{TEST_PORT}/"
         ) as client:
             future = await client.models.unload(request=tinker_types.UnloadModelRequest(model_id=model_id))
-            while True:
-                result = await client.futures.retrieve(
-                    request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
-                )
-                if isinstance(result, tinker_types.UnloadModelResponse):
-                    return result
-                await asyncio.sleep(0.1)
+            return await client.futures.retrieve(
+                request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
+            )
 
     asyncio.run(_unload(a.model_id))
 

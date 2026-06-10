@@ -18,7 +18,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.train_batch_size=16 \
   trainer.max_prompt_length=512 \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   trainer.micro_train_batch_size_per_gpu=8 \
   trainer.micro_forward_batch_size_per_gpu=32 \
   generator.sampling_params.max_generate_length=1024 \

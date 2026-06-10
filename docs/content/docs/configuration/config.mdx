@@ -51,7 +51,7 @@ critic_mini_batch_size: 256
 micro_train_batch_size_per_gpu: 1
 micro_forward_batch_size_per_gpu: 1
 update_ref_every_epoch: false
-use_sample_packing: true
+remove_microbatch_padding: true
 max_prompt_length: 512
 gradient_checkpointing: true
 seed: 42
@@ -66,7 +66,7 @@ seed: 42
 - `micro_train_batch_size_per_gpu`: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches.
 - `micro_forward_batch_size_per_gpu`: Micro batch size during forward pass (i.e., for log probability or value computation). This is common for both policy and critic models. Each mini batch is split into micro batches of this size, model forward pass is performed over these micro batches.
 - `update_ref_every_epoch`: Whether to update the reference model every epoch.
-- `use_sample_packing`: Whether to use sample packing during model forward pass (common for all models).
+- `remove_microbatch_padding`: Whether to pack samples and strip intra-microbatch padding during the model forward pass (requires flash attention; common for all models).
 - `max_prompt_length`: Maximum prompt length during training. Longer prompts will be truncated.
 - `gradient_checkpointing`: Whether to use gradient checkpointing.
 - `seed`: Random seed for training.
@@ -374,7 +374,7 @@ algorithm:
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
   policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
-  loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+  loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "prompt_mean"
   grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
   zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
 
@@ -495,6 +495,7 @@ algorithm:
   - `token_mean`: computes average loss over all valid tokens in the batch. Used in [DAPO](https://dapo-sia.github.io/).
   - `sequence_mean`: computes per-sequence avg token loss, then averages over the batch.
   - `seq_mean_token_sum_norm`: computes the sum of token losses for each sequence, normalizes by `max_seq_len`, and then averages over the batch. This is used in [Dr. GRPO](https://arxiv.org/abs/2503.20783). `algorithm.max_seq_len` must be set explicitly for this mode because multi-turn/token budgets are workload-dependent.
+  - `prompt_mean`: computes the average token loss within each prompt group (all `generator.n_samples_per_prompt` responses sampled for a prompt), then averages over prompts. Unlike `token_mean`, every prompt contributes equally regardless of how many tokens its responses contain.
 
 - `algorithm.grpo_norm_by_std`: Whether to normalize advantages by the standard deviation in GRPO. This is set to `false` in [Dr. GRPO](https://arxiv.org/abs/2503.20783).
 - `algorithm.zero_variance_filter`: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.

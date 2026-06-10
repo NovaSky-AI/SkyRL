@@ -14,7 +14,6 @@ High-level notes:
 import asyncio
 import inspect
 import os
-import sys
 import traceback
 from dataclasses import dataclass
 from typing import Iterable, List, Set, Tuple
@@ -288,6 +287,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Initialize base trainer
         super().__init__(*args, **kwargs)
 
+        # Callbacks aren't wired into FullyAsyncRayPPOTrainer.train() yet — fail
+        # fast
+        if self._callback_handler.callbacks:
+            raise NotImplementedError("Callbacks are not yet supported by FullyAsyncRayPPOTrainer. ")
+
         # Some async-specific validations
         assert (
             self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
@@ -311,6 +315,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
         )
+
+    def add_callback(self, callback):
+        raise NotImplementedError("Callbacks are not yet supported by FullyAsyncRayPPOTrainer. ")
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -465,7 +472,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     and self.global_step > self.cfg.trainer.max_training_steps
                 ):
                     logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
-                    self.global_step = self.cfg.trainer.max_training_steps
                     for t in generator_tasks:
                         t.cancel()
                     await asyncio.gather(*generator_tasks, return_exceptions=True)
@@ -614,19 +620,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 except asyncio.QueueFull:
                     raise AssertionError("Generation buffer should never be full given staleness control.")
                 await self._staleness_manager.on_rollout_accepted()
+                slot_acquired = False
         except asyncio.CancelledError:
-            # If a slot was acquired but we exit early, release running count
-            try:
-                if "slot_acquired" in locals() and slot_acquired:
-                    raise RuntimeError("Generation workers should only be cancelled when they finish running.")
-            finally:
-                return
+            if "slot_acquired" in locals() and slot_acquired:
+                logger.error("Generation worker cancelled mid-flight (slot acquired). Exiting.")
+                os._exit(1)
+            return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
             logger.error(f"Traceback: \n{traceback.format_exc()}")
-            if "slot_acquired" in locals() and slot_acquired:
-                raise RuntimeError("Generation workers should only run into error when they finish running.")
-            sys.exit(1)
+            os._exit(1)
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
@@ -684,19 +687,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return self.convert_to_training_input(generator_output, uids)
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> str:
         """
         Extend base checkpointing by recording consumed UIDs for fully-async training.
 
         Otherwise, when resuming, there is no way to know which data has been trained on.
+        Returns the checkpoint folder path (forwarded from the base implementation).
         """
         consumed_uids_list = (
             self.async_train_dataloader.get_consumed_uids_list()
         )  # read first to prevent race condition
         # The base method will save the model, dataloader path, trainer_state, and latest_ckpt_global_step.txt.
-        super().save_checkpoints()
+        global_step_folder = super().save_checkpoints()
         # In addition, we need to save the consumed UIDs -- the data that we have already trained on.
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         fully_async_state_path = os.path.join(global_step_folder, "fully_async_state.pt")
         fully_async_state = {
             "consumed_uids": consumed_uids_list,
@@ -704,6 +707,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with io.open_file(fully_async_state_path, "wb") as f:
             torch.save(fully_async_state, f)
         logger.info(f"Saved fully-async state to {fully_async_state_path}")
+        return global_step_folder
 
     def load_checkpoints(self) -> Tuple[int, str, Set[str]]:
         """

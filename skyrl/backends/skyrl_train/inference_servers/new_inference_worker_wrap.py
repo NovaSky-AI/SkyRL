@@ -5,7 +5,7 @@ This module provides NewInferenceWorkerWrap, a vLLM worker extension that
 enables chunked weight updates from training to inference using the
 start/update/finish lifecycle:
 
-    start_weight_update   ->  one or more update_weights_chunk  ->  finish_weight_update
+    start_weight_update   ->  one or more update_weights_ipc  ->  finish_weight_update
 
 This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
@@ -64,7 +64,7 @@ class NewInferenceWorkerWrap:
 
     Provides a three-phase weight update protocol via collective_rpc:
         1. start_weight_update: Prepare model for receiving weights
-        2. update_weights_chunk: Receive and load one chunk of weights
+        2. update_weights_ipc: Receive and load one chunk of weights
         3. finish_weight_update: Finalize the model after all chunks
 
     Attributes accessed from the host GPUWorker (via mixin inheritance):
@@ -82,7 +82,7 @@ class NewInferenceWorkerWrap:
         machinery which moves layers to meta device and wraps weight loaders
         to defer processing until all weights for each layer are loaded.
 
-        Must be called before any update_weights_chunk calls.
+        Must be called before any update_weights_ipc calls.
 
         Args:
             is_checkpoint_format: True if incoming weights are in checkpoint
@@ -108,7 +108,7 @@ class NewInferenceWorkerWrap:
         self._skyrl_is_checkpoint_format = is_checkpoint_format
         self._skyrl_weight_update_active = True
 
-    def update_weights_chunk(self, update_info: dict) -> None:
+    def update_weights_ipc(self, update_info: dict) -> None:
         """
         Receive and load a single chunk of weights.
 
@@ -127,7 +127,7 @@ class NewInferenceWorkerWrap:
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_chunk.")
+            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -178,13 +178,53 @@ class NewInferenceWorkerWrap:
         # before the sender drops its reference on the next barrier).
         torch.accelerator.synchronize()
 
+    def update_weights_nccl(self, update_info: dict) -> None:
+        """
+        Receive a batched weight update via vLLM's NCCL weight transfer engine.
+
+        Alternative to update_weights_ipc for the broadcast (non-IPC) sender:
+        the trainer initiates an NCCL broadcast via
+        NCCLWeightTransferEngine.trainer_send_weights, and each inference
+        worker calls weight_transfer_engine.receive_weights here.
+
+        Routed through this skyrl wrap (rather than vLLM's native
+        /update_weights endpoint) so the load is wrapped with
+        set_current_vllm_config — process_weights_after_loading on MoE
+        models can otherwise instantiate kernels (e.g. FlashInfer CUTLASS)
+        whose __init__ reads get_current_vllm_config().
+
+        TODO: remove once the upstream vLLM patch lands (vllm-project/vllm
+        weight-sync-fix), then route via the native /update_weights endpoint.
+        https://github.com/vllm-project/vllm/pull/42577
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        model = self.model_runner.model
+
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.receive_weights(
+                typed_update_info,
+                load_weights=model.load_weights,
+            )
+
+        torch.accelerator.synchronize()
+
     def finish_weight_update(self) -> None:
         """
         Finalize the current weight update.
 
         For checkpoint-format weights, runs layerwise postprocessing
         (quantization repacking, attention weight processing, etc.).
-        Must be called after all update_weights_chunk calls are done.
+        Must be called after all update_weights_ipc calls are done.
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")

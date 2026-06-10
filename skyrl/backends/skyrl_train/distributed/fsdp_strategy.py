@@ -4,7 +4,6 @@ import json
 import os
 import random
 from collections import defaultdict
-from datetime import timedelta
 from typing import List, Optional, Union
 
 import numpy as np
@@ -98,7 +97,7 @@ class FSDPStrategy(DistributedStrategy):
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
+    def setup_distributed(self) -> None:
         self.set_seed(self.seed)
 
         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
@@ -219,6 +218,33 @@ class FSDPStrategy(DistributedStrategy):
         }
         module = model.model if is_wrapped else model
         full_state = module.state_dict()
+
+        # Move the entire module to meta before apply_fsdp2 so the sharded
+        # DTensors are allocated directly on GPU at their final sharded size,
+        # rather than first materializing the full model on each rank.
+        # Reference: huggingface/accelerate fsdp2_prepare_model uses the
+        # same pattern.
+        #
+        # Non-persistent buffers (e.g. RotaryEmbedding.inv_freq) are not in
+        # state_dict, so they would be wiped by the meta swap. We snapshot
+        # rank 0's values before the swap and restore them on rank 0 after,
+        # so _sync_non_persistent_buffers (inside fsdp2_load_full_state_dict)
+        # can broadcast real values to the other ranks.
+        non_persistent_snapshot = {}
+        if dist.get_rank() == 0:
+            for sub_name, sub in module.named_modules():
+                for bname in getattr(sub, "_non_persistent_buffers_set", set()):
+                    buf = sub._buffers.get(bname)
+                    if buf is not None and not buf.is_meta:
+                        non_persistent_snapshot[(sub_name, bname)] = buf.detach().clone()
+
+        module.to(torch.device("meta"))
+
+        if dist.get_rank() == 0:
+            for (sub_name, bname), buf in non_persistent_snapshot.items():
+                sub = module.get_submodule(sub_name) if sub_name else module
+                sub._buffers[bname] = buf
+
         apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
         fsdp2_load_full_state_dict(module, full_state, cpu_offload)
         return module

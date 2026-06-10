@@ -39,9 +39,37 @@ class BaseConfig(ABC):
 
 
 @dataclass
+class DataLoaderConfig(BaseConfig):
+    num_workers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Prompt DataLoader worker processes. Default of None auto-derives the value "
+                "(0 with the inference HTTP endpoint, else 8). Set 0 for in-process loading "
+                "that never respawns workers at epoch boundaries."
+            )
+        },
+    )
+    persistent_workers: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Keep DataLoader workers alive across epochs instead of respawning them at "
+                "every epoch boundary. Setting this requires `num_workers > 0`"
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.num_workers is not None and self.num_workers < 0:
+            raise ValueError(f"data.dataloader.num_workers must be None or >= 0, got {self.num_workers}.")
+
+
+@dataclass
 class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
     val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -168,10 +196,17 @@ class MegatronConfig(BaseConfig):
     # MoE runtime configuration flags
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
+    """Set to "aux_loss", "seq_aux_loss", or "global_aux_loss" to enable aux loss-based load balancing and logging."""
+    moe_aux_loss_coeff: float = 0.0
+    """Scaling coefficient for the moe load balancing loss if moe_router_load_balancing_type is not 'none'. Will disable aux loss in megatron-core if set to 0."""
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
     moe_enable_routing_replay: bool = False
+    moe_per_layer_logging: bool = False
+    """Enable per-layer logging of MoE metrics (i.e. per layer aux losses)."""
+    moe_router_dtype: str = "fp32"
+    """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
@@ -181,12 +216,24 @@ class MegatronConfig(BaseConfig):
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
-    empty_cuda_cache: Optional[bool] = None
+    empty_cuda_cache: Optional[bool] = True
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+
+    def __post_init__(self):
+        # Backfill defaults for any keys the user didn't override so an override dict
+        # doesn't have to repeat every default just to set one value.
+        if self.transformer_config_kwargs is None:
+            self.transformer_config_kwargs = {}
+        for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
+            self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
+        if self.optimizer_config_kwargs is None:
+            self.optimizer_config_kwargs = {}
+        for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
+            self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +246,10 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     """When True, training and inference share the same GPUs."""
     colocate_policy_ref: bool = True
+    """When colocate_all is False, True (default) still colocates policy and ref
+    on the same GPUs (one shared placement group). Set this item to False to place
+    policy and ref on separate GPUs (their own placement groups); needed when
+    a large model's policy and ref shards can't both fit on one GPU."""
     policy_num_nodes: int = 1
     policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
@@ -230,6 +281,15 @@ class PolicyConfig(BaseConfig):
     language_model_only: bool = False
     """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
     Loads only the language model backbone using AutoModelForCausalLM."""
+    inference_only_init: bool = False
+    """When True, set up the policy worker for inference-only flows (forward + weight
+    sync, no train_step), skipping the training-only state that would otherwise OOM
+    memory-constrained nodes (e.g. large MoE on 4xH100). NOT valid for actual training.
+    Backend-specific behavior:
+    - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
+      that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
+    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
+      materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass
@@ -636,7 +696,8 @@ class TrainerConfig(BaseConfig):
     micro_train_batch_size_per_gpu: int = 1
     micro_forward_batch_size_per_gpu: int = 1
     update_ref_every_epoch: bool = False
-    use_sample_packing: bool = True
+    remove_microbatch_padding: bool = True
+    """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""
     eval_batch_size: int = 1024
     eval_before_train: bool = True
     eval_interval: int = 5
@@ -647,6 +708,8 @@ class TrainerConfig(BaseConfig):
     project_name: str = "skyrl"
     run_name: str = "test_run"
     logger: str = "wandb"
+    enable_ray_gpu_monitor: bool = True
+    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
@@ -784,6 +847,15 @@ class SkyRLTrainConfig(BaseConfig):
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
+        if self.data.dataloader.num_workers is None:
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            self.data.dataloader.num_workers = 0 if self.generator.inference_engine.enable_http_endpoint else 8
+        if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:
+            raise ValueError(
+                "data.dataloader.persistent_workers requires num_workers > 0, but it was either"
+                " set explicitly to 0 or forced to 0 by the inference HTTP endpoint."
+            )
+
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
         from skyrl.backends.skyrl_train.inference_servers.utils import (
@@ -835,6 +907,27 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
+        # Accept the deprecated ``trainer.use_sample_packing`` key as an alias
+        # for ``trainer.remove_microbatch_padding``. Remap it before
+        # construction so the strict key validation does not reject the old
+        # name.
+        if "trainer" in overrides and "use_sample_packing" in overrides.trainer:
+            if "remove_microbatch_padding" in overrides.trainer:
+                raise ValueError(
+                    "Specify only one of trainer.use_sample_packing (deprecated) and "
+                    "trainer.remove_microbatch_padding, not both."
+                )
+            import warnings
+
+            warnings.warn(
+                "trainer.use_sample_packing has been renamed to "
+                "trainer.remove_microbatch_padding; use "
+                "trainer.remove_microbatch_padding instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            overrides.trainer["remove_microbatch_padding"] = overrides.trainer["use_sample_packing"]
+            del overrides.trainer["use_sample_packing"]
         return cls.from_dict_config(overrides)
 
 

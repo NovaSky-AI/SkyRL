@@ -48,7 +48,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.ref.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.ref.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.ref.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
-  trainer.use_sample_packing=true \
+  trainer.remove_microbatch_padding=true \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \

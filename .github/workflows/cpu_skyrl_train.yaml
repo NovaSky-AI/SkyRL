@@ -69,8 +69,10 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
-      - name: Run cpu tests
-        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu
+      - name: Run cpu tests (without vllm)
+        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
+      - name: Run cpu tests (with vllm)
+        run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
   
   skyrl_gym_tests:
     needs: check_code_quality

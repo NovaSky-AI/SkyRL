@@ -65,7 +65,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
   # VLM flags — see the tutorial for background
   generator.vision_language_generator=true \
   generator.batched=false \
-  trainer.use_sample_packing=false \
+  trainer.remove_microbatch_padding=false \
   # Multi-turn rollouts
   generator.max_turns=3 \
   generator.inference_engine.async_engine=true \

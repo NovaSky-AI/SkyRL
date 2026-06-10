@@ -22,7 +22,7 @@ def example_dummy_config():
         update_epochs_per_batch=1,
         epochs=1,
         max_prompt_length=20,
-        use_sample_packing=False,
+        remove_microbatch_padding=False,
         seed=42,
         resume_mode="none",
         algorithm=AlgorithmConfig(

@@ -203,6 +203,24 @@
             - skyrl.train.config.sft_config.validate_sft_cfg
             - skyrl.train.config.sft_config.build_skyrl_config_for_sft
 
+    - slug: callbacks
+      title: Callbacks
+      description: Training callbacks for the SFT and RL trainers.
+      sections:
+        - heading: Callback Interface
+          description: Subclass `TrainingCallback` and override the events you need.
+          objects:
+            - skyrl.train.utils.callbacks.TrainingCallback
+        - heading: Callback I/O
+          description: State passed to each event and the mutable control flags callbacks can set.
+          objects:
+            - skyrl.train.utils.callbacks.CallbackInput
+            - skyrl.train.utils.callbacks.TrainingControl
+        - heading: Dispatch
+          description: Fan-out handler that trainers hold internally.
+          objects:
+            - skyrl.train.utils.callbacks.CallbackHandler
+
     - slug: env-vars
       title: Environment Variables
       description: Configuration via environment variables.

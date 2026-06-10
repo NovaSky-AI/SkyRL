@@ -684,6 +684,39 @@ class TestApplyLossReductionToAdvantagesMinibatch:
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(8.5))
 
+    def test_prompt_mean(self):
+        """Prompt mean: token mean within each prompt group, then average over prompts."""
+        # 4 sequences forming 2 prompts (2 samples each): rows [0,1] -> p0, rows [2,3] -> p1.
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 1.0]])
+        prompt_boundaries = [(0, 2), (2, 4)]
+        # prompt 0: token mean = (1+2+3)/3 = 2.0
+        # prompt 1: token mean = (5+6+7+8)/4 = 6.5
+        # mean over prompts = (2.0 + 6.5) / 2 = 4.25
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="prompt_mean",
+            micro_batch_size=1,
+            max_seq_len=2,
+            prompt_boundaries=prompt_boundaries,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(4.25))
+
+    def test_prompt_mean_requires_boundaries(self):
+        """prompt_mean without prompt_boundaries should raise ValueError."""
+        advantages = torch.tensor([[1.0, 2.0]])
+        loss_mask = torch.tensor([[1.0, 1.0]])
+        with pytest.raises(ValueError, match="prompt_mean"):
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages=advantages,
+                loss_mask=loss_mask,
+                loss_reduction="prompt_mean",
+                micro_batch_size=1,
+                max_seq_len=2,
+            )
+
     def test_invalid_loss_reduction_raises(self):
         """Invalid loss_reduction should raise ValueError."""
         advantages = torch.tensor([[1.0]])
