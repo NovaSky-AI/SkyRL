@@ -55,6 +55,9 @@ TOP_P=1.0
 EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
 MAX_PROMPT_LENGTH=$((1024 * 2))
+# IDENTICAL to the no-spec run (8192) for an apples-to-apples comparison. The MTP draft loss adds a
+# full [seq, vocab] softmax tensor on top of the main lm-head gradient, but this fits at TP=2 with the
+# default allocator now that the O(num_microbatches) `mtp_student_logits` accumulation is fixed.
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
@@ -69,9 +72,13 @@ ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
 
 # megatron config -- Qwen3.5-2B is a dense model, so no expert parallelism.
-# TP=2 (not 1): with 8K-token responses, TP=2 auto-enables sequence parallelism,
-# which shards activations/vocab-logits across the TP group. TP=1 keeps full
-# activations on each GPU and OOMs in the backward grad-sync at gpu_mem_util=0.5.
+# TP=2 (matching the no-spec run): the decoupled MTP draft loss materializes a full
+# [batch, seq, vocab] float32 softmax tensor on top of the main lm-head gradient at Qwen3.5's 248K
+# vocab, but this fits at TP=2 with the default allocator now that the O(num_microbatches)
+# `mtp_student_logits` accumulation is fixed. NOTE: raising TP does NOT meaningfully shrink the
+# training footprint (it's activation/optimizer-bound, not vocab-bound), and TP=8 also triggered a
+# CUDA-IPC weight-sync failure (pidfd_getfd EPERM) when broadcasting the 8-way-sharded policy to the
+# TP=1 vLLM engines. So TP=2 is both the apples-to-apples match and the known-good weight-sync config.
 # TP=2, PP=1, CP=1 => DP=4.
 MEGATRON_TP=2
 MEGATRON_PP=1
@@ -86,11 +93,25 @@ TIS_TYPE=token
 
 
 # Multi-Token Prediction (MTP) speculative decoding.
-# Qwen3.5-2B ships 1 native MTP head (`mtp_num_hidden_layers: 1`), so draft depth = 1.
+# Qwen3.5-2B ships 1 native MTP head (`mtp_num_hidden_layers: 1`); training always trains the
+# checkpoint's heads. NUM_SPECULATIVE_TOKENS is the vLLM *draft depth* only — values > 1 reuse the
+# single head autoregressively at draft time (more speedup, but per-position acceptance decays with
+# depth since the head never trains on its own outputs). Try 2-3 for extra acceleration.
 MTP_ENABLED=true
 MTP_NUM_SPECULATIVE_TOKENS=1
 MTP_LOSS_TYPE="soft_ce" # "soft_ce" (distill against policy) | "hard_ce" (ground-truth next tokens)
 MTP_LOSS_WEIGHT=0.1
+# NOTE: trainer.policy.megatron_config.mtp_detach_shared_output now defaults to true: the draft loss
+# trains ONLY the MTP-head params; the tied embedding/lm_head is detached (output projection AND the
+# MTP block's re-embedding), so the draft gradient no longer nudges the policy's own logits. Set it
+# to false for the old NeMo-RL behaviour (shared head also trained by the draft loss).
+# Top-k draft loss: distill only the teacher's top-k tokens instead of the full 248K vocab, keeping
+# draft-loss memory at O(seq*k) vs O(seq*vocab). This is now an optional throughput knob, NOT a
+# memory requirement: the full-vocab soft-CE fits comfortably at TP=2 since the real OOM cause (the
+# O(num_microbatches) accumulation of `mtp_student_logits`) was fixed by freeing each microbatch's
+# student logits right after its draft backward. No PYTORCH_CUDA_ALLOC_CONF tuning is needed.
+# null => exact full-vocab soft-CE. Set to e.g. 64 to use the memory-light top-k approximation.
+MTP_LOSS_TOPK=null
 
 
 # Qwen3.5 flags
@@ -99,6 +120,15 @@ ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 export _SKYRL_USE_NEW_INFERENCE=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF here (neither expandable_segments:True nor max_split_size_mb).
+# - expandable_segments:True makes PyTorch allocate via virtual-memory segments incompatible with the
+#   legacy CUDA-IPC handle used by colocated weight sync -> it falls back to pidfd_getfd, which this
+#   cluster's ptrace_scope blocks (pidfd_getfd: Operation not permitted).
+# - max_split_size_mb over-reserves PyTorch memory and starves NCCL's external cudaMalloc at grad-sync
+#   ("Failed to CUDA calloc ... bytes" in reduce_scatter).
+# Neither is needed: the draft-loss OOM was an O(num_microbatches) accumulation of `mtp_student_logits`,
+# now fixed by freeing each microbatch's student logits right after its draft backward. The full-vocab
+# soft-CE fits at TP=2 with the default allocator.
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -165,6 +195,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
   trainer.mtp.loss_type=$MTP_LOSS_TYPE \
   trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+  trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_5_dapo_sd" \
   trainer.run_name="sd_dapo_qwen3_5_2b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \

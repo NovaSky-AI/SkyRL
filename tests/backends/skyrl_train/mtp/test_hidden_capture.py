@@ -24,7 +24,9 @@ sys.modules.setdefault("megatron", types.ModuleType("megatron"))
 sys.modules.setdefault("megatron.core", types.ModuleType("megatron.core"))
 sys.modules["megatron.core.utils"] = _fake_mcore_utils
 
-from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits  # noqa: E402
+from skyrl.backends.skyrl_train.mtp.adapter import (  # noqa: E402
+    project_mtp_hidden_to_logits,
+)
 from skyrl.backends.skyrl_train.mtp.hidden_capture import MTPHiddenCapture  # noqa: E402
 
 
@@ -142,6 +144,100 @@ def test_project_to_logits_detach_shared_output():
     logits[0].sum().backward()
     assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
     assert model._out_weight.grad is None
+
+
+class _FakeEmbedding(nn.Module):
+    """Stands in for the shared LanguageModelEmbedding the MTP block re-embeds rolled ids with."""
+
+    def __init__(self, vocab=5, hidden=4):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(vocab, hidden))
+
+    def forward(self, input_ids=None, position_ids=None):
+        return self.weight[input_ids]
+
+
+class _FakeMTPBlockWithEmbedding(_FakeMTPBlock):
+    """Like the real block: re-embeds rolled input ids via the ``embedding`` kwarg and mixes the
+    result into each depth's output, creating the second gradient path into the shared weight."""
+
+    def forward(self, hidden_states, input_ids=None, embedding=None, **kwargs):
+        emb = embedding(input_ids=input_ids).transpose(0, 1)  # [b, s, h] -> [s, b, h]
+        chunks = [hidden_states] + [(hidden_states + emb) * self.w[i] for i in range(self.num_layers)]
+        return torch.cat(chunks, dim=0)
+
+
+def _run_with_embedding(detach_shared_embedding):
+    model = _FakeGPT()
+    model.mtp = _FakeMTPBlockWithEmbedding(hidden=4, num_layers=1)
+    embedding = _FakeEmbedding(vocab=5, hidden=4)
+    capture = MTPHiddenCapture(model, detach_trunk=True, detach_shared_embedding=detach_shared_embedding)
+    s, b = 3, 2
+    trunk = torch.randn(s, b, 4, requires_grad=True)
+    ids = torch.randint(0, 5, (b, s))
+    with capture.capture():
+        _ = model.mtp(hidden_states=trunk, input_ids=ids, embedding=embedding)
+    student = capture.compute_student_hidden_states()
+    student[0].sum().backward()
+    return model, embedding
+
+
+def test_replay_detaches_shared_embedding_when_requested():
+    # mtp_detach_shared_output must also sever the re-embedding path (the second route into the
+    # tied embedding/lm_head, next to the output projection) so only MTP-head params train.
+    model, embedding = _run_with_embedding(detach_shared_embedding=True)
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
+    assert embedding.weight.grad is None
+
+
+def test_replay_trains_shared_embedding_by_default():
+    model, embedding = _run_with_embedding(detach_shared_embedding=False)
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
+    assert embedding.weight.grad is not None and embedding.weight.grad.abs().sum() > 0
+
+
+def test_replay_asserts_on_positional_hidden_states():
+    # The trunk detach patches kwargs only; if a future megatron passes hidden_states positionally
+    # the capture must fail loudly instead of silently coupling the draft loss into the trunk.
+    import pytest
+
+    model = _FakeGPT()
+    trunk = torch.randn(3, 2, 4, requires_grad=True)
+    capture = MTPHiddenCapture(model, detach_trunk=True)
+    with capture.capture():
+        _ = model.mtp(trunk, position_ids=torch.zeros(2, 3))  # positional hidden_states
+    with pytest.raises(AssertionError, match="keyword argument"):
+        capture.compute_student_hidden_states()
+
+
+class _FakeUntiedOutputLayer(nn.Module):
+    def __init__(self, vocab=5, hidden=4):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(vocab, hidden))
+
+    def forward(self, hidden, weight=None):
+        w = weight if weight is not None else self.weight
+        return hidden @ w.t(), None
+
+
+class _FakeUntied(_FakeGPT):
+    """Untied embeddings: no shared weight; the output layer owns its own parameter."""
+
+    def __init__(self, hidden=4, vocab=5, mtp_num_layers=1):
+        super().__init__(hidden=hidden, mtp_num_layers=mtp_num_layers)
+        self.share_embeddings_and_output_weights = False
+        self.output_layer = _FakeUntiedOutputLayer(vocab=vocab, hidden=hidden)
+
+
+def test_project_to_logits_detach_output_weight_untied_model():
+    # detach_output_weight must also isolate an UNTIED model's own output-layer weight (passed
+    # explicitly as a detached tensor), not just the tied/shared weight.
+    model, trunk, student = _run(detach_trunk=True, model_cls=_FakeUntied)
+    logits = project_mtp_hidden_to_logits(student, model, detach_output_weight=True)
+    logits[0].sum().backward()
+    assert model.mtp.w[0].grad is not None and model.mtp.w[0].grad.abs().sum() > 0
+    assert model.output_layer.weight.grad is None
+    assert trunk.grad is None
 
 
 class _FakeVL(nn.Module):

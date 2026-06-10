@@ -82,8 +82,6 @@ async def test_get_spec_decode_metrics_returns_none_when_no_engine_reports():
 @pytest.mark.asyncio
 async def test_get_spec_decode_metrics_ignores_non_reporting_engines():
     # A mix of reporting and non-reporting engines still aggregates the reporters only.
-    client = _make_spec_client(
-        [None, {"num_drafts": 2, "num_draft_tokens": 8, "num_accepted_tokens": 5}]
-    )
+    client = _make_spec_client([None, {"num_drafts": 2, "num_draft_tokens": 8, "num_accepted_tokens": 5}])
     totals = await client.get_spec_decode_metrics()
     assert totals == {"num_drafts": 2, "num_draft_tokens": 8, "num_accepted_tokens": 5}
