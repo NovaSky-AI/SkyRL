@@ -331,7 +331,7 @@ class MegatronWorker:
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
-        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -339,7 +339,7 @@ class MegatronWorker:
             "pad_token_id": tokenizer.pad_token_id,
         }
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
-        update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+        hf_config = update_model_config(hf_config_original, override_config_kwargs=override_config_kwargs)
 
         transformer_config_kwargs = (
             transformer_config_kwargs
@@ -402,7 +402,10 @@ class MegatronWorker:
         self.provider = provider
         self.bridge = bridge
 
-        self.strategy.hf_config = hf_config
+        # strategy.hf_config is the on-disk source-of-truth used by
+        # save_hf_configs and must NOT carry runtime overrides like
+        # mtp_num_layers=0; assign the un-mutated AutoConfig here.
+        self.strategy.hf_config = hf_config_original
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 

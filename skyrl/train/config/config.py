@@ -39,9 +39,37 @@ class BaseConfig(ABC):
 
 
 @dataclass
+class DataLoaderConfig(BaseConfig):
+    num_workers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Prompt DataLoader worker processes. Default of None auto-derives the value "
+                "(0 with the inference HTTP endpoint, else 8). Set 0 for in-process loading "
+                "that never respawns workers at epoch boundaries."
+            )
+        },
+    )
+    persistent_workers: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Keep DataLoader workers alive across epochs instead of respawning them at "
+                "every epoch boundary. Setting this requires `num_workers > 0`"
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.num_workers is not None and self.num_workers < 0:
+            raise ValueError(f"data.dataloader.num_workers must be None or >= 0, got {self.num_workers}.")
+
+
+@dataclass
 class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
     val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +246,10 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     """When True, training and inference share the same GPUs."""
     colocate_policy_ref: bool = True
+    """When colocate_all is False, True (default) still colocates policy and ref
+    on the same GPUs (one shared placement group). Set this item to False to place
+    policy and ref on separate GPUs (their own placement groups); needed when
+    a large model's policy and ref shards can't both fit on one GPU."""
     policy_num_nodes: int = 1
     policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
@@ -675,6 +707,8 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    tags: Optional[List[str]] = None
+    """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
@@ -811,6 +845,15 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        if self.data.dataloader.num_workers is None:
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            self.data.dataloader.num_workers = 0 if self.generator.inference_engine.enable_http_endpoint else 8
+        if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:
+            raise ValueError(
+                "data.dataloader.persistent_workers requires num_workers > 0, but it was either"
+                " set explicitly to 0 or forced to 0 by the inference HTTP endpoint."
+            )
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
