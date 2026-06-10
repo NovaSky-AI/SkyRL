@@ -751,7 +751,7 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
 
 
 def build_dataloader(
-    cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+    cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train: bool = True, is_fully_async: bool = False
 ) -> StatefulDataLoader:
     """
     Build the dataloader for the training or evaluation dataset.
@@ -770,19 +770,24 @@ def build_dataloader(
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
 
+    num_workers = cfg.data.dataloader.num_workers
+    assert num_workers is not None, "dataloader `num_workers` should be non-null"
+
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
         shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
-        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
+        num_workers=num_workers,
+        # Unlike `shuffle`/`drop_last`, not branched on `is_train`: both dataloaders are
+        # reused (train across epochs, eval across evaluations) to avoid worker respawn
+        persistent_workers=cfg.data.dataloader.persistent_workers,
         drop_last=True if is_train else False,
         generator=seeded_generator,
         # NOTE (sumanthrh): We use ray and thus use `spawn` start method.
         # forking within ray leads to undefined behaviour and often causes hard to debug
         # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
-        multiprocessing_context="spawn" if not cfg.generator.inference_engine.enable_http_endpoint else None,
+        multiprocessing_context="spawn" if num_workers > 0 else None,
     )
     if is_train:
         if not is_fully_async:

@@ -702,6 +702,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         "position_ids": position_ids,
                         "num_actions": num_actions,
                         "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                        "sub_seq_lengths": micro.get("sub_seq_lengths"),
                         **vlm_inputs,
                     }
                 )
@@ -762,6 +763,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    "sub_seq_lengths": experience.sub_seq_lengths,
                     **vlm_inputs,
                 }
             )
