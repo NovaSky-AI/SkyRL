@@ -29,6 +29,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
+from skyrl.backends.skyrl_train.utils.hf_router_replay import (
+    install_router_replay_hooks,
+)
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -178,8 +181,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             meta_init=use_meta,
             language_model_only=self.cfg.policy.language_model_only,
             logprobs_chunk_size=self.cfg.logprobs_chunk_size,
+            moe_enable_routing_replay=self.cfg.policy.fsdp_config.moe_enable_routing_replay,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        if self.cfg.policy.fsdp_config.moe_enable_routing_replay:
+            install_router_replay_hooks(wrapped_model.model, wrapped_model.router_replay_ctx)
 
         if self.cfg.gradient_checkpointing:
             wrapped_model.gradient_checkpointing_enable(
@@ -420,8 +426,11 @@ class FSDPRefWorkerBase(RefWorkerBase):
             meta_init=use_meta,
             language_model_only=self.cfg.ref.language_model_only,
             logprobs_chunk_size=self.cfg.logprobs_chunk_size,
+            moe_enable_routing_replay=self.cfg.ref.fsdp_config.moe_enable_routing_replay,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        if self.cfg.ref.fsdp_config.moe_enable_routing_replay:
+            install_router_replay_hooks(wrapped_model.model, wrapped_model.router_replay_ctx)
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()

@@ -142,6 +142,10 @@ class FSDPConfig(BaseConfig):
     mixed_precision: Optional[MixedPrecisionConfig] = None
     # specify wrap policy as a dict with `transformer_layer_cls_to_wrap` key for custom module based wrapping
     wrap_policy: dict = field(default_factory=dict)
+    moe_enable_routing_replay: bool = False
+    """Enable MoE Rollout Routing Replay (R3): replay vLLM's rollout expert
+    selections in the training forward pass. Requires
+    generator.inference_engine.enable_return_routed_experts=True."""
 
 
 # ---------------------------------------------------------------------------

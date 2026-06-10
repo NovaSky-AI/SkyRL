@@ -143,11 +143,13 @@ fsdp_config:
     cpu_offload: false # offload params + optimizer state to cpu during fwd pass
     reshard_after_forward: true # [True, False, int between 1 and fsdp_size]
     fsdp_size: -1
+    moe_enable_routing_replay: false # Opt-in for MoE rollout routing replay (R3)
 
 ```
 
 - `cpu_offload`: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to [offload_policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) in FSDP.
 - `reshard_after_forward`: Whether to re-shard the FSDP model after the forward pass. See the [FSDP docs](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard) for details. If set to `false`, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
+- `moe_enable_routing_replay`: Whether to replay vLLM's rollout expert-routing decisions in the training forward pass (the replay half of R3). Must be co-enabled with `generator.inference_engine.enable_return_routed_experts`, which makes vLLM return the per-token expert indices. With KL enabled (`use_kl_loss` or `use_kl_in_reward`), also set `trainer.ref.fsdp_config.moe_enable_routing_replay` so ref logprobs use the same routing.
 - `fsdp_size`: The group size within which worker state is sharded with FSDP. This is a parameter to be used for hybrid sharding in multi-node settings. For example, if the number of workers in the actor group is 8, with 4 in each node, and `fsdp_size` is 4, then the training state will be fully sharded across 4 ranks in each node, but replicated (DP) across nodes.
 
     `cpu_offload` is different from worker state offloading with model colocation.
@@ -717,7 +719,7 @@ For more details on how different placement options work, please refer to the [p
 - `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 - `generator.inference_engine.enforce_eager`: Whether to disable CUDA graphs. Default is `true` for stability. Set to `false` for higher performance, but this may affect convergence for long-running or long-context training jobs.
 - `generator.inference_engine.enable_ray_prometheus_stats`: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses `vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger`.
-- `generator.inference_engine.enable_return_routed_experts`: Whether to return per-layer expert routing indices to use for rollout router replay (R3) if training an MoE model. Used together with `trainer.policy.megatron_config.moe_enable_routing_replay` to enable R3.
+- `generator.inference_engine.enable_return_routed_experts`: Whether to return per-layer expert routing indices to use for rollout router replay (R3) if training an MoE model. Used together with `trainer.policy.megatron_config.moe_enable_routing_replay` (Megatron) or `trainer.policy.fsdp_config.moe_enable_routing_replay` (FSDP) to enable R3.
 - `generator.inference_engine.distributed_executor_backend`: The distributed executor backend to use for the vLLM engine. Options are either `mp` or `ray`.
 - `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
 
