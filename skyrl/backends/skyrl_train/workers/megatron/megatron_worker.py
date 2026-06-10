@@ -1329,7 +1329,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
+        # Ref worker does not handle VLM inputs during SFT, so is_vlm stays False (the wrapper default).
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method

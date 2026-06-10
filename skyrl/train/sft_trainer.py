@@ -711,8 +711,15 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
     # VLM image tensors travel as a TensorList (one variable-shape tensor per
     # sample). Mixed text+image batches are not supported; every sample in a VLM
-    # batch is expected to carry images.
-    batch_has_images = any("pixel_values" in ex for ex in examples)
+    # batch must carry images. Check homogeneity up front so a mixed batch fails
+    # here with a clear message rather than a KeyError deep in the pad loop.
+    num_with_images = sum("pixel_values" in ex for ex in examples)
+    if num_with_images not in (0, len(examples)):
+        raise ValueError(
+            f"Mixed text+image batches are not supported: {num_with_images}/{len(examples)} "
+            "samples carry 'pixel_values'. Every sample in a VLM batch must carry images."
+        )
+    batch_has_images = num_with_images > 0
     pixel_values = []
     image_grid_thw = []
 

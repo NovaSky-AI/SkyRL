@@ -57,7 +57,7 @@ uv run --isolated --extra megatron \
     project_name=skyrl_sft \
     run_name=skyrl_sft_megatron_vlm \
     ckpt_path="$CKPT_DIR" \
-    ckpt_interval=20 \
-    hf_save_interval=40 \
-    resume_from="$CKPT_DIR/global_step_20" \
+    ckpt_interval=10 \
+    hf_save_interval=20 \
+    resume_from="" \
     "$@"
