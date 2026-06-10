@@ -55,6 +55,7 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.batch_prefetcher import BatchPrefetcher
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -1553,118 +1554,189 @@ class SFTTrainer:
         self._fire("on_epoch_start")
         epoch_in_progress = True
 
-        while self.global_step <= num_steps:
-            all_timings: dict[str, float] = {}
+        # ------------------------------------------------------------------
+        # Async data prefetch (double-buffering) setup
+        # ------------------------------------------------------------------
+        # Two consecutive steps in the same epoch see the SAME ``tokenized``
+        # order (it only changes at an epoch boundary reshuffle), so step N+1's
+        # slice is knowable while step N runs. ``_slice_examples`` reproduces the
+        # loop's deterministic wrap-around slice against the *current* order, and
+        # ``_compute_batch`` is the producer run on the background thread (the
+        # heavy collate releases the GIL, so it overlaps the GPU step).
+        n_examples = len(tokenized)
 
-            with Timer("step", all_timings):
+        def _epoch_of(step: int) -> int:
+            return (step * batch_size) // n_examples
 
-                # Data loading with wrap-around
-                with Timer("data_loading", all_timings):
-                    start_idx = (self.global_step * batch_size) % len(tokenized)
-                    end_idx = start_idx + batch_size
-                    if end_idx > len(tokenized):
-                        batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
-                    else:
-                        batch_examples = tokenized[start_idx:end_idx]
-                    batch = self.collator(batch_examples, batch_size=batch_size)
+        def _slice_examples(step: int) -> list:
+            start_idx = (step * batch_size) % n_examples
+            end_idx = start_idx + batch_size
+            if end_idx > n_examples:
+                return tokenized[start_idx:] + tokenized[: end_idx - n_examples]
+            return tokenized[start_idx:end_idx]
 
-                self._fire("on_step_start", batch=batch)
+        def _compute_batch(step: int):
+            return self.collator(_slice_examples(step), batch_size=batch_size)
 
-                # Training step
-                step_result = self.train_step(batch, self.global_step)
-                all_timings.update(step_result["timings"])
+        prefetch_enabled = self.sft_cfg.prefetch_data
+        prefetcher: Optional[BatchPrefetcher] = (
+            BatchPrefetcher(_compute_batch, thread_name_prefix="sft-prefetch") if prefetch_enabled else None
+        )
+        logger.info(f"SFT data prefetch (double-buffering): {'ENABLED' if prefetch_enabled else 'disabled'}")
 
-            # Compute throughput using actual (non-padding) tokens
-            batch_padded_seq_len = batch["sequences"].shape[1]
-            actual_num_tokens = batch["attention_mask"].sum().item()
-            self._total_tokens_processed += actual_num_tokens
-            tokens_per_second = actual_num_tokens / all_timings["step"]
+        # Whether the step about to run can prefetch its successor. The loop
+        # reshuffles ``tokenized`` after step N iff ``_epoch_of(N) > cur_epoch``
+        # (the same predicate the epoch-boundary block below uses). When a
+        # reshuffle would occur, step N+1 reads a DIFFERENT order than step N, so
+        # it must not be prefetched against the pre-shuffle order. Mirroring the
+        # loop's reshuffle decision via ``cur_epoch`` (the authoritative loop
+        # state) keeps the predicate exact regardless of wrap-around alignment.
+        def _can_prefetch_next(step: int, cur_epoch: int) -> bool:
+            if prefetcher is None or step + 1 > num_steps:
+                return False
+            reshuffle_after_step = _epoch_of(step) > cur_epoch
+            return not reshuffle_after_step
 
-            # Build log dict
-            log_dict = {
-                "train/loss": step_result["loss"],
-                "train/grad_norm": step_result["grad_norm"],
-                "train/tokens_per_second": tokens_per_second,
-                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
-                "train/actual_num_tokens": actual_num_tokens,
-                "train/batch_padded_seq_len": batch_padded_seq_len,
-                "train/total_tokens_processed": self._total_tokens_processed,
-            }
-            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
-            if self._ray_gpu_monitor is not None:
-                log_dict.update(self._ray_gpu_monitor.flush())
+        try:
+            while self.global_step <= num_steps:
+                all_timings: dict[str, float] = {}
 
-            self._fire("on_step_end", batch=batch, metrics=step_result)
+                with Timer("step", all_timings):
 
-            # Capture callback-driven triggers, then reset so they only fire once.
-            force_save = self._training_control.should_save
-            force_eval = self._training_control.should_evaluate
-            self._training_control.should_save = False
-            self._training_control.should_evaluate = False
+                    # Data loading with wrap-around. With prefetch enabled this
+                    # measures only the (ideally ~0) wait for the already-running
+                    # background collate; otherwise the full serial collate.
+                    with Timer("data_loading", all_timings):
+                        if prefetcher is not None and prefetcher.pending_step() == self.global_step:
+                            # Consume the batch prefetched during the previous step.
+                            # ``get`` asserts the in-flight step matches, so a
+                            # stale/mismatched batch fails loudly.
+                            batch = prefetcher.get(self.global_step)
+                        else:
+                            # No valid prefetch in flight (first step, or the first
+                            # step after an epoch reshuffle): compute synchronously
+                            # against the live order.
+                            batch = _compute_batch(self.global_step)
 
-            # Checkpoint: interval-driven or callback-requested.
-            interval_save = (
-                self.sft_cfg.ckpt_interval > 0
-                and self.global_step > 0
-                and self.global_step % self.sft_cfg.ckpt_interval == 0
-            )
-            did_save_last_step = force_save or interval_save
-            if did_save_last_step:
-                with Timer("save_checkpoint", all_timings):
-                    ckpt_path = self.save_checkpoint()
-                log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
-                self._fire("on_save", ckpt_path=ckpt_path)
+                        # Kick off the NEXT step's collate on the background thread so
+                        # it overlaps this step's GPU work — only when the successor
+                        # is in the same epoch (no reshuffle between them).
+                        if _can_prefetch_next(self.global_step, current_epoch):
+                            prefetcher.submit(self.global_step + 1)
 
-            # HF export at regular intervals
-            if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
-                with Timer("save_hf_model", all_timings):
-                    self.save_hf_model()
-                log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+                    self._fire("on_step_start", batch=batch)
 
-            eval_metrics = None
-            num_eval_batches: int | None = None
-            # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
-            # whenever a callback set ``control.should_evaluate``.
-            interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
-            if eval_tokenized is not None and (force_eval or interval_eval):
-                self._fire("on_eval_start")
-                with Timer("eval", all_timings):
-                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
-                self._fire("on_eval_end", metrics=eval_metrics)
+                    # Training step
+                    step_result = self.train_step(batch, self.global_step)
+                    all_timings.update(step_result["timings"])
+
+                # Compute throughput using actual (non-padding) tokens
+                batch_padded_seq_len = batch["sequences"].shape[1]
+                actual_num_tokens = batch["attention_mask"].sum().item()
+                self._total_tokens_processed += actual_num_tokens
+                tokens_per_second = actual_num_tokens / all_timings["step"]
+
+                # Build log dict
+                log_dict = {
+                    "train/loss": step_result["loss"],
+                    "train/grad_norm": step_result["grad_norm"],
+                    "train/tokens_per_second": tokens_per_second,
+                    "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
+                    "train/actual_num_tokens": actual_num_tokens,
+                    "train/batch_padded_seq_len": batch_padded_seq_len,
+                    "train/total_tokens_processed": self._total_tokens_processed,
+                }
+                log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                if self._ray_gpu_monitor is not None:
+                    log_dict.update(self._ray_gpu_monitor.flush())
+
+                self._fire("on_step_end", batch=batch, metrics=step_result)
+
+                # Capture callback-driven triggers, then reset so they only fire once.
+                force_save = self._training_control.should_save
+                force_eval = self._training_control.should_evaluate
+                self._training_control.should_save = False
+                self._training_control.should_evaluate = False
+
+                # Checkpoint: interval-driven or callback-requested.
+                interval_save = (
+                    self.sft_cfg.ckpt_interval > 0
+                    and self.global_step > 0
+                    and self.global_step % self.sft_cfg.ckpt_interval == 0
+                )
+                did_save_last_step = force_save or interval_save
+                if did_save_last_step:
+                    with Timer("save_checkpoint", all_timings):
+                        ckpt_path = self.save_checkpoint()
+                    log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+                    self._fire("on_save", ckpt_path=ckpt_path)
+
+                # HF export at regular intervals
+                if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
+                    with Timer("save_hf_model", all_timings):
+                        self.save_hf_model()
+                    log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+
+                eval_metrics = None
+                num_eval_batches: int | None = None
+                # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
+                # whenever a callback set ``control.should_evaluate``.
+                interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
+                if eval_tokenized is not None and (force_eval or interval_eval):
+                    self._fire("on_eval_start")
+                    with Timer("eval", all_timings):
+                        eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                    self._fire("on_eval_end", metrics=eval_metrics)
+                    if eval_metrics:
+                        log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                        log_dict["timing/eval"] = all_timings["eval"]
+
+                log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
+                # Callbacks may mutate log_dict in place via on_log.
+                self._fire("on_log", logs=log_dict)
+                self.tracker.log(log_dict, step=self.global_step, commit=True)
+
+                if self.global_step % 5 == 0:
+                    logger.info(
+                        f"Step {self.global_step}: loss={step_result['loss']:.4f}, "
+                        f"grad_norm={step_result['grad_norm']}"
+                    )
+
                 if eval_metrics:
-                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
-                    log_dict["timing/eval"] = all_timings["eval"]
+                    logger.info(
+                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {num_eval_batches} batches"
+                    )
 
-            log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
-            # Callbacks may mutate log_dict in place via on_log.
-            self._fire("on_log", logs=log_dict)
-            self.tracker.log(log_dict, step=self.global_step, commit=True)
+                # Check for epoch boundary and reshuffle
+                epoch = (self.global_step * batch_size) // len(tokenized)
+                if epoch > current_epoch:
+                    self._fire("on_epoch_end")
+                    epoch_in_progress = False
+                    # Drain any in-flight prefetch BEFORE reshuffling so a background
+                    # collate can never read ``tokenized`` while it is being
+                    # shuffled, and so the next epoch's first step is computed
+                    # synchronously against the post-shuffle order. ``_can_prefetch_next``
+                    # already withholds cross-epoch submits, so this is normally a
+                    # no-op — it's defense in depth against the reshuffle/prefetch race.
+                    if prefetcher is not None:
+                        prefetcher.clear()
+                    for _ in range(epoch - current_epoch):
+                        rng.shuffle(tokenized)
+                    current_epoch = epoch
+                    self._current_epoch = epoch
+                    if self.global_step + 1 <= num_steps:
+                        self._fire("on_epoch_start")
+                        epoch_in_progress = True
 
-            if self.global_step % 5 == 0:
-                logger.info(
-                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
-                )
-
-            if eval_metrics:
-                logger.info(
-                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                    f"over {num_eval_batches} batches"
-                )
-
-            # Check for epoch boundary and reshuffle
-            epoch = (self.global_step * batch_size) // len(tokenized)
-            if epoch > current_epoch:
-                self._fire("on_epoch_end")
-                epoch_in_progress = False
-                for _ in range(epoch - current_epoch):
-                    rng.shuffle(tokenized)
-                current_epoch = epoch
-                self._current_epoch = epoch
-                if self.global_step + 1 <= num_steps:
-                    self._fire("on_epoch_start")
-                    epoch_in_progress = True
-
-            self.global_step += 1
+                self.global_step += 1
+        finally:
+            # Always tear down the prefetch thread (drains any in-flight
+            # batch and joins the worker) so neither the background thread
+            # nor the dataset reference is leaked, even on exception. No-op
+            # when prefetch is disabled.
+            if prefetcher is not None:
+                prefetcher.shutdown()
         self.global_step = min(self.global_step, num_steps)
 
         # Pair the leading on_epoch_start: fire on_epoch_end if we exited the
