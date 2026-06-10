@@ -118,6 +118,7 @@ def create_ray_wrapped_inference_engines(
     enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",
+    use_expandable_segments: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
@@ -152,6 +153,15 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
+
+    # Enable PyTorch's expandable_segments allocator on the engine processes by setting
+    # the env var at actor launch (it must be set before the CUDA context initializes).
+    # Ray propagates runtime_env to the vLLM worker actors spawned under the ray backend.
+    # On vLLM >= 0.20.1 the CuMemAllocator auto-disables expandable segments around its
+    # sleep/wake memory pool, so this is compatible with sleep mode.
+    engine_runtime_env = (
+        {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}} if use_expandable_segments else None
+    )
 
     resolved_executor_backend = (
         "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
@@ -283,6 +293,7 @@ def create_ray_wrapped_inference_engines(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
                     scheduling_strategy=dp_rank_sched,
+                    runtime_env=engine_runtime_env,
                 ).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,

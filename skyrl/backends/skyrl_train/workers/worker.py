@@ -3,6 +3,7 @@ import logging
 import os
 import socket
 from collections import defaultdict
+from contextlib import contextmanager
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
@@ -244,6 +245,49 @@ class Worker(DistributedTorchRayActor):
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
+
+    def _set_expandable_segments(self, enabled: bool) -> None:
+        """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
+
+        No-op when disabled via ``placement.use_expandable_segments`` or when CUDA is
+        unavailable. Expandable segments reduce fragmentation across the offload/backload
+        and forward/backward cycles, but are incompatible with ``cudaIpcGetMemHandle``,
+        so callers turn this OFF around CUDA-IPC weight sync (see
+        :meth:`_expandable_segments_disabled_for_sync`) and back ON afterward.
+
+        Enabling is done *after* model init so the model weights stay in standard CUDA
+        memory (IPC-compatible); only later allocations use expandable segments.
+        """
+        if not self.cfg.placement.use_expandable_segments:
+            return
+        if not torch.cuda.is_available():
+            return
+        setting = f"expandable_segments:{enabled}"
+        try:
+            # PyTorch 2.7+ exposes the accelerator-generic API; fall back otherwise.
+            if hasattr(torch._C, "_accelerator_setAllocatorSettings"):
+                torch._C._accelerator_setAllocatorSettings(setting)
+            else:
+                torch.cuda.memory._set_allocator_settings(setting)
+        except Exception as e:
+            logger.warning(f"Failed to set {setting!r}: {e}")
+
+    @contextmanager
+    def _expandable_segments_disabled_for_sync(self):
+        """Disable expandable_segments for the duration of CUDA-IPC weight sync.
+
+        Only toggles under ``colocate_all`` (the IPC path); under non-colocated runs
+        weight sync uses NCCL broadcast, which has its own buffers and is unaffected.
+        :meth:`_set_expandable_segments` itself no-ops when the feature is disabled.
+        """
+        toggle = self.cfg.placement.colocate_all and self.cfg.placement.use_expandable_segments
+        if toggle:
+            self._set_expandable_segments(False)
+        try:
+            yield
+        finally:
+            if toggle:
+                self._set_expandable_segments(True)
 
     def set_algorithm_config(self, **kwargs) -> None:
         for key, value in kwargs.items():

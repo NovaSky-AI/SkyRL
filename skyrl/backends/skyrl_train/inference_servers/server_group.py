@@ -52,6 +52,7 @@ class ServerGroup:
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
+        use_expandable_segments: bool = False,
         **server_actor_kwargs: Any,
     ):
         """
@@ -90,6 +91,7 @@ class ServerGroup:
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
         self._server_actor_kwargs = server_actor_kwargs
+        self._use_expandable_segments = use_expandable_segments
         self._external_pg = placement_group
 
         # Extract the raw PG, reordered indices, and GPU IDs from ResolvedPlacementGroup.
@@ -135,6 +137,17 @@ class ServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
+        # Enable PyTorch's expandable_segments allocator on the engine process by setting
+        # the env var at actor launch (before the CUDA context initializes). The vLLM
+        # worker actors are spawned as child tasks of this server actor
+        # (placement_group_capture_child_tasks=True) and inherit its runtime_env env_vars.
+        # Safe with sleep mode on vLLM >= 0.20.1 (CuMemAllocator auto-disables expandable
+        # segments around its sleep/wake pool).
+        runtime_env = (
+            {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}}
+            if self._use_expandable_segments
+            else None
+        )
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
@@ -143,6 +156,7 @@ class ServerGroup:
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=start_bundle_idx,
             ),
+            runtime_env=runtime_env,
         )
 
     def _get_bundle_indices_for_server(self, server_idx: int) -> List[int]:

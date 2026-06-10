@@ -224,6 +224,13 @@ class PlacementConfig(BaseConfig):
     critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
     ref_num_gpus_per_node: int = 1
+    use_expandable_segments: bool = True
+    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training
+    workers to reduce GPU memory fragmentation across the offload/backload and
+    forward/backward cycles. Enabled programmatically after model init and turned
+    off around CUDA-IPC weight sync (IPC handles are incompatible with the VMM
+    addresses expandable segments uses). See ``InferenceEngineConfig`` for the
+    independent inference-engine knob."""
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +511,13 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    use_expandable_segments: bool = False
+    """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
+    processes to reduce fragmentation. Independent of the trainer-side
+    ``PlacementConfig.use_expandable_segments``. Default ``False``: it is a safe opt-in
+    on vLLM >= 0.20.1, where the CuMemAllocator auto-disables expandable segments around
+    its sleep/wake memory pool. On older vLLM, sleep mode + expandable segments is a hard
+    error, so leave this off."""
     max_num_seqs: int = 1024
     remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False

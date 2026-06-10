@@ -95,3 +95,28 @@ generator:
    
    - When `colocate_all=true`, all training models should have identical node and GPU counts.
    - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+
+## Memory Optimization
+
+In colocated runs the trainer repeatedly offloads to CPU and backloads to GPU while the inference engine sleeps and wakes. Over many steps this churn fragments the CUDA address space: a worker can have plenty of free VRAM yet still fail to satisfy a single large contiguous allocation (e.g. Megatron's `reload_from_cpu` resizing a param buffer), which surfaces as a hard `Aborted`/SIGABRT rather than a catchable OOM. PyTorch's `expandable_segments` allocator avoids this by growing segments instead of requiring one contiguous block.
+
+Two **independent** flags control this, because the trainer and the inference engine are separate processes with different allocators:
+
+```yaml
+trainer:
+  placement:
+    # Trainer workers (policy/critic/ref). Enabled programmatically after model init
+    # and automatically turned OFF around CUDA-IPC weight sync, since IPC handles are
+    # incompatible with the VMM addresses expandable segments uses.
+    use_expandable_segments: true   # default
+
+generator:
+  inference_engine:
+    # vLLM engine processes. Sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True at
+    # actor launch. Safe with sleep mode on vLLM >= 0.20.1 (its CuMemAllocator
+    # auto-disables expandable segments around the sleep/wake pool). Opt-in.
+    use_expandable_segments: false  # default
+```
+
+- The trainer flag defaults **on** — it directly mitigates colocated backload fragmentation.
+- The engine flag defaults **off** — enable it to also defragment the engine side; on vLLM `< 0.20.1`, sleep mode plus expandable segments is a hard error, so leave it off there.

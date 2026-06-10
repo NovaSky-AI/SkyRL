@@ -198,6 +198,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 self.optimizer is not None and self.scheduler is not None
             ), "FSDP preparation should create optimizer and scheduler"
 
+        # Enable expandable_segments after init so model weights stay in IPC-compatible
+        # standard CUDA memory; only subsequent activations use expandable segments.
+        self._set_expandable_segments(True)
+
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
@@ -294,13 +298,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )
         else:
-            # Extract and send weights using the sender created at init time
-            weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
-            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-            await self._weight_transfer_sender.send_chunks(
-                weight_iterator,
-                weight_metadata=weight_metadata,
-            )
+            # Extract and send weights using the sender created at init time.
+            # Disable expandable_segments around the send: under colocate_all the
+            # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
+            # VMM addresses expandable segments uses.
+            with self._expandable_segments_disabled_for_sync():
+                weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+                weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+                await self._weight_transfer_sender.send_chunks(
+                    weight_iterator,
+                    weight_metadata=weight_metadata,
+                )
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -375,6 +383,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
+        self._set_expandable_segments(True)
+
     def _set_pad_token_id(self, pad_token_id):
         self.model.config.pad_token_id = pad_token_id
 
@@ -425,6 +435,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
+
+        self._set_expandable_segments(True)
 
     def forward(
         self,
