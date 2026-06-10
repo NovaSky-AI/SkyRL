@@ -669,17 +669,13 @@ class TrainerConfig(BaseConfig):
     NOTE: this is a *soft* cap. Sequences are never split across microbatches, so a single sequence
     longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
     cap (no error, no truncation). The true peak microbatch size is therefore
-    ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``. To keep the cap meaningful (and
-    avoid OOM), set it ``>= max_prompt_length + max_generate_length`` so any single sequence fits."""
-    recompute_old_logprobs_per_minibatch: bool = False
-    """When True, compute the pre-training policy logprobs (and critic values) per mini-batch using
-    the same mini-batch + DP partition as the training step, instead of a single full-batch forward.
+    ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    recompute_old_logprobs_per_minibatch: bool = True
+    """When True, recopmputes policy/ref model logprobs (and critic values) per mini-batch using
+    the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.
     This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
-    first inner step. Mainly relevant with THD packing (remove_microbatch_padding=True) or
-    max_tokens_per_microbatch > 0, where the full-batch vs per-mini-batch packing otherwise differ and
-    introduce a small (~1e-4) old-vs-recomputed logprob mismatch. Defaults to False to preserve
-    existing numerics."""
+    first inner step."""
     update_ref_every_epoch: bool = False
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""

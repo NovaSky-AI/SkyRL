@@ -290,25 +290,14 @@ class TokenBasedBatchIterator(BaseBatchIterator):
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch with loss_mask=0 so it doesn't affect the loss."""
         # Match the real data's sequence length so every microbatch shares the same
-        # seq_len. Megatron's forward_backward_func / postprocess_packed_seqs /
-        # recover_left_padding size the per-microbatch output as [bsz, seq_len_global]
-        # and scatter with the microbatch's own attention_mask, so the mask width must
-        # equal the global seq_len. A hardcoded short length breaks that (and also
-        # FSDP/Megatron extracting the last `num_actions` action log-probs).
+        # seq_len.
         seq_len = self.data["sequences"].shape[1]
         num_actions = self.data.metadata["response_length"]
         batch_size = 1
-        # Build on the same device as the real data so the padding microbatch matches
-        # the real microbatches (which are gathered from self.data). The Megatron
-        # forward_backward path moves data to GPU before iterating and does not move
-        # microbatches again, so a hardcoded CPU device mismatches the model.
         device = self.data["sequences"].device
 
         # Keep the full seq_len for shape uniformity, but mark only a single token as
-        # valid in the attention mask. This is loss-neutral (loss_mask=0) and cheap:
-        # the packed/THD path then packs just 1 token instead of the whole sequence,
-        # and a length-1 sequence keeps both attention paths non-degenerate (no
-        # zero-length cu_seqlens segment, no fully-masked-row NaN in dense attention).
+        # valid in the attention mask to keep the row non-degenerate.
         attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device=device)
         attention_mask[:, 0] = 1
 

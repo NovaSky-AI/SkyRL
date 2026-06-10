@@ -245,13 +245,13 @@ class WorkerDispatch:
         loss_fn_config: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
     ) -> WorkerOutput:
-        """Run a forward pass using pre-staged per-DP chunks (loads model only, not optimizer).
+        """Run a forward pass using pre-staged per-DP chunks.
 
-        Mirrors :meth:`forward` but consumes per-DP chunks already placed in the object store by
-        :meth:`stage_data`, so serialization of the per-mini-batch chunks is amortized off the
-        dispatch critical path across mini-batches (see :meth:`forward_backward_from_staged`). The
-        chunks are produced exactly as in :meth:`stage_data`, so the per-rank partition (and thus
-        the microbatch packing) matches what ``forward_backward`` sees for the same mini-batch.
+        Consumes per-DP chunks already placed in the object store by :meth:`stage_data`, so
+        serialization of the per-mini-batch chunks is amortized off the dispatch critical path
+        across mini-batches (see :meth:`forward_backward_from_staged`). The chunks are produced
+        exactly as in :meth:`stage_data`, so the per-rank partition (and thus the microbatch packing)
+        matches what ``forward_backward`` sees for the same mini-batch.
 
         Args:
             model: Model identifier ("policy", "critic", or "ref")
@@ -262,7 +262,7 @@ class WorkerDispatch:
             model_id: Optional Tinker model_id; selects the LoRA adapter before the forward.
 
         Returns:
-            :class:`WorkerOutput` aggregated across DP ranks (see :meth:`forward`).
+            :class:`WorkerOutput` aggregated across DP ranks.
         """
         self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
         self.ensure_active_adapter(model, model_id)

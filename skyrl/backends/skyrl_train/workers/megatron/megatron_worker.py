@@ -637,13 +637,10 @@ class MegatronWorker:
                     # Pad with zeros so padded samples don't contribute to loss
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 elif key == "attention_mask":
-                    # Give each dummy row a single valid token rather than a full row of ones.
-                    # A length-1 sequence keeps the row non-degenerate for both forward paths:
+                    # Give each dummy row a single valid token, so the row is non-degenerate:
                     # it avoids a fully-masked row (NaN in dense attention's softmax) and a
-                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel), while
-                    # letting the packed path skip nearly all of the dummy's tokens — only 1
-                    # token (aligned up to TP/CP) is packed instead of the full seq_len. The
-                    # row is still excluded from the loss via loss_mask/action_mask=0.
+                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel).
+                    # The row is still excluded from the loss via loss_mask/action_mask=0.
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                     pad_tensor[:, 0] = 1
                 elif key == "position_ids":

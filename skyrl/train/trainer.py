@@ -1077,14 +1077,14 @@ class RayPPOTrainer:
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
 
-    def _old_forward(
+    def _execute_forward_pass(
         self,
         model: str,
         data_fwd_pass: TrainingInputBatch,
         key: str,
         mini_batch_boundaries: Optional[List[Tuple[int, int]]],
     ) -> torch.Tensor:
-        """Run the pre-training forward that produces the "old" logprobs/values.
+        """Executes forward pass that produces to produce the "old" logprobs/values.
 
         With ``trainer.recompute_old_logprobs_per_minibatch`` set (and mini-batch boundaries
         available), the forward is run per mini-batch — matching the mini-batch + DP partition
@@ -1147,7 +1147,7 @@ class RayPPOTrainer:
 
         # Critic forward (dispatch handles offload/backload automatically)
         if self.has_critic:
-            values = self._old_forward(
+            values = self._execute_forward_pass(
                 "critic",
                 data_fwd_pass,
                 key="values",
@@ -1157,11 +1157,13 @@ class RayPPOTrainer:
         # Ref forward. The ref model is not trained, so there is no forward_backward to match
         # its packing against -> always a single full-batch forward (boundaries=None).
         if self.ref_model is not None:
-            base_log_probs = self._old_forward("ref", data_fwd_pass, key="logprobs", mini_batch_boundaries=None)
+            base_log_probs = self._execute_forward_pass(
+                "ref", data_fwd_pass, key="logprobs", mini_batch_boundaries=None
+            )
             self.dispatch.empty_cache("ref")
 
         # Policy forward
-        action_log_probs = self._old_forward(
+        action_log_probs = self._execute_forward_pass(
             "policy",
             data_fwd_pass,
             key="logprobs",
