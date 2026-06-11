@@ -10,6 +10,9 @@ import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    expandable_segments_runtime_env,
+)
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
     ServerInfo,
@@ -142,12 +145,9 @@ class ServerGroup:
         # worker actors are spawned as child tasks of this server actor
         # (placement_group_capture_child_tasks=True) and inherit its runtime_env env_vars.
         # Safe with sleep mode on vLLM >= 0.20.1 (CuMemAllocator auto-disables expandable
-        # segments around its sleep/wake pool).
-        runtime_env = (
-            {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}}
-            if self._use_expandable_segments
-            else None
-        )
+        # segments around its sleep/wake pool). The helper appends to any existing
+        # PYTORCH_CUDA_ALLOC_CONF rather than clobbering it.
+        runtime_env = expandable_segments_runtime_env(self._use_expandable_segments)
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,

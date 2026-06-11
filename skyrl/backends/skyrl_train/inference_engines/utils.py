@@ -1,4 +1,5 @@
 import hashlib
+import os
 import random
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -12,6 +13,30 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
     ErrorResponse,
 )
 from skyrl.train.config import SamplingParams
+
+
+def expandable_segments_runtime_env(enabled: bool) -> Optional[Dict[str, Any]]:
+    """Build a Ray ``runtime_env`` that turns on PyTorch's ``expandable_segments``
+    allocator for inference-engine actors.
+
+    ``expandable_segments:True`` is *appended* to any ``PYTORCH_CUDA_ALLOC_CONF``
+    already set in the launching environment rather than overwriting it, so other
+    allocator settings (e.g. ``max_split_size_mb`` or a custom backend) are preserved.
+    If the user already set ``expandable_segments`` explicitly we leave their value
+    untouched (and avoid a duplicate-key parse error). Returns ``None`` when disabled,
+    so callers can pass it straight through as ``runtime_env``.
+    """
+    if not enabled:
+        return None
+    existing = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip()
+    if not existing:
+        alloc_conf = "expandable_segments:True"
+    elif "expandable_segments" in existing:
+        # Respect an explicit user setting instead of appending a conflicting one.
+        alloc_conf = existing
+    else:
+        alloc_conf = f"{existing},expandable_segments:True"
+    return {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": alloc_conf}}
 
 
 def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:

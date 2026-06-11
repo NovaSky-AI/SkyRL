@@ -15,7 +15,10 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    expandable_segments_runtime_env,
+    get_rendezvous_addr_port,
+)
 from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
 
 
@@ -158,10 +161,9 @@ def create_ray_wrapped_inference_engines(
     # the env var at actor launch (it must be set before the CUDA context initializes).
     # Ray propagates runtime_env to the vLLM worker actors spawned under the ray backend.
     # On vLLM >= 0.20.1 the CuMemAllocator auto-disables expandable segments around its
-    # sleep/wake memory pool, so this is compatible with sleep mode.
-    engine_runtime_env = (
-        {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}} if use_expandable_segments else None
-    )
+    # sleep/wake memory pool, so this is compatible with sleep mode. The helper appends
+    # to any existing PYTORCH_CUDA_ALLOC_CONF rather than clobbering it.
+    engine_runtime_env = expandable_segments_runtime_env(use_expandable_segments)
 
     resolved_executor_backend = (
         "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
