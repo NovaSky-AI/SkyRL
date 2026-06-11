@@ -851,6 +851,7 @@ class JaxBackendImpl(AbstractBackend):
         all_sampling_params = prepared_batch.all_sampling_params
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
+        max_topk_prompt_logprobs = prepared_batch.max_topk_prompt_logprobs
 
         # Load sampler weights and get adapter indices
         all_adapter_indices = self.load_sampler_weights(prepared_batch)
@@ -862,6 +863,7 @@ class JaxBackendImpl(AbstractBackend):
         # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
         all_prompt_logprobs: list[list[float]] = []
+        all_topk_prompt_logprobs: list = []
 
         # Sharding specs for sampling inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
@@ -896,6 +898,7 @@ class JaxBackendImpl(AbstractBackend):
                         sampling_params=sampling_params,
                         adapter_indices=adapter_indices,
                         prompt_logprobs=needs_prompt_logprobs,
+                        topk_prompt=max_topk_prompt_logprobs,
                         tokenizer=self.tokenizer,
                     )
                 # Only take the actual results, not the padded ones
@@ -910,14 +913,23 @@ class JaxBackendImpl(AbstractBackend):
                 )
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
+                if max_topk_prompt_logprobs > 0 and result.topk_prompt_logprobs:
+                    all_topk_prompt_logprobs.extend(result.topk_prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
+        for request_id, _, start_idx, end_idx, prompt_logprobs_requested, topk_requested in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
                 all_prompt_logprobs[start_idx] if prompt_logprobs_requested and all_prompt_logprobs else None
             )
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
+            topk_prompt_logprobs = (
+                all_topk_prompt_logprobs[start_idx] if topk_requested > 0 and all_topk_prompt_logprobs else None
+            )
+            results[request_id] = types.SampleOutput(
+                sequences=sequences,
+                prompt_logprobs=prompt_logprobs,
+                topk_prompt_logprobs=topk_prompt_logprobs,
+            )
 
         return results
 

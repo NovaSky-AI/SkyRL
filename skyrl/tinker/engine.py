@@ -64,6 +64,9 @@ def prepare_sample_batch(
     request_batch_slices = []
 
     needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
+    max_topk_prompt_logprobs = max(
+        (request_data.topk_prompt_logprobs for (_, request_data) in requests.values()), default=0
+    )
 
     for request_id, (model_id, request_data) in requests.items():
         request_start = len(all_model_inputs)
@@ -89,7 +92,14 @@ def prepare_sample_batch(
             all_session_ids.append(session_id)
 
         request_batch_slices.append(
-            (request_id, model_id, request_start, len(all_model_inputs), request_data.prompt_logprobs)
+            (
+                request_id,
+                model_id,
+                request_start,
+                len(all_model_inputs),
+                request_data.prompt_logprobs,
+                request_data.topk_prompt_logprobs,
+            )
         )
 
     return types.PreparedSampleBatch(
@@ -100,6 +110,7 @@ def prepare_sample_batch(
         all_checkpoint_paths=all_checkpoint_paths,
         all_session_ids=all_session_ids,
         needs_prompt_logprobs=needs_prompt_logprobs,
+        max_topk_prompt_logprobs=max_topk_prompt_logprobs,
         request_batch_slices=request_batch_slices,
     )
 

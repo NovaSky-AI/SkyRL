@@ -255,6 +255,8 @@ class SampleInput(BaseModel):
     num_samples: int
     checkpoint_id: str
     prompt_logprobs: bool
+    # Number of top-K teacher logprobs to return per prompt position (0 = disabled).
+    topk_prompt_logprobs: int = 0
     # See make_routing_session_id.
     seq_id: int | None = None
     sampling_session_id: str | None = None
@@ -269,6 +271,9 @@ class GeneratedSequence(BaseModel):
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
     prompt_logprobs: list[float] | None = None
+    # Per prompt position: None, or a list of (token_id, logprob) for the top-K
+    # tokens predicting that position. Matches the Tinker SDK's expected shape.
+    topk_prompt_logprobs: list[list[tuple[int, float]] | None] | None = None
 
 
 # Metrics tracked in the engine
@@ -323,8 +328,12 @@ class PreparedSampleBatch(BaseModel):
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool
 
-    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
-    request_batch_slices: list[tuple[str, str, int, int, bool]]
+    # Max top-K prompt logprobs requested across the batch (0 = none). The backend
+    # computes this many for every sample; each request slices what it asked for.
+    max_topk_prompt_logprobs: int = 0
+
+    # Mapping: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested, topk_requested)
+    request_batch_slices: list[tuple[str, str, int, int, bool, int]]
 
 
 # All accepted loss functions across backends.

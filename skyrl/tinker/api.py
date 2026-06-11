@@ -1092,7 +1092,12 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
+            # top-K prompt logprobs require the full prompt logits path, so enable
+            # prompt_logprobs whenever top-K is requested.
+            prompt_logprobs=(
+                (request.prompt_logprobs is True) or (request.topk_prompt_logprobs > 0)
+            ),
+            topk_prompt_logprobs=request.topk_prompt_logprobs,
             seq_id=request.seq_id,
             sampling_session_id=request.sampling_session_id,
         ),
