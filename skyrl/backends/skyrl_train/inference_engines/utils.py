@@ -15,28 +15,50 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
 from skyrl.train.config import SamplingParams
 
 
-def expandable_segments_runtime_env(enabled: bool) -> Optional[Dict[str, Any]]:
-    """Build a Ray ``runtime_env`` that turns on PyTorch's ``expandable_segments``
-    allocator for inference-engine actors.
+def _alloc_conf_with_expandable_segments() -> str:
+    """Return a ``PYTORCH_CUDA_ALLOC_CONF`` value with ``expandable_segments:True`` enabled.
 
-    ``expandable_segments:True`` is *appended* to any ``PYTORCH_CUDA_ALLOC_CONF``
-    already set in the launching environment rather than overwriting it, so other
-    allocator settings (e.g. ``max_split_size_mb`` or a custom backend) are preserved.
-    If the user already set ``expandable_segments`` explicitly we leave their value
-    untouched (and avoid a duplicate-key parse error). Returns ``None`` when disabled,
-    so callers can pass it straight through as ``runtime_env``.
+    Appended to any value already set in the launching environment rather than overwriting
+    it, so other allocator settings (e.g. ``max_split_size_mb`` or a custom backend) are
+    preserved. If the user already set ``expandable_segments`` explicitly, their value is
+    left untouched (which also avoids a duplicate-key parse error).
     """
-    if not enabled:
-        return None
     existing = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip()
     if not existing:
-        alloc_conf = "expandable_segments:True"
-    elif "expandable_segments" in existing:
-        # Respect an explicit user setting instead of appending a conflicting one.
-        alloc_conf = existing
-    else:
-        alloc_conf = f"{existing},expandable_segments:True"
-    return {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": alloc_conf}}
+        return "expandable_segments:True"
+    if "expandable_segments" in existing:
+        return existing
+    return f"{existing},expandable_segments:True"
+
+
+def build_engine_runtime_env(
+    use_expandable_segments: bool = False,
+    extra_env_vars: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build the Ray ``runtime_env`` for inference-engine actors.
+
+    Env vars are set here (rather than inside the actor) because they must be present
+    before the worker process initializes CUDA -- this is also why the vLLM worker child
+    tasks, which inherit the actor's ``runtime_env``, pick them up. Add future engine-side
+    env vars by extending this function or by passing ``extra_env_vars``.
+
+    Args:
+        use_expandable_segments: Enable PyTorch's ``expandable_segments`` allocator via
+            ``PYTORCH_CUDA_ALLOC_CONF`` (appended to any existing value).
+        extra_env_vars: Additional env vars to set on the engine actors. Takes precedence
+            over the keys this function sets if they collide.
+
+    Returns ``None`` when there is nothing to set, so callers can pass the result straight
+    through as ``runtime_env``.
+    """
+    env_vars: Dict[str, str] = {}
+    if use_expandable_segments:
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = _alloc_conf_with_expandable_segments()
+    if extra_env_vars:
+        env_vars.update(extra_env_vars)
+    if not env_vars:
+        return None
+    return {"env_vars": env_vars}
 
 
 def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:

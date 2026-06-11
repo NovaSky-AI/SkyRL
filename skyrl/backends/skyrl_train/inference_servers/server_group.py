@@ -11,7 +11,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.inference_engines.utils import (
-    expandable_segments_runtime_env,
+    build_engine_runtime_env,
 )
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
@@ -140,9 +140,10 @@ class ServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        # expandable_segments allocator for the engine actor (and its child vLLM workers,
-        # which inherit runtime_env). Safe with sleep mode on vLLM >= 0.20.1.
-        runtime_env = expandable_segments_runtime_env(self._use_expandable_segments)
+        # Engine-actor runtime_env (env vars applied before CUDA init and inherited by the
+        # child vLLM workers). Currently just the expandable_segments allocator, which is
+        # safe with sleep mode on vLLM >= 0.20.1.
+        runtime_env = build_engine_runtime_env(use_expandable_segments=self._use_expandable_segments)
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,

@@ -16,7 +16,7 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.utils import (
-    expandable_segments_runtime_env,
+    build_engine_runtime_env,
     get_rendezvous_addr_port,
 )
 from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
@@ -157,9 +157,10 @@ def create_ray_wrapped_inference_engines(
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
 
-    # expandable_segments allocator for the vLLM worker actors (set via runtime_env so it
-    # applies before CUDA init). Safe with sleep mode on vLLM >= 0.20.1.
-    engine_runtime_env = expandable_segments_runtime_env(use_expandable_segments)
+    # Engine-actor runtime_env (env vars are applied before CUDA init and inherited by the
+    # vLLM worker child tasks). Currently just the expandable_segments allocator, which is
+    # safe with sleep mode on vLLM >= 0.20.1.
+    engine_runtime_env = build_engine_runtime_env(use_expandable_segments=use_expandable_segments)
 
     resolved_executor_backend = (
         "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
