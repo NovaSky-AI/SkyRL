@@ -98,7 +98,9 @@ generator:
 
 ## Memory Optimization
 
-In colocated runs the trainer repeatedly offloads to CPU and backloads to GPU while the inference engine sleeps and wakes. Over many steps this churn fragments the CUDA address space: a worker can have plenty of free VRAM yet still fail to satisfy a single large contiguous allocation (e.g. Megatron's `reload_from_cpu` resizing a param buffer), which surfaces as a hard `Aborted`/SIGABRT rather than a catchable OOM. PyTorch's `expandable_segments` allocator avoids this by growing segments instead of requiring one contiguous block.
+PyTorch's default CUDA allocator can fragment the address space over a long run: a worker may have plenty of free VRAM yet still fail to satisfy a single large *contiguous* allocation, which surfaces as a hard `Aborted`/SIGABRT rather than a catchable OOM. This happens whenever allocation sizes vary over time — for example forward/backward passes with variable sequence lengths or dynamic microbatch token counts leave differently-sized holes step to step. PyTorch's `expandable_segments` allocator avoids this by growing segments in place instead of requiring one contiguous block, so it is generally useful regardless of placement.
+
+`colocate_all=true` is the worst case for fragmentation, and the main motivation for defaulting this on. There, the trainer repeatedly offloads to CPU and backloads to GPU while the inference engine sleeps and wakes in the same address space; over many steps this churn — plus large reallocations like Megatron's `reload_from_cpu` resizing a param buffer — fragments memory badly enough to crash a run that has tens of GiB free. In non-colocated runs the models stay resident on GPU with no offload/backload churn, so the benefit is smaller (it only mitigates fwd/bwd activation fragmentation), but the flag still applies and has effectively no downside.
 
 Two **independent** flags control this, because the trainer and the inference engine are separate processes with different allocators:
 
@@ -118,5 +120,5 @@ generator:
     use_expandable_segments: false  # default
 ```
 
-- The trainer flag defaults **on** — it directly mitigates colocated backload fragmentation.
+- The trainer flag defaults **on** — it most directly mitigates colocated backload fragmentation, but also helps fwd/bwd activation fragmentation in non-colocated runs. Under `colocate_all=false`, weight sync uses NCCL broadcast rather than CUDA-IPC, so it simply stays on continuously.
 - The engine flag defaults **off** — enable it to also defragment the engine side; on vLLM `< 0.20.1`, sleep mode plus expandable segments is a hard error, so leave it off there.
