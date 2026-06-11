@@ -142,6 +142,10 @@ class RenderedModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
+    # Shape of the tensor (row-major flattened into `data`). Used to recover 2D
+    # loss-fn inputs such as the (num_tokens, K) targets/weights for soft top-K
+    # distillation. None / 1D means a flat per-token sequence (the common case).
+    shape: list[int] | None = None
 
 
 class LossFnInputs(BaseModel):
@@ -300,6 +304,9 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
+
+    # K for soft top-K distillation targets (0/1 => standard hard 1D targets).
+    target_topk: int = 0
 
     # Per-example scalars
     all_model_ids: list[str]

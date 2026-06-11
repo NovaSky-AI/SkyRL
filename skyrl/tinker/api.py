@@ -415,9 +415,13 @@ class ModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
+    # Shape of the (row-major flattened) tensor. Preserved so 2D loss-fn inputs
+    # such as (num_tokens, K) soft top-K distillation targets survive the request
+    # boundary; None / 1D is the common per-token case.
+    shape: list[int] | None = None
 
     def to_types(self) -> types.TensorData:
-        return types.TensorData(data=self.data)
+        return types.TensorData(data=self.data, shape=self.shape)
 
 
 class Datum(BaseModel):
@@ -1094,9 +1098,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             checkpoint_id=checkpoint_id,
             # top-K prompt logprobs require the full prompt logits path, so enable
             # prompt_logprobs whenever top-K is requested.
-            prompt_logprobs=(
-                (request.prompt_logprobs is True) or (request.topk_prompt_logprobs > 0)
-            ),
+            prompt_logprobs=((request.prompt_logprobs is True) or (request.topk_prompt_logprobs > 0)),
             topk_prompt_logprobs=request.topk_prompt_logprobs,
             seq_id=request.seq_id,
             sampling_session_id=request.sampling_session_id,
