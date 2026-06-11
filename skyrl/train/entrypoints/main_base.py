@@ -280,6 +280,7 @@ class BasePPOExp:
             experiment_name=self.cfg.trainer.run_name,
             backends=self.cfg.trainer.logger,
             config=self.cfg,
+            tags=self.cfg.trainer.tags,
         )
 
     def get_inference_client(self) -> InferenceEngineInterface:
