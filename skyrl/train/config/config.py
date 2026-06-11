@@ -224,13 +224,6 @@ class PlacementConfig(BaseConfig):
     critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
     ref_num_gpus_per_node: int = 1
-    use_expandable_segments: bool = True
-    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training
-    workers to reduce GPU memory fragmentation across the offload/backload and
-    forward/backward cycles. Enabled programmatically after model init and turned
-    off around CUDA-IPC weight sync (IPC handles are incompatible with the VMM
-    addresses expandable segments uses). See ``InferenceEngineConfig`` for the
-    independent inference-engine knob."""
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +507,7 @@ class InferenceEngineConfig(BaseConfig):
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side
-    ``PlacementConfig.use_expandable_segments``. Default ``False``: it is a safe opt-in
+    ``TrainerConfig.use_expandable_segments``. Default ``False``: it is a safe opt-in
     on vLLM >= 0.20.1, where the CuMemAllocator auto-disables expandable segments around
     its sleep/wake memory pool. On older vLLM, sleep mode + expandable segments is a hard
     error, so leave this off."""
@@ -641,6 +634,11 @@ class EnvironmentConfig(BaseConfig):
 @dataclass
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
+    use_expandable_segments: bool = True
+    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training
+    workers to reduce GPU memory fragmentation across the offload/backload and
+    forward/backward cycles. See ``InferenceEngineConfig`` for the
+    equivalent inference-engine knob."""
     sequence_parallel_backend: str = "ulysses"
     strategy: str = "fsdp"
     policy: PolicyConfig = field(default_factory=PolicyConfig)

@@ -249,7 +249,7 @@ class Worker(DistributedTorchRayActor):
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
 
-        No-op when disabled via ``placement.use_expandable_segments`` or when CUDA is
+        No-op when disabled via ``trainer.use_expandable_segments`` or when CUDA is
         unavailable. Expandable segments reduce fragmentation across the offload/backload
         and forward/backward cycles, but are incompatible with ``cudaIpcGetMemHandle``,
         so callers turn this OFF around CUDA-IPC weight sync (see
@@ -258,7 +258,7 @@ class Worker(DistributedTorchRayActor):
         Enabling is done *after* model init so the model weights stay in standard CUDA
         memory (IPC-compatible); only later allocations use expandable segments.
         """
-        if not self.cfg.placement.use_expandable_segments:
+        if not self.cfg.use_expandable_segments:
             return
         if not torch.cuda.is_available():
             return
@@ -280,7 +280,7 @@ class Worker(DistributedTorchRayActor):
         weight sync uses NCCL broadcast, which has its own buffers and is unaffected.
         :meth:`_set_expandable_segments` itself no-ops when the feature is disabled.
         """
-        toggle = self.cfg.placement.colocate_all and self.cfg.placement.use_expandable_segments
+        toggle = self.cfg.placement.colocate_all and self.cfg.use_expandable_segments
         if toggle:
             self._set_expandable_segments(False)
         try:

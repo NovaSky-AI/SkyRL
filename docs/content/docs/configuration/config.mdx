@@ -748,3 +748,29 @@ For more details on how different placement options work, please refer to the [p
 - `generator.zero_reward_on_non_stop`: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - `generator.apply_overlong_filtering`: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
 - `generator.step_wise_trajectories`: Whether to return outputs in a step-wise fashion. If `true`, then the generator will return multi-turn generations with the (prompt, response) pair of each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.
+
+## Memory Optimization
+
+PyTorch's default CUDA allocator can fragment the address space over a long run: a worker may have plenty of free VRAM yet still fail to satisfy a single large *contiguous* allocation, which surfaces as a hard `Aborted`/SIGABRT rather than a catchable OOM. This happens whenever allocation sizes vary over time — for example forward/backward passes with variable sequence lengths or dynamic microbatch token counts leave differently-sized holes step to step. PyTorch's `expandable_segments` allocator avoids this by growing segments in place instead of requiring one contiguous block, so it is generally useful regardless of placement.
+
+`colocate_all=true` is the worst case for fragmentation, and the main motivation for defaulting this on. There, the trainer repeatedly offloads to CPU and backloads to GPU while the inference engine sleeps and wakes in the same address space; over many steps this churn — plus large reallocations like Megatron's `reload_from_cpu` resizing a param buffer — fragments memory badly enough to crash a run that has tens of GiB free. In non-colocated runs the models stay resident on GPU with no offload/backload churn, so the benefit is smaller (it only mitigates fwd/bwd activation fragmentation), but the flag still applies and has effectively no downside.
+
+Two **independent** flags control this, because the trainer and the inference engine are separate processes with different allocators:
+
+```yaml
+trainer:
+  # Trainer workers (policy/critic/ref). Enabled programmatically after model init
+  # and automatically turned OFF around CUDA-IPC weight sync, since IPC handles are
+  # incompatible with the VMM addresses expandable segments uses.
+  use_expandable_segments: true   # default
+
+generator:
+  inference_engine:
+    # vLLM engine processes. Sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True at
+    # actor launch. Safe with sleep mode on vLLM >= 0.20.1 (its CuMemAllocator
+    # auto-disables expandable segments around the sleep/wake pool). Opt-in.
+    use_expandable_segments: false  # default
+```
+
+- `trainer.use_expandable_segments` (default **on**) — most directly mitigates colocated backload fragmentation, but also helps fwd/bwd activation fragmentation in non-colocated runs. Under `colocate_all=false`, weight sync uses NCCL broadcast rather than CUDA-IPC, so it simply stays on continuously.
+- `generator.inference_engine.use_expandable_segments` (default **off**) — enable it to also defragment the engine side; on vLLM `< 0.20.1`, sleep mode plus expandable segments is a hard error, so leave it off there.
