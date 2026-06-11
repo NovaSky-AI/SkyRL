@@ -157,12 +157,8 @@ def create_ray_wrapped_inference_engines(
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
 
-    # Enable PyTorch's expandable_segments allocator on the engine processes by setting
-    # the env var at actor launch (it must be set before the CUDA context initializes).
-    # Ray propagates runtime_env to the vLLM worker actors spawned under the ray backend.
-    # On vLLM >= 0.20.1 the CuMemAllocator auto-disables expandable segments around its
-    # sleep/wake memory pool, so this is compatible with sleep mode. The helper appends
-    # to any existing PYTORCH_CUDA_ALLOC_CONF rather than clobbering it.
+    # expandable_segments allocator for the vLLM worker actors (set via runtime_env so it
+    # applies before CUDA init). Safe with sleep mode on vLLM >= 0.20.1.
     engine_runtime_env = expandable_segments_runtime_env(use_expandable_segments)
 
     resolved_executor_backend = (

@@ -140,13 +140,8 @@ class ServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        # Enable PyTorch's expandable_segments allocator on the engine process by setting
-        # the env var at actor launch (before the CUDA context initializes). The vLLM
-        # worker actors are spawned as child tasks of this server actor
-        # (placement_group_capture_child_tasks=True) and inherit its runtime_env env_vars.
-        # Safe with sleep mode on vLLM >= 0.20.1 (CuMemAllocator auto-disables expandable
-        # segments around its sleep/wake pool). The helper appends to any existing
-        # PYTORCH_CUDA_ALLOC_CONF rather than clobbering it.
+        # expandable_segments allocator for the engine actor (and its child vLLM workers,
+        # which inherit runtime_env). Safe with sleep mode on vLLM >= 0.20.1.
         runtime_env = expandable_segments_runtime_env(self._use_expandable_segments)
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
