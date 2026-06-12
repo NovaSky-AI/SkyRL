@@ -226,7 +226,7 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
-    "transformer-engine-cu13; sys_platform == 'never'",
+    "transformer-engine-cu13; sys_platform == 'never'"
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -306,7 +306,7 @@ megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
+    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
 
 
