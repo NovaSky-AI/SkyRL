@@ -35,9 +35,7 @@ tpu = [
 ]
 
 tinker = [
-    # Pinned to 0.16.1 to test whether the SDK bump to 0.22.3 (from #1601's lock
-    # re-resolution) is what makes the tinker CPU tests hang. TODO: revert this pin.
-    "tinker==0.16.1",
+    "tinker>=0.3.0",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",
