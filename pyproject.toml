@@ -226,6 +226,7 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    "transformer-engine-cu13; sys_platform == 'never'",
 ]
 
 [tool.uv.extra-build-dependencies]
