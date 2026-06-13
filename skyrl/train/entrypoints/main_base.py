@@ -115,12 +115,14 @@ def create_ray_wrapped_inference_engines_from_config(
 
 
 def create_remote_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):
-    # TODO(tgriggs): We may want a separate config for the model name in case
-    # it's different from the name used in the OpenAI API
     ie_cfg = cfg.generator.inference_engine
+    # Use served_model_name if provided, otherwise fall back to the model path.
+    # served_model_name allows using a different model name for HTTP requests than the actual
+    # model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
+    model_name = ie_cfg.served_model_name if ie_cfg.served_model_name is not None else cfg.trainer.policy.model.path
     return create_remote_inference_engines(
         urls=ie_cfg.remote_urls,
-        model_name=cfg.trainer.policy.model.path,
+        model_name=model_name,
         engine_backend=ie_cfg.backend,
         tokenizer=tokenizer,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,
