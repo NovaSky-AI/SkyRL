@@ -334,6 +334,11 @@ class MegatronModelWrapper:
             rollout_action_logprobs = data["rollout_action_logprobs"]
             action_mask = data.get("action_mask")
             num_microbatches = data.get("num_microbatches")
+            # Number of microbatches carrying real samples (excludes fully-padding
+            # microbatches added by token-based batching). Used to normalize the
+            # KL/entropy terms over real microbatches only. Falls back to
+            # num_microbatches when not provided (no padding microbatches).
+            num_real_microbatches = data.get("num_real_microbatches", num_microbatches)
 
             dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
             tp_grp = mpu.get_tensor_model_parallel_group()
@@ -479,7 +484,16 @@ class MegatronModelWrapper:
             # NOTE: The KL and entropy loss terms are not pre-scaled,
             # so we just average them across microbatches and DP workers.
             # KL and entropy use Megatron's existing microbatch and CP schedule scaling.
-            loss = policy_loss * grad_sum_correction_factor + (kl_loss_term - entropy_loss_term)
+            # Megatron divides by num_microbatches (which includes fully-padding microbatches
+            # added by token-based batching). Those padding microbatches contribute 0 to
+            # KL/entropy, so dividing by the full count would dilute the regularization by
+            # num_real/num_total. Scale up by num_microbatches/num_real_microbatches so the
+            # terms are averaged over real microbatches only (no-op when there is no padding).
+            kl_entropy_microbatch_scale = num_microbatches / max(1, num_real_microbatches)
+            loss = (
+                policy_loss * grad_sum_correction_factor
+                + (kl_loss_term - entropy_loss_term) * kl_entropy_microbatch_scale
+            )
             unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.

@@ -81,6 +81,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
         "distributed_executor_backend": ie_cfg.distributed_executor_backend,
+        "use_expandable_segments": ie_cfg.use_expandable_segments,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -280,6 +281,7 @@ class BasePPOExp:
             experiment_name=self.cfg.trainer.run_name,
             backends=self.cfg.trainer.logger,
             config=self.cfg,
+            tags=self.cfg.trainer.tags,
         )
 
     def get_inference_client(self) -> InferenceEngineInterface:
