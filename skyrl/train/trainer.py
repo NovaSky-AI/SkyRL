@@ -487,6 +487,32 @@ class RayPPOTrainer:
         self.tracker.finish()
         logger.info("Training done!")
 
+    def flush_pending_metrics(self):
+        """Best-effort flush of metrics accumulated for the in-flight step.
+
+        `train()` only logs `all_metrics`/`all_timings` once a step fully
+        completes, so a crash mid-step (e.g. an OOM in
+        `fwd_logprobs_values_reward` after a long generation phase) would
+        otherwise drop everything already recorded for that step. Called from
+        the except block in `BasePPOExp.run` before `tracker.log_exception`
+        (which finishes the wandb run, so the flush must happen first).
+
+        Idempotent: the accumulators are cleared after the flush attempt, so a
+        second call is a no-op. Never raises.
+        """
+        if not self.all_metrics and not self.all_timings:
+            return
+        log_payload = {
+            **self.all_metrics,
+            **{f"timing/{k}": v for k, v in self.all_timings.items()},
+        }
+        try:
+            self.tracker.log(log_payload, step=self.global_step, commit=True)
+        except Exception as e:
+            logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
+        self.all_metrics = {}
+        self.all_timings = {}
+
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.
 
