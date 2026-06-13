@@ -620,6 +620,12 @@ class RayPPOTrainer:
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
                 )
+                if pg is not None:
+                    # The shared policy/ref placement group `pg` is set only when colocate_policy_ref is enabled
+                    logger.info(
+                        "Colocating policy and ref on the same GPUs across "
+                        f"{cfg.trainer.placement.policy_num_nodes} node(s)."
+                    )
             else:
                 ref_model = None
 
