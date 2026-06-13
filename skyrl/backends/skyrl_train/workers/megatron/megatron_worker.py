@@ -340,7 +340,7 @@ class MegatronWorker:
         # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
         # HF config means a vision tower is present. Megatron's TransformerConfig
         # has no such field, so this must be read off the HF config.
-        self.is_vlm = hasattr(hf_config, "vision_config") and hf_config.vision_config is not None
+        self.is_vlm = hasattr(hf_config_original, "vision_config") and hf_config_original.vision_config is not None
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
