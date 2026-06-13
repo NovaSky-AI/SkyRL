@@ -7,14 +7,21 @@ Run with:
 uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_train/test_token_based_batching_utils.py
 """
 
+from typing import List
+
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     TokenBasedBatchIterator,
-    balanced_binpacking,
     get_microbatch_iterator,
 )
+from skyrl.train.dataset.bin_packing import make_seq_packer
+
+
+def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int) -> List[List[int]]:
+    """Pack via the shared Balanced SeqPacker (soft-cap semantics, as the iterator uses)."""
+    return make_seq_packer("balanced", bin_capacity=max_tokens_per_microbatch).pack(token_counts)
 
 
 class TestBalancedBinpacking:

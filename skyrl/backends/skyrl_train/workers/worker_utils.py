@@ -1,4 +1,3 @@
-import heapq
 import math
 from typing import Dict, Iterator, List
 
@@ -7,6 +6,7 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
+from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
 
 
@@ -188,60 +188,6 @@ class SampleBasedBatchIterator(BaseBatchIterator):
         return TensorBatch.cat(batches)
 
 
-def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int) -> List[List[int]]:
-    """Chunk a list of token counts into microbatches so that each
-    microbatch's total token count does not exceed `max_tokens_per_microbatch`,
-    and the microbatches are roughly balanced.
-
-    Roughly balance by assigning sequences to the microbatch with
-    the least number of tokens so far.
-
-    Args:
-        token_counts: List of token counts for each sample.
-        max_tokens_per_microbatch: Maximum total tokens allowed per microbatch.
-
-    Returns:
-        A list of microbatches, where each microbatch is a list of indices (ints)
-        referring to entries in `token_counts`.
-
-    >>> balanced_binpacking([10, 10, 5, 5], 15)
-    [[0, 2], [1, 3]]
-    >>> balanced_binpacking([10, 1, 1, 1, 1, 1], 10)
-    [[0], [1, 2, 3, 4, 5]]
-    >>> balanced_binpacking([8, 3, 5, 6, 2, 7], 11)
-    [[0, 4], [5, 1], [3, 2]]
-    """
-    # Create list of (index, token_count) pairs and sort by token count descending
-    seq_lens = [(i, seq_len) for i, seq_len in enumerate(token_counts)]
-    seq_lens.sort(key=lambda x: x[1], reverse=True)
-
-    # Track microbatch indices and their current token counts
-    microbatch_indices: List[List[int]] = []
-
-    # Heap to track the total number of tokens in each microbatch
-    microbatch_tokens_heap = []  # (current_total, bin_idx)
-
-    for idx, seq_len in seq_lens:
-        placed = False
-
-        # Look for an existing microbatch with the least number of tokens
-        # that can fit the sequence without exceeding the token limit.
-        if microbatch_tokens_heap:
-            microbatch_len, i = microbatch_tokens_heap[0]
-            new_microbatch_len = microbatch_len + seq_len
-            if new_microbatch_len <= max_tokens_per_microbatch:
-                microbatch_indices[i].append(idx)
-                heapq.heapreplace(microbatch_tokens_heap, (new_microbatch_len, i))
-                placed = True
-
-        # If no microbatch can fit the sequence, create a new microbatch.
-        if not placed:
-            microbatch_indices.append([idx])
-            heapq.heappush(microbatch_tokens_heap, (seq_len, len(microbatch_indices) - 1))
-
-    return microbatch_indices
-
-
 class TokenBasedBatchIterator(BaseBatchIterator):
     """An iterator that chunks microbatches based on real token count.
 
@@ -267,8 +213,11 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         attention_mask = data["attention_mask"]
         self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
 
-        # Create microbatches based on token count
-        self._microbatches = balanced_binpacking(self._token_counts, self._max_tokens_per_microbatch)
+        # Create microbatches based on token count. The "balanced" packer treats
+        # the token budget as a soft cap: a sequence longer than the budget gets
+        # its own (over-budget) microbatch rather than raising.
+        packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
+        self._microbatches = packer.pack(self._token_counts)
 
         # Synchronize the number of microbatches across all DP workers
         max_num_microbatches = self._sync_num_microbatches()
