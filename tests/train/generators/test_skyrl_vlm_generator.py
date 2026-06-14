@@ -85,6 +85,8 @@ def _build_vlm_generator(tokenizer):
     env_cfg = SkyRLGymConfig(max_env_workers=0)
     mock_client = MagicMock()
     mock_client.model_name = MODEL_NAME
+    # agent_loop releases the trajectory's router session on completion.
+    mock_client.finish_session = AsyncMock()
     generator = SkyRLVLMGymGenerator(
         generator_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,

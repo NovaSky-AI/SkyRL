@@ -872,6 +872,32 @@ class RemoteInferenceClient:
 
         return results
 
+    async def finish_session(self, session_id: str) -> None:
+        """Notify the router that a session (trajectory) is complete.
+
+        Best-effort data-plane call to the router's ``/finish_session`` endpoint.
+        Session-aware routing policies (e.g. ``sticky_least_loaded``)
+        use this to release the replica capacity held by the session so that new
+        trajectories are balanced onto less-busy engines.
+
+        Failures are logged but never raised: this runs in trajectory cleanup
+        paths (``finally`` blocks, cancellation handlers) and must not mask the
+        original outcome. Routers/policies that don't track sessions treat this
+        as a no-op, and unknown session ids are ignored server-side.
+        """
+        if not session_id:
+            return
+        url = f"{self.proxy_url}/finish_session"
+        try:
+            session = await self._get_session()
+            async with session.post(url, params={"session_id": str(session_id)}) as resp:
+                # Drain the body so the keep-alive connection can be reused.
+                await resp.read()
+                if resp.status >= 400:
+                    logger.warning(f"finish_session for session_id={session_id!r} returned HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"finish_session for session_id={session_id!r} failed: {e}")
+
     # ---------------------------
     # Control Plane (fan-out to all server_urls)
     # ---------------------------
