@@ -74,6 +74,7 @@ async def test_worker_wrap_load_weights_preserves_moe_forward(ray_init_fixture) 
             # Skip CUDAGraph capture as the test only needs two short prefills
             enforce_eager=True,
             worker_extension_cls=f"{WorkerWrapRepro.__module__}.{WorkerWrapRepro.__name__}",
+            distributed_executor_backend="ray",
         )
     )
 
@@ -135,6 +136,7 @@ async def test_worker_wrap_multichunk_reload_preserves_moe_forward(
             gpu_memory_utilization=0.4,
             enforce_eager=True,
             worker_extension_cls=f"{WorkerWrap.__module__}.{WorkerWrap.__name__}",
+            distributed_executor_backend="ray",
         )
     )
 
