@@ -11,6 +11,7 @@ from torch import distributed as dist
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
 
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.utils.tok import check_is_vlm, get_processor
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
@@ -137,6 +138,17 @@ class DistributedStrategy(ABC):
                 except Exception as e:
                     # if the generation config isn't available, we don't save it
                     logger.warning(f"Could not save generation config for '{model_config.name_or_path}'. Error: {e}")
+
+                # VLMs need preprocessor_config.json (+ image/video processor configs) to be
+                # reloadable by AutoProcessor; the tokenizer alone is insufficient and vLLM
+                # crashes on load without it. Resolve from the original base model, same as
+                # generation_config above. No-op for text-only models (no vision_config).
+                if check_is_vlm(model_config.name_or_path):
+                    try:
+                        processor = get_processor(model_config.name_or_path)
+                        processor.save_pretrained(work_dir)
+                    except Exception as e:
+                        logger.warning(f"Could not save processor for '{model_config.name_or_path}'. Error: {e}")
 
     @staticmethod
     def get_rng_state():
