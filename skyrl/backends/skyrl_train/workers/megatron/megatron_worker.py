@@ -357,13 +357,9 @@ class MegatronWorker:
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
 
-        # For Qwen3.5 hybrid GDN models, language_model_only routes the unified
-        # multimodal checkpoint to megatron-core's native GPTModel + GDN ``thd``
-        # path (dropping the vision tower) instead of the VL bridge ->
-        # ``Qwen3VLModel``, which double-packs sequences and corrupts the GDN
-        # ``cu_seqlens`` under sample packing. Must run before
-        # ``to_megatron_provider`` (which resolves the bridge from
-        # ``architectures``). No-op for all other models / architectures.
+        # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
+        # path (which supports sample packing) instead of the VL Qwen3VLModel
+        # (which doesn't). Must run before to_megatron_provider; no-op otherwise.
         if language_model_only and maybe_force_qwen35_text_bridge(bridge, hf_config):
             logger.info(
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
@@ -372,18 +368,10 @@ class MegatronWorker:
 
         provider = bridge.to_megatron_provider()
 
-        # Disable Multi-Token Prediction (MTP) for training. MTP is a
-        # speculative-decoding draft head; its auxiliary loss is not used by
-        # SkyRL's policy / cross-entropy losses (which read only the main head
-        # logits). Beyond being dead compute, the MTP layer's
-        # ``_checkpointed_forward`` in megatron-core splats non-tensor kwargs
-        # (e.g. ``packed_seq_params``) as positional args into
-        # ``tensor_parallel.checkpoint``, whose ``CheckpointFunction`` only
-        # accepts tensors -- so with ``recompute_granularity='full'`` (SkyRL's
-        # default) a packed-sequence backward raises ``save_for_backward can
-        # only save variables, but argument N is of type PackedSeqParams``. This
-        # mirrors the existing MTP-disable in ``model_bridges.py`` (GLM-4.7-Flash
-        # / DeepSeek-V3 style models).
+        # Disable MTP for training: its aux loss is unused, and under full
+        # recompute its checkpointed forward passes packed_seq_params positionally
+        # into tensor_parallel.checkpoint (tensors only), breaking packed-sequence
+        # backward. Mirrors the MTP-disable in model_bridges.py.
         if getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
             provider.mtp_num_layers = None

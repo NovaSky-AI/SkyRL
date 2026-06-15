@@ -516,25 +516,12 @@ def preprocess_packed_seqs(
 
 
 def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
-    """Whether the model packs + CP-shards sequences inside its own ``forward``.
+    """Whether the model packs sequences inside its own ``forward``.
 
-    Some mbridge model wrappers (e.g. ``Qwen3VLModel``, which backs the Qwen3.5
-    hybrid Gated-DeltaNet + attention MoE models when loaded via the VL bridge)
-    call ``preprocess_packed_seqs`` *inside* their own ``forward``. SkyRL sample
-    packing (``remove_microbatch_padding``) would then pack the sequence a second
-    time: the model sees a global ``cu_seqlens`` (e.g. ``[0, 4112]``) that no
-    longer matches the CP-local tensor length, and the GatedDeltaNet layer's
-    ``_resolve_cu_seqlens`` check fails / corrupts the varlen kernel, aborting in
-    the backward.
-
-    SkyRL therefore refuses sample packing for these models (see
-    :class:`MegatronModelWrapper`). To pack Qwen3.5, load the language model via
-    the native ``GPTModel`` GDN ``thd`` path (``language_model_only=True``, which
-    routes through ``maybe_force_qwen35_text_bridge``); that model does not
-    self-pack and is not matched here.
-
-    Returns ``False`` when mbridge / Qwen3VL is not importable, so non-hybrid
-    models are unaffected.
+    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
+    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
+    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
+    mbridge / Qwen3VL is not importable, so other models are unaffected.
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (

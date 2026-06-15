@@ -86,12 +86,10 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
-        # Some mbridge models (Qwen3VL hybrid GDN+attention MoE, e.g. Qwen3.5
-        # loaded via the VL bridge) pack + CP-shard sequences inside their own
-        # forward. SkyRL sample packing would then double-pack and corrupt the
-        # GatedDeltaNet cu_seqlens, so we refuse it. To pack Qwen3.5, load the
-        # native GPTModel GDN path via language_model_only=True (which routes
-        # through maybe_force_qwen35_text_bridge); that model does not self-pack.
+        # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
+        # sequences inside their own forward; SkyRL sample packing would then
+        # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
+        # use language_model_only=True (native GPTModel GDN path) to pack.
         if self.remove_microbatch_padding and model_packs_sequences_internally(self.actor_module):
             raise ValueError(
                 "remove_microbatch_padding=True (sample packing) is not supported for models that "

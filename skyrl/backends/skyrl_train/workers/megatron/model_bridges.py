@@ -72,38 +72,20 @@ try:
             provider.mtp_num_layers = None
             return provider
 
-    # ------------------------------------------------------------------
-    # Qwen3.5 hybrid GDN models: text (language-model-only) -> GPTModel
-    # ------------------------------------------------------------------
+    # Qwen3.5 (language-model-only) -> GPTModel.
     #
-    # Qwen3.5 checkpoints report ``architectures=[...ForConditionalGeneration]``
-    # and ``model_type=qwen3_5(_moe)``, so AutoBridge dispatches them to the VL
-    # bridge -> ``Qwen3VLModel``, which packs + CP-shards sequences inside its
-    # own ``forward``. That double-packs against SkyRL's ``preprocess_packed_seqs``
-    # and corrupts the ``cu_seqlens`` fed to the GDN varlen kernel (see
-    # QWEN35_GDN_PACKING_NOTES.md).
-    #
-    # When the user only wants the language model (``language_model_only=True``),
-    # we instead route to megatron-core's native GPTModel + GDN ``thd`` path,
-    # which supports packed sequences directly. The stock text bridges
-    # (``Qwen35MoEBridge`` / ``Qwen35Bridge``, registered upstream for the
-    # ``...ForCausalLM`` archs) target ``GPTModel`` but assume a *re-saved* flat
-    # text checkpoint: their ``provider_bridge`` reads config fields at the top
-    # level and their mappings use ``hf_prefix="model."``. The unified
-    # multimodal checkpoint instead nests LM dims under ``text_config`` and
-    # stores LM weights under ``model.language_model.*``. The two thin subclasses
-    # below adapt the stock bridges to the unified checkpoint -- exactly what
-    # ``Qwen35VLMoEBridge`` / ``Qwen35VLBridge`` do, but targeting plain
-    # ``GPTModel`` (vision tower dropped). No HF model is materialized; weights
-    # stream from safetensors.
+    # Qwen3.5 checkpoints dispatch to the VL bridge -> Qwen3VLModel, which packs
+    # sequences inside its own forward and breaks under SkyRL sample packing. When
+    # only the LM is wanted (language_model_only=True), route to the native
+    # GPTModel + GDN thd path instead. The stock text bridges assume a flat text
+    # checkpoint (top-level config, hf_prefix="model."); these subclasses adapt
+    # them to the unified VL checkpoint (text_config, model.language_model.*),
+    # like Qwen35VLBridge but targeting GPTModel.
 
     class _TextConfigShim:
         """Present ``text_config`` as ``.config`` for the stock text bridges.
 
-        The stock ``provider_bridge`` reads ``hf_pretrained.config`` flat, so we
-        hand it the language-model sub-config of the unified multimodal config.
-        Every other attribute access (notably ``.state.source``, used for weight
-        streaming) passes through to the real ``hf_pretrained``.
+        Other attribute access passes through to the real ``hf_pretrained``.
         """
 
         def __init__(self, hf_pretrained, text_config):
@@ -116,17 +98,14 @@ try:
     class _Qwen35LMOnlyBridgeMixin:
         """Adapt a stock Qwen3.5 text->GPTModel bridge to a unified VL checkpoint.
 
-        Feeds ``text_config`` into the inherited provider logic and re-prefixes
-        the inherited weight mappings to ``model.language_model.``. MTP is
-        disabled for training (``megatron_worker`` nulls ``mtp_num_layers``), so
-        MTP mappings are intentionally omitted.
+        Feeds ``text_config`` into the inherited provider logic; MTP mappings are
+        omitted (disabled for training).
         """
 
         def provider_bridge(self, hf_pretrained):
             hf_config = hf_pretrained.config
             text_config = hf_config.get_text_config()
-            # VLMs keep ``tie_word_embeddings`` on the top-level config, not on
-            # ``text_config``; surface it so the inherited bridge reads it.
+            # tie_word_embeddings lives on the top-level VL config, not text_config.
             if not hasattr(text_config, "tie_word_embeddings"):
                 text_config.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
             return super().provider_bridge(_TextConfigShim(hf_pretrained, text_config))
@@ -157,23 +136,19 @@ try:
                 *self._get_dense_lm_mappings(hf_prefix="model.language_model.", megatron_prefix="")
             )
 
-    # Maps a VL-dispatched Qwen3.5 architecture -> the sentinel ``...ForCausalLM``
-    # name registered above. The sentinel ends in ``ForCausalLM`` (so it passes
-    # AutoBridge's architecture-suffix filter) and is not a real ``transformers``
-    # class (so dispatch falls back to the string key -> our bridge).
+    # VL arch -> sentinel ...ForCausalLM key registered above. The ForCausalLM
+    # suffix passes AutoBridge's filter; not being a real transformers class makes
+    # dispatch fall back to the string key -> our bridge.
     _QWEN35_LM_SENTINEL = {
         "Qwen3_5MoeForConditionalGeneration": "Qwen3_5MoeTextForCausalLM",
         "Qwen3_5ForConditionalGeneration": "Qwen3_5TextForCausalLM",
     }
 
     def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:
-        """Force a loaded Qwen3.5 ``AutoBridge`` onto the text->GPTModel LM bridge.
+        """Rewrite a Qwen3.5 bridge's ``architectures`` to the text sentinel so it
+        dispatches to the GPTModel LM bridge instead of the VL bridge.
 
-        Rewrites the bridge's loaded ``architectures`` to the text sentinel so
-        ``to_megatron_provider`` dispatches to ``Qwen35MoELMBridge`` /
-        ``Qwen35DenseLMBridge`` instead of the VL bridge. Returns ``True`` if the
-        architecture matched and was rewritten, ``False`` otherwise (caller-gated
-        on ``language_model_only``).
+        Returns ``True`` if rewritten (caller gates on ``language_model_only``).
         """
         archs = list(getattr(hf_config, "architectures", []) or [])
         sentinel = next((_QWEN35_LM_SENTINEL[a] for a in archs if a in _QWEN35_LM_SENTINEL), None)
