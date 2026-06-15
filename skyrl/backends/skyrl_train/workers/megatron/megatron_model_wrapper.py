@@ -46,6 +46,9 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
 )
 from skyrl.train.config import TrainerConfig
 
+# One-shot guard for the MTP_PROFILE diagnostic capture (see forward_backward_mini_batch).
+_MTP_PROFILE_DONE = False
+
 
 class MegatronModelWrapper:
     def __init__(
@@ -565,6 +568,8 @@ class MegatronModelWrapper:
             return loss, metrics
 
         def forward_step(batch_iter, model):
+            if prof is not None:
+                prof.step()
             # NOTE(Charlie): despite the name, methods like `remove_left_padding()` are padding-agnostic
             # (can be left, or right) as it uses attention_mask to locate real tokens. Same thing
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
@@ -679,15 +684,52 @@ class MegatronModelWrapper:
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        metrics_list = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=forward_only,
-        )
+        # MTP_PROFILE=1: one-shot torch.profiler capture of steady-state microbatches (~9-13) of
+        # the first training mini-batch, for diagnosing the draft-path slowdown. Writes a per-rank
+        # kernel table to /tmp/mtp_prof_rank<R>.txt (+ a chrome trace from rank 0).
+        prof = None
+        global _MTP_PROFILE_DONE
+        if os.environ.get("MTP_PROFILE") and not forward_only and not _MTP_PROFILE_DONE and len(micro_batches) >= 14:
+            _MTP_PROFILE_DONE = True
+            from torch.profiler import ProfilerActivity, profile, schedule
+
+            _rank = torch.distributed.get_rank()
+
+            def _dump_profile(p):
+                path = f"/tmp/mtp_prof_rank{_rank}.txt"
+                with open(path, "w") as f:
+                    f.write(
+                        p.key_averages(group_by_input_shape=True).table(sort_by="self_cuda_time_total", row_limit=40)
+                    )
+                    f.write("\n\n===== by stack =====\n")
+                    f.write(p.key_averages(group_by_stack_n=12).table(sort_by="self_cuda_time_total", row_limit=10))
+                if _rank == 0:
+                    p.export_chrome_trace("/tmp/mtp_prof_rank0_trace.json")
+                print(f"[MTP_PROFILE] wrote {path}", flush=True)
+
+            prof = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=schedule(wait=8, warmup=2, active=3, repeat=1),
+                record_shapes=True,
+                with_stack=True,
+                on_trace_ready=_dump_profile,
+            )
+
+        if prof is not None:
+            prof.start()
+        try:
+            metrics_list = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=forward_only,
+            )
+        finally:
+            if prof is not None:
+                prof.stop()
 
         # The decoupled MTP/draft loss is computed and logged per-microbatch inside loss_func
         # (metric key "mtp_loss"); no MTPLossLoggingHelper plumbing is needed.

@@ -1,6 +1,25 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO with Megatron.
+# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO with Megatron,
+# WITH Multi-Token Prediction (MTP) speculative decoding for faster rollout.
+#
+# This is the spec-decode counterpart of run_megatron_dapo_qwen3.5_9b.sh. Every
+# knob below is IDENTICAL to the no-spec script (same batch sizes, LR, parallelism,
+# sampling) so a reward-curve / throughput comparison is apples-to-apples. The ONLY
+# difference is the `trainer.mtp.*` block at the bottom.
+#
+# What MTP on does (single high-level `trainer.mtp` knob, see skyrl/train/config/config.py):
+#   - Training side: builds + trains Qwen3.5-9B's native MTP head (the model ships
+#     `mtp_num_hidden_layers: 1`) with a decoupled draft loss (top-k soft-CE distillation against
+#     the policy's own detached next-token distribution). The draft gradient never pulls on
+#     the policy backbone.
+#   - Inference side: enables vLLM MTP speculative decoding
+#     (`speculative_config={"method": "mtp", "num_speculative_tokens": 3}`). With a single trained
+#     head, depth>1 reuses that head autoregressively at draft time. vLLM loads the MTP head from the
+#     same policy checkpoint, and SkyRL's weight sync keeps the draft head in sync with the trained
+#     policy each step.
+#   - The per-step draft acceptance rate is logged as `vllm/draft_acceptance_rate`.
+#
 # Runs on 1 node of 8xH100s (80GB each).
 #
 # NOTE: verify the exact HF repo id for the 9B model before running
@@ -9,7 +28,7 @@ set -x
 # Prepare data onto the fast local disk first:
 #   DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # Then launch:
-#   bash examples/train/megatron/run_megatron_dapo_qwen3.5_9b.sh
+#   bash examples/train/megatron/run_megatron_dapo_qwen3.5_9b_specdecode.sh
 
 MODEL_NAME="Qwen/Qwen3.5-9B"
 # Use the fast, non-persistent local disk for data (not the ~/default quota).
@@ -72,6 +91,25 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 # TIS parameters
 TIS_IMP_RATIO_CAP=2.0
 TIS_TYPE=token
+
+
+# Multi-Token Prediction (MTP) speculative decoding.
+# Qwen3.5-9B ships 1 native MTP head (`mtp_num_hidden_layers: 1`); training always trains the
+# checkpoint's heads. NUM_SPECULATIVE_TOKENS is the vLLM *draft depth* only — values > 1 reuse the
+# single head autoregressively at draft time (more speedup, but per-position acceptance decays with
+# depth since the head never trains on its own outputs). Here k=3.
+MTP_ENABLED=true
+MTP_NUM_SPECULATIVE_TOKENS=3
+MTP_LOSS_TYPE="soft_ce" # "soft_ce" (distill against policy) | "hard_ce" (ground-truth next tokens)
+MTP_LOSS_WEIGHT=0.5
+# NOTE: trainer.policy.megatron_config.mtp_detach_shared_output now defaults to true: the draft loss
+# trains ONLY the MTP-head params; the tied embedding/lm_head is detached (output projection AND the
+# MTP block's re-embedding), so the draft gradient no longer nudges the policy's own logits. Set it
+# to false for the old NeMo-RL behaviour (shared head also trained by the draft loss).
+# Top-k draft loss: distill only the teacher's top-k tokens instead of the full 248K vocab, keeping
+# draft-loss memory at O(seq*k) vs O(seq*vocab). Only applies to mtp_loss_type="soft_ce". Here k=256.
+MTP_LOSS_TOPK=256
+
 
 # Qwen3.5 flags
 REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
@@ -145,12 +183,17 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.5 \
+  trainer.mtp.enabled=$MTP_ENABLED \
+  trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
+  trainer.mtp.loss_type=$MTP_LOSS_TYPE \
+  trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+  trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_5_dapo" \
-  trainer.run_name="nosd_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
-  trainer.export_path="/mnt/local_storage/exports/dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.run_name="sd_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.export_path="/mnt/local_storage/exports/sd_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="/mnt/local_storage/ckpts/dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.ckpt_path="/mnt/local_storage/ckpts/sd_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   $@

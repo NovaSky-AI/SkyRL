@@ -20,6 +20,36 @@ from __future__ import annotations
 
 from typing import List, Protocol, runtime_checkable
 
+import torch
+
+
+class _CanonicalGradStrides(torch.autograd.Function):
+    """Identity forward; backward hands upstream a stride-canonical gradient.
+
+    The draft projection runs through megatron's ``LinearWithFrozenWeight`` (the
+    detached-weight path), whose hand-written dgrad is ``grad_output.matmul(weight)``.
+    ``torch.matmul`` only folds that 3D x 2D product into a flat ``mm`` when the grad
+    passes ``should_fold``'s stride check, which does NOT skip size-1 dims. With
+    micro-batch 1, the grad reaching it is a transpose-backward view whose size-1 batch
+    dim carries a stale stride (the adapter's ``.contiguous()`` no-ops on such views),
+    so matmul falls back to a broadcast ``bmm`` (batch=seq, M=1) that runs ~100x slower
+    than the equivalent ``mm`` — measured 1.27s vs 10ms per microbatch at
+    [8344, 1, 62080] x [62080, 4096] on H100. Re-viewing the (dense) grad rewrites the
+    strides to canonical form at zero copy and restores the ``mm`` dispatch. The
+    non-detached path is unaffected either way (``should_fold`` folds early when the
+    weight requires grad), and the no-copy view keeps this shim free there too.
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        if grad.is_contiguous():
+            return grad.view(-1).view(grad.shape)
+        return grad.contiguous()
+
 
 @runtime_checkable
 class DraftAdapter(Protocol):
@@ -71,5 +101,6 @@ def project_mtp_hidden_to_logits(hidden_states_per_layer, model, detach_output_w
     logits_per_layer = []
     for hidden in hidden_states_per_layer:
         logits, _ = model.output_layer(hidden, weight=output_weight)
+        logits = _CanonicalGradStrides.apply(logits)
         logits_per_layer.append(logits.transpose(0, 1).contiguous())
     return logits_per_layer

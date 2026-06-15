@@ -1,6 +1,35 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO with Megatron.
+# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO with Megatron,
+# WITH vLLM MTP speculative decoding for faster rollout, but the MTP head is NOT trained.
+#
+# This is the "frozen-head" counterpart of run_megatron_dapo_qwen3.5_9b_specdecode.sh.
+# Every knob is IDENTICAL except the MTP block at the bottom: the head is BUILT and SYNCED
+# like the training variant, but its draft loss weight is 0 so it is never actually trained.
+#
+# Why not just turn the head off on the training side?  Under colocate_all, vLLM is slept
+# with level=2 between steps, which DISCARDS its weights -- including the separate spec-decode
+# drafter (the MTP head). On wake, SkyRL restores the drafter ONLY from the Megatron
+# weight-sync list (inference_servers/spec_decode_utils.py::_reload_spec_decode_drafter). If
+# Megatron doesn't build the head, the sync list has no `mtp.*` weights, the drafter stays
+# garbage, and draft acceptance is ~0 (many drafted tokens, almost all rejected). So the head
+# MUST be built + exported every sync even when we don't want to train it.
+#
+# What this configuration does:
+#   - Training side: `trainer.mtp.enabled=true` builds Qwen3.5-9B's native MTP head (the model
+#     ships `mtp_num_hidden_layers: 1`) and exports it through weight sync each step. But
+#     `trainer.mtp.loss_weight=0.0` makes the decoupled draft loss contribute ZERO gradient, so
+#     the head stays at its pretrained values (only ~1e-7/step weight-decay drift). The RL policy
+#     backbone trains normally.
+#   - Inference side: vLLM MTP speculative decoding is enabled with `num_speculative_tokens`
+#     draft tokens; the drafter is re-synced with the (frozen) pretrained head every step.
+#   - The per-step draft acceptance rate is logged as `vllm/draft_acceptance_rate`.
+#
+# CAVEAT: the frozen head is matched to the ORIGINAL base model. As RL updates the policy
+# backbone (and syncs those updates to vLLM), the never-updated head drifts out of alignment,
+# so `vllm/draft_acceptance_rate` will DECAY over training -- best early, eroding as the policy
+# moves. Training the head (the _specdecode.sh variant) closes that gap.
+#
 # Runs on 1 node of 8xH100s (80GB each).
 #
 # NOTE: verify the exact HF repo id for the 9B model before running
@@ -9,7 +38,7 @@ set -x
 # Prepare data onto the fast local disk first:
 #   DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # Then launch:
-#   bash examples/train/megatron/run_megatron_dapo_qwen3.5_9b.sh
+#   bash examples/train/megatron/run_megatron_dapo_qwen3.5_9b_specdecode_notrain.sh
 
 MODEL_NAME="Qwen/Qwen3.5-9B"
 # Use the fast, non-persistent local disk for data (not the ~/default quota).
@@ -73,6 +102,29 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 TIS_IMP_RATIO_CAP=2.0
 TIS_TYPE=token
 
+
+# vLLM MTP speculative decoding WITHOUT training the head (frozen pretrained head baseline).
+#
+# IMPORTANT: under colocate_all, vLLM is slept with level=2 between steps, which DISCARDS its
+# weights — including the separate spec-decode drafter (the MTP head). On wake, SkyRL restores the
+# drafter ONLY from the Megatron weight-sync list (see inference_servers/spec_decode_utils.py:
+# _reload_spec_decode_drafter). So the head MUST be built + exported on the Megatron side every sync,
+# or the drafter stays garbage and draft acceptance is ~0 (lots of drafted tokens, almost all
+# rejected). vLLM's init-time checkpoint load is NOT enough — sleep(level=2) throws it away on step 1.
+#
+# Therefore we keep trainer.mtp.enabled=true (builds the native head, exports it each sync, sets
+# vLLM speculative_config) but set loss_weight=0.0 so the draft loss contributes ZERO gradient: the
+# head stays at its pretrained values (only ~1e-7/step weight-decay drift, negligible) and is
+# re-synced to vLLM every step. Acceptance then reflects the genuine "stock pretrained head, drifting
+# RL backbone" baseline. NOTE: the (top-k soft-CE) draft loss is still computed each step and thrown
+# away — small wasted compute. Ask for the proper freeze path (skip the loss + freeze the params) if
+# that matters.
+MTP_NUM_SPECULATIVE_TOKENS=3
+MTP_LOSS_TYPE="soft_ce" # kept cheap via top-k; weight is 0 so the value is discarded
+MTP_LOSS_WEIGHT=0.0     # 0 => head is built + synced but never trained (frozen pretrained head)
+MTP_LOSS_TOPK=256
+
+
 # Qwen3.5 flags
 REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/vllm-project/vllm/issues/36921#issuecomment-4109702738
@@ -129,7 +181,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=-1 \
+  trainer.ckpt_interval=50 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=$LR \
@@ -145,12 +197,17 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.5 \
+  trainer.mtp.enabled=true \
+  trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
+  trainer.mtp.loss_type=$MTP_LOSS_TYPE \
+  trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+  trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_5_dapo" \
-  trainer.run_name="nosd_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
-  trainer.export_path="/mnt/local_storage/exports/dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.run_name="sd_notrain_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.export_path="/mnt/local_storage/exports/sd_notrain_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="/mnt/local_storage/ckpts/dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.ckpt_path="/mnt/local_storage/ckpts/sd_notrain_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   $@

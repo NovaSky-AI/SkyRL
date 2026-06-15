@@ -782,6 +782,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_PYTHON",
         "UV_OFFLINE",
         "MTP_DEBUG",
+        "MTP_PROFILE",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
