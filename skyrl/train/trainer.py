@@ -489,6 +489,7 @@ class RayPPOTrainer:
 
     def flush_pending_metrics(self):
         """Best-effort flush of metrics accumulated for the in-flight step.
+        
         Idempotent: the accumulators are cleared after the flush attempt, so a
         second call is a no-op. Never raises.
         """
