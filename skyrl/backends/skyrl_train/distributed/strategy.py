@@ -143,12 +143,14 @@ class DistributedStrategy(ABC):
                 # reloadable by AutoProcessor; the tokenizer alone is insufficient and vLLM
                 # crashes on load without it. Resolve from the original base model, same as
                 # generation_config above. No-op for text-only models (no vision_config).
-                if check_is_vlm(model_config.name_or_path):
-                    try:
+                # The VLM check reuses the already-loaded model_config (no extra I/O) and the
+                # whole block is guarded so a processor-resolution failure can't abort the save.
+                try:
+                    if check_is_vlm(model_config):
                         processor = get_processor(model_config.name_or_path)
                         processor.save_pretrained(work_dir)
-                    except Exception as e:
-                        logger.warning(f"Could not save processor for '{model_config.name_or_path}'. Error: {e}")
+                except Exception as e:
+                    logger.warning(f"Could not save processor for '{model_config.name_or_path}'. Error: {e}")
 
     @staticmethod
     def get_rng_state():
