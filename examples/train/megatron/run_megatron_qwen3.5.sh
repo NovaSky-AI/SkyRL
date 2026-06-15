@@ -17,15 +17,14 @@ NUM_GPUS=4
 
 MEGATRON_TP=1
 MEGATRON_PP=1
-MEGATRON_CP=2
+MEGATRON_CP=1
 
 INFERENCE_ENGINE_TP=1
 
 # Qwen3.5 flags
-REMOVE_MICROBATCH_PADDING=True # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
-LANGUAGE_MODEL_ONLY=True # need to use the native GPTModel + GDN thd packing path
+LANGUAGE_MODEL_ONLY=True  # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 
-MAX_TOKENS_PER_MICROBATCH=8000
+MAX_TOKENS_PER_MICROBATCH=20000
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -46,18 +45,18 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.ref.language_model_only=$LANGUAGE_MODEL_ONLY \
-  trainer.remove_microbatch_padding=$REMOVE_MICROBATCH_PADDING \
+  generator.inference_engine.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=1024 \
-  trainer.policy_mini_batch_size=256 \
+  trainer.train_batch_size=128 \
+  trainer.policy_mini_batch_size=64 \
   trainer.micro_forward_batch_size_per_gpu=16 \
   trainer.micro_train_batch_size_per_gpu=16 \
   trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
-  trainer.ckpt_interval=10 \
+  trainer.ckpt_interval=1 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
@@ -72,7 +71,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3.5-0.8b" \
-  trainer.run_name="qwen3.5-0.8b_megatron_cp2_max_tokens_8k" \
+  trainer.run_name="qwen3.5-0.8b_megatron_max_tokens_20k" \
+  trainer.hf_save_interval=1 \
+  trainer.export_path="/mnt/nvme/ckpts/gsm8k_megatron_export" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
+  trainer.ckpt_path="/mnt/nvme/ckpts/gsm8k_megatron_ckpt" \
   $@
