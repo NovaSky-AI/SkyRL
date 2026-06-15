@@ -30,6 +30,7 @@ from dataclasses import asdict
 from math import ceil
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
 from datasets import Dataset, load_dataset
@@ -642,25 +643,32 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
+    num_examples = len(examples)
 
-    sequences = []
-    attention_masks = []
-    loss_masks = []
+    # Build the left-padded rows directly in NumPy and convert once at the end.
+    # Each example is written with a single vectorized slice assignment (one
+    # C-level copy) instead of allocating a per-example padded Python list. The
+    # produced tensors are bit-identical to the previous implementation.
+    sequences_np = np.full((num_examples, max_len), tokenizer.pad_token_id, dtype=np.int64)
+    attention_mask_np = np.zeros((num_examples, max_len), dtype=np.int64)
+    loss_mask_np = np.zeros((num_examples, max_num_actions), dtype=np.int64)
 
-    for ex in examples:
+    for i, ex in enumerate(examples):
+        # Left-pad sequences (SkyRL convention): real tokens occupy the trailing
+        # ``len(input_ids)`` positions, with leading pad.
         pad_len = max_len - len(ex["input_ids"])
-        # Left-pad sequences (SkyRL convention)
-        sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
-        attention_masks.append([0] * pad_len + ex["attention_mask"])
+        sequences_np[i, pad_len:] = ex["input_ids"]
+        attention_mask_np[i, pad_len:] = ex["attention_mask"]
 
+        # loss_mask is right-aligned within ``max_num_actions``.
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + ex["loss_mask"])
+        loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
     batch = TrainingInputBatch(
         {
-            "sequences": torch.tensor(sequences, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
-            "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "sequences": torch.from_numpy(sequences_np),
+            "attention_mask": torch.from_numpy(attention_mask_np),
+            "loss_mask": torch.from_numpy(loss_mask_np),
         }
     )
     batch.metadata = {"response_length": max_num_actions}
