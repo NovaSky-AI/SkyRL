@@ -505,3 +505,50 @@ class TestTorchProfilerConfigValidation:
         cfg.trainer.policy.torch_profiler_config.export_type = "bogus"
         with pytest.raises(ValueError, match=r"export_type"):
             validate_cfg(cfg)
+
+    # -- FSDP swap-offload incompatibility (cross-field) --------------------------
+    # The FSDP2 manual CPU-offload path moves params via torch.utils.swap_tensors,
+    # which crashes mid-run ("Couldn't swap <param>") while the profiler holds
+    # weakrefs to those params. That offload only fires under colocation; Megatron
+    # and fsdp cpu_offload=true use non-swap paths and are safe.
+
+    def test_fsdp_colocate_all_manual_offload_rejected(self):
+        with pytest.raises(ValueError, match=r"Couldn't swap"):
+            self._cfg().validate(strategy="fsdp", colocate_all=True, colocate_policy_ref=True, fsdp_cpu_offload=False)
+
+    def test_fsdp_colocate_policy_ref_only_rejected(self):
+        # colocate_policy_ref alone still offloads the policy/ref pair mid-loop.
+        with pytest.raises(ValueError, match=r"Couldn't swap"):
+            self._cfg().validate(strategy="fsdp", colocate_all=False, colocate_policy_ref=True, fsdp_cpu_offload=False)
+
+    def test_fsdp_no_colocation_allowed(self):
+        # No colocation -> no in-loop offload -> safe.
+        self._cfg().validate(strategy="fsdp", colocate_all=False, colocate_policy_ref=False, fsdp_cpu_offload=False)
+
+    def test_fsdp_native_cpu_offload_allowed(self):
+        # cpu_offload=true uses FSDP2-native offload (no manual swap_tensors) -> safe.
+        self._cfg().validate(strategy="fsdp", colocate_all=True, colocate_policy_ref=True, fsdp_cpu_offload=True)
+
+    def test_megatron_colocation_allowed(self):
+        # Megatron offloads via flat-buffer/.data reassignment (no swap_tensors) -> safe.
+        self._cfg().validate(strategy="megatron", colocate_all=True, colocate_policy_ref=True, fsdp_cpu_offload=False)
+
+    def test_offload_check_skipped_without_context(self):
+        # Called with no context (e.g. the SFT path), the cross-field check is skipped.
+        self._cfg().validate()
+
+    def test_validate_cfg_rejects_profiler_under_default_colocation(self):
+        # End-to-end: the default config is fsdp + colocate_all + cpu_offload=false,
+        # so simply enabling the profiler must fail fast through validate_cfg.
+        cfg = _make_validated_test_config()
+        cfg.trainer.policy.torch_profiler_config.enable = True
+        cfg.trainer.policy.torch_profiler_config.save_path = "/tmp/skyrl_prof_test"
+        with pytest.raises(ValueError, match=r"Couldn't swap"):
+            validate_cfg(cfg)
+
+    def test_validate_cfg_allows_profiler_with_native_offload(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.policy.torch_profiler_config.enable = True
+        cfg.trainer.policy.torch_profiler_config.save_path = "/tmp/skyrl_prof_test"
+        cfg.trainer.policy.fsdp_config.cpu_offload = True
+        validate_cfg(cfg)  # must not raise on the profiler/offload check

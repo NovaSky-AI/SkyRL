@@ -270,7 +270,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "or negative to keep all checkpoints"
         )
 
-    cfg.trainer.policy.torch_profiler_config.validate()
+    cfg.trainer.policy.torch_profiler_config.validate(
+        strategy=cfg.trainer.strategy,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        colocate_policy_ref=cfg.trainer.placement.colocate_policy_ref,
+        fsdp_cpu_offload=cfg.trainer.policy.fsdp_config.cpu_offload,
+    )
 
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()

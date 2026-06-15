@@ -306,6 +306,8 @@ policy:
 
 **Scope:** the profiler captures **only the policy model's training step** (forward/backward + optimizer). In an RL run it does **not** profile the critic or reference models, and it does **not** profile generation/inference — only policy training compute on the configured `ranks`.
 
+**FSDP + colocation restriction:** on the FSDP backend, the default CPU-offload path moves models to CPU with `torch.utils.swap_tensors`, which crashes mid-run (`RuntimeError: _apply(): Couldn't swap <param>`) when the profiler holds references to those parameters. That offload only happens under colocation, so `validate_cfg` **rejects at startup** the combination of `enable: true` + `trainer.strategy=fsdp` + `policy.fsdp_config.cpu_offload: false` (default) + colocation (`placement.colocate_all: true` *or* `placement.colocate_policy_ref: true`). To profile FSDP, either set `policy.fsdp_config.cpu_offload: true` (FSDP2-native offload, no swap) or disable colocation. The **Megatron** backend offloads via a different mechanism and is unaffected.
+
 Which steps are recorded is controlled entirely by [`torch.profiler.schedule`](https://docs.pytorch.org/docs/stable/profiler.html#torch.profiler.schedule): the profiler skips the first `skip_first` steps, then repeats a cycle of `wait` (idle) + `warmup` (tracing discarded) + `active` (tracing recorded) steps `repeat` times (`repeat: 0` profiles every cycle for the whole run). This is how you profile multiple steps, at an interval, repeating.
 
 - `policy.torch_profiler_config.enable`: Master switch. When `false` (default), no profiler RPCs are dispatched and there is zero overhead.

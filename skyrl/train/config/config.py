@@ -205,7 +205,13 @@ class TorchProfilerConfig(BaseConfig):
     """``chrome_trace`` -> ``*.pt.trace.json`` (HTA-friendly) or ``stacks`` ->
     flamegraph-style self-CUDA-time stacks (requires ``with_stack=True``)."""
 
-    def validate(self) -> None:
+    def validate(
+        self,
+        strategy: Optional[str] = None,
+        colocate_all: Optional[bool] = None,
+        colocate_policy_ref: Optional[bool] = None,
+        fsdp_cpu_offload: Optional[bool] = None,
+    ) -> None:
         """Validate the profiler config. No-op when disabled.
 
         Called from both ``validate_cfg`` (RL) and ``validate_sft_cfg`` (SFT) so
@@ -213,6 +219,13 @@ class TorchProfilerConfig(BaseConfig):
         (e.g. an unknown ``export_type`` would otherwise fall through to the
         chrome-trace branch, and an unknown ``activities`` entry would disable
         profiling mid-run via the wrapper's exception isolation).
+
+        The ``strategy``/``colocate_*``/``fsdp_cpu_offload`` args (passed by the RL
+        validator, which has the full root config) gate an incompatibility check:
+        the FSDP2 manual CPU-offload path moves params with ``torch.utils.swap_tensors``,
+        which fails (``RuntimeError: Couldn't swap <param>``) while ``torch.profiler``
+        holds weakrefs to those params during an active window. SFT calls this with no
+        context (single-model, never colocated) so the check is skipped there.
         """
         if not self.enable:
             return
@@ -260,6 +273,29 @@ class TorchProfilerConfig(BaseConfig):
                 raise ValueError(f"`torch_profiler_config.{name}` must be >= 0, got {value}.")
         if self.active < 1:
             raise ValueError(f"`torch_profiler_config.active` must be >= 1, got {self.active}.")
+
+        # Cross-field: reject configs that would crash mid-run on the FSDP2 swap-based
+        # CPU offload. The manual offload path (fsdp_strategy: `manual_offload`, used
+        # when `fsdp_config.cpu_offload=False`) calls `model.to("cpu")` -> nn.Module._apply
+        # -> torch.utils.swap_tensors, which raises "Couldn't swap <param>" if any weakref
+        # to a param is alive. torch.profiler holds such weakrefs to every param it observes
+        # during an active window. That offload only fires mid-loop under colocation
+        # (colocate_all, or colocate_policy_ref for the policy/ref pair). Megatron offloads
+        # via its own flat-buffer/`.data` reassignment path (no swap_tensors) and is immune;
+        # `fsdp_config.cpu_offload=True` uses FSDP2-native offload (also no manual swap).
+        if strategy == "fsdp" and fsdp_cpu_offload is False and (colocate_all or colocate_policy_ref):
+            raise ValueError(
+                "`torch_profiler_config.enable=true` is incompatible with this FSDP configuration: "
+                "with the manual CPU-offload path (`policy.fsdp_config.cpu_offload=false`, the default) "
+                "under colocation "
+                f"(`placement.colocate_all={colocate_all}`, `placement.colocate_policy_ref={colocate_policy_ref}`), "
+                "the trainer offloads models to CPU via `torch.utils.swap_tensors` while the profiler holds "
+                "references to their parameters, which crashes mid-run with "
+                "`RuntimeError: _apply(): Couldn't swap <param>`. "
+                "To profile: set `policy.fsdp_config.cpu_offload=true` (FSDP2-native offload, no swap), or "
+                "disable colocation (`placement.colocate_all=false` and `placement.colocate_policy_ref=false`), "
+                "or use the Megatron backend (`trainer.strategy=megatron`)."
+            )
 
 
 @dataclass
