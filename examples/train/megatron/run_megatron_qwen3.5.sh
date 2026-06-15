@@ -23,6 +23,7 @@ INFERENCE_ENGINE_TP=1
 
 # Qwen3.5 flags
 REMOVE_MICROBATCH_PADDING=True # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
+LANGUAGE_MODEL_ONLY=True # need to use the native GPTModel + GDN thd packing path
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -41,6 +42,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.policy.language_model_only=$LANGUAGE_MODEL_ONLY \
+  trainer.ref.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.remove_microbatch_padding=$REMOVE_MICROBATCH_PADDING \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
