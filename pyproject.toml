@@ -98,6 +98,11 @@ skyrl-train = [
     "pybind11",
     "setuptools",
     "nixl-cu12; sys_platform == 'linux'",
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
+    # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
+    # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
+    "nixl; sys_platform == 'linux'",
 ]
 
 fsdp = [
@@ -105,6 +110,11 @@ fsdp = [
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl-cu12; sys_platform == 'linux'",
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
+    # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
+    # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
+    "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
@@ -125,6 +135,11 @@ megatron = [
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     "nixl-cu12; sys_platform == 'linux'",
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
+    # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
+    # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
+    "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.8.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
@@ -224,7 +239,10 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
-    "transformer-engine-cu13; sys_platform == 'never'"
+    "transformer-engine-cu13; sys_platform == 'never'",
+    # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu13 variant
+    # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
+    "nixl-cu13; sys_platform == 'never'"
 ]
 
 [tool.uv.extra-build-dependencies]
