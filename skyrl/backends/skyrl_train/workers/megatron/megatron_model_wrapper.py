@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
-    model_self_packs_for_cp,
+    model_packs_sequences_internally,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -86,12 +86,20 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
-        # Some mbridge models (Qwen3VL hybrid GDN+attention MoE, e.g. Qwen3.5)
-        # pack + CP-shard sequences inside their own forward. For those we must
-        # NOT pre-pack here (it would double-pack and break GatedDeltaNet's
-        # cu_seqlens check). See `model_self_packs_for_cp` and the packing
-        # branches in `forward`/`forward_backward_mini_batch`.
-        self.delegate_pack_to_model = model_self_packs_for_cp(self.actor_module)
+        # Some mbridge models (Qwen3VL hybrid GDN+attention MoE, e.g. Qwen3.5
+        # loaded via the VL bridge) pack + CP-shard sequences inside their own
+        # forward. SkyRL sample packing would then double-pack and corrupt the
+        # GatedDeltaNet cu_seqlens, so we refuse it. To pack Qwen3.5, load the
+        # native GPTModel GDN path via language_model_only=True (which routes
+        # through maybe_force_qwen35_text_bridge); that model does not self-pack.
+        if self.remove_microbatch_padding and model_packs_sequences_internally(self.actor_module):
+            raise ValueError(
+                "remove_microbatch_padding=True (sample packing) is not supported for models that "
+                "pack sequences inside their own forward (e.g. the Qwen3.5 VL Qwen3VLModel): it "
+                "double-packs and corrupts the GatedDeltaNet cu_seqlens. Set "
+                "trainer.policy.language_model_only=True to route Qwen3.5 to the native GPTModel GDN "
+                "packing path, or set trainer.remove_microbatch_padding=False."
+            )
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -192,40 +200,18 @@ class MegatronModelWrapper:
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
             if self.remove_microbatch_padding:
-                if self.delegate_pack_to_model and sub_seq_lengths is None:
-                    # Model packs + CP-shards internally (see __init__). Build the
-                    # global packed_seq_params only (pre_process=False keeps
-                    # sequences as [B, S]) and hand the model the unpacked
-                    # sequences + bool mask; pre-packing here would double-pack
-                    # and break GatedDeltaNet's cu_seqlens check. The packing
-                    # layout matches, so packed_seq_params / packed_targets stay
-                    # valid for the model's THD output. NOTE: only the
-                    # single-sub-seq layout matches the model's per-row internal
-                    # packing, so we keep the classic path when controller-side
-                    # multi-sub-seq packing (sub_seq_lengths) is in use.
-                    _, packed_seq_params = preprocess_packed_seqs(
-                        sequences,
-                        attention_mask,
-                        pre_process=False,
-                    )
-                    batch["packed_seq_params"] = packed_seq_params
-                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
-                    new_sequences = sequences
-                    new_attention_mask = attention_mask
-                    new_position_ids = position_ids
-                else:
-                    new_sequences, packed_seq_params = preprocess_packed_seqs(
-                        sequences,
-                        attention_mask,
-                        pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                        sub_seq_lengths=sub_seq_lengths,
-                    )
-                    batch["packed_seq_params"] = packed_seq_params
-                    batch["packed_targets"] = _build_packed_targets(
-                        sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
-                    )
-                    new_attention_mask = None
-                    new_position_ids = None
+                new_sequences, packed_seq_params = preprocess_packed_seqs(
+                    sequences,
+                    attention_mask,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
+                )
+                batch["packed_seq_params"] = packed_seq_params
+                batch["packed_targets"] = _build_packed_targets(
+                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                )
+                new_attention_mask = None
+                new_position_ids = None
             else:
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,
@@ -549,40 +535,18 @@ class MegatronModelWrapper:
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
             if self.remove_microbatch_padding:
-                if self.delegate_pack_to_model and sub_seq_lengths is None:
-                    # Model packs + CP-shards internally (see __init__). Build the
-                    # global packed_seq_params only (pre_process=False keeps
-                    # sequences as [B, S]) and hand the model the unpacked
-                    # sequences + bool mask; pre-packing here would double-pack
-                    # and break GatedDeltaNet's cu_seqlens check. The packing
-                    # layout matches, so packed_seq_params / packed_targets stay
-                    # valid for the model's THD output. NOTE: only the
-                    # single-sub-seq layout matches the model's per-row internal
-                    # packing, so we keep the classic path when controller-side
-                    # multi-sub-seq packing (sub_seq_lengths) is in use.
-                    _, packed_seq_params = preprocess_packed_seqs(
-                        sequences,
-                        attention_mask,
-                        pre_process=False,
-                    )
-                    batch["packed_seq_params"] = packed_seq_params
-                    batch["packed_targets"] = _build_packed_targets(sequences, attention_mask, packed_seq_params)
-                    new_sequences = sequences
-                    new_attention_mask = attention_mask
-                    new_position_ids = position_ids
-                else:
-                    new_sequences, packed_seq_params = preprocess_packed_seqs(
-                        sequences,
-                        attention_mask,
-                        pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                        sub_seq_lengths=sub_seq_lengths,
-                    )
-                    batch["packed_seq_params"] = packed_seq_params
-                    batch["packed_targets"] = _build_packed_targets(
-                        sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
-                    )
-                    new_attention_mask = None
-                    new_position_ids = None
+                new_sequences, packed_seq_params = preprocess_packed_seqs(
+                    sequences,
+                    attention_mask,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    sub_seq_lengths=sub_seq_lengths,
+                )
+                batch["packed_seq_params"] = packed_seq_params
+                batch["packed_targets"] = _build_packed_targets(
+                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                )
+                new_attention_mask = None
+                new_position_ids = None
             else:
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,

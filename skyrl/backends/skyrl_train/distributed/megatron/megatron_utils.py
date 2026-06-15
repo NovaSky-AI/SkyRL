@@ -515,27 +515,26 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def model_self_packs_for_cp(model: Union[nn.Module, List[nn.Module]]) -> bool:
-    """Whether the model packs sequences + CP-shards inside its own ``forward``.
+def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the model packs + CP-shards sequences inside its own ``forward``.
 
     Some mbridge model wrappers (e.g. ``Qwen3VLModel``, which backs the Qwen3.5
-    hybrid Gated-DeltaNet + attention MoE models) call ``preprocess_packed_seqs``
-    *inside* their own ``forward``. For those models SkyRL must hand the model an
-    unpacked ``[B, S]`` batch + bool ``attention_mask`` + ``PackedSeqParams``
-    (global, un-CP-divided ``cu_seqlens``) and let the model pack/CP-shard
-    itself. If SkyRL also pre-packs + CP-shards (the classic path), the sequence
-    gets packed twice: the model then sees a global ``cu_seqlens`` (e.g.
-    ``[0, 4112]``) that no longer matches the CP-local tensor length, and the
-    GatedDeltaNet layer's ``_resolve_cu_seqlens`` check fails with
-    ``cu_seqlens_q[-1]=4112 does not match total_sequence_length=...``.
+    hybrid Gated-DeltaNet + attention MoE models when loaded via the VL bridge)
+    call ``preprocess_packed_seqs`` *inside* their own ``forward``. SkyRL sample
+    packing (``remove_microbatch_padding``) would then pack the sequence a second
+    time: the model sees a global ``cu_seqlens`` (e.g. ``[0, 4112]``) that no
+    longer matches the CP-local tensor length, and the GatedDeltaNet layer's
+    ``_resolve_cu_seqlens`` check fails / corrupts the varlen kernel, aborting in
+    the backward.
 
-    SkyRL's :func:`preprocess_packed_seqs` and mbridge's internal
-    ``preprocess_packed_seqs`` use an identical packing/zigzag layout
-    (``align_size = tp * cp * 2``), so the packed-logprob scatter still maps the
-    model's THD output correctly in this delegated path.
+    SkyRL therefore refuses sample packing for these models (see
+    :class:`MegatronModelWrapper`). To pack Qwen3.5, load the language model via
+    the native ``GPTModel`` GDN ``thd`` path (``language_model_only=True``, which
+    routes through ``maybe_force_qwen35_text_bridge``); that model does not
+    self-pack and is not matched here.
 
-    Returns ``False`` (classic pre-packing path) when mbridge / Qwen3VL is not
-    importable, so non-hybrid models are unaffected.
+    Returns ``False`` when mbridge / Qwen3VL is not importable, so non-hybrid
+    models are unaffected.
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
