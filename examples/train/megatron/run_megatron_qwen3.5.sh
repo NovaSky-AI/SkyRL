@@ -17,13 +17,15 @@ NUM_GPUS=4
 
 MEGATRON_TP=1
 MEGATRON_PP=1
-MEGATRON_CP=1
+MEGATRON_CP=2
 
 INFERENCE_ENGINE_TP=1
 
 # Qwen3.5 flags
 REMOVE_MICROBATCH_PADDING=True # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
 LANGUAGE_MODEL_ONLY=True # need to use the native GPTModel + GDN thd packing path
+
+MAX_TOKENS_PER_MICROBATCH=8000
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -54,6 +56,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy_mini_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=16 \
   trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -69,7 +72,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3.5-0.8b" \
-  trainer.run_name="qwen3.5-0.8b_megatron" \
+  trainer.run_name="qwen3.5-0.8b_megatron_cp2_max_tokens_8k" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

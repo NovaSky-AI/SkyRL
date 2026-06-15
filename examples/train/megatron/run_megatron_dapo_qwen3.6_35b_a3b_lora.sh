@@ -65,7 +65,7 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 
 # Qwen3.6 flags
-REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
+LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY"}}' # auto prefill backend can crash
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 export _SKYRL_USE_NEW_INFERENCE=0
@@ -89,6 +89,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
+  trainer.policy.language_model_only=$LANGUAGE_MODEL_ONLY \
+  generator.inference_engine.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
   generator.inference_engine.distributed_executor_backend="mp" \
