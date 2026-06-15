@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -47,6 +47,39 @@ def compute_minibatch_rollout_logprob_diff_metrics(
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY: masked_abs_diff.max().item(),
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY: masked_abs_diff.min().item(),
     }
+
+
+# Reserved ``loss_fn_config`` key that gates the per-token ``loss_fn_outputs`` build.
+RETURN_PER_TOKEN_OUTPUTS_KEY = "return_per_token_outputs"
+
+
+def pop_return_per_token_outputs(
+    loss_fn_config: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Extract the per-request ``return_per_token_outputs`` flag from ``loss_fn_config``.
+
+    Default ``True`` keeps the existing contract (Tinker / RL consume the per-token
+    ``loss_fn_outputs``); SkyRL's own SFTTrainer sets it ``False`` since it only reads
+    ``metrics``. The flag is popped here because it is not an ``AlgorithmConfig`` field:
+    leaving it in would trip the ``AlgorithmConfig`` key validation in
+    ``build_nested_dataclass`` (reached via ``from_dict_config``).
+
+    The pop runs on a shallow copy so the caller's ``loss_fn_config`` dict is never
+    mutated (callers may reuse it across micro-batches). Returns the (possibly copied)
+    config alongside the resolved flag.
+
+    Args:
+        loss_fn_config: Optional per-call loss-function config overrides, or ``None``.
+
+    Returns:
+        ``(loss_fn_config, return_per_token_outputs)`` where ``loss_fn_config`` is a
+        fresh copy with ``return_per_token_outputs`` removed when the input was not
+        ``None``, otherwise the original ``None``.
+    """
+    if loss_fn_config is None:
+        return None, True
+    loss_fn_config = dict(loss_fn_config)
+    return loss_fn_config, loss_fn_config.pop(RETURN_PER_TOKEN_OUTPUTS_KEY, True)
 
 
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:

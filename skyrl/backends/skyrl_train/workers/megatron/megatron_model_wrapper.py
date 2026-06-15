@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
+    pop_return_per_token_outputs,
 )
 from skyrl.train.config import TrainerConfig
 
@@ -385,6 +386,9 @@ class MegatronModelWrapper:
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
+                May also carry the reserved key ``return_per_token_outputs`` (bool, default
+                ``True``); set ``False`` to skip the per-token ``loss_fn_outputs`` build when
+                the caller reads only ``metrics``. See :func:`pop_return_per_token_outputs`.
             forward_only: If True, run the forward pass without backward (no gradients).
                           Useful for evaluation / loss-only inference paths (e.g., SFT
                           ``forward(loss_fn=...)`` codepath).
@@ -401,10 +405,12 @@ class MegatronModelWrapper:
         else:
             current_loss_fn = self.policy_loss_fn
 
+        # Pop the per-request flag that gates the per-token loss_fn_outputs build.
+        loss_fn_config, return_per_token_outputs = pop_return_per_token_outputs(loss_fn_config)
+
         # Build config for loss function, applying any overrides
         loss_config = self.cfg.algorithm
-        if loss_fn_config is not None:
-
+        if loss_fn_config:
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
@@ -523,41 +529,47 @@ class MegatronModelWrapper:
             if resolved_loss_name == "cross_entropy":
                 loss = policy_loss
 
-                # Compute elementwise loss for Tinker API (per-token NLL)
-                with torch.no_grad():
-                    elementwise_loss = -action_log_probs
-                    if loss_mask is not None:
-                        elementwise_loss = elementwise_loss * loss_mask
+                # Build per-token loss_fn_outputs unless the caller opted out (see
+                # pop_return_per_token_outputs); skipping returns one empty dict per sequence.
+                if return_per_token_outputs:
+                    # Compute elementwise loss for Tinker API (per-token NLL)
+                    with torch.no_grad():
+                        elementwise_loss = -action_log_probs
+                        if loss_mask is not None:
+                            elementwise_loss = elementwise_loss * loss_mask
 
-                # Build per-sequence loss_fn_outputs.
-                # Compute valid_lens vectorized on GPU, then move tensors to CPU
-                # exactly once before iterating in Python — avoids ~3N GPU->CPU
-                # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
-                batch_size = action_log_probs.shape[0]
-                seq_len = action_log_probs.shape[1]
-                if action_mask is not None:
-                    valid_lens_t = action_mask.sum(dim=-1).long()
-                elif loss_mask is not None:
-                    valid_lens_t = loss_mask.sum(dim=-1).long()
+                    # Compute valid_lens vectorized on GPU, then move tensors to CPU
+                    # exactly once before iterating in Python — avoids ~3N GPU->CPU
+                    # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
+                    batch_size = action_log_probs.shape[0]
+                    seq_len = action_log_probs.shape[1]
+                    if action_mask is not None:
+                        valid_lens_t = action_mask.sum(dim=-1).long()
+                    elif loss_mask is not None:
+                        valid_lens_t = loss_mask.sum(dim=-1).long()
+                    else:
+                        valid_lens_t = torch.full(
+                            (batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long
+                        )
+
+                    # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
+                    action_log_probs_cpu = action_log_probs.detach().cpu()
+                    elementwise_loss_cpu = elementwise_loss.detach().cpu()
+                    valid_lens = valid_lens_t.cpu().tolist()
+
+                    loss_fn_outputs = []
+                    for i in range(batch_size):
+                        valid_len = valid_lens[i]
+                        loss_fn_outputs.append(
+                            {
+                                "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
+                                "elementwise_loss": (
+                                    elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
+                                ),
+                            }
+                        )
                 else:
-                    valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
-
-                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
-                action_log_probs_cpu = action_log_probs.detach().cpu()
-                elementwise_loss_cpu = elementwise_loss.detach().cpu()
-                valid_lens = valid_lens_t.cpu().tolist()
-
-                loss_fn_outputs = []
-                for i in range(batch_size):
-                    valid_len = valid_lens[i]
-                    loss_fn_outputs.append(
-                        {
-                            "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
-                            "elementwise_loss": (
-                                elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
-                            ),
-                        }
-                    )
+                    loss_fn_outputs = [{} for _ in range(action_log_probs.shape[0])]
 
                 metrics = {
                     "loss": loss.item(),
