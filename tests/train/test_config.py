@@ -433,13 +433,18 @@ class TestTorchProfilerConfigValidation:
     def _cfg(**overrides):
         from skyrl.train.config.config import TorchProfilerConfig
 
+        # `save_path` is required when enabled; supply a valid local default so
+        # tests targeting *other* fields don't trip the save_path guard.
+        overrides.setdefault("save_path", "/tmp/skyrl_prof_test")
         return TorchProfilerConfig(enable=True, **overrides)
 
     def test_disabled_skips_all_checks(self):
         from skyrl.train.config.config import TorchProfilerConfig
 
         # Garbage values must be tolerated while disabled (the default state).
-        TorchProfilerConfig(enable=False, export_type="bogus", activities=["gpu"], ranks=[], active=0).validate()
+        TorchProfilerConfig(
+            enable=False, export_type="bogus", activities=["gpu"], ranks=[], active=0, save_path=None
+        ).validate()
 
     def test_defaults_are_valid_when_enabled(self):
         self._cfg().validate()  # must not raise
@@ -447,6 +452,19 @@ class TestTorchProfilerConfigValidation:
     def test_empty_ranks_rejected(self):
         with pytest.raises(ValueError, match=r"ranks.*non-empty"):
             self._cfg(ranks=[]).validate()
+
+    def test_missing_save_path_rejected(self):
+        # save_path has no implicit default; an enabled run must set it explicitly.
+        with pytest.raises(ValueError, match=r"save_path.*must be set"):
+            self._cfg(save_path=None).validate()
+        with pytest.raises(ValueError, match=r"save_path.*must be set"):
+            self._cfg(save_path="").validate()
+
+    def test_cloud_save_path_rejected(self):
+        # torch.profiler can only write the local filesystem; cloud URIs fail fast.
+        for uri in ("s3://bucket/run/traces", "gs://bucket/run/traces", "gcs://bucket/run/traces"):
+            with pytest.raises(ValueError, match=r"save_path.*local path"):
+                self._cfg(save_path=uri).validate()
 
     def test_unknown_activity_rejected(self):
         with pytest.raises(ValueError, match=r"activities"):
@@ -483,6 +501,7 @@ class TestTorchProfilerConfigValidation:
         # The RL entrypoint validator must surface profiler config errors.
         cfg = _make_validated_test_config()
         cfg.trainer.policy.torch_profiler_config.enable = True
+        cfg.trainer.policy.torch_profiler_config.save_path = "/tmp/skyrl_prof_test"
         cfg.trainer.policy.torch_profiler_config.export_type = "bogus"
         with pytest.raises(ValueError, match=r"export_type"):
             validate_cfg(cfg)

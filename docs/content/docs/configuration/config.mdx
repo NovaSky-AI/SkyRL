@@ -276,7 +276,7 @@ policy:
   torch_profiler_config:    # torch.profiler-based training-loop profiler (see below)
     enable: false
     ranks: [0]
-    save_path: null         # defaults to {ckpt_path}/profiler_traces
+    save_path: null         # REQUIRED when enable=true; absolute local path
     skip_first: 10           # torch.profiler.schedule
     wait: 0
     warmup: 1
@@ -310,7 +310,7 @@ Which steps are recorded is controlled entirely by [`torch.profiler.schedule`](h
 
 - `policy.torch_profiler_config.enable`: Master switch. When `false` (default), no profiler RPCs are dispatched and there is zero overhead.
 - `policy.torch_profiler_config.ranks`: List of global ranks to profile (e.g. `[0]`). Add a mid-pipeline-stage rank to diagnose pipeline bubbles.
-- `policy.torch_profiler_config.save_path`: Output directory for traces. Defaults to `{ckpt_path}/profiler_traces`.
+- `policy.torch_profiler_config.save_path`: Output directory for traces. **Required** when `enable: true` (there is no implicit default). Use an absolute local path: Ray workers run from a `/tmp/ray/.../working_dir_files` runtime working dir, so a relative path would scatter traces there, and `torch.profiler` cannot write to cloud URIs (`s3://`/`gs://`) — both are rejected at startup.
 - `policy.torch_profiler_config.{skip_first,wait,warmup,active,repeat}`: Passed directly to `torch.profiler.schedule`.
 - `policy.torch_profiler_config.activities`: Subset of `["cpu", "cuda"]` to record.
 - `policy.torch_profiler_config.{record_shapes,profile_memory,with_stack,with_flops,with_modules}`: Passed directly to `torch.profiler.profile`. `with_stack` and `record_shapes` add overhead; `profile_memory` is heavier still and off by default.

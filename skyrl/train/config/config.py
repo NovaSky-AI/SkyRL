@@ -179,7 +179,10 @@ class TorchProfilerConfig(BaseConfig):
     enable: bool = False
     ranks: List[int] = field(default_factory=lambda: [0])
     save_path: Optional[str] = None
-    """Trace output dir. Defaults to ``{ckpt_path}/profiler_traces`` when None."""
+    """Trace output dir. Required when ``enable=True``; use an absolute local path.
+    Ray workers run from a ``/tmp/ray/.../working_dir_files`` runtime dir, so a
+    relative path would scatter traces there -- and ``torch.profiler`` cannot write
+    to cloud URIs (``s3://``/``gs://``)."""
 
     # torch.profiler.schedule -- one cycle = wait + warmup + active steps.
     skip_first: int = 10
@@ -215,6 +218,22 @@ class TorchProfilerConfig(BaseConfig):
             return
         if not self.ranks:
             raise ValueError("`torch_profiler_config.ranks` must be non-empty when profiling is enabled.")
+        # `save_path` is a required, explicit, local path -- no implicit default. Ray
+        # workers run from a /tmp/ray runtime working dir, so a relative path would
+        # scatter traces there, and torch.profiler can't write cloud URIs.
+        if not self.save_path:
+            raise ValueError(
+                "`torch_profiler_config.save_path` must be set when profiling is enabled. "
+                "Use an absolute local path -- Ray workers run from a /tmp/ray runtime "
+                "working dir, so a relative path would write traces there."
+            )
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
+        if is_cloud_path(self.save_path):
+            raise ValueError(
+                f"`torch_profiler_config.save_path` must be a local path; got cloud URI "
+                f"{self.save_path!r}. torch.profiler cannot write to cloud storage."
+            )
         # An empty `activities` passes the membership check below vacuously, but
         # `torch.profiler.profile(activities=[])` records nothing -- fail fast instead.
         if not self.activities:

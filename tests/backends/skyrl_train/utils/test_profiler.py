@@ -44,7 +44,7 @@ def _run_loop(prof: Profiler, n_steps: int) -> None:
 
 
 def test_disabled_is_noop(tmp_path):
-    prof = Profiler(_ProfCfg(enable=False), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(enable=False, save_path=str(tmp_path)))
     assert prof.prof is None
     assert prof.check() is False
     _run_loop(prof, 5)  # must not raise
@@ -54,7 +54,7 @@ def test_disabled_is_noop(tmp_path):
 def test_rank_not_selected_is_noop(tmp_path):
     # is_initialized() is False in this process -> rank resolves to 0, which is
     # not in ranks=[1], so the profiler must not arm.
-    prof = Profiler(_ProfCfg(ranks=[1]), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(ranks=[1], save_path=str(tmp_path)))
     assert prof.prof is None
     _run_loop(prof, 3)
     assert glob.glob(os.path.join(str(tmp_path), "*")) == []
@@ -62,8 +62,7 @@ def test_rank_not_selected_is_noop(tmp_path):
 
 def test_single_window_writes_one_trace(tmp_path):
     prof = Profiler(
-        _ProfCfg(skip_first=0, wait=0, warmup=0, active=1, repeat=1),
-        default_save_path=str(tmp_path),
+        _ProfCfg(skip_first=0, wait=0, warmup=0, active=1, repeat=1, save_path=str(tmp_path)),
     )
     assert prof.check() is True
     _run_loop(prof, 3)
@@ -75,8 +74,7 @@ def test_single_window_writes_one_trace(tmp_path):
 def test_repeat_writes_multiple_windows(tmp_path):
     # Two cycles of (warmup=1 + active=1); needs >= 2*(1+1) steps to fire twice.
     prof = Profiler(
-        _ProfCfg(skip_first=0, wait=0, warmup=1, active=1, repeat=2),
-        default_save_path=str(tmp_path),
+        _ProfCfg(skip_first=0, wait=0, warmup=1, active=1, repeat=2, save_path=str(tmp_path)),
     )
     _run_loop(prof, 8)
     traces = glob.glob(os.path.join(str(tmp_path), "*.pt.trace.json*"))
@@ -86,51 +84,35 @@ def test_repeat_writes_multiple_windows(tmp_path):
 def test_skip_first_defers_recording(tmp_path):
     # With skip_first larger than the loop, no window should ever open.
     prof = Profiler(
-        _ProfCfg(skip_first=100, wait=0, warmup=0, active=1, repeat=1),
-        default_save_path=str(tmp_path),
+        _ProfCfg(skip_first=100, wait=0, warmup=0, active=1, repeat=1, save_path=str(tmp_path)),
     )
     _run_loop(prof, 5)
     assert glob.glob(os.path.join(str(tmp_path), "*.pt.trace.json*")) == []
 
 
-def test_save_path_overrides_default(tmp_path):
-    explicit = tmp_path / "explicit"
-    prof = Profiler(
-        _ProfCfg(save_path=str(explicit)),
-        default_save_path=str(tmp_path / "default"),
-    )
-    assert prof.save_path == str(explicit)
-
-
-def test_default_save_path_used_when_none(tmp_path):
-    default = str(tmp_path / "default")
-    prof = Profiler(_ProfCfg(save_path=None), default_save_path=default)
-    assert prof.save_path == default
-
-
-def test_cloud_save_path_falls_back_to_local(tmp_path):
-    # ckpt_path (and thus the derived default save_path) can be a cloud URI, which
-    # torch.profiler can't write to. The wrapper must fall back to a local dir so
-    # the trace isn't silently lost.
-    prof = Profiler(_ProfCfg(save_path="s3://my-bucket/run/profiler_traces"), default_save_path=str(tmp_path))
-    assert prof.save_path == "./profiler_traces"
+def test_save_path_is_taken_verbatim(tmp_path):
+    # `save_path` is an explicit, required local path -- the wrapper uses it as-is
+    # (no implicit default, no rewriting). Cloud-URI/empty rejection lives in
+    # TorchProfilerConfig.validate(), exercised in tests/train/test_config.py.
+    explicit = str(tmp_path / "explicit")
+    prof = Profiler(_ProfCfg(save_path=explicit))
+    assert prof.save_path == explicit
 
 
 def test_kernel_summary_none_when_disabled(tmp_path):
-    prof = Profiler(_ProfCfg(enable=False), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(enable=False, save_path=str(tmp_path)))
     assert prof.get_kernel_summary() is None
 
 
 def test_kernel_summary_empty_before_first_window(tmp_path):
-    prof = Profiler(_ProfCfg(skip_first=0, wait=0, warmup=0, active=1), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(skip_first=0, wait=0, warmup=0, active=1, save_path=str(tmp_path)))
     summary = prof.get_kernel_summary()
     assert summary == {"window_count": 0, "pairs": []}
 
 
 def test_kernel_summary_populated_after_window(tmp_path):
     prof = Profiler(
-        _ProfCfg(skip_first=0, wait=0, warmup=0, active=1, repeat=1, activities=["cpu"]),
-        default_save_path=str(tmp_path),
+        _ProfCfg(skip_first=0, wait=0, warmup=0, active=1, repeat=1, activities=["cpu"], save_path=str(tmp_path)),
     )
     prof.start()
     for _ in range(3):
@@ -157,14 +139,14 @@ def test_kernel_summary_populated_after_window(tmp_path):
 def test_activities_threaded_to_torch(tmp_path):
     import torch
 
-    prof = Profiler(_ProfCfg(activities=["cpu"]), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(activities=["cpu"], save_path=str(tmp_path)))
     # The underlying torch profiler was constructed with the CPU activity only.
     assert torch.profiler.ProfilerActivity.CPU in prof.prof.activities
     assert torch.profiler.ProfilerActivity.CUDA not in prof.prof.activities
 
 
 def test_step_failure_disables_without_raising(tmp_path):
-    prof = Profiler(_ProfCfg(), default_save_path=str(tmp_path))
+    prof = Profiler(_ProfCfg(save_path=str(tmp_path)))
     prof.start()
 
     class _Boom:
@@ -241,42 +223,33 @@ class TestWorkerProfilerRPCs:
 
 class TestBuildProfilerFromPolicyCfg:
     """``build_profiler_from_policy_cfg`` is the production entry both worker
-    backends call in ``init_model``. It gates on ``enable`` and composes the
-    default ``{ckpt_path}/profiler_traces`` save path when none is set."""
+    backends call in ``init_model``. It gates on ``enable`` and passes the
+    explicit, validated ``save_path`` straight through (no implicit default)."""
 
     @staticmethod
-    def _trainer_cfg(prof_cfg, ckpt_path):
+    def _trainer_cfg(prof_cfg):
         from types import SimpleNamespace
 
-        return SimpleNamespace(ckpt_path=ckpt_path, policy=SimpleNamespace(torch_profiler_config=prof_cfg))
+        return SimpleNamespace(policy=SimpleNamespace(torch_profiler_config=prof_cfg))
 
     def test_returns_none_when_disabled(self, tmp_path):
         from skyrl.backends.skyrl_train.utils.profiler import (
             build_profiler_from_policy_cfg,
         )
 
-        cfg = self._trainer_cfg(_ProfCfg(enable=False), str(tmp_path))
+        cfg = self._trainer_cfg(_ProfCfg(enable=False, save_path=str(tmp_path)))
         assert build_profiler_from_policy_cfg(cfg) is None
 
-    def test_builds_profiler_with_ckpt_default_save_path(self, tmp_path):
+    def test_builds_profiler_with_explicit_save_path(self, tmp_path):
         from skyrl.backends.skyrl_train.utils.profiler import (
             Profiler,
             build_profiler_from_policy_cfg,
         )
 
-        cfg = self._trainer_cfg(_ProfCfg(enable=True, save_path=None), str(tmp_path))
+        explicit = str(tmp_path / "explicit")
+        cfg = self._trainer_cfg(_ProfCfg(enable=True, save_path=explicit))
         prof = build_profiler_from_policy_cfg(cfg)
         assert isinstance(prof, Profiler)
-        assert prof.save_path == os.path.join(str(tmp_path), "profiler_traces")
-
-    def test_explicit_save_path_wins_over_ckpt_default(self, tmp_path):
-        from skyrl.backends.skyrl_train.utils.profiler import (
-            build_profiler_from_policy_cfg,
-        )
-
-        explicit = str(tmp_path / "explicit")
-        cfg = self._trainer_cfg(_ProfCfg(enable=True, save_path=explicit), str(tmp_path))
-        prof = build_profiler_from_policy_cfg(cfg)
         assert prof.save_path == explicit
 
 

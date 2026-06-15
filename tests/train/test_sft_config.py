@@ -167,6 +167,7 @@ class TestTorchProfilerConfigOverrides:
                 "torch_profiler_config.profile_memory=true",
                 "torch_profiler_config.with_stack=false",
                 "torch_profiler_config.activities=[cuda]",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
             ]
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
@@ -183,6 +184,7 @@ class TestTorchProfilerConfigOverrides:
                 "model.path=test/my-model",
                 "torch_profiler_config.enable=true",
                 "torch_profiler_config.export_type=bogus",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
             ]
         )
         with pytest.raises(ValueError, match=r"export_type"):

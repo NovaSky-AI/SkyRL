@@ -4,8 +4,6 @@ import torch
 import torch.distributed
 from loguru import logger
 
-from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
-
 # Map config activity strings to torch ProfilerActivity members.
 _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
@@ -17,15 +15,13 @@ def build_profiler_from_policy_cfg(trainer_cfg):
     """Construct a :class:`Profiler` from ``policy.torch_profiler_config``, or None.
 
     Returns ``None`` when profiling is disabled, so callers can simply assign the
-    result to ``self.profiler``. The trace ``save_path`` defaults to
-    ``{ckpt_path}/profiler_traces`` (mirrors how memory snapshots default under
-    ``ckpt_path``).
+    result to ``self.profiler``. ``save_path`` is an explicit, required local path
+    (validated at startup) -- there is no implicit ``ckpt_path``-derived default.
     """
     cfg = trainer_cfg.policy.torch_profiler_config
     if not cfg.enable:
         return None
-    default_save_path = os.path.join(trainer_cfg.ckpt_path, "profiler_traces")
-    return Profiler(cfg, default_save_path=default_save_path)
+    return Profiler(cfg)
 
 
 class Profiler:
@@ -51,7 +47,7 @@ class Profiler:
         with_modules, export_type.
     """
 
-    def __init__(self, config, default_save_path: str = None):
+    def __init__(self, config):
         self.enable = config.enable
         self.prof = None
         # Per-window self-device-time kernel summary, refreshed by on_trace_ready
@@ -62,17 +58,9 @@ class Profiler:
         if not config.enable:
             return
         self.config = config
-        self.save_path = config.save_path or default_save_path or "./profiler_traces"
-        # torch.profiler writes traces with the local filesystem only. ``save_path``
-        # commonly defaults to ``{ckpt_path}/profiler_traces``, and ckpt_path can be a
-        # cloud URI (s3://, gs://) -- which torch can't write to, so the trace would be
-        # silently lost. Fall back to a local dir so profiling still produces output.
-        if is_cloud_path(self.save_path):
-            logger.warning(
-                f"[Profiler] cloud save_path {self.save_path!r} is not writable by torch.profiler; "
-                f"falling back to local './profiler_traces'."
-            )
-            self.save_path = "./profiler_traces"
+        # `save_path` is a required, explicit local path -- validated by
+        # TorchProfilerConfig.validate() at startup (non-empty + not a cloud URI).
+        self.save_path = config.save_path
         self.ranks = list(config.ranks)
         self.export_type = getattr(config, "export_type", "chrome_trace")
         self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
