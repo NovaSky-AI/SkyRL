@@ -253,10 +253,7 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
 
 
 def test_flush_pending_metrics_logs_and_clears(dummy_config):
-    """Metrics accumulated for an in-flight step are flushed to the tracker.
-
-    See https://github.com/NovaSky-AI/SkyRL/issues/1687.
-    """
+    """Metrics accumulated for an in-flight step are flushed to the tracker."""
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,
@@ -306,11 +303,7 @@ def test_flush_pending_metrics_swallows_tracker_errors(dummy_config):
 
 
 def test_run_flushes_pending_metrics_before_logging_exception():
-    """`BasePPOExp.run` flushes pending step metrics before `log_exception`
-    finishes the wandb run.
-
-    See https://github.com/NovaSky-AI/SkyRL/issues/1687.
-    """
+    """`BasePPOExp.run` flushes pending step metrics before `log_exception` finishes the wandb run."""
     from skyrl.train.entrypoints.main_base import BasePPOExp
 
     exp = BasePPOExp.__new__(BasePPOExp)

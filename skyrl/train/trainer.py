@@ -489,14 +489,6 @@ class RayPPOTrainer:
 
     def flush_pending_metrics(self):
         """Best-effort flush of metrics accumulated for the in-flight step.
-
-        `train()` only logs `all_metrics`/`all_timings` once a step fully
-        completes, so a crash mid-step (e.g. an OOM in
-        `fwd_logprobs_values_reward` after a long generation phase) would
-        otherwise drop everything already recorded for that step. Called from
-        the except block in `BasePPOExp.run` before `tracker.log_exception`
-        (which finishes the wandb run, so the flush must happen first).
-
         Idempotent: the accumulators are cleared after the flush attempt, so a
         second call is a no-op. Never raises.
         """
