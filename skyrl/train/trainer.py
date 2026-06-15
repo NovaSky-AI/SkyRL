@@ -487,6 +487,25 @@ class RayPPOTrainer:
         self.tracker.finish()
         logger.info("Training done!")
 
+    def flush_pending_metrics(self):
+        """Best-effort flush of metrics accumulated for the in-flight step.
+
+        Idempotent: the accumulators are cleared after the flush attempt, so a
+        second call is a no-op. Never raises.
+        """
+        if not self.all_metrics and not self.all_timings:
+            return
+        log_payload = {
+            **self.all_metrics,
+            **{f"timing/{k}": v for k, v in self.all_timings.items()},
+        }
+        try:
+            self.tracker.log(log_payload, step=self.global_step, commit=True)
+        except Exception as e:
+            logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
+        self.all_metrics = {}
+        self.all_timings = {}
+
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.
 
@@ -1083,6 +1102,41 @@ class RayPPOTrainer:
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
 
+    def _execute_forward_pass(
+        self,
+        model: str,
+        data_fwd_pass: TrainingInputBatch,
+        key: str,
+        mini_batch_boundaries: Optional[List[Tuple[int, int]]],
+    ) -> torch.Tensor:
+        """Executes forward pass that produces to produce the "old" logprobs/values.
+
+        With ``trainer.recompute_old_logprobs_per_minibatch`` set (and mini-batch boundaries
+        available), the forward is run per mini-batch — matching the mini-batch + DP partition
+        that the training step (``_execute_training_step`` / ``stage_data``) will use — so the
+        microbatch packing, and therefore the resulting logprobs/values, are identical to what
+        ``forward_backward`` recomputes. This makes the PPO ratio (and critic value clipping)
+        exact at the first inner step. Otherwise a single full-batch forward is run.
+
+        Per-sample outputs are concatenated in mini-batch order, which matches the global sample
+        order (mini-batches are contiguous and in order), so the result aligns with the full-batch
+        forward's ordering. Tensorizing the combined ``loss_fn_outputs`` once pads uniformly.
+        """
+        if self.cfg.trainer.recompute_old_logprobs_per_minibatch and mini_batch_boundaries:
+            # Pre-stage all per-DP mini-batch chunks once (same as the training step), so chunk
+            # serialization is amortized off the dispatch critical path across mini-batches. The
+            # staged chunks use the same partition as `_execute_training_step`'s `stage_data`, so
+            # the packing — and resulting logprobs/values — match what forward_backward recomputes.
+            all_chunk_refs = self.dispatch.stage_data(model, data_fwd_pass, mini_batch_boundaries)
+            combined_outputs: List[Dict[str, Any]] = []
+            for chunk_refs in all_chunk_refs:
+                mb_output = self.dispatch.forward_from_staged(model, chunk_refs)
+                combined_outputs.extend(mb_output.loss_fn_outputs)
+            return loss_fn_outputs_to_tensor(combined_outputs, key=key)
+
+        output = self.dispatch.forward(model, data_fwd_pass)
+        return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key=key)
+
     @torch.no_grad()
     def fwd_logprobs_values_reward(
         self,
@@ -1118,18 +1172,28 @@ class RayPPOTrainer:
 
         # Critic forward (dispatch handles offload/backload automatically)
         if self.has_critic:
-            critic_output = self.dispatch.forward("critic", data_fwd_pass)
-            values = loss_fn_outputs_to_tensor(critic_output.loss_fn_outputs, key="values")
+            values = self._execute_forward_pass(
+                "critic",
+                data_fwd_pass,
+                key="values",
+                mini_batch_boundaries=training_input.metadata.get("critic_mini_batch_boundaries"),
+            )
 
-        # Ref forward
+        # Ref forward. The ref model is not trained, so there is no forward_backward to match
+        # its packing against -> always a single full-batch forward (boundaries=None).
         if self.ref_model is not None:
-            ref_output = self.dispatch.forward("ref", data_fwd_pass)
-            base_log_probs = loss_fn_outputs_to_tensor(ref_output.loss_fn_outputs, key="logprobs")
+            base_log_probs = self._execute_forward_pass(
+                "ref", data_fwd_pass, key="logprobs", mini_batch_boundaries=None
+            )
             self.dispatch.empty_cache("ref")
 
         # Policy forward
-        policy_output = self.dispatch.forward("policy", data_fwd_pass)
-        action_log_probs = loss_fn_outputs_to_tensor(policy_output.loss_fn_outputs, key="logprobs")
+        action_log_probs = self._execute_forward_pass(
+            "policy",
+            data_fwd_pass,
+            key="logprobs",
+            mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
+        )
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()

@@ -33,12 +33,7 @@ jobs:
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models') &&
-        (
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR'
-        )
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models')
       )
     runs-on: ubuntu-latest
     defaults:

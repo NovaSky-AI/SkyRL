@@ -187,6 +187,43 @@ class TestTrainerUseSamplePackingAlias:
             )
 
 
+class TestSkyRLTrainConfig:
+    @pytest.mark.parametrize(
+        ("overrides", "expected_num_workers", "expected_persistent"),
+        [
+            pytest.param([], 8, False, id="default-no-http"),
+            pytest.param(["generator.inference_engine.enable_http_endpoint=true"], 0, False, id="http-endpoint"),
+            pytest.param(
+                ["generator.inference_engine.enable_http_endpoint=true", "data.dataloader.num_workers=4"],
+                4,
+                False,
+                id="explicit-overrides-http",
+            ),
+            pytest.param(["data.dataloader.num_workers=0"], 0, False, id="explicit-zero"),
+            pytest.param(["data.dataloader.persistent_workers=true"], 8, True, id="persistent-keeps-default-workers"),
+        ],
+    )
+    def test_resolution(self, overrides: list[str], expected_num_workers: int, expected_persistent: bool) -> None:
+        cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
+        assert cfg.data.dataloader.num_workers == expected_num_workers
+        assert cfg.data.dataloader.persistent_workers == expected_persistent
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            pytest.param(
+                ["data.dataloader.num_workers=0", "data.dataloader.persistent_workers=true"],
+                "persistent_workers requires num_workers > 0",
+                id="persistent-without-workers",
+            ),
+            pytest.param(["data.dataloader.num_workers=-1"], "num_workers must be None or >= 0", id="negative-workers"),
+        ],
+    )
+    def test_invalid_raises(self, overrides: list[str], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            SkyRLTrainConfig.from_cli_overrides(overrides)
+
+
 class TestMaxSeqLenValidation:
     """Tests for max_seq_len defaults and validation behavior."""
 
