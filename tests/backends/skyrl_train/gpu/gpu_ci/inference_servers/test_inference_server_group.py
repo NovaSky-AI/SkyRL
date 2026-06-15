@@ -118,7 +118,9 @@ def server_group_and_router(class_scoped_ray_init_fixture):
         "client": client,
     }
 
-    asyncio.get_event_loop().run_until_complete(client.teardown())
+    # Teardown runs after the class-scoped event loop is gone, so create a
+    # fresh one. `asyncio.get_event_loop()` raises on py3.12 when no loop is set.
+    asyncio.run(client.teardown())
     router.shutdown()
     group.shutdown()
 

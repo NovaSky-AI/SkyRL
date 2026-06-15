@@ -53,6 +53,7 @@ constraints = [
 overrides = [
     { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'", git = "https://github.com/NVIDIA/Megatron-LM?rev=71e418ea7d7b3a6c9a53238c543c3e0b43e11026" },
     { name = "ml-dtypes", marker = "sys_platform == 'linux'", specifier = ">=0.5.0" },
+    { name = "nixl-cu13", marker = "sys_platform == 'never'" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux'", specifier = "==2.11.0" },
     { name = "transformer-engine-cu13", marker = "sys_platform == 'never'" },
@@ -4691,6 +4692,17 @@ wheels = [
 ]
 
 [[package]]
+name = "nixl"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nixl-cu12", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/cf/9a6cee3a65dba86a32243fe1b31b84c987215227c9fe850699d599d762ed/nixl-1.2.0-py3-none-any.whl", hash = "sha256:eb666a3691e3d98be35164128175d7763eea3217125b5ead9fc54cd9754e0f16", size = 8842, upload-time = "2026-05-30T00:54:59.814Z" },
+]
+
+[[package]]
 name = "nixl-cu12"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -8598,6 +8610,7 @@ flashrl = [
     { name = "jaxtyping" },
     { name = "loguru" },
     { name = "ninja" },
+    { name = "nixl", marker = "sys_platform == 'linux'" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux'" },
     { name = "omegaconf" },
     { name = "peft" },
@@ -8639,6 +8652,7 @@ fsdp = [
     { name = "jaxtyping" },
     { name = "loguru" },
     { name = "ninja" },
+    { name = "nixl", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "omegaconf" },
     { name = "peft" },
@@ -8698,6 +8712,7 @@ megatron = [
     { name = "megatron-bridge", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "ninja" },
+    { name = "nixl", marker = "sys_platform == 'linux'" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux'" },
     { name = "nvidia-modelopt", marker = "sys_platform == 'linux'" },
     { name = "omegaconf" },
@@ -8737,6 +8752,7 @@ miniswe = [
     { name = "loguru" },
     { name = "mini-swe-agent" },
     { name = "ninja" },
+    { name = "nixl", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax')" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax')" },
     { name = "omegaconf" },
     { name = "peft" },
@@ -8772,6 +8788,7 @@ skyrl-train = [
     { name = "jaxtyping" },
     { name = "loguru" },
     { name = "ninja" },
+    { name = "nixl", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-fsdp') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-gpu') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-flashrl' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "omegaconf" },
     { name = "peft" },
@@ -8864,6 +8881,9 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'dev'" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "ninja", marker = "extra == 'skyrl-train'" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'fsdp'" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'megatron'" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'skyrl-train'" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' and extra == 'fsdp'" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' and extra == 'megatron'" },
     { name = "nixl-cu12", marker = "sys_platform == 'linux' and extra == 'skyrl-train'" },
