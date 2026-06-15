@@ -194,11 +194,16 @@ class VLLMMetricsScraper:
                 merged[key] = value
         return merged
 
-    async def sample(self) -> Dict[str, float]:
+    async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
         """Return a dict of ``vllm/...`` scalars for the current step.
 
         Empty if no agents are reachable or if no vLLM samples are present
         yet (e.g. before any inference has run).
+
+        ``generation_time_s`` is the time the engine spent generating since the
+        previous ``sample()`` call; it is the denominator for the throughput
+        metrics. Pass ``None`` when generation runs for the whole interval
+        (e.g. fully-async overlap) to fall back to the wall-clock interval.
         """
         if not self._urls:
             return {}
@@ -230,14 +235,19 @@ class VLLMMetricsScraper:
         # Derived metrics need a previous snapshot to take deltas.
         if self._prev_aggregated is not None and self._prev_timestamp is not None:
             dt = max(now - self._prev_timestamp, 1e-9)
-            out.update(self._derive(snapshot, self._prev_aggregated, dt))
+            # Throughput is per generation-second, not per step-second.
+            if generation_time_s is not None and generation_time_s > 0:
+                throughput_window_s = generation_time_s
+            else:
+                throughput_window_s = dt
+            out.update(self._derive(snapshot, self._prev_aggregated, throughput_window_s))
 
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
 
     @staticmethod
-    def _derive(cur: Dict[str, float], prev: Dict[str, float], dt: float) -> Dict[str, float]:
+    def _derive(cur: Dict[str, float], prev: Dict[str, float], throughput_window_s: float) -> Dict[str, float]:
         out: Dict[str, float] = {}
 
         def delta(name: str) -> Optional[float]:
@@ -249,11 +259,11 @@ class VLLMMetricsScraper:
 
         gen_d = delta(_COUNTER_GENERATION_TOKENS)
         if gen_d is not None:
-            out["vllm/generation_throughput_tok_s"] = gen_d / dt
+            out["vllm/generation_throughput_tok_s"] = gen_d / throughput_window_s
 
         prompt_d = delta(_COUNTER_PROMPT_TOKENS)
         if prompt_d is not None:
-            out["vllm/prompt_throughput_tok_s"] = prompt_d / dt
+            out["vllm/prompt_throughput_tok_s"] = prompt_d / throughput_window_s
 
         q_d = delta(_COUNTER_PREFIX_QUERIES)
         h_d = delta(_COUNTER_PREFIX_HITS)

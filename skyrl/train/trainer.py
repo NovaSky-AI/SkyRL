@@ -437,7 +437,13 @@ class RayPPOTrainer:
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
                 if self._vllm_metrics_scraper is not None:
-                    log_payload.update(await self._vllm_metrics_scraper.sample())
+                    # Engine only generates during the "generate" phase, so
+                    # throughput divides by that, not the full step time.
+                    log_payload.update(
+                        await self._vllm_metrics_scraper.sample(
+                            generation_time_s=self.all_timings.get("generate")
+                        )
+                    )
 
                 if self._ray_gpu_monitor is not None:
                     log_payload.update(self._ray_gpu_monitor.flush())
