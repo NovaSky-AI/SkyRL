@@ -410,7 +410,7 @@ class BasePPOExp:
             if self.trainer is not None and self.trainer.tracker is not None:
                 # Flush metrics already recorded for the in-flight step (e.g.
                 # reward/timing metrics from a completed generation phase)
-                # before log_exception finishes the wandb run. See #1687.
+                # before log_exception finishes the wandb run.
                 self.trainer.flush_pending_metrics()
                 self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
             else:
