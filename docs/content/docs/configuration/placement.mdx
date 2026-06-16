@@ -2,6 +2,10 @@
 title: "Model Placement and Colocation"
 ---
 
+<Callout type="info">
+Model placement and colocation applies to the `fsdp` and `megatron` backends.
+</Callout>
+
 
 SkyRL provides flexible control over how to distribute models across available GPU resources. You can either colocate models on the same GPUs or disaggregate them across separate GPUs, depending on your setup and requirements.
 
@@ -19,15 +23,15 @@ A typical PPO training workflow involves 5 model-based components:
 
 ## Inference Engine Management
 
-The `generator.run_engines_locally` argument controls inference engine management. 
+The `generator.inference_engine.run_engines_locally` argument controls inference engine management.
 
 If `run_engines_locally=true`, then the inference engines are launched during the training run and managed by SkyRL.
 
-If `run_engines_locally=false`, then the user can specify inference engine URLs managed externally (with the `generator.remote_inference_engine_urls` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines [here](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/remote_inference_engine) for convenience.
+If `run_engines_locally=false`, then the user can specify inference engine URLs managed externally (with the `generator.inference_engine.remote_urls` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines [here](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/remote_inference_engine) for convenience.
 
 ## Inference Engine Placement
 
-The `generator.colocate_all` setting controls inference engine placement.
+The `trainer.placement.colocate_all` setting controls inference engine placement.
 
 **Colocated Engines (colocate_all = true)**
 
@@ -37,7 +41,7 @@ Inference engines share GPUs with training models:
 - Engines will `sleep()` after generation to free GPU memory
 - Engines will `wake_up()` before the next generation round
 
-NOTE: As of now, colocated engines are only supported with `generator.run_engines_locally=true`.
+NOTE: As of now, colocated engines are only supported with `generator.inference_engine.run_engines_locally=true`.
 
 **Disaggregated Engines (colocate_all = false)**
 
@@ -58,8 +62,18 @@ All training models (policy, critic, reward, reference) share the same GPUs.
 
 The policy and critic models are not colocated, but fine-grained placement of the reference and reward models can be controlled with two additional parameters:
 
-- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`) or place them on separate GPUs (`false`)
+- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`, the default) or place them on separate GPUs (`false`)
 - `trainer.placement.colocate_critic_reward`: Colocate critic and reward models (`true`) or place them on separate GPUs (`false`)
+
+<Callout type="warn">
+`colocate_all=false` does not separate the policy and reference models by itself.
+With the default `colocate_policy_ref=true`, policy and reference run on the same physical GPUs
+(one shared placement group): every GPU holds one policy shard and one reference shard at the same time,
+and their combined size must fit in that GPU's memory.
+To give policy and reference their own GPUs
+(separate nodes with whole-node bundles), set `colocate_policy_ref=false`;
+also consider `trainer.policy.fsdp_config.cpu_offload=true`.
+</Callout>
 
 ## Hardware Configuration
 
@@ -78,15 +92,16 @@ trainer:
   reward_num_gpus_per_node: 4
 
 generator:
-  # InferenceEngine resources
-  num_inference_engines: 1
-  inference_engine_tensor_parallel_size: 4
-  inference_engine_expert_parallel_size: 1
-  inference_engine_data_parallel_size: 1
+  inference_engine:
+    # InferenceEngine resources
+    num_engines: 1
+    tensor_parallel_size: 4
+    expert_parallel_size: 1
+    data_parallel_size: 1
 
 ```
 
    **Resource Allocation Guidelines**
    
    - When `colocate_all=true`, all training models should have identical node and GPU counts.
-   - When `generator.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+   - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.

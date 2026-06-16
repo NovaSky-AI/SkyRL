@@ -1,0 +1,49 @@
+name: SkyRL-GPU-E2E-CI-Tinker-Fully-Async
+
+on:
+  schedule:
+    - cron: '29 8 * * *'   # Every day at 08:29 UTC, offset from the other nightly E2Es
+  workflow_dispatch:
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+jobs:
+
+  skyrl_gpu_e2e_test_tinker_fully_async:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        # This is the version of the action for setting up Python, not the Python version.
+        uses: actions/setup-python@v5
+        with:
+          # Semantic version range syntax or exact version of a Python version
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install basic dependencies
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
+      - name: Install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext-base
+      - name: Tinker fully-async rl_loop convergence test
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          envsubst < ci/anyscale_gpu_e2e_test_tinker_fully_async.yaml > ci/anyscale_gpu_e2e_test_tinker_fully_async_envsubst.yaml
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          JOB_NAME="skyrl-train-gpu-e2e-test-tinker-fully-async-${COMMIT_SHA:0:7}-${{ github.run_id }}"
+          anyscale job submit -f ci/anyscale_gpu_e2e_test_tinker_fully_async_envsubst.yaml --name "$JOB_NAME" --timeout 12000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 12000
+          rm -f ci/anyscale_gpu_e2e_test_tinker_fully_async_envsubst.yaml

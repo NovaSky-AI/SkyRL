@@ -1,0 +1,89 @@
+---
+title: "Agent Integration"
+---
+
+<Callout type="info">
+This doc is a work-in-progress. Last updated: March 18, 2026.
+</Callout>
+
+SkyRL is designed with modularity as the most important principle. As shown in the [Architecture Overview](../getting-started/overview), the Generator is where rollout is performed and where your per-task agent behaviors are defined (e.g. environment, tool calls). In general, there are two ways to perform RL with SkyRL:
+
+1. **Using the `SkyRLGymGenerator`** — a basic agent loop where you define your task-specific logic in a gymnasium-style API (`init()`, `step()`, `close()`). It supports all features including fully async RL (i.e. in-flight weight update), step-wise training, token-in-token-out, TIS, R3, etc. This is recommended when your environment is lightweight (e.g. deep-research tasks where the tools are simple API calls). See: [SkyRLGymGenerator](skyrl_gym_generator).
+
+2. **Implementing a custom generator** by following the `GeneratorInterface` abstraction, with the only required method being `async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput`. This is the path to take if you have an existing agent harness that is too complex to migrate into the `SkyRLGymGenerator` format. A canonical example is the Harbor generator — see: [Harbor](../harbor).
+
+## Prerequisite: Toggle on HTTP Endpoint
+
+SkyRL exposes the inference engine as an OpenAI-compatible HTTP endpoint, so your agent harness can send requests to it. Configure the following:
+
+- **`generator.inference_engine.enable_http_endpoint`**: Set to `true` to launch an OpenAI-compatible HTTP endpoint. When using HTTP endpoints, propagate the temperature appropriately to `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`.
+- **`generator.inference_engine.http_endpoint_host`**: Host for the inference HTTP endpoint.
+- **`generator.inference_engine.http_endpoint_port`**: Port for the inference HTTP endpoint.
+- **`generator.inference_engine.served_model_name`**: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path.
+
+## Ways to Integrate Your Custom Agent
+
+The end goal is to implement the contract of `generate(self, input_batch: GeneratorInput) -> GeneratorOutput`. Let's first look at the `GeneratorOutput`:
+
+```python
+class GeneratorOutput(TypedDict):
+    prompt_token_ids: List[List[int]]
+    response_ids: List[List[int]]
+    rewards: Union[List[float], List[List[float]]]
+    loss_masks: List[List[int]]
+    stop_reasons: Optional[List[str]]
+    rollout_metrics: Optional[Dict[str, Any]]
+    rollout_logprobs: Optional[List[List[float]]]
+    trajectory_ids: Optional[List[TrajectoryID]]
+    rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
+    # Applicable only for step-wise training
+    is_last_step: Optional[List[bool]]
+```
+
+With a custom agent, you are expected to book-keep:
+- `rollout_logprobs` if you want to perform TIS
+- `rollout_expert_indices` if you want to perform R3
+- `prompt_token_ids` and `response_ids` if you perform step-wise training
+
+There are roughly three ways to integrate an agent, each with different trade-offs.
+
+### 1. Re-Tokenization
+
+For each trajectory, record a `chat_history: List[Dict[str, str]]`, re-tokenize it with the chat template, and construct `loss_mask` based on roles. You can use the helper method [`get_response_ids_and_loss_mask_from_messages()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/utils.py) to construct `prompt_token_ids`, `response_ids`, and `loss_masks`.
+
+**Pros:**
+- Simplest approach — works almost out of the box for most agent harnesses. Despite re-tokenization drift, some successful open-source recipes were trained this way.
+
+**Cons:**
+- **Re-tokenization drift** — what the model actually generated may not match what you end up tokenizing (and hence training on). This means:
+  - You cannot do rollout correction like TIS reliably, so you cannot do fully async training with proper staleness correction.
+  - The chat history must be strictly appending (no context management like summarization).
+
+### 2. Make the agent harness Token-In-Token-Out
+
+Make your agent harness operate entirely in token space.
+
+This likely involves rewriting your agent to use `/completions` (not `/chat/completions`), meaning you cannot use vLLM's native tool call parsing — you will need to parse tool calls yourself. You maintain a list of tokens that is strictly appending: turn 2's input consists of the exact tokens from turn 1's LLM output plus observation tokens (tokenized in a way that obeys the chat template). You can refer to the `SkyRLGymGenerator` to see how it is done.
+
+**Pros:**
+- Guaranteed on-policyness with no tokenization drift.
+- A single forward pass per trajectory (unless combined with approach 3 for non-strictly-appending chat histories, e.g. context management like summarization or thinking token stripping).
+
+**Cons:**
+- More implementation work. But likely worth it since doing RL is a significant investment of time and effort.
+
+### 3. Step-Wise Training
+
+For each trajectory, treat each turn's input and output pair as a separate training sequence.
+
+Your agent harness can still use `/chat/completions` with tool call parsing, since you can use vLLM's `return_token_ids` to get the raw input and output token IDs. However, your agent harness is expected to do this book-keeping per turn.
+
+**Pros:**
+- Simpler than rewriting the agent into token-in-token-out.
+- On-policy (no tokenization drift) despite using `/chat/completions` (string-space) and context management (i.e. non-strictly-appending chat history).
+
+**Cons:**
+- Training time can grow: O(T^2) vs O(T), since each trajectory of T turns becomes T sequences to forward (each with a growing prefix), as opposed to 1 sequence.
+  - SkyRL support prefix-aware merging of per-step sequences when the prefix matches with config flag `generator.merge_stepwise_output`, which can reduce the O(T^2) cost if chat history is linearly appending across turns and there is no token mismatch. See https://github.com/NovaSky-AI/SkyRL/pull/1532
+
+For the full details on how to structure the `GeneratorOutput` for step-wise training, including the required fields, invariants, and a concrete example, see: [Step-Wise Training](step-wise-training).

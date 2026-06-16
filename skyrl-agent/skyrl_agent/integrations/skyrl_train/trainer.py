@@ -18,30 +18,29 @@ from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 import torch
 
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.generators.base import (
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     TrajectoryID,
     BatchMetadata,
     TrainingPhase,
 )
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.dataset import PromptDataset
+from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.train.dataset import PromptDataset
 
-import asyncio
 from pathlib import Path
 import ray
 from tqdm import tqdm
 
-from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.utils import prepare_generator_input, get_metrics_from_generator_output
-from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import (
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.generators.utils import prepare_generator_input, get_metrics_from_generator_output
+from skyrl.train.utils import Timer
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
     get_kl_controller,
-    normalize_advantages_dict,
 )
-from skyrl_train.utils.trainer_utils import (
+from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     ResumeMode,
     build_dataloader,
@@ -50,7 +49,7 @@ from skyrl_train.utils.trainer_utils import (
     concatenate_generator_outputs,
 )
 
-from skyrl_train.utils.ppo_utils import register_advantage_estimator
+from skyrl.backends.skyrl_train.utils.ppo_utils import register_advantage_estimator
 
 
 @register_advantage_estimator("loop")
@@ -145,33 +144,42 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
         logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
 
 
-def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> StatefulDataLoader:
+def build_dataloader(
+    cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+) -> StatefulDataLoader:
     """
-    Build the dataloader for the training or evaluation dataset
+    Build the dataloader for the training or evaluation dataset.
+
+    Args:
+        cfg: Config object
+        dataset: Dataset object
+        is_train: Whether to build the dataloader for training or evaluation
+        is_fully_async: If is_train, whether to build the dataloader for fully async training, which
+            mainly makes the batch size 1.
     """
     # prepare dataloader
     batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
 
     # Seed the dataloader for reproducibility.
-    # NOTE: We seed the dataloader in the same fashion as VERL for exact reproducibility
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
-    if is_train:
-        sampler = RandomSampler(dataset, generator=seeded_generator)
-    else:
-        sampler = SequentialSampler(dataset)
 
     dataloader = StatefulDataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=batch_size if not is_fully_async else 1,
+        shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
-        sampler=sampler,
+        generator=seeded_generator,
+        multiprocessing_context="spawn" if not cfg.generator.inference_engine.enable_http_endpoint else None,
     )
     if is_train:
-        logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        if not is_fully_async:
+            logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        else:
+            logger.info(f"Total steps: {len(dataloader) // cfg.trainer.train_batch_size * cfg.trainer.epochs}")
     else:
         logger.info(f"Validation set size: {len(dataloader)}")
 
@@ -270,7 +278,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         return generator_output
 
-    def train(self):
+    async def train(self):
         """
         Main training loop for PPO
         """
@@ -278,29 +286,19 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
-        # Load policy model to GPU before loading checkpoint.
-        if self.colocate_all:
-            self.policy_model.backload_to_gpu()
-
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.global_step = self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
 
-        if self.colocate_all:
-            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+        # Prepare weights for sampling
         with Timer("sync_weights"):
-            ray.get(self.sync_policy_weights_to_inference_engines())
-        if self.colocate_all:
-            with Timer("offload_policy_model_to_cpu"):
-                self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-            asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+            await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
-                eval_metrics = asyncio.run(self.eval())
+                eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # initialize kl controller
@@ -320,7 +318,9 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        get_sampling_params_for_backend(
+                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                        ),
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
@@ -328,7 +328,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
-                        generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+                        generator_output: GeneratorOutput = await self.generate(generator_input)
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -338,12 +338,13 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        await self.inference_engine_client.sleep()
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -369,9 +370,6 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                         for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
@@ -405,15 +403,8 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                             self.update_ref_with_policy()
 
                     # 7. sync weights to inference engines
-                    if self.colocate_all:
-                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                        asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
                     with Timer("sync_weights", self.all_timings):
-                        ray.get(self.sync_policy_weights_to_inference_engines())
-                    if self.colocate_all:
-                        with Timer("offload_policy_model_to_cpu"):
-                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-                        asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+                        await self.dispatch.save_weights_for_sampler()
 
                 # 8. set logs
                 logger.info(status)
@@ -424,7 +415,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     or self.global_step == self.total_training_steps
                 ):
                     with Timer("eval", self.all_timings):
-                        eval_metrics = asyncio.run(self.eval())
+                        eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
 
                 log_payload = {
@@ -444,8 +435,8 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         pbar.close()
         if self.colocate_all:
-            asyncio.run(self.inference_engine_client.sleep())
-            self.policy_model.backload_to_gpu()
+            await self.inference_engine_client.sleep()
+
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()
@@ -487,7 +478,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
             generator_input, uids = prepare_generator_input(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
-                get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
+                get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
                 cfg.environment.env_class,
                 "eval",
                 global_step,

@@ -3,15 +3,18 @@
   "pages": [
     "index",
     "getting-started",
-    "datasets",
     "tutorials",
     "examples",
+    "harbor",
+    "tinker",
+    "datasets",
     "platforms",
     "recipes",
     "algorithms",
     "configuration",
     "checkpointing-logging",
     "troubleshooting",
-    "skyagent"
+    "skyagent",
+    "api-ref"
   ]
 }

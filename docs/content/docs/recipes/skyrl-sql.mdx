@@ -3,7 +3,7 @@ title: "SkyRL-SQL"
 ---
 
 
-We provide scripts to reproduce the results for [SkyRL-SQL-7B](https://novasky-ai.notion.site/skyrl-sql) using SkyRL-train and SkyRL-Gym.
+We provide scripts to reproduce the results for [SkyRL-SQL-7B](https://novasky-ai.notion.site/skyrl-sql) using FSDP and Megatron backend with SkyRL-Gym.
 
 You can find a WandB run for both single-turn and multi-turn Text2SQL training at [this link](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5df7pt6p).
 
@@ -45,10 +45,10 @@ unzip <path_to_file.zip>
 
 ## Running the scripts
 
-We provide a script `examples/text_to_sql/run_skyrl_sql.sh` for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
+We provide a script `examples/train/text_to_sql/run_skyrl_sql.sh` for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
 
 ```bash
 export WANDB_API_KEY=<wandb-api-key>
-bash examples/text_to_sql/run_skyrl_sql.sh
+bash examples/train/text_to_sql/run_skyrl_sql.sh
 
 ```

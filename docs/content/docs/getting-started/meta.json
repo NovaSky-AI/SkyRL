@@ -2,9 +2,11 @@
   "title": "Getting Started",
   "pages": [
     "installation",
+    "supported_models",
     "quickstart",
     "overview",
     "development",
-    "library"
+    "library",
+    "inference_architecture"
   ]
 }

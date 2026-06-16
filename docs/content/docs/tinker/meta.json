@@ -1,0 +1,13 @@
+{
+  "title": "Tinker API",
+  "pages": [
+    "overview",
+    "quickstart",
+    "architecture",
+    "multi_tenancy",
+    "session_based_routing",
+    "cookbook",
+    "configuration",
+    "limitations"
+  ]
+}

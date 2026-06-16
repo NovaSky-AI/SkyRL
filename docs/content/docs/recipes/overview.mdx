@@ -14,7 +14,7 @@ We provide reproduction runs for the following recipes:
 
 ### Simple training on GSM8K
 
-The scripts for training on GSM8K are available at `examples/gsm8k/`.
+The scripts for training on GSM8K are available at `examples/train/gsm8k/`.
 
 <style>{`
   table.skytable {
@@ -47,7 +47,7 @@ The scripts for training on GSM8K are available at `examples/gsm8k/`.
      </thead>
      <tbody>
        <tr>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>Qwen/Qwen2.5-1.5B-Instruct</td>
          <td>0.796</td>
          <td>4xH100</td>
@@ -70,7 +70,7 @@ The scripts for training on GSM8K are available at `examples/gsm8k/`.
 
 ### DAPO Recipes
 
-The code for the DAPO recipe is available at `examples/algorithms/dapo/`. 
+The code for the DAPO recipe is available at `examples/train/algorithms/dapo/`. 
 
 For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2. 
 In the table below we report the peak mean@32 and pass@32 over the course of the run. All runs are DAPO but without Dynamic Sampling enabled (just clip-higher, overlong buffer, overlong filtering, and token level loss aggregation).
@@ -110,7 +110,7 @@ All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554
      <tr>
          <td>DAPO</td>
          <td>Qwen/Qwen-2.5-32B</td>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>0.766</td>
          <td>0.381</td>
          <td>2x8xH100</td>
@@ -137,7 +137,7 @@ All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554
        <tr>
          <td>DAPO</td>
          <td>Qwen/Qwen-2.5-7B-Math</td>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>0.633</td>
          <td>0.348</td>
          <td>8xH100</td>
@@ -146,7 +146,7 @@ All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554
        <tr>
          <td>DAPO</td>
          <td>Qwen/Qwen3-1.7B-Base</td>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>0.366</td>
          <td>0.144</td>
          <td>8xH100</td>
@@ -155,7 +155,7 @@ All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554
        <tr>
          <td>DAPO + 0-Var Filtering</td>
          <td>Qwen/Qwen3-1.7B-Base</td>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>0.433</td>
          <td>0.169</td>
          <td>8xH100</td>
@@ -164,7 +164,7 @@ All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554
        <tr>
          <td>DAPO</td>
          <td>Qwen/Qwen3-4B-Base</td>
-         <td>FSDP2</td>
+         <td>FSDP</td>
          <td>0.6</td>
          <td>0.254</td>
          <td>8xH100</td>

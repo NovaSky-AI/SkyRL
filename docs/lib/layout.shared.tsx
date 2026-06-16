@@ -5,5 +5,6 @@ export function baseOptions(): BaseLayoutProps {
     nav: {
       title: 'SkyRL',
     },
+    githubUrl: 'https://github.com/NovaSky-AI/SkyRL',
   };
 }

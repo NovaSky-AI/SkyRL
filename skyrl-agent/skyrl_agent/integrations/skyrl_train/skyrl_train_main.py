@@ -1,10 +1,13 @@
+from dataclasses import dataclass
 import hydra
+import sys
 import os
 from omegaconf import DictConfig
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from skyrl.train.config import GeneratorConfig, SkyRLTrainConfig, make_config
+from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
 import ray
 
 from skyrl_agent import AutoAgentRunner
@@ -12,8 +15,16 @@ from skyrl_agent import AutoAgentRunner
 from .trainer import SkyRLAgentPPOTrainer
 
 
+@dataclass
+class SkyRLAgentGeneratorConfig(GeneratorConfig):
+    task: str = ""
+
+
+SkyRLAgentConfig = make_config(generator_cls=SkyRLAgentGeneratorConfig)
+
+
 class SkyRLAgentGenerator(GeneratorInterface):
-    def __init__(self, generator_cfg: DictConfig, llm_endpoint_client: InferenceEngineClient, tokenizer):
+    def __init__(self, generator_cfg: SkyRLAgentGeneratorConfig, llm_endpoint_client: InferenceEngineClient, tokenizer):
         # read the skyagent task yaml
         skyagent_task_yaml_path = generator_cfg.task
         if not os.path.exists(skyagent_task_yaml_path):
@@ -64,14 +75,16 @@ class SkyRLAgentPPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLAgentConfig):
     # make sure that the training loop is not run on the head node.
     exp = SkyRLAgentPPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    # Parse CLI args and build typed config
+    cfg = SkyRLAgentConfig.from_cli_overrides(sys.argv[1:])
+
     # validate the arguments
     validate_cfg(cfg)
 

@@ -1,0 +1,858 @@
+import copy
+import os
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+from loguru import logger
+
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.train.config import ChatTemplateConfig
+from skyrl.train.generators.base import (
+    BatchMetadata,
+    GeneratorInput,
+    GeneratorOutput,
+    MetricsOutput,
+    TrainingPhase,
+    TrajectoryID,
+)
+from skyrl_gym.metrics import aggregate_for_environment
+
+
+def _validate_template_file_path(file_path: str) -> str:
+    """
+    Validate and sanitize a template file path.
+
+    NOTE(Charlie): this is vibe coded to address comment https://github.com/NovaSky-AI/SkyRL/pull/890#discussion_r2699773416.
+    Could be too strict.
+    """
+    # Resolve to absolute path first
+    resolved_path = os.path.abspath(os.path.expanduser(file_path))
+
+    # Check for path traversal attempts in the original path
+    # Normalize path separators for consistent checking
+    normalized_input = os.path.normpath(file_path)
+
+    # Check if the path contains parent directory references that could indicate traversal
+    # After normpath, legitimate paths won't start with .. but malicious ones trying to escape might
+    if normalized_input.startswith(".."):
+        raise ValueError(
+            f"Invalid template file path '{file_path}': Path traversal sequences are not allowed. "
+            "Please use an absolute path or a path relative to the current working directory."
+        )
+
+    # Additional check: ensure the path doesn't contain null bytes (which could bypass checks)
+    if "\x00" in file_path:
+        raise ValueError(f"Invalid template file path '{file_path}': Null bytes are not allowed in paths.")
+
+    # Ensure the resolved path is a regular file (not a directory, symlink to sensitive location, etc.)
+    if os.path.exists(resolved_path):
+        if not os.path.isfile(resolved_path):
+            raise ValueError(f"Invalid template file path '{file_path}': Path must point to a regular file.")
+
+        # Check that the file has a reasonable size (prevent reading very large files)
+        file_size = os.path.getsize(resolved_path)
+        max_template_size = 1024 * 1024  # 1MB should be more than enough for any chat template
+        if file_size > max_template_size:
+            raise ValueError(
+                f"Template file '{file_path}' is too large ({file_size} bytes). "
+                f"Maximum allowed size is {max_template_size} bytes."
+            )
+
+    return resolved_path
+
+
+CUSTOM_CHAT_TEMPLATES = {
+    # chat template for qwen3 that preserves thinking tokens
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
+    # template but we add `generation` and `endgeneration` tags)
+    "qwen3_without_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{% set full_content = message['content'] %}"
+        "{% set mycontent = message['content'] %}"
+        "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
+        "{% if '</think>' in full_content and not is_last_message %}"
+        "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
+        "{% endif %}"
+        "{{mycontent + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+}
+
+
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemplateConfig]] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
+
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
+
+    Returns:
+        Chat template string or None
+    """
+    if chat_template_config is None:
+        return None
+
+    if isinstance(chat_template_config, dict):
+        chat_template_config = ChatTemplateConfig(**chat_template_config)
+
+    source = chat_template_config.source
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
+
+    name_or_path = chat_template_config.name_or_path
+    if not name_or_path:
+        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
+
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(
+                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
+            )
+    elif source == "file":
+        # Validate and sanitize the file path to prevent path traversal attacks
+        validated_path = _validate_template_file_path(name_or_path)
+        try:
+            with open(validated_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            raise ValueError(f"Template file '{name_or_path}' not found") from e
+        except OSError as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
+
+
+def get_generation_prompt_ids(tokenizer, tokenizer_kwargs: Optional[dict] = None) -> List[int]:
+    """
+    Helper function to get the generation prompt ids for a given tokenizer.
+
+    Args:
+        tokenizer: HuggingFace tokenizer with chat_template support.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``). If None, uses defaults.
+                          ``enable_thinking`` is not supported here; use
+                          ``encode_messages_subset`` instead.
+
+    Returns:
+        List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
+    """
+    assert "enable_thinking" not in (
+        tokenizer_kwargs or {}
+    ), "enable_thinking is not supported in get_generation_prompt_ids; use encode_messages_subset instead"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
+    empty_user = tokenizer.apply_chat_template(
+        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, **kwargs
+    )
+    empty_user_with_generation_prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": ""}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=False,
+        **kwargs,
+    )
+
+    generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
+    return generation_prompt_ids
+
+
+@torch.no_grad()
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> MetricsOutput:
+    """
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
+
+    The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
+    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
+    unique examples.
+
+    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+    """
+    rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
+    if not len(rewards):
+        raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
+
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's reward on that same example
+    uid_to_trajectory_rewards = defaultdict(list)
+    if isinstance(rewards[0], list):
+        # Token-level rewards: rewards is List[List[float]]
+        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
+        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+
+        # For each trajectory, we sum over the positive token rewards for mean_positive_reward computation
+        mean_positive_reward = float(
+            np.mean([sum(max(r, 0) for r in trajectory_rewards) for trajectory_rewards in rewards])
+        )
+
+        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
+        for i, cur_trajectory_rewards in enumerate(rewards):
+            if len(cur_trajectory_rewards) == 0:
+                raise ValueError("Token-level rewards must be a non-empty list.")
+            uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
+    else:
+        mean_raw_reward = float(np.mean(rewards))
+        mean_positive_reward = float(np.mean(np.maximum(rewards, 0.0)))
+        for i, reward in enumerate(rewards):
+            uid_to_trajectory_rewards[uids[i]].append(reward)
+
+    # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
+    # any of its trajectories' reward is positive, pass@n for that uid is 1.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(
+        uid_to_trajectory_rewards
+    )
+
+    return MetricsOutput(
+        avg_score=mean_raw_reward,
+        pass_at_n=pass_at_n,
+        mean_positive_reward=mean_positive_reward,
+    )
+
+
+def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
+    """Concatenate a per-sample list-valued field across generator outputs in O(N_total)."""
+    flat = []
+    for go in generator_outputs:
+        flat.extend(go[key])
+    return flat
+
+
+def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
+    """
+    Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
+
+    We only aggregate rollout metrics the can deduced by responses and rewards, but not
+    those that use `env_metrics` or `env_classes`.
+
+    Args:
+        generator_outputs: Per-batch generator outputs to concatenate.
+        step_wise: If True, validate step-wise specific fields on the concatenated result
+            (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
+    """
+    assert len(generator_outputs) > 0
+    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
+    if any(has_rollout_logprobs) and not all(has_rollout_logprobs):
+        raise ValueError(
+            "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
+        )
+    first = generator_outputs[0]
+    result: GeneratorOutput = {
+        "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
+        "response_ids": _flatten_field(generator_outputs, "response_ids"),
+        "rewards": _flatten_field(generator_outputs, "rewards"),
+        "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
+        "stop_reasons": (
+            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
+        ),
+        "rollout_logprobs": (
+            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
+        ),
+    }
+
+    # propagate additional keys with list values as-is
+    additional_keys = [key for key in first if key not in result and isinstance(first[key], list)]
+    if len(additional_keys):
+        logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
+    for key in additional_keys:
+        result[key] = _flatten_field(generator_outputs, key)
+
+    # Re-aggregate rollout metrics
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+    )
+
+    # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
+    # computes basic stats (response length, reward); generators may add custom keys, which we
+    # aggregate by inferring from the key name. TODO(Charlie): hacky, to be removed soon.
+    extra_keys: dict = {}
+    for go in generator_outputs:
+        per_group = go.get("rollout_metrics") or {}
+        for k, v in per_group.items():
+            if k not in rollout_metrics and isinstance(v, (int, float)):
+                extra_keys.setdefault(k, []).append(v)
+    for k, values in extra_keys.items():
+        if "avg" in k or "mean" in k:
+            rollout_metrics[k] = sum(values) / len(values)
+        elif "min" in k:
+            rollout_metrics[k] = min(values)
+        elif "max" in k:
+            rollout_metrics[k] = max(values)
+        else:
+            rollout_metrics[k] = sum(values)
+    result["rollout_metrics"] = rollout_metrics
+
+    # Validate the generator output using the number of prompts
+    # Import here to avoid circular dependency.
+    from skyrl.train.utils.trainer_utils import validate_generator_output
+
+    num_prompts = len(result["prompt_token_ids"])
+    validate_generator_output(num_prompts, result, step_wise=step_wise)
+
+    return result
+
+
+def apply_overlong_filtering(
+    loss_masks: List[List[int]],
+    stop_reasons: List[str],
+) -> List[List[int]]:
+    """
+    Implements DAPO Overlong Filtering: zero-out every token's mask whenever
+    the response was truncated (i.e. did not end with a stop token).
+
+    Uses stop_reasons from the inference engine rather than checking for a
+    specific eos token id, making this model/tokenizer agnostic.
+
+    Args:
+        loss_masks: Per-trajectory token loss masks.
+        stop_reasons: Per-trajectory stop reasons from the inference engine
+            (e.g. "stop" for normal completion, "length" for truncation).
+
+    Returns:
+        The loss masks with tokens zeroed out for truncated responses.
+    """
+    assert len(loss_masks) == len(stop_reasons), "loss_masks and stop_reasons must have the same length"
+    return [
+        [0] * len(mask) if stop_reason != "stop" else mask[:] for mask, stop_reason in zip(loss_masks, stop_reasons)
+    ]
+
+
+def get_rollout_metrics(
+    responses: List[List[int]],
+    rewards: Union[List[float], List[List[float]]],
+    env_metrics: Optional[List[Dict[str, Any]]] = None,
+    env_classes: Optional[List[str]] = None,
+    loss_masks: Optional[List[List[int]]] = None,
+):
+    """
+    Computes rollout metrics including token statistics and optional environment-specific metrics.
+
+    Args:
+        responses: List of token ID sequences for each response
+        rewards: List of rewards (either per-trajectory or per-token)
+        env_metrics: Optional list of environment-specific metrics for each trajectory
+        env_classes: Optional list of environment class names for each trajectory
+        loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
+
+    Returns:
+        Dictionary of aggregated metrics
+    """
+    num_tokens_arr = np.array([len(response) for response in responses])
+    # Support both response-level and token-level rewards
+    flat_rewards = []
+    for r in rewards:
+        if isinstance(r, list):
+            flat_rewards.append(float(np.sum(r)))
+        else:
+            flat_rewards.append(float(r))
+    flat_rewards_arr = np.array(flat_rewards)
+    non_zero_rewards_arr = flat_rewards_arr > 0.0
+    zero_rewards_arr = flat_rewards_arr == 0.0
+    # average tokens for non zero rewards
+    avg_tokens_non_zero_rewards = (
+        np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
+    )
+    # average tokens for zero rewards
+    avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
+
+    rollout_metrics = {
+        "generate/min_num_tokens": np.min(num_tokens_arr).item(),
+        "generate/max_num_tokens": np.max(num_tokens_arr).item(),
+        "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
+        "generate/std_num_tokens": np.std(num_tokens_arr).item(),
+        "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
+        "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
+    }
+
+    if loss_masks is not None:
+        assistant_tokens_arr = np.array([sum(mask) for mask in loss_masks])
+        rollout_metrics.update(
+            {
+                "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
+                "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
+                "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
+                "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+            }
+        )
+
+    if env_metrics is not None and env_classes is not None:
+        env_to_metrics = defaultdict(list)
+        for i, metrics in enumerate(env_metrics):
+            env_to_metrics[env_classes[i]].append(metrics)
+        for env_name, metrics in env_to_metrics.items():
+            # Aggregate metrics across all trajectories for the same environment
+            agg = aggregate_for_environment(env_name, metrics)
+            for key, value in agg.items():
+                rollout_metrics[f"environment/{key}"] = value
+
+    return rollout_metrics
+
+
+def prepare_generator_input(
+    prompts: List[Any],
+    n_samples_per_prompt: int,
+    sampling_params: Dict[str, Any],
+    default_env_class: str,
+    training_phase: TrainingPhase,
+    global_step: int,
+) -> Tuple[GeneratorInput, List[str]]:
+    """Prepares the generator input for training and eval
+
+    Args:
+        prompts (List[Any]): list of prompts
+        n_samples_per_prompt (int): how many samples to create per prompt
+        sampling_params (Dict[str, Any]): sampling parameters
+        default_env_class (str): env class to use if env class missing from prompts
+        training_phase (TrainingPhase): training or eval
+        global_step (int): current global step
+
+    Returns:
+        Tuple[GeneratorInput, List[str]]: generator input and list of uuids
+    """
+
+    all_prompts = [prompt["prompt"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    all_envs = [
+        prompt["env_class"] if prompt["env_class"] is not None else default_env_class
+        for prompt in prompts
+        for _ in range(n_samples_per_prompt)
+    ]
+
+    # all the other columns are env_extras
+    env_extras = [copy.deepcopy(prompt["env_extras"]) for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
+    trajectory_ids = []
+    uids = []
+    for _, prompt in enumerate(prompts):
+        uid: str = prompt["uid"]
+
+        # Create TrajectoryID for each repetition
+        for repetition_id in range(n_samples_per_prompt):
+            trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
+            uids.append(uid)
+
+    generator_input: GeneratorInput = {
+        "prompts": all_prompts,
+        "env_classes": all_envs,
+        "env_extras": env_extras,
+        "sampling_params": sampling_params,
+        "trajectory_ids": trajectory_ids,
+        "batch_metadata": BatchMetadata(global_step=global_step, training_phase=training_phase),
+    }
+
+    return generator_input, uids
+
+
+def encode_messages_subset(messages: ConversationType, tokenizer, tokenizer_kwargs: Optional[dict] = None):
+    """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
+
+    This function tokenizes messages as if they are part of a larger conversation, ensuring
+    no additional default system messages are prepended by the tokenizer's chat template
+
+    The "fixed base approach" works by:
+    - Creating a dummy base conversation to establish context
+    - Appending the target messages to this base
+    - Tokenizing the full conversation and extracting only the tokens for the target messages
+
+    For simple chat templates without complex token splitting behavior, this produces the same
+    result as directly tokenizing the messages. For templates like Qwen's ChatML format where
+    a default system prompt can be appended, this ensures correct tokenization.
+
+    In addition, for Qwen3, this function will keep all the thinking tokens from the messages.
+
+    Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message. These are assumed to be a subset from a larger conversation.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
+
+    Returns:
+        List[int]: Token IDs for the given messages, with proper multi-turn context handling.
+    """
+    # TODO(Charlie): what are the tokenizers that could lead to clipping issues? Namely the previous turn ending
+    # token can be combined with the tokens of the start of a turn. e.g. Qwen3 with a dummy chat template in
+    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, tokenizer_kwargs={"chat_template": dummy_chat_template})`
+    # But this case is not realistic.
+
+    assert len(messages), "messages list cannot be empty"
+    kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
+    # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+    base_conversation = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "I am a user."},
+    ]
+    base_conversation_token_ids = tokenizer.apply_chat_template(
+        base_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        **kwargs,
+    )
+
+    full_conversation = base_conversation + messages
+    full_conversation_token_ids = tokenizer.apply_chat_template(
+        full_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        **kwargs,
+    )
+    conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
+    return conversation_token_ids
+
+
+def _find_generation_prompt_boundary(cur_token_ids: List[int], generation_prompt_ids: List[int]) -> int:
+    """Return the index in ``cur_token_ids`` where assistant-generated content starts.
+
+    Handles the common case (exact prefix match) and a merge case where the last
+    token of the generation prompt is merged with the assistant content's leading
+    whitespace by the tokenizer (e.g. ``\\n`` + ``\\nHello`` -> ``\\n\\n`` token).
+    In the merge case, returns ``len(generation_prompt_ids) - 1`` so the merged
+    boundary token is attributed to the assistant's content (loss 1).
+
+    Args:
+        cur_token_ids: Token IDs for a single assistant message.
+        generation_prompt_ids: Expected generation-prompt prefix token IDs.
+
+    Returns:
+        Index into ``cur_token_ids`` at which generated content begins.
+
+    Raises:
+        AssertionError: If neither the exact nor the merge pattern matches.
+    """
+    n = len(generation_prompt_ids)
+    if cur_token_ids[:n] == generation_prompt_ids:
+        return n
+    # Merge fallback: everything except the last header token matches, and the
+    # last header token differs because it was merged with the content's
+    # leading whitespace during tokenization.
+    if n >= 1 and len(cur_token_ids) >= n and cur_token_ids[: n - 1] == generation_prompt_ids[: n - 1]:
+        return n - 1
+    raise AssertionError(
+        "Assistant message tokens should start with generation prompt (or a "
+        "merge variant thereof). "
+        f"Expected prefix {generation_prompt_ids}, got {cur_token_ids[:n]}"
+    )
+
+
+def get_response_ids_and_loss_mask_from_messages(
+    messages: ConversationType, tokenizer, assistant_logprobs=None, tokenizer_kwargs: Optional[dict] = None
+):
+    """
+    Get the response ids and loss mask from a list of messages.
+
+    We encode each message one by one, using a fixed base approach, building response token IDs, loss mask,
+    and rollout logprobs if provided. For Qwen3, this function will keep all the thinking tokens from the messages.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
+                `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+        tokenizer_kwargs: Optional dict of extra kwargs forwarded to ``apply_chat_template``
+                          (e.g. ``chat_template``, ``enable_thinking``). If None, uses defaults.
+
+    Returns:
+        Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
+    """
+    assert len(messages), "messages list cannot be empty"
+
+    # Needed to correctly mask it zero for assistant messages.
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, tokenizer_kwargs=tokenizer_kwargs)
+
+    # 1. Initalize the things to accumulate
+    response_ids = []
+    loss_mask = []
+    rollout_logprobs = None if assistant_logprobs is None else []
+    assistant_msg_idx = 0
+
+    for i in range(len(messages)):
+        # 2. Use fixed base approach to encode the message and accumulate
+        cur_message = messages[i]
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, tokenizer_kwargs=tokenizer_kwargs)
+        response_ids.extend(cur_token_ids)
+
+        # 3. Set loss mask and rollout logprobs.
+        # Regardless of the message role, each message is responsible for adding its own generation
+        # prompt, and we apply the correct masking.
+        if cur_message["role"] in ("user", "tool"):
+            # 3.1. For user / tool (observation) messages, it is simply zeros.
+            # Tool turns carry environment output, never assistant generation.
+            loss_mask.extend([0] * len(cur_token_ids))
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * len(cur_token_ids))
+        elif cur_message["role"] == "assistant":
+            # 3.2. For assistant messages, we need to separate out:
+            # 1) generation prompt IDs -- mask is 0
+            # 2) tokens actually generated by the assistant (including the EOS) -- mask is 1
+            # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
+            # Handle the common case (exact prefix) and the merge case, where the
+            # last generation-prompt token (e.g. '\n' -> id 198 in Qwen) is merged
+            # with the assistant content's leading whitespace by the tokenizer
+            # (e.g. content '\nHello' -> header ends with '\n\n' id 271). This
+            # occurs for datasets like TULU3 where assistant replies may begin
+            # with a blank line.
+            header_boundary = _find_generation_prompt_boundary(cur_token_ids, generation_prompt_ids)
+            if tokenizer.eos_token_id in cur_token_ids:
+                last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
+                generated_token_ids = cur_token_ids[header_boundary : last_eos_token_index + 1]
+                tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
+            else:
+                generated_token_ids = cur_token_ids[header_boundary:]
+                tokens_after_eos = []
+            assert header_boundary + len(generated_token_ids) + len(tokens_after_eos) == len(
+                cur_token_ids
+            ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
+
+            # 3.2.1. Add the generation prompt IDs.
+            # Use header_boundary (not len(generation_prompt_ids)) so the mask
+            # lines up with `cur_token_ids` even when the last header token got
+            # merged with the content's leading whitespace. In that merge case,
+            # header_boundary == len(generation_prompt_ids) - 1 and the merged
+            # boundary token ends up in `generated_token_ids` (loss 1).
+            loss_mask.extend([0] * header_boundary)
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * header_boundary)
+
+            # 3.2.2. Add what the assistant actually generated
+            loss_mask.extend([1] * len(generated_token_ids))
+            if assistant_logprobs:
+                if assistant_msg_idx >= len(assistant_logprobs):
+                    raise ValueError(
+                        f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists."
+                    )
+                msg_logprobs = assistant_logprobs[assistant_msg_idx]
+                if len(msg_logprobs) != len(generated_token_ids):
+                    raise ValueError(
+                        f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(generated_token_ids)}) for assistant message #{assistant_msg_idx + 1}."
+                    )
+                rollout_logprobs.extend(msg_logprobs)
+
+            # 3.2.3. Add the tokens after the EOS token.
+            loss_mask.extend([0] * len(tokens_after_eos))
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * len(tokens_after_eos))
+
+            assistant_msg_idx += 1
+        else:
+            raise ValueError(f"Expected message role to be 'user', 'assistant', or 'tool', got {cur_message['role']}")
+
+        assert len(loss_mask) == len(response_ids)
+        assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
+
+    return response_ids, loss_mask, rollout_logprobs
+
+
+# -------------------------------------------
+# Prefix-aware merging for step-wise training
+# -------------------------------------------
+
+
+def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
+    """Check if maybe_prefix is a prefix of candidate (or equal)."""
+    if len(maybe_prefix) > len(candidate):
+        return False
+    return maybe_prefix == candidate[: len(maybe_prefix)]
+
+
+def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+    """Slice a GeneratorOutput to keep only the entries at the given indices.
+
+    All sliced entries must share the same TrajectoryID — this helper is used by
+    prefix-aware merging which operates on one trajectory at a time.
+    """
+    assert len(indices) > 0, "indices must be non-empty"
+    # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
+    sliced: GeneratorOutput = {}
+    for key, value in generator_output.items():
+        if key == "rollout_metrics":
+            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
+            continue
+        elif value is None:
+            sliced[key] = None
+        else:
+            sliced[key] = [value[i] for i in indices]
+    return sliced
+
+
+def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
+    """Greedily merge turns of a single trajectory using prefix matching.
+
+    Takes a GeneratorOutput whose entries all belong to the same trajectory_id
+    and returns a merged GeneratorOutput (potentially fewer entries).
+    """
+    # Make sure all entries in the trajectory have the same trajectory_id
+    trajectory_ids = gen_out.get("trajectory_ids")
+    assert trajectory_ids is not None, "trajectory_ids is required for prefix-aware merging"
+    for i in range(0, len(trajectory_ids)):
+        assert (
+            trajectory_ids[i] == trajectory_ids[0]
+        ), "all entries in a single trajectory must have the same trajectory_id"
+
+    n = len(gen_out["response_ids"])
+    assert n > 0, "Expect non-empty GeneratorOutput."
+    is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
+    has_logprobs = gen_out.get("rollout_logprobs") is not None
+    has_stop_reasons = gen_out.get("stop_reasons") is not None
+
+    # Per-field output accumulators.
+    # Fields that we take from all the entries in the merge group
+    out_prompt_ids: List[List[int]] = []
+    out_response_ids: List[List[int]] = []
+    out_loss_masks: List[List[int]] = []
+    out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
+    out_rewards: list = []
+
+    # Fields that we only take from the last turn in the merge group
+    out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_trajectory_ids: list = []
+    out_is_last_step: List[bool] = []
+
+    # Accumulator for the current merge group
+    acc_prompt: List[int] = list(gen_out["prompt_token_ids"][0])
+    acc_response: List[int] = list(gen_out["response_ids"][0])
+    acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
+    acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
+    last = 0
+
+    def flush():
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        out_prompt_ids.append(acc_prompt)
+        out_response_ids.append(acc_response)
+        out_loss_masks.append(acc_loss_mask)
+        if has_logprobs:
+            out_logprobs.append(acc_logprobs)
+        out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
+        if has_stop_reasons:
+            out_stop_reasons.append(gen_out["stop_reasons"][last])
+        out_trajectory_ids.append(gen_out["trajectory_ids"][last])
+        out_is_last_step.append(gen_out["is_last_step"][last])
+
+    for i in range(1, n):
+        full_merged = acc_prompt + acc_response
+
+        # If prompt[i-1] + response[i-1] is not a prefix of prompt[i], flush the current merge group
+        # and start a new group to merge.
+        if not _is_prefix(full_merged, gen_out["prompt_token_ids"][i]):
+            flush()
+            acc_prompt = list(gen_out["prompt_token_ids"][i])
+            acc_response = list(gen_out["response_ids"][i])
+            acc_loss_mask = list(gen_out["loss_masks"][i])
+            acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
+            last = i
+            continue
+
+        # prompt[i-1] + response[i-1] is a prefix of prompt[i], so we can merge the two turns.
+        # obs_delta is the newly prefilled tokens not generated by the assistant, so we need to
+        # properly loss mask them.
+        obs_delta = gen_out["prompt_token_ids"][i][len(full_merged) :]
+
+        # Merge obs_delta to the fields, assigning zeros since it is not generated by the assistant.
+        acc_response.extend(obs_delta)
+        acc_loss_mask.extend([0] * len(obs_delta))
+        if acc_logprobs is not None:
+            acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend([0.0] * len(obs_delta))
+
+        # Extend the current merge group with the next turn's fields, exactly the same preserved.
+        acc_response.extend(gen_out["response_ids"][i])
+        acc_loss_mask.extend(gen_out["loss_masks"][i])
+        if acc_logprobs is not None:
+            acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend(gen_out["rewards"][i])
+
+        last = i
+
+    flush()
+
+    return {
+        "prompt_token_ids": out_prompt_ids,
+        "response_ids": out_response_ids,
+        "rewards": out_rewards,
+        "loss_masks": out_loss_masks,
+        "stop_reasons": out_stop_reasons,
+        "rollout_logprobs": out_logprobs,
+        "trajectory_ids": out_trajectory_ids,
+        "rollout_expert_indices": None,
+        "is_last_step": out_is_last_step,
+    }
+
+
+def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
+    """Merge step-wise GeneratorOutput entries using prefix-aware merging.
+
+    For consecutive turns within the same trajectory where
+    prompt[i] + response[i] is a prefix of prompt[i+1],
+    merges them into a single entry with:
+    - prompt from the first turn in the merge group
+    - response tokens concatenated with observation deltas (obs_delta) in between
+    - Per-token fields (loss_masks, rewards, logprobs) concatenated, with default
+      values (0) for obs_delta positions
+    - Per-turn fields (stop_reason, is_last_step, trajectory_id) taken from the
+      last turn in the merge group
+
+    When the prefix condition fails between two consecutive turns, the current
+    merge group is flushed and a new group starts (greedy merging).
+
+    The returned GeneratorOutput's rollout_metrics should be ignored. We already recorded it before
+    calling this function.
+
+    Args:
+        generator_output: Step-wise GeneratorOutput with trajectory_ids and is_last_step.
+
+    Returns:
+        Merged GeneratorOutput with one entry per merged group.
+    """
+    num_samples = len(generator_output["response_ids"])
+    assert (
+        generator_output.get("rollout_expert_indices") is None
+    ), "rollout_expert_indices not supported for prefix-aware merging"
+    assert (
+        generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
+    ), "pixel_values and image_grid_thw not supported for step-wise training merging"
+
+    # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
+    # (contiguity is guaranteed by validate_generator_output with step_wise=True)
+    is_last_step = generator_output["is_last_step"]
+    trajectory_slices: List[GeneratorOutput] = []
+    start = 0
+    for i in range(num_samples):
+        if is_last_step[i]:
+            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            start = i + 1
+
+    merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
+
+    return concatenate_generator_outputs(merged_slices, step_wise=True)

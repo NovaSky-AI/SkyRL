@@ -1,6 +1,8 @@
 {
-  "title": "Checkpointing and Logging",
+  "title": "Checkpointing and Observability",
   "pages": [
-    "checkpointing"
+    "checkpointing",
+    "logging",
+    "vllm-metrics"
   ]
 }
