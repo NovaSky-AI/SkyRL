@@ -25,8 +25,8 @@ MEGATRON_ETP=1
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=8
 
-OPTIMIZER_OFFLOAD=false
-OPTIMIZER_OFFLOAD_FRACTION=0.0
+OPTIMIZER_OFFLOAD=true
+OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 # Qwen3.5 flags
 LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
@@ -79,10 +79,10 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.7 \
+  generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_qwen3.5" \
   trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_qwen3.5-35b-a3b" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="/mnt/nvme/ckpts/gsm8k_megatron_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

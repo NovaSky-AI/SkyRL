@@ -23,8 +23,10 @@ INFERENCE_ENGINE_TP=1
 
 # Qwen3.5 flags
 LANGUAGE_MODEL_ONLY=True  # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
-# On Blackwell (B200), fla's default TileLang GDN backend aborts in the packed backward; export FLA_TILELANG=0 to use the Triton kernels.
-# On Hopper (H100) leave it unset to keep the working TileLang default (Triton GDN backward is broken there: fla-org/flash-linear-attention#640).
+
+# On Blackwell, use the following env var:
+# export FLA_TILELANG=0   # force triton gdn backend since fla's default TileLang GDN backend aborts in the packed backward. leave unset on hopper, since Triton GDN backward is broken there: https://github.com/fla-org/flash-linear-attention/issues/640#issuecomment-4236520788
+
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
