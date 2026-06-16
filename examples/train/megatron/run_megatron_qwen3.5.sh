@@ -24,8 +24,6 @@ INFERENCE_ENGINE_TP=1
 # Qwen3.5 flags
 LANGUAGE_MODEL_ONLY=True  # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 
-MAX_TOKENS_PER_MICROBATCH=20000
-
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -51,12 +49,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=128 \
-  trainer.policy_mini_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=16 \
-  trainer.micro_train_batch_size_per_gpu=16 \
-  trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
-  trainer.ckpt_interval=1 \
+  trainer.train_batch_size=1024 \
+  trainer.policy_mini_batch_size=256 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
@@ -71,9 +68,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3.5-0.8b" \
-  trainer.run_name="qwen3.5-0.8b_megatron_max_tokens_20k" \
-  trainer.hf_save_interval=1 \
-  trainer.export_path="/mnt/nvme/ckpts/gsm8k_megatron_export" \
+  trainer.run_name="qwen3.5-0.8b_megatron" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="/mnt/nvme/ckpts/gsm8k_megatron_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@
