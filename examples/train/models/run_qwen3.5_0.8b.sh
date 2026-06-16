@@ -19,7 +19,7 @@ LANGUAGE_MODEL_ONLY=true
 # https://github.com/huggingface/transformers/issues/44910 
 # https://github.com/QwenLM/Qwen3.5/issues/104 
 # disabling for now
-REMOVE_MICROBATCH_PADDING=false # sample packing 
+REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for Qwen3.5 with FSDP backend
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
