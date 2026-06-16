@@ -618,10 +618,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        # fla enables its TileLang GDN backend by default on sm90+, but its packed
-        # backward (chunk_bwd_dqkwg) aborts on Blackwell (B200). Force the stable
-        # Triton GDN kernels instead; override by exporting FLA_TILELANG=1.
-        env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
+        # Propagate fla's GDN backend choice to Ray workers. Default 1 keeps fla's
+        # TileLang default (works on Hopper); export FLA_TILELANG=0 on Blackwell (B200),
+        # where the TileLang packed backward aborts, to fall back to the Triton kernels.
+        env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
         if cfg.trainer.flash_attn:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)

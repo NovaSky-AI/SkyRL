@@ -62,6 +62,8 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 # Qwen3.5 flags
 LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
+# On Blackwell (B200), fla's default TileLang GDN backend aborts in the packed backward; export FLA_TILELANG=0 to use the Triton kernels.
+# On Hopper (H100) leave it unset to keep the working TileLang default (Triton GDN backward is broken there: fla-org/flash-linear-attention#640).
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/vllm-project/vllm/issues/36921#issuecomment-4109702738
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 export _SKYRL_USE_NEW_INFERENCE=0
