@@ -140,9 +140,17 @@ def discover_ray_metrics_urls() -> List[str]:
 class VLLMMetricsScraper:
     """Per-step snapshot of selected vLLM metrics from Ray's metrics agents.
 
-    The first ``sample()`` call establishes a baseline; rate-style metrics
-    (throughput, hit rate, average latency) are reported starting from the
-    second call.
+    The first sample establishes a baseline; rate-style metrics (throughput,
+    hit rate, average latency) are reported starting from the second call.
+
+    Two usage modes share the same plumbing:
+
+    * ``sample()`` — one snapshot per step, deltas vs. the previous step. Used
+      by the fully-async trainer, where generation runs for the whole interval.
+    * ``mark_pre_eval()`` + ``sample_split()`` — the synchronous trainer marks
+      the counters right before the eval rollout so the train rollout is
+      reported under ``vllm/*`` and the (much larger, differently-batched) eval
+      rollout under ``vllm/eval/*`` instead of being blended into one number.
     """
 
     def __init__(
@@ -154,6 +162,8 @@ class VLLMMetricsScraper:
         self._timeout = request_timeout_s
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
+        # Counter snapshot taken right before an eval rollout (sync trainer).
+        self._mid_snapshot: Optional[Dict[str, float]] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
         if not self._urls:
@@ -194,14 +204,14 @@ class VLLMMetricsScraper:
                 merged[key] = value
         return merged
 
-    async def sample(self) -> Dict[str, float]:
-        """Return a dict of ``vllm/...`` scalars for the current step.
+    async def _read_snapshot(self) -> Optional[Dict[str, float]]:
+        """Scrape every agent and reduce to one cumulative value per metric.
 
-        Empty if no agents are reachable or if no vLLM samples are present
-        yet (e.g. before any inference has run).
+        Returns ``None`` when no endpoints are configured. Counters are summed
+        across replicas; gauges are averaged.
         """
         if not self._urls:
-            return {}
+            return None
 
         parsed = await self._fetch_all()
         if not parsed and not self._warned_empty:
@@ -212,32 +222,111 @@ class VLLMMetricsScraper:
             )
             self._warned_empty = True
 
-        now = time.monotonic()
-
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
-        snapshot = {**sums, **means}
+        return {**sums, **means}
 
-        out: Dict[str, float] = {}
-        # Instantaneous gauges expose directly.
-        if _GAUGE_NUM_RUNNING in snapshot:
-            out["vllm/num_requests_running"] = snapshot[_GAUGE_NUM_RUNNING]
-        if _GAUGE_NUM_WAITING in snapshot:
-            out["vllm/num_requests_waiting"] = snapshot[_GAUGE_NUM_WAITING]
-        if _GAUGE_KV_CACHE_USAGE in snapshot:
-            out["vllm/kv_cache_usage_perc"] = snapshot[_GAUGE_KV_CACHE_USAGE]
+    async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
+        """Return a dict of ``vllm/...`` scalars for the current step.
 
-        # Derived metrics need a previous snapshot to take deltas.
+        Empty if no agents are reachable or if no vLLM samples are present
+        yet (e.g. before any inference has run).
+
+        ``generation_time_s`` is the time the engine spent generating since the
+        previous ``sample()`` call; it is the denominator for the throughput
+        metrics. Pass ``None`` when generation runs for the whole interval
+        (e.g. fully-async overlap) to fall back to the wall-clock interval.
+        """
+        snapshot = await self._read_snapshot()
+        if snapshot is None:
+            return {}
+
+        now = time.monotonic()
         if self._prev_aggregated is not None and self._prev_timestamp is not None:
             dt = max(now - self._prev_timestamp, 1e-9)
-            out.update(self._derive(snapshot, self._prev_aggregated, dt))
+            # Throughput is per generation-second, not per step-second.
+            window = generation_time_s if (generation_time_s is not None and generation_time_s > 0) else dt
+            out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
+        else:
+            # First call: gauges only, no deltas yet.
+            out = self._window_metrics(None, snapshot, None, "vllm/")
 
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
 
+    async def mark_pre_eval(self) -> None:
+        """Snapshot the counters right before the eval rollout.
+
+        Lets :meth:`sample_split` attribute eval-rollout generation to
+        ``vllm/eval/*`` separately from the train rollout. No-op effect if no
+        endpoints are configured (the stored mark is simply ``None``).
+        """
+        self._mid_snapshot = await self._read_snapshot()
+
+    async def sample_split(
+        self,
+        *,
+        generate_time_s: Optional[float] = None,
+        eval_generate_time_s: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """Synchronous-trainer sampling that separates train and eval rollouts.
+
+        Emits ``vllm/*`` for the train rollout (delta from the previous step up
+        to the pre-eval mark, divided by ``generate_time_s``). When
+        :meth:`mark_pre_eval` was called this step, also emits ``vllm/eval/*``
+        for the eval rollout (delta from the mark to now, divided by
+        ``eval_generate_time_s``).
+        """
+        cur = await self._read_snapshot()
+        mid = self._mid_snapshot
+        self._mid_snapshot = None
+        if cur is None:
+            return {}
+
+        # Train rollout ends at the pre-eval mark when eval ran this step,
+        # otherwise nothing generated after it, so the current snapshot is fine.
+        train_end = mid if mid is not None else cur
+        train_window = generate_time_s if (generate_time_s is not None and generate_time_s > 0) else None
+        out = self._window_metrics(self._prev_aggregated, train_end, train_window, "vllm/")
+
+        if mid is not None:
+            eval_window = (
+                eval_generate_time_s if (eval_generate_time_s is not None and eval_generate_time_s > 0) else None
+            )
+            out.update(self._window_metrics(mid, cur, eval_window, "vllm/eval/"))
+
+        self._prev_aggregated = cur
+        return out
+
+    @classmethod
+    def _window_metrics(
+        cls,
+        prev: Optional[Dict[str, float]],
+        cur: Optional[Dict[str, float]],
+        throughput_window_s: Optional[float],
+        prefix: str,
+    ) -> Dict[str, float]:
+        """Gauges from ``cur`` plus derived rates over ``cur - prev``."""
+        if cur is None:
+            return {}
+        out: Dict[str, float] = {}
+        # Instantaneous gauges expose directly.
+        if _GAUGE_NUM_RUNNING in cur:
+            out[f"{prefix}num_requests_running"] = cur[_GAUGE_NUM_RUNNING]
+        if _GAUGE_NUM_WAITING in cur:
+            out[f"{prefix}num_requests_waiting"] = cur[_GAUGE_NUM_WAITING]
+        if _GAUGE_KV_CACHE_USAGE in cur:
+            out[f"{prefix}kv_cache_usage_perc"] = cur[_GAUGE_KV_CACHE_USAGE]
+        # Derived metrics need a previous snapshot to take deltas.
+        if prev is not None:
+            out.update(cls._derive(cur, prev, throughput_window_s, prefix))
+        return out
+
     @staticmethod
-    def _derive(cur: Dict[str, float], prev: Dict[str, float], dt: float) -> Dict[str, float]:
+    def _derive(
+        cur: Dict[str, float], prev: Dict[str, float], throughput_window_s: Optional[float], prefix: str
+    ) -> Dict[str, float]:
         out: Dict[str, float] = {}
 
         def delta(name: str) -> Optional[float]:
@@ -247,27 +336,31 @@ class VLLMMetricsScraper:
             # Counter resets (engine restart) shouldn't crash; just skip.
             return d if d >= 0 else None
 
+        # Throughput needs a positive time window; the rate/latency metrics
+        # below are time-independent, so they emit regardless.
+        has_window = throughput_window_s is not None and throughput_window_s > 0
+
         gen_d = delta(_COUNTER_GENERATION_TOKENS)
-        if gen_d is not None:
-            out["vllm/generation_throughput_tok_s"] = gen_d / dt
+        if gen_d is not None and has_window:
+            out[f"{prefix}generation_throughput_tok_s"] = gen_d / throughput_window_s
 
         prompt_d = delta(_COUNTER_PROMPT_TOKENS)
-        if prompt_d is not None:
-            out["vllm/prompt_throughput_tok_s"] = prompt_d / dt
+        if prompt_d is not None and has_window:
+            out[f"{prefix}prompt_throughput_tok_s"] = prompt_d / throughput_window_s
 
         q_d = delta(_COUNTER_PREFIX_QUERIES)
         h_d = delta(_COUNTER_PREFIX_HITS)
         if q_d is not None and h_d is not None and q_d > 0:
-            out["vllm/prefix_cache_hit_rate"] = h_d / q_d
+            out[f"{prefix}prefix_cache_hit_rate"] = h_d / q_d
 
         ttft_sum_d = delta(_HIST_TTFT_SUM)
         ttft_count_d = delta(_HIST_TTFT_COUNT)
         if ttft_sum_d is not None and ttft_count_d is not None and ttft_count_d > 0:
-            out["vllm/ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
+            out[f"{prefix}ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
 
         itl_sum_d = delta(_HIST_ITL_SUM)
         itl_count_d = delta(_HIST_ITL_COUNT)
         if itl_sum_d is not None and itl_count_d is not None and itl_count_d > 0:
-            out["vllm/tpot_seconds_avg"] = itl_sum_d / itl_count_d
+            out[f"{prefix}tpot_seconds_avg"] = itl_sum_d / itl_count_d
 
         return out

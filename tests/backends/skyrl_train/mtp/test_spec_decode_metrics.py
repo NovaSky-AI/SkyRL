@@ -160,6 +160,36 @@ def test_acceptance_rate_per_position_depth_one_single_key():
     assert abs(metrics["vllm/draft_acceptance_rate_pos_1"] - 0.75) < 1e-9
 
 
+def test_acceptance_rate_prefix_separates_train_and_eval():
+    # Mirrors the trainer's eval-step sequence: a train rollout records under vllm/*, then the eval
+    # rollout records under vllm/eval/* using the SAME advancing baseline, so eval counts don't leak
+    # into the next train step.
+    prev = None
+    # Train rollout: cumulative after train generate.
+    train, prev = acceptance_rate_metrics(
+        {"num_drafts": 10, "num_draft_tokens": 20, "num_accepted_tokens": 12}, prev, prefix="vllm/"
+    )
+    assert train["vllm/draft_num_draft_tokens"] == 20
+    assert abs(train["vllm/draft_acceptance_rate"] - 0.6) < 1e-9
+
+    # Eval rollout: cumulative grows a lot; reported under vllm/eval/* as the delta vs the train
+    # baseline (drafted 120-20=100, accepted 90-12=78 -> 0.78).
+    eval_m, prev = acceptance_rate_metrics(
+        {"num_drafts": 60, "num_draft_tokens": 120, "num_accepted_tokens": 90}, prev, prefix="vllm/eval/"
+    )
+    assert eval_m["vllm/eval/draft_num_draft_tokens"] == 100
+    assert abs(eval_m["vllm/eval/draft_acceptance_rate"] - 0.78) < 1e-9
+    assert not any(k.startswith("vllm/draft_") for k in eval_m)
+
+    # Next train step: delta is from the post-eval baseline, so eval is NOT counted again
+    # (drafted 140-120=20, accepted 105-90=15 -> 0.75).
+    train2, prev = acceptance_rate_metrics(
+        {"num_drafts": 70, "num_draft_tokens": 140, "num_accepted_tokens": 105}, prev, prefix="vllm/"
+    )
+    assert train2["vllm/draft_num_draft_tokens"] == 20
+    assert abs(train2["vllm/draft_acceptance_rate"] - 0.75) < 1e-9
+
+
 def test_acceptance_rate_no_spec_decode_returns_empty():
     metrics, prev = acceptance_rate_metrics(None, None)
     assert metrics == {}

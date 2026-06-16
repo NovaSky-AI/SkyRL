@@ -87,17 +87,21 @@ def merge_spec_decode_counters(totals: dict, stats: dict) -> None:
             totals[key] = totals.get(key, 0) + int(value)
 
 
-def acceptance_rate_metrics(cumulative: Optional[dict], prev: Optional[dict]) -> tuple[dict, Optional[dict]]:
+def acceptance_rate_metrics(
+    cumulative: Optional[dict], prev: Optional[dict], prefix: str = "vllm/"
+) -> tuple[dict, Optional[dict]]:
     """Turn cumulative spec-decode counters into per-step (delta) metrics.
 
     Args:
         cumulative: counters read this step (from the engines), or None if speculative decoding is
             disabled / unsupported.
         prev: the ``cumulative`` from the previous step (None on the first step).
+        prefix: metric-key prefix. ``"vllm/"`` for the train rollout; pass ``"vllm/eval/"`` to
+            attribute the eval rollout's draft/accept delta separately.
 
     Returns:
-        ``(metrics, new_prev)`` where ``metrics`` has ``vllm/draft_*`` keys (empty when there are no
-        stats) and ``new_prev`` is the snapshot to pass back next step.
+        ``(metrics, new_prev)`` where ``metrics`` has ``{prefix}draft_*`` keys (empty when there are
+        no stats) and ``new_prev`` is the snapshot to pass back next step.
     """
     if not cumulative:
         return {}, prev
@@ -106,12 +110,12 @@ def acceptance_rate_metrics(cumulative: Optional[dict], prev: Optional[dict]) ->
     drafted = cumulative.get("num_draft_tokens", 0) - prev.get("num_draft_tokens", 0)
     accepted = cumulative.get("num_accepted_tokens", 0) - prev.get("num_accepted_tokens", 0)
     metrics: dict[str, Any] = {
-        "vllm/draft_num_draft_tokens": drafted,
-        "vllm/draft_num_accepted_tokens": accepted,
+        f"{prefix}draft_num_draft_tokens": drafted,
+        f"{prefix}draft_num_accepted_tokens": accepted,
     }
     if drafted > 0:
         # Acceptance rate = accepted draft tokens / total drafted tokens this step.
-        metrics["vllm/draft_acceptance_rate"] = accepted / drafted
+        metrics[f"{prefix}draft_acceptance_rate"] = accepted / drafted
     # Per-position rates: fraction of draft rounds this step whose k-th speculated token was
     # accepted (same definition vLLM uses in its own per-position logging). Position keys are
     # 1-based: pos_1 = first drafted token. Acceptance halts at the first rejection, so the rates
@@ -121,5 +125,5 @@ def acceptance_rate_metrics(cumulative: Optional[dict], prev: Optional[dict]) ->
     if drafts > 0:
         for i, n in enumerate(per_pos):
             prev_n = int(prev_per_pos[i]) if i < len(prev_per_pos) else 0
-            metrics[f"vllm/draft_acceptance_rate_pos_{i + 1}"] = (int(n) - prev_n) / drafts
+            metrics[f"{prefix}draft_acceptance_rate_pos_{i + 1}"] = (int(n) - prev_n) / drafts
     return metrics, cumulative

@@ -429,10 +429,18 @@ class RayPPOTrainer:
                     or self.global_step == self.total_training_steps
                 )
                 if force_eval or interval_eval:
+                    # Mark the vLLM counters before eval so the eval rollout is
+                    # attributed to vllm/eval/* rather than blended into the
+                    # train rollout's vllm/* throughput.
+                    if self._vllm_metrics_scraper is not None:
+                        await self._vllm_metrics_scraper.mark_pre_eval()
                     self._fire("on_eval_start")
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
+                    # Attribute the eval rollout's draft acceptance to vllm/eval/* and advance the
+                    # spec-decode baseline so eval counts don't leak into the next train step.
+                    await self._record_spec_decode_metrics(prefix="vllm/eval/")
                     self._fire("on_eval_end", metrics=eval_metrics)
 
                 log_payload = {
@@ -440,7 +448,16 @@ class RayPPOTrainer:
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
                 if self._vllm_metrics_scraper is not None:
-                    log_payload.update(await self._vllm_metrics_scraper.sample())
+                    # vllm/* covers the train rollout (divided by generate time);
+                    # on eval steps vllm/eval/* covers the eval rollout (divided
+                    # by the eval rollout time). Each rollout's tokens are thus
+                    # divided by its own time, avoiding the eval-step spike.
+                    log_payload.update(
+                        await self._vllm_metrics_scraper.sample_split(
+                            generate_time_s=self.all_timings.get("generate"),
+                            eval_generate_time_s=self.all_metrics.get("timing/eval_generate"),
+                        )
+                    )
 
                 if self._ray_gpu_monitor is not None:
                     log_payload.update(self._ray_gpu_monitor.flush())
@@ -841,14 +858,20 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
-    async def _record_spec_decode_metrics(self) -> None:
-        """Record the vLLM speculative-decoding (MTP draft) acceptance rate for this rollout step.
+    async def _record_spec_decode_metrics(self, prefix: str = "vllm/") -> None:
+        """Record the vLLM speculative-decoding (MTP draft) acceptance rate for this rollout.
 
         Reads the engines' cumulative draft/accept counters and logs the per-step delta as
-        ``vllm/draft_acceptance_rate`` (+ raw counts), plus one ``vllm/draft_acceptance_rate_pos_k``
+        ``{prefix}draft_acceptance_rate`` (+ raw counts), plus one ``{prefix}draft_acceptance_rate_pos_k``
         per draft position when num_speculative_tokens > 1 (per-depth acceptance decay). No-op when
         speculative decoding is disabled or the backend doesn't expose the stats. Best-effort:
         never fails the training step.
+
+        ``prefix`` is ``"vllm/"`` for the train rollout. Because the cumulative counters keep
+        ``self._prev_spec_decode`` at the post-train-rollout value (nothing generates between the
+        train rollout and eval), calling this again with ``prefix="vllm/eval/"`` right after the
+        eval rollout reports the eval delta under ``vllm/eval/*`` AND advances the baseline so the
+        eval counts don't leak into the next train step's acceptance rate.
         """
         from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
             acceptance_rate_metrics,
@@ -859,7 +882,7 @@ class RayPPOTrainer:
         except Exception as e:
             logger.warning(f"Failed to read vLLM spec-decode metrics: {e}")
             return
-        metrics, self._prev_spec_decode = acceptance_rate_metrics(cumulative, self._prev_spec_decode)
+        metrics, self._prev_spec_decode = acceptance_rate_metrics(cumulative, self._prev_spec_decode, prefix=prefix)
         self.all_metrics.update(metrics)
 
     async def generate(
