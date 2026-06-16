@@ -470,7 +470,7 @@ class FullyAsyncConfig(BaseConfig):
 
     max_staleness_steps: int = 0
     """Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*,
-    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
+    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness. Should be set > 1 for fully async training."""
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
