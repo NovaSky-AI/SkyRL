@@ -1425,6 +1425,24 @@ class SFTTrainer:
 
         logger.info("Dummy SFT training complete!")
 
+    @staticmethod
+    def _resolve_num_steps(
+        *,
+        num_steps: Optional[int],
+        num_epochs: int,
+        steps_per_epoch: int,
+        max_training_steps: Optional[int],
+    ) -> int:
+        """Resolve the total number of training steps.
+
+        Explicit ``num_steps`` takes precedence; otherwise it is derived from
+        ``num_epochs``. When ``max_training_steps`` is set it caps the result.
+        """
+        resolved = num_steps if num_steps is not None else num_epochs * steps_per_epoch
+        if max_training_steps is not None:
+            resolved = min(resolved, max_training_steps)
+        return resolved
+
     def train(self):
         """Full training loop: load data, iterate, log, checkpoint."""
         if self.sft_cfg.dummy_run_full_ctx:
@@ -1448,18 +1466,21 @@ class SFTTrainer:
         # steps_per_epoch is always derived from the data; callbacks rely on it.
         steps_per_epoch = max(1, ceil(len(tokenized) / batch_size))
 
-        # Resolve num_steps: explicit num_steps takes precedence; otherwise derive from num_epochs.
-        if self.sft_cfg.num_steps is not None:
-            num_steps = self.sft_cfg.num_steps
-        else:
-            num_steps = self.sft_cfg.num_epochs * steps_per_epoch
+        if self.sft_cfg.num_steps is None:
             logger.info(
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
-                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = {num_steps} steps"
+                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = "
+                f"{self.sft_cfg.num_epochs * steps_per_epoch} steps"
             )
 
+        num_steps = self._resolve_num_steps(
+            num_steps=self.sft_cfg.num_steps,
+            num_epochs=self.sft_cfg.num_epochs,
+            steps_per_epoch=steps_per_epoch,
+            max_training_steps=self.sft_cfg.max_training_steps,
+        )
+
         if self.sft_cfg.max_training_steps is not None:
-            num_steps = min(num_steps, self.sft_cfg.max_training_steps)
             logger.info(f"Capping training at max_training_steps={self.sft_cfg.max_training_steps}")
 
         # Early validation: dataset must have at least batch_size examples

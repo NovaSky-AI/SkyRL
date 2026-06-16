@@ -9,7 +9,6 @@ uv run --extra dev --extra skyrl-train pytest tests/train/test_max_training_step
 
 import importlib.util
 import sys
-from math import ceil
 from types import SimpleNamespace
 
 import pytest
@@ -124,128 +123,27 @@ class TestRLValidateCfgMaxSteps:
 
 
 # ---------------------------------------------------------------------------
-# RL Trainer: total_training_steps capping logic (shared by sync and async)
-# ---------------------------------------------------------------------------
-
-
-class TestRLTrainerStepsCapping:
-    """Verify capping logic in _build_train_dataloader_and_compute_training_steps.
-
-    Both sync and async RL trainers use the same pattern:
-        total = dataloader_steps * epochs
-        if max_training_steps: total = min(total, max_training_steps)
-    """
-
-    @pytest.mark.parametrize(
-        "dl_len,epochs,max_steps,expected",
-        [
-            (50, 2, None, 100),
-            (50, 2, 10, 10),
-            (50, 2, 1000, 100),
-            (50, 2, 100, 100),
-            (50, 2, 1, 1),
-        ],
-        ids=["no_cap", "caps_smaller", "no_effect_larger", "boundary_equal", "single_step"],
-    )
-    def test_capping(self, dl_len, epochs, max_steps, expected):
-        total = dl_len * epochs
-        if max_steps is not None:
-            total = min(total, max_steps)
-        assert total == expected
-
-
-# ---------------------------------------------------------------------------
-# RL Trainer: early exit condition (shared by sync and async)
-# ---------------------------------------------------------------------------
-
-
-class TestRLTrainerEarlyExit:
-    """Verify early exit condition: global_step > max_training_steps.
-
-    Both sync and async trainers use the same check after incrementing global_step.
-    """
-
-    @pytest.mark.parametrize(
-        "global_step,max_steps,should_exit",
-        [
-            (6, 5, True),
-            (5, 5, False),
-            (3, 5, False),
-            (9999, None, False),
-            (1, 1, False),
-            (2, 1, True),
-        ],
-        ids=["exceeded", "at_boundary", "below", "none_never_exits", "boundary_1", "exit_after_1"],
-    )
-    def test_exit_condition(self, global_step, max_steps, should_exit):
-        exits = max_steps is not None and global_step > max_steps
-        assert exits is should_exit
-
-    @pytest.mark.parametrize(
-        "max_steps",
-        [1, 2, 5],
-        ids=["one_step", "two_steps", "five_steps"],
-    )
-    def test_sync_final_global_step_matches_cap(self, max_steps):
-        """The sync trainer increments global_step before the cap check, then
-        decrements once after the training loop. The net recorded step must
-        equal max_training_steps so checkpoint metadata is correct on resume.
-        """
-        global_step = 1  # sync trainer starts the loop at global_step 1
-        for _ in range(10_000):  # well beyond the cap
-            # step runs at the current global_step, then increments
-            global_step += 1
-            if global_step > max_steps:
-                break
-        # post-loop decrement (see RayPPOTrainer.train)
-        global_step -= 1
-        assert global_step == max_steps
-
-    @pytest.mark.parametrize(
-        "max_steps",
-        [1, 2, 5],
-        ids=["one_step", "two_steps", "five_steps"],
-    )
-    def test_async_final_global_step_matches_cap(self, max_steps):
-        """The fully async trainer increments global_step before the cap check
-        and has no post-loop decrement; on early exit the recorded step is
-        max_training_steps + 1, matching a normal async run of that many steps.
-        """
-        global_step = 1  # async trainer starts the loop at global_step 1
-        for _ in range(10_000):
-            global_step += 1
-            if global_step > max_steps:
-                break
-        assert global_step == max_steps + 1
-
-
-# ---------------------------------------------------------------------------
 # SFT Trainer: num_steps capping logic
 # ---------------------------------------------------------------------------
 
 
 class TestSFTTrainerMaxStepsCapping:
-    """Verify the capping logic used in SFTTrainer.train()."""
+    """Verify the capping logic used in SFTTrainer.train().
 
-    @staticmethod
-    def _resolve_num_steps(num_steps=None, num_epochs=None, dataset_len=100, batch_size=4, max_training_steps=None):
-        if num_steps is not None:
-            resolved = num_steps
-        else:
-            resolved = ceil(dataset_len / batch_size) * num_epochs
-        if max_training_steps is not None:
-            resolved = min(resolved, max_training_steps)
-        return resolved
+    Exercises the real SFTTrainer._resolve_num_steps so the test fails if the
+    trainer's resolution logic changes (rather than re-implementing it here).
+    """
 
+    @requires_transformers
     @pytest.mark.parametrize(
         "kwargs,expected",
         [
-            (dict(num_epochs=10, dataset_len=100, batch_size=4, max_training_steps=3), 3),
-            (dict(num_steps=50, max_training_steps=5), 5),
-            (dict(num_steps=50, max_training_steps=None), 50),
-            (dict(num_steps=10, max_training_steps=1000), 10),
-            (dict(num_epochs=2, dataset_len=100, batch_size=4, max_training_steps=None), 50),
-            (dict(num_epochs=100, dataset_len=1000, batch_size=1, max_training_steps=1), 1),
+            (dict(num_steps=None, num_epochs=10, steps_per_epoch=25, max_training_steps=3), 3),
+            (dict(num_steps=50, num_epochs=1, steps_per_epoch=1, max_training_steps=5), 5),
+            (dict(num_steps=50, num_epochs=1, steps_per_epoch=1, max_training_steps=None), 50),
+            (dict(num_steps=10, num_epochs=1, steps_per_epoch=1, max_training_steps=1000), 10),
+            (dict(num_steps=None, num_epochs=2, steps_per_epoch=25, max_training_steps=None), 50),
+            (dict(num_steps=None, num_epochs=100, steps_per_epoch=1000, max_training_steps=1), 1),
         ],
         ids=[
             "caps_epoch_derived",
@@ -256,8 +154,10 @@ class TestSFTTrainerMaxStepsCapping:
             "single_step",
         ],
     )
-    def test_capping(self, kwargs, expected):
-        assert self._resolve_num_steps(**kwargs) == expected
+    def test_resolve_num_steps(self, kwargs, expected):
+        from skyrl.train.sft_trainer import SFTTrainer
+
+        assert SFTTrainer._resolve_num_steps(**kwargs) == expected
 
     @requires_transformers
     def test_worker_initialization_uses_capped_num_training_steps(self, monkeypatch):
