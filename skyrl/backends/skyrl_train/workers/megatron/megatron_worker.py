@@ -442,8 +442,8 @@ class MegatronWorker:
             # The native MTP heads are still *built* (so the megatron-bridge weight mappings
             # round-trip them to HF / vLLM), but SkyRL trains them with a decoupled, explicit
             # loss (see MegatronModelWrapper) instead of Megatron's in-forward
-            # process_mtp_loss / MTPLossAutoScaler path. We therefore do not set
-            # provider.mtp_loss_scaling_factor; the explicit weight is megatron_config.mtp_loss_weight.
+            # process_mtp_loss / MTPLossAutoScaler path. The explicit weight is
+            # megatron_config.mtp_loss_weight.
             logger.info(
                 f"MTP enabled (decoupled): mtp_num_layers={provider.mtp_num_layers}, "
                 f"mtp_loss_type={megatron_config.mtp_loss_type}, "

@@ -1,4 +1,4 @@
-"""CPU unit tests for the decoupled MTP draft losses and loss combination.
+"""CPU unit tests for the decoupled MTP draft losses.
 
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/mtp/test_soft_ce.py
 """
@@ -6,10 +6,6 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/mtp/test_soft_ce
 import torch
 import torch.nn.functional as F
 
-from skyrl.backends.skyrl_train.mtp.draft_loss_wrapper import (
-    DraftLossConfig,
-    combine_policy_and_draft_loss,
-)
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
     build_teacher_logits,
     draft_hard_ce,
@@ -295,66 +291,6 @@ def test_left_pad_zero_logits_do_not_inflate_loss():
     # And the result is the true (low) entropy, nowhere near log(V).
     assert loss.item() < ent[valid].max().item() + 1e-4
     assert loss.item() < torch.log(torch.tensor(float(V))).item()
-
-
-def test_combine_is_policy_plus_weighted_draft():
-    torch.manual_seed(3)
-    policy_loss = torch.tensor(2.0, requires_grad=True)
-    student = torch.randn(2, 5, 7, requires_grad=True)
-    main_logits = torch.randn(2, 5, 7)
-    mask = torch.ones(2, 5)
-    cfg = DraftLossConfig(loss_weight=0.5, loss_type="soft_ce")
-
-    combined, metrics = combine_policy_and_draft_loss(policy_loss, [student], main_logits, mask, cfg)
-    # Recompute the draft term independently and check the combination identity.
-    teacher = build_teacher_logits(main_logits, 0)
-    draft = draft_soft_ce(student, teacher, shift_mask_for_mtp(mask, 0))
-    assert torch.allclose(combined, policy_loss + 0.5 * draft, atol=1e-6)
-    assert abs(metrics["mtp_loss"] - draft.item()) < 1e-6
-
-
-def test_combine_hard_ce_uses_rolled_labels():
-    torch.manual_seed(4)
-    policy_loss = torch.tensor(1.0)
-    student = torch.randn(1, 5, 7, requires_grad=True)
-    main_logits = torch.randn(1, 5, 7)
-    mask = torch.ones(1, 5)
-    base_labels = torch.randint(0, 7, (1, 5))
-    cfg = DraftLossConfig(loss_weight=1.0, loss_type="hard_ce")
-
-    combined, _ = combine_policy_and_draft_loss(policy_loss, [student], main_logits, mask, cfg, hard_labels=base_labels)
-    layer_labels = torch.roll(base_labels, shifts=-1, dims=1)
-    # Hard CE masks with one extra shift (label at t+k+2 must be a real token), unlike soft CE.
-    draft = draft_hard_ce(student, layer_labels, shift_mask_for_mtp(mask, 1))
-    assert torch.allclose(combined, policy_loss + draft, atol=1e-6)
-
-
-def test_combine_hard_ce_excludes_boundary_with_invalid_label():
-    # Regression: hard CE at depth k supervises position t against the TOKEN seq[t+k+2] — one
-    # position further than the soft-CE teacher (a distribution read at t+k+1). With the soft-CE
-    # mask shift, the last in-range position (t = last_real - (k+1)) was trained against the
-    # zeroed boundary label (token id 0). Build a student that is perfectly confident in the true
-    # label at every genuinely-valid position but puts ~zero mass on token 0 at the boundary
-    # position: the loss must be ~0 (boundary excluded), not inflated by -log q(0).
-    S, V = 6, 7
-    seq = torch.arange(1, S + 1) % V  # tokens 1..6 — never 0, so label 0 only comes from the boundary
-    hard_labels = torch.roll(seq, -1).unsqueeze(0).clone()  # labels[t] = seq[t+1]
-    hard_labels[:, -1] = 0
-    mask = torch.ones(1, S)
-
-    # depth 0: true label at t is seq[t+2]; valid sources are t = 0..S-3.
-    student = torch.full((1, S, V), -30.0)
-    for t in range(S - 2):
-        student[0, t, seq[t + 2]] = 30.0
-    # boundary position t = S-2: confident in a NON-zero token, so a leaked label-0 target
-    # would contribute ~60 nats.
-    student[0, S - 2, 1] = 30.0
-
-    cfg = DraftLossConfig(loss_weight=1.0, loss_type="hard_ce")
-    combined, metrics = combine_policy_and_draft_loss(
-        torch.tensor(0.0), [student], torch.zeros(1, S, V), mask, cfg, hard_labels=hard_labels
-    )
-    assert metrics["draft_loss"] < 1e-3, metrics["draft_loss"]
 
 
 def test_unpadded_vocab_shard_width():

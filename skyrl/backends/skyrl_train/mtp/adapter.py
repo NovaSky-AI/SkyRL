@@ -1,24 +1,14 @@
-# Backend seam for decoupled MTP/draft-head training.
+# Output-head projection for decoupled MTP/draft-head training.
 #
-# The loss (``soft_ce``), the combination (``draft_loss_wrapper``) and the
-# capture mechanism (``hidden_capture``) are backend-agnostic. Only two things
-# differ per backend / draft style: (a) where the trunk hidden states are
-# captured and (b) how the draft head turns those hidden states into vocab
-# logits. ``DraftAdapter`` pins down that contract.
-#
-# Implemented today: native-MTP draft training on Megatron (capture the model's
-# built-in ``self.mtp`` block and project through the shared output layer), which
+# The loss (``soft_ce``) and the capture mechanism (``hidden_capture``) are
+# backend-agnostic. This module holds the Megatron-specific piece: turning the
+# captured MTP hidden states into vocab logits via the shared output layer. It
 # works for any model that ships native MTP heads regardless of base class
 # (``GPTModel`` for DeepSeek/GLM/Qwen3-Next, ``MambaModel`` for Qwen3.5/NemotronH).
-#
-# Planned follow-ups implement the SAME protocol and reuse the loss/combination
-# unchanged: (1) a NeMo-RL-style Eagle adapter that captures auxiliary policy
-# hidden states and projects them through a separate Eagle draft model (for models
-# WITHOUT native MTP heads); (2) an FSDP backend adapter.
 
 from __future__ import annotations
 
-from typing import List, Protocol, runtime_checkable
+from typing import List
 
 import torch
 
@@ -49,19 +39,6 @@ class _CanonicalGradStrides(torch.autograd.Function):
         if grad.is_contiguous():
             return grad.view(-1).view(grad.shape)
         return grad.contiguous()
-
-
-@runtime_checkable
-class DraftAdapter(Protocol):
-    """Per-backend / per-draft-style hooks for decoupled MTP/draft training.
-
-    An Eagle adapter would implement the same two methods: ``capture_context``
-    grabs the auxiliary policy hidden states, and ``project_to_logits`` runs the
-    (separate) draft model's output head."""
-
-    def capture_context(self, model, detach_trunk: bool): ...
-
-    def project_to_logits(self, hidden_states_per_layer, model) -> List: ...
 
 
 def project_mtp_hidden_to_logits(hidden_states_per_layer, model, detach_output_weight: bool = False) -> List:

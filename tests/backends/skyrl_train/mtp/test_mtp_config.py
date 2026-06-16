@@ -27,8 +27,6 @@ def test_megatron_config_mtp_defaults():
     # embedding/output weight (== the lm_head on tied-embedding models like Qwen3.5) is detached
     # in both the output projection and the MTP block's re-embedding (slime-style).
     assert cfg.mtp_detach_shared_output is True
-    # Deprecated alias is unset by default.
-    assert cfg.mtp_loss_scaling_factor is None
 
 
 def test_megatron_config_mtp_overrides_parse():
@@ -38,12 +36,6 @@ def test_megatron_config_mtp_overrides_parse():
     assert cfg.mtp_num_layers == 2
     assert cfg.mtp_loss_weight == 0.3
     assert cfg.mtp_loss_type == "hard_ce"
-
-
-def test_megatron_config_mtp_loss_scaling_factor_back_compat():
-    # The deprecated scaling-factor knob maps onto the explicit loss weight.
-    cfg = build_nested_dataclass(MegatronConfig, {"mtp_loss_scaling_factor": 0.25})
-    assert cfg.mtp_loss_weight == 0.25
 
 
 def test_megatron_config_mtp_force_disable():

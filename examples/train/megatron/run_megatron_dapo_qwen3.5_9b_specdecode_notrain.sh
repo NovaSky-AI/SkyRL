@@ -203,7 +203,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
   trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
   trainer.logger="$LOGGER" \
-  trainer.project_name="qwen3_5_dapo" \
+  trainer.project_name="qwen3_5_dapo_2" \
   trainer.run_name="sd_notrain_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.export_path="/mnt/local_storage/exports/sd_notrain_dapo_qwen3_5_9b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.hf_save_interval=300 \

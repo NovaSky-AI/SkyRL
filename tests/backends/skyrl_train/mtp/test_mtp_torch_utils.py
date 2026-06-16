@@ -6,7 +6,6 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/utils/test_mtp_t
 import torch
 
 from skyrl.backends.skyrl_train.utils.torch_utils import (
-    build_mtp_loss_mask,
     build_mtp_next_token_labels,
 )
 
@@ -35,18 +34,3 @@ def test_build_mtp_next_token_labels_no_wraparound_into_first_token():
     labels = build_mtp_next_token_labels(sequences)
     assert labels[0, -1].item() == 0
     assert labels[0, -1].item() != sequences[0, 0].item() or sequences[0, 0].item() == 0
-
-
-def test_build_mtp_loss_mask_from_attention_mask():
-    attention_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]])
-    loss_mask = build_mtp_loss_mask(attention_mask)
-    assert loss_mask.dtype == torch.float32
-    assert torch.equal(loss_mask, attention_mask.to(torch.float32))
-
-
-def test_build_mtp_loss_mask_accepts_bool_mask():
-    # forward_step passes attention_mask.to(bool); the helper must still produce a float mask.
-    attention_mask = torch.tensor([[True, True, False]])
-    loss_mask = build_mtp_loss_mask(attention_mask)
-    assert loss_mask.dtype == torch.float32
-    assert torch.equal(loss_mask, torch.tensor([[1.0, 1.0, 0.0]]))

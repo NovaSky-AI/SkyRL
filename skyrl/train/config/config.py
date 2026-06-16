@@ -208,10 +208,10 @@ class MegatronConfig(BaseConfig):
     mtp_loss_weight: float = 0.1
     """Weight ``w`` of the decoupled MTP/draft loss in ``policy_loss + w * draft_loss``.
 
-    Replaces the role of Megatron's opaque ``mtp_loss_scaling_factor`` backward-scale. SkyRL now
-    trains the native MTP heads with an *explicit* loss on *detached* trunk hidden states (so the
-    draft gradient never pulls on the policy backbone) and adds it to the policy loss with this
-    weight. Only used when MTP layers are active."""
+    SkyRL trains the native MTP heads with an *explicit* loss on *detached* trunk hidden states (so
+    the draft gradient never pulls on the policy backbone) and adds it to the policy loss with this
+    weight, instead of Megatron's opaque in-forward MTP backward-scale. Only used when MTP layers
+    are active."""
     mtp_loss_type: str = "soft_ce"
     """Supervision for the MTP/draft head:
 
@@ -231,9 +231,6 @@ class MegatronConfig(BaseConfig):
     head means the draft loss directly nudges the policy's own logits every step. Matches slime's
     MTP-RL training (only ``.mtp.`` params receive gradients). Set False for NeMo-RL's behaviour
     (shared embedding/head also trained by the draft loss)."""
-    mtp_loss_scaling_factor: Optional[float] = None
-    """Deprecated alias for ``mtp_loss_weight`` (kept for back-compat). If set, it overrides
-    ``mtp_loss_weight``."""
     mtp_loss_chunk_size: Optional[int] = 1024
     """Sequence-chunk size for the decoupled MTP/draft loss. The draft loss materializes full
     ``[batch, seq, vocab]`` softmax tensors; at large vocab (e.g. Qwen3.5's 248K) computing the whole
@@ -251,9 +248,6 @@ class MegatronConfig(BaseConfig):
     Typical: 64-128 (acceptance is governed by the top tokens, so the dropped tail is benign)."""
 
     def __post_init__(self):
-        # Back-compat: the old `mtp_loss_scaling_factor` knob now maps onto the explicit loss weight.
-        if self.mtp_loss_scaling_factor is not None:
-            self.mtp_loss_weight = self.mtp_loss_scaling_factor
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
