@@ -426,8 +426,6 @@ class RayPPOTrainer:
                     or self.global_step == self.total_training_steps
                 )
                 if force_eval or interval_eval:
-                    # Mark vLLM counters before eval so the eval rollout lands
-                    # in vllm/eval/* rather than blending into the train rollout.
                     if self._vllm_metrics_scraper is not None:
                         await self._vllm_metrics_scraper.mark_pre_eval()
                     self._fire("on_eval_start")

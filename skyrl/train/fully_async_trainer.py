@@ -459,8 +459,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                 if self._vllm_metrics_scraper is not None:
-                    # Generation overlaps training here, so throughput falls
-                    # back to the wall-clock interval.
                     timing_payload.update(await self._vllm_metrics_scraper.sample())
                 self.tracker.log(timing_payload, step=self.global_step)
                 self.all_timings = {}

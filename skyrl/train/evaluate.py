@@ -59,7 +59,6 @@ async def evaluate(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
-    # Rollout-only time (denominator for the vLLM eval throughput).
     eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):

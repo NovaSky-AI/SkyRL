@@ -155,7 +155,6 @@ class VLLMMetricsScraper:
         self._timeout = request_timeout_s
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
-        # Counter snapshot taken right before an eval rollout (sync trainer).
         self._mid_snapshot: Optional[Dict[str, float]] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
