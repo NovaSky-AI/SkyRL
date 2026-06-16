@@ -147,14 +147,29 @@ def test_activities_threaded_to_torch(tmp_path):
 
 def test_step_failure_disables_without_raising(tmp_path):
     prof = Profiler(_ProfCfg(save_path=str(tmp_path)))
-    prof.start()
 
     class _Boom:
+        """Stands in for a live torch profiler whose ``step`` faults. ``start``/
+        ``stop`` are no-ops: we must NOT start the real kineto profiler here, or
+        the wrapper's fault path nulls ``self.prof`` while that session is still
+        running, leaving it unstopped -> libkineto segfaults at interpreter exit
+        (process-wide, surfaces as a teardown crash long after this test passes)."""
+
+        def start(self):
+            pass
+
         def step(self):
             raise RuntimeError("boom")
 
-    # Simulate an internal profiler fault mid-loop; the wrapper must swallow it.
+        def stop(self):
+            pass
+
+    # Swap in the faulting stub BEFORE start() so no real profiler session is ever
+    # opened; this still exercises the wrapper's swallow-and-disable path.
     prof.prof = _Boom()
+    prof.start()
+
+    # Simulate an internal profiler fault mid-loop; the wrapper must swallow it.
     prof.step()
     assert prof.enable is False
     assert prof.prof is None
