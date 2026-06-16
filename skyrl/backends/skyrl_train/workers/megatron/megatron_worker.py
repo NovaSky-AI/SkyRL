@@ -1271,7 +1271,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
-        if use_prefix_cache and torch.distributed.get_rank() == 0:
+        # skip KV cache reset if max_staleness_steps > 0 (fully async training) and clear_kv_cache_on_weight_sync is False
+        skip_kv_cache_reset = (
+            self.cfg.fully_async.max_staleness_steps > 0 and not self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        )
+        if use_prefix_cache and torch.distributed.get_rank() == 0 and not skip_kv_cache_reset:
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
