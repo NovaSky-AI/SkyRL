@@ -97,9 +97,8 @@ skyrl-train = [
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
-    "nixl-cu12; sys_platform == 'linux'",
-    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
@@ -109,9 +108,8 @@ fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl-cu12; sys_platform == 'linux'",
-    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
@@ -134,9 +132,8 @@ megatron = [
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.20.2; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
-    "nixl-cu12; sys_platform == 'linux'",
-    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
+    # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",

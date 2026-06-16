@@ -53,12 +53,12 @@ jobs:
         with:
           activate-environment: true
       - name: Install basic dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       # Run h100 tests via anyscale staging (compute config llm-team-h100-4x:1)
       - name: GPU tests
         env:
-          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN_STAGING }}
-          ANYSCALE_HOST: https://console.anyscale-staging.com
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
         run: |
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-ci-h100-${COMMIT_SHA:0:7}-${{ github.run_id }}"

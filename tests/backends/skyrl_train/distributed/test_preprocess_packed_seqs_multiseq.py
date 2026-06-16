@@ -53,6 +53,7 @@ _mock_modules["megatron.core.transformer.moe.moe_utils"].clear_aux_losses_tracke
 _mock_modules["megatron.core.transformer.moe.moe_utils"].get_moe_layer_wise_logging_tracker = MagicMock()
 _mock_modules["megatron.core.transformer.moe.moe_utils"].reduce_aux_losses_tracker_across_ranks = MagicMock()
 _mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
+_mock_modules["megatron.core.utils"].unwrap_model = MagicMock()
 
 
 @pytest.fixture(scope="module", autouse=True)
