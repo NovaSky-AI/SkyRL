@@ -409,6 +409,10 @@ class BasePPOExp:
             # worker logs; route them through the tracker so wandb users see
             # them as an `error/tracebacks` table row.
             if self.trainer is not None and self.trainer.tracker is not None:
+                # Flush metrics already recorded for the in-flight step (e.g.
+                # reward/timing metrics from a completed generation phase)
+                # before log_exception finishes the wandb run.
+                self.trainer.flush_pending_metrics()
                 self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
