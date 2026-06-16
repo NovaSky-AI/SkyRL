@@ -112,7 +112,7 @@ def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
     "model_name",
     [
         pytest.param(
-            "Qwen/Qwen3.5-35B-A3B-Base",
+            "Qwen/Qwen3.5-35B-A3B",
             id="qwen3_5_35b_a3b_mm_moe",
         ),
         pytest.param("Qwen/Qwen2.5-1.5B-Instruct", id="qwen2_5_1_5b_dense"),
