@@ -31,8 +31,17 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
+from skyrl.backends.skyrl_train.patches.vllm.patch_fp32_lm_head import (
+    apply_fp32_lm_head_patch,
+)
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
+
+# vLLM imports this module inside every worker process (via worker_extension_cls)
+# at init_worker time, before the model and its LogitsProcessor are built. We use
+# that as the hook to install the SkyRL fp32 lm-head patch in each worker. The
+# patch is a no-op unless additional_config["skyrl_enable_fp32_lm_head"] is set.
+apply_fp32_lm_head_patch()
 
 
 class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
@@ -50,6 +59,35 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.model_config
         self.device
     """
+
+    def get_fp32_lm_head_status(self) -> dict:
+        """Introspection RPC: report whether the fp32 LM-head patch is active.
+
+        Used by integration tests to verify that a ServerGroup-launched worker
+        (a) imported and installed the SkyRL fp32 lm-head patch, (b) received the
+        ``skyrl_enable_fp32_lm_head`` flag via ``additional_config``, and (c) has
+        the flag set on its model's ``LogitsProcessor`` instance(s). Read-only and
+        cheap; callable via ``/collective_rpc``.
+        """
+        from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+        from skyrl.backends.skyrl_train.patches.vllm import patch_fp32_lm_head
+
+        additional_config = dict(getattr(self.vllm_config, "additional_config", None) or {})
+        logits_processor_flags = []
+        try:
+            model = self.model_runner.model
+            for module in model.modules():
+                if isinstance(module, LogitsProcessor):
+                    logits_processor_flags.append(bool(getattr(module, "_skyrl_fp32_lm_head", False)))
+        except Exception:
+            pass
+
+        return {
+            "patch_installed": bool(patch_fp32_lm_head._PATCHED),
+            "additional_config_flag": bool(additional_config.get("skyrl_enable_fp32_lm_head", False)),
+            "logits_processor_flags": logits_processor_flags,
+        }
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """

@@ -118,6 +118,17 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     for key, value in overrides.items():
         setattr(args, key, value)
 
+    # Propagate the fp32 LM-head flag to all vLLM workers via additional_config.
+    # additional_config is part of VllmConfig and is serialized to every worker,
+    # so this is robust for both the "ray" and "mp" executor backends (unlike an
+    # env var, which is not reliably inherited by ray-backend workers). The
+    # SkyRL-side patch (patches/vllm/patch_fp32_lm_head.py) reads this flag at
+    # LogitsProcessor build time.
+    if ie_cfg.enable_fp32_lm_head:
+        additional_config = dict(getattr(args, "additional_config", None) or {})
+        additional_config["skyrl_enable_fp32_lm_head"] = True
+        args.additional_config = additional_config
+
     # Enable LoRA on the inference engine only when the trainer will sync
     # LoRA adapters (not merged weights).  Megatron merges by default
     # (merge_lora=True), so the inference engine must NOT have LoRA wrapping.

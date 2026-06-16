@@ -31,6 +31,7 @@ All under `generator.inference_engine.*`:
 - `enable_chunked_prefill` (bool, default true)
 - `distributed_executor_backend` ("ray" or "mp")
 - `engine_init_kwargs` (dict, pass-through to vLLM EngineArgs)
+- `enable_fp32_lm_head` (bool, default false): Compute the LM-head projection (logits) in FP32. Reduces inference-vs-trainer logprob mismatch at a small cost on the final projection only. Implemented as a SkyRL-side vLLM monkey-patch (`patches/vllm/patch_fp32_lm_head.py`) installed in each worker via `new_inference_worker_wrap`, gated by `VllmConfig.additional_config["skyrl_enable_fp32_lm_head"]`. New inference path only.
 
 ## Placement
 - Colocated: vLLM and training workers (FSDP/Megatron) are placed on the same set of GPUs. We offload/backload each component as needed. During weight syncing, model weights from vLLM as well as model weights from the training workers remain on GPU

@@ -562,6 +562,11 @@ class InferenceEngineConfig(BaseConfig):
     language_model_only: bool = False
     """When True, pass ``language_model_only=True`` to the vLLM engine so that
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
+    enable_fp32_lm_head: bool = False
+    """Compute the LM-head projection (logits) in FP32 on the inference engine. Reduces inference-vs-trainer
+    logprob mismatch at a small cost on the final projection only. Implemented as
+    a SkyRL-side vLLM patch and only takes effect on the new inference path
+    (``_SKYRL_USE_NEW_INFERENCE=1``)."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
