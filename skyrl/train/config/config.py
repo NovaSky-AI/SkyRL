@@ -477,6 +477,10 @@ class FullyAsyncConfig(BaseConfig):
     clear_kv_cache_on_weight_sync: bool = False
     """Whether or not to clear the KV cache on weight sync. Defaults to False, which means KV cache from stale policies will be used during generation."""
 
+    @property
+    def skip_kv_cache_reset(self) -> bool:
+        return self.max_staleness_steps > 0 and not self.clear_kv_cache_on_weight_sync
+
 
 # ---------------------------------------------------------------------------
 # Sampling / Chat Template
