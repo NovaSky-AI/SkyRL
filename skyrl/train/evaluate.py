@@ -1,3 +1,4 @@
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
@@ -58,6 +59,8 @@ async def evaluate(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    # Rollout-only time (denominator for the vLLM eval throughput).
+    eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -69,7 +72,9 @@ async def evaluate(
             "eval",
             global_step,
         )
+        gen_start = time.monotonic()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        eval_generate_time += time.monotonic() - gen_start
         validate_generator_output(len(generator_input["prompts"]), generator_output)
         generator_outputs.append(generator_output)
         concat_all_envs.extend(generator_input["env_classes"])
@@ -127,6 +132,7 @@ async def evaluate(
                 eval_metrics,
             )
 
+    eval_metrics["timing/eval_generate"] = eval_generate_time
     return eval_metrics
 
 
@@ -160,6 +166,7 @@ async def evaluate_step_wise(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -171,7 +178,9 @@ async def evaluate_step_wise(
             "eval",
             global_step,
         )
+        gen_start = time.monotonic()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        eval_generate_time += time.monotonic() - gen_start
         traj_id_to_input = {
             traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
             for traj_id, env_class, env_extra in zip(
@@ -244,4 +253,5 @@ async def evaluate_step_wise(
                 eval_metrics,
             )
 
+    eval_metrics["timing/eval_generate"] = eval_generate_time
     return eval_metrics

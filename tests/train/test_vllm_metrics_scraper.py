@@ -373,6 +373,88 @@ def test_scraper_with_no_urls_is_noop():
 
 
 @pytest.mark.asyncio
+async def test_sample_split_separates_train_and_eval_rollouts():
+    """vllm/* uses the train window; vllm/eval/* uses the eval window.
+
+      baseline  gen=500  prompt=1000
+      pre-eval  gen=600  prompt=1100   (train rollout: +100 gen, +100 prompt)
+      log-time  gen=1100 prompt=1300   (eval rollout:  +500 gen, +200 prompt)
+    with generate_time=2s and eval_generate_time=5s.
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    def snap(gen, prompt):
+        return _snapshot(
+            running=1,
+            waiting=0,
+            kv=0.4,
+            prefix_q=0,
+            prefix_h=0,
+            prompt_toks=prompt,
+            gen_toks=gen,
+            ttft_sum=0,
+            ttft_count=0,
+            itl_sum=0,
+            itl_count=0,
+        )
+
+    texts = iter([snap(500, 1000), snap(600, 1100), snap(1100, 1300)])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        # Step before eval: establishes the baseline (no throughput yet).
+        first = await scraper.sample_split(generate_time_s=1.0)
+        assert "vllm/generation_throughput_tok_s" not in first
+
+        # Eval step: mark before eval, then sample after.
+        await scraper.mark_pre_eval()
+        out = await scraper.sample_split(generate_time_s=2.0, eval_generate_time_s=5.0)
+
+    # Train rollout: (600-500)/2 == 50, (1100-1000)/2 == 50.
+    assert out["vllm/generation_throughput_tok_s"] == pytest.approx(50.0)
+    assert out["vllm/prompt_throughput_tok_s"] == pytest.approx(50.0)
+    # Eval rollout: (1100-600)/5 == 100, (1300-1100)/5 == 40.
+    assert out["vllm/eval/generation_throughput_tok_s"] == pytest.approx(100.0)
+    assert out["vllm/eval/prompt_throughput_tok_s"] == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_sample_split_without_eval_emits_only_train_metrics():
+    """On a non-eval step (no mark_pre_eval), no vllm/eval/* keys appear."""
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    def snap(gen, prompt):
+        return _snapshot(
+            running=1,
+            waiting=0,
+            kv=0.4,
+            prefix_q=0,
+            prefix_h=0,
+            prompt_toks=prompt,
+            gen_toks=gen,
+            ttft_sum=0,
+            ttft_count=0,
+            itl_sum=0,
+            itl_count=0,
+        )
+
+    texts = iter([snap(0, 0), snap(200, 100)])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        await scraper.sample_split(generate_time_s=1.0)
+        out = await scraper.sample_split(generate_time_s=4.0)
+
+    assert out["vllm/generation_throughput_tok_s"] == pytest.approx(200.0 / 4.0)
+    assert out["vllm/prompt_throughput_tok_s"] == pytest.approx(100.0 / 4.0)
+    assert not any(k.startswith("vllm/eval/") for k in out)
+
+
+@pytest.mark.asyncio
 async def test_fetch_all_merges_across_nodes_and_aggregates_correctly():
     # Two nodes, each running two replicas with disjoint ReplicaId labels.
     # Node A → r0, r1.  Node B → r2, r3.  Merged set should have 4 entries

@@ -426,6 +426,10 @@ class RayPPOTrainer:
                     or self.global_step == self.total_training_steps
                 )
                 if force_eval or interval_eval:
+                    # Mark vLLM counters before eval so the eval rollout lands
+                    # in vllm/eval/* rather than blending into the train rollout.
+                    if self._vllm_metrics_scraper is not None:
+                        await self._vllm_metrics_scraper.mark_pre_eval()
                     self._fire("on_eval_start")
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
@@ -437,11 +441,12 @@ class RayPPOTrainer:
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
                 if self._vllm_metrics_scraper is not None:
-                    # Engine only generates during the "generate" phase, so
-                    # throughput divides by that, not the full step time.
+                    # vllm/* = train rollout / generate time; on eval steps
+                    # vllm/eval/* = eval rollout / eval rollout time.
                     log_payload.update(
-                        await self._vllm_metrics_scraper.sample(
-                            generation_time_s=self.all_timings.get("generate")
+                        await self._vllm_metrics_scraper.sample_split(
+                            generate_time_s=self.all_timings.get("generate"),
+                            eval_generate_time_s=self.all_metrics.get("timing/eval_generate"),
                         )
                     )
 
