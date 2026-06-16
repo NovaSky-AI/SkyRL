@@ -40,6 +40,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
+    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -61,8 +62,11 @@ from skyrl.backends.skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BaseBatchIterator,
     BatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
+    get_microbatch_iterator,
     reduce_metrics,
 )
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
@@ -77,6 +81,9 @@ if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
+from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    maybe_force_qwen35_text_bridge,
+)
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -327,6 +334,7 @@ class MegatronWorker:
         flash_attn=False,
         lora_config=None,
         enable_mtp=True,
+        language_model_only=False,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -338,7 +346,7 @@ class MegatronWorker:
                 inference-only flows), force MTP off so the extra layers are neither built nor run.
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
-        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -346,7 +354,7 @@ class MegatronWorker:
             "pad_token_id": tokenizer.pad_token_id,
         }
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
-        update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+        hf_config = update_model_config(hf_config_original, override_config_kwargs=override_config_kwargs)
 
         transformer_config_kwargs = (
             transformer_config_kwargs
@@ -359,7 +367,25 @@ class MegatronWorker:
                 transformer_config_kwargs[key] = None
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+
+        # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
+        # path (which supports sample packing) instead of the VL Qwen3VLModel
+        # (which doesn't). Must run before to_megatron_provider; no-op otherwise.
+        if language_model_only and maybe_force_qwen35_text_bridge(bridge, hf_config):
+            logger.info(
+                "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
+                "(native GDN thd packing path; vision tower dropped)"
+            )
+
         provider = bridge.to_megatron_provider()
+
+        # Disable MTP for training: its aux loss is unused, and under full
+        # recompute its checkpointed forward passes packed_seq_params positionally
+        # into tensor_parallel.checkpoint (tensors only), breaking packed-sequence
+        # backward. Mirrors the MTP-disable in model_bridges.py.
+        if getattr(provider, "mtp_num_layers", None):
+            logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
+            provider.mtp_num_layers = None
 
         # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
         # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
@@ -456,7 +482,10 @@ class MegatronWorker:
         self.provider = provider
         self.bridge = bridge
 
-        self.strategy.hf_config = hf_config
+        # strategy.hf_config is the on-disk source-of-truth used by
+        # save_hf_configs and must NOT carry runtime overrides like
+        # mtp_num_layers=0; assign the un-mutated AutoConfig here.
+        self.strategy.hf_config = hf_config_original
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
@@ -535,6 +564,178 @@ class MegatronWorker:
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
         return model
+
+    def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
+        """Run a Megatron inference forward over ``data`` and return per-sample logprobs.
+
+        Passes the full mini batch to ``MegatronModelWrapper.forward``. Supports token-based
+        micro-batching via ``max_tokens_per_microbatch`` (padding micro-batches to a uniform
+        size as Megatron's pipeline schedule requires, then reordering back to input order).
+
+        Returns:
+            CPU tensor of shape ``[batch_size, response_length]`` in original sample order.
+        """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
+        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
+
+        if use_token_batching:
+            microbatch_iterator = get_microbatch_iterator(
+                data,
+                micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            )
+        else:
+            microbatch_iterator = None
+
+        # Build micro-batch dicts expected by policy.forward_mini_batch
+        micro_dicts = []
+        device = torch.cuda.current_device()
+
+        if microbatch_iterator is not None:
+            micro_batches = microbatch_iterator
+        else:
+            micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+
+        for micro in micro_batches:
+            micro.to(device)
+            attention_mask = micro["attention_mask"]
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            rollout_expert_indices = micro.get("rollout_expert_indices")
+            if rollout_expert_indices is not None:
+                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+            micro_dicts.append(
+                {
+                    "sequences": micro["sequences"],
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": micro.metadata["response_length"],
+                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                    "sub_seq_lengths": micro.get("sub_seq_lengths"),
+                }
+            )
+
+        if use_token_batching:
+            # Pad microbatches to uniform batch size for Megatron compatibility
+            max_micro_bsz = max(m["sequences"].shape[0] for m in micro_dicts) if micro_dicts else 1
+            for i, m in enumerate(micro_dicts):
+                micro_dicts[i] = self._pad_microbatch_to_size(m, max_micro_bsz)
+            mbs = max_micro_bsz
+        else:
+            mbs = micro_dicts[0]["sequences"].shape[0] if micro_dicts else 1
+
+        self.model.eval()
+        seq_len = micro_dicts[0]["sequences"].shape[1]
+        with torch.no_grad():
+            log_probs = self.model.forward(
+                micro_batches=micro_dicts,
+                seq_len=seq_len,
+                micro_batch_size=mbs,
+                temperature=self.cfg.algorithm.temperature,
+            )
+
+        log_probs = log_probs.to("cpu")
+
+        if use_token_batching and microbatch_iterator is not None:
+            # Need to strip padded samples and reorder back to original order
+            output = TrainingOutputBatch({"output": log_probs})
+            output.metadata = data.metadata
+            # The output from Megatron is concatenated across microbatches.
+            # We need to extract only the real (non-padded) samples and reorder.
+            output = self._reorder_megatron_forward_output(output, microbatch_iterator, micro_dicts, mbs)
+        else:
+            output = TrainingOutputBatch({"output": log_probs})
+            output.metadata = data.metadata
+
+        clear_router_replay()
+        return output["output"]
+
+    def _reorder_megatron_forward_output(
+        self, output: TrainingOutputBatch, microbatch_iterator, micro_dicts, padded_mbs
+    ) -> TrainingOutputBatch:
+        """Reorder forward output from token-based microbatching back to original sample order."""
+        if not isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            return output
+
+        # With PP > 1 only the last pipeline stage produces real per-sample logprobs;
+        # other stages return a dummy placeholder (e.g. [1, 1]). There is nothing to
+        # reorder there, and indexing it by microbatch would raise — so return as-is,
+        # matching how the non-token-batched path leaves the placeholder untouched.
+        if not mpu.is_pipeline_last_stage(ignore_virtual=True):
+            return output
+
+        log_probs = output["output"]  # shape: [total_padded_samples, num_actions]
+
+        # Split by padded_mbs, take only real samples, reorder
+        all_log_probs = log_probs.split(padded_mbs, dim=0)
+
+        # Build original-order tensor
+        batch_size = microbatch_iterator.data.batch_size
+        num_actions = log_probs.shape[1]
+        reordered = torch.zeros((batch_size, num_actions), dtype=log_probs.dtype, device=log_probs.device)
+
+        for mb_idx, original_indices in enumerate(microbatch_iterator._microbatches):
+            mb_log_probs = all_log_probs[mb_idx]
+            for sample_idx, original_idx in enumerate(original_indices):
+                reordered[original_idx] = mb_log_probs[sample_idx]
+
+        result = TrainingOutputBatch({"output": reordered})
+        result.metadata = output.metadata
+        return result
+
+    def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
+        """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
+
+        Padded samples have loss_mask/action_mask=0 so they don't contribute to the loss
+        (forward micro-batches carry neither key, so this is inert there). This is needed
+        because Megatron's forward_backward_func requires uniform micro_batch_size across all
+        microbatches (especially with PP > 1). Scalar keys (``num_actions``,
+        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
+
+        Defined on the base worker so the shared ``_forward_logprobs`` path works for
+        policy, ref, and critic workers alike.
+        """
+        current_bsz = micro_dict["sequences"].shape[0]
+        if current_bsz >= target_batch_size:
+            return micro_dict
+
+        pad_count = target_batch_size - current_bsz
+        device = micro_dict["sequences"].device
+
+        padded = {}
+        for key, value in micro_dict.items():
+            if key in ("num_actions", "num_microbatches", "num_real_microbatches"):
+                padded[key] = value
+                continue
+            if value is None:
+                padded[key] = None
+                continue
+            if isinstance(value, torch.Tensor):
+                if key == "loss_mask":
+                    # Pad with zeros so padded samples don't contribute to loss
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                elif key == "attention_mask":
+                    # Give each dummy row a single valid token, so the row is non-degenerate:
+                    # it avoids a fully-masked row (NaN in dense attention's softmax) and a
+                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel).
+                    # The row is still excluded from the loss via loss_mask/action_mask=0.
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                    pad_tensor[:, 0] = 1
+                elif key == "position_ids":
+                    # position_ids for padded samples
+                    seq_len = value.shape[1]
+                    pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
+                elif key == "action_mask":
+                    # action_mask should be zeros for padded samples
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                else:
+                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
+                padded[key] = torch.cat([value, pad_tensor], dim=0)
+            else:
+                padded[key] = value
+
+        return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
@@ -623,6 +824,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.policy.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
+            language_model_only=self.cfg.policy.language_model_only,
         )
 
         if self.enable_router_replay:
@@ -690,6 +892,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
+        # Enable expandable_segments after init so model weights stay in IPC-compatible
+        # standard CUDA memory; only subsequent activations use expandable segments.
+        self._set_expandable_segments(True)
+
     def forward(
         self,
         data: TrainingInputBatch,
@@ -709,47 +915,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
         if loss_fn is None:
-            # Megatron inference forward path: pass the full mini batch through
-            # MegatronModelWrapper.forward and emit per-sample logprobs.
-            micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
-            micro_batches = data.chunk(micro_bsz)
-
-            # Build micro-batch dicts expected by policy.forward_mini_batch
-            micro_dicts = []
-            device = torch.cuda.current_device()
-            for micro in micro_batches:
-                micro.to(device)
-                sequences = micro["sequences"]
-                attention_mask = micro["attention_mask"]
-                num_actions = micro.metadata["response_length"]
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
-                rollout_expert_indices = micro.get("rollout_expert_indices")
-                if rollout_expert_indices is not None:
-                    rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-                micro_dicts.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": num_actions,
-                        "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    }
-                )
-
-            self.model.eval()
-            seq_len = micro_dicts[0]["sequences"].shape[1]
-            mbs = micro_dicts[0]["sequences"].shape[0]
-            with torch.no_grad():
-                log_probs = self.model.forward(
-                    micro_batches=micro_dicts,
-                    seq_len=seq_len,
-                    micro_batch_size=mbs,
-                    temperature=self.cfg.algorithm.temperature,
-                )
-
-            log_probs = log_probs.to("cpu")
-            clear_router_replay()
+            # Megatron inference forward path: emit per-sample logprobs. Token-based
+            # micro-batching (when `max_tokens_per_microbatch > 0`) is handled inside
+            # `_forward_logprobs`, which also reorders back to the original sample order.
+            log_probs = self._forward_logprobs(data)
             loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
             return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
@@ -786,6 +955,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    "sub_seq_lengths": experience.sub_seq_lengths,
                 }
             )
 
@@ -840,7 +1010,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu,
+        or by token count if max_tokens_per_microbatch is configured.
         Megatron Core's forward_backward_func handles gradient accumulation internally.
 
         Args:
@@ -860,16 +1031,33 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
             chunk.zero_grad_buffer()
 
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
 
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch
+        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
+
+        if use_token_batching:
+            microbatch_iterator = get_microbatch_iterator(
+                data,
+                micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            )
+        else:
+            microbatch_iterator = None
+
+        # Build micro-batch dicts expected by forward_backward_mini_batch.
+        # Token-based batching yields TrainingInputBatch microbatches (converted to
+        # Experience here); sample-based BatchIterator yields Experience directly.
         micro_buffer = []
-        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
-            sequences = experience.sequences
+
+        if microbatch_iterator is not None:
+            experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
+        else:
+            experiences = BatchIterator(data, self.cfg.micro_train_batch_size_per_gpu, drop_last=False)
+
+        for experience in experiences:
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
@@ -879,7 +1067,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             micro_buffer.append(
                 {
-                    "sequences": sequences,
+                    "sequences": experience.sequences,
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                     "num_actions": experience.num_actions,
@@ -890,17 +1078,50 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
+                    # used with global sequence packing (None when token-based batching is active)
+                    "sub_seq_lengths": experience.sub_seq_lengths,
                 }
             )
 
+        # Count microbatches that carry real (non-padding) samples. Token-based batching
+        # appends fully-padding microbatches (loss_mask all zero) so every DP rank runs the
+        # same number of forward passes; those contribute 0 to KL/entropy and to mean metrics
+        # but would otherwise inflate the denominators. `num_real_microbatches` lets the loss
+        # normalize KL/entropy over real microbatches only.
+        num_real_microbatches = sum(1 for m in micro_buffer if m["loss_mask"].sum().item() > 0)
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
+            m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
             return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
-        micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        if use_token_batching:
+            # With token-based batching, microbatches may have different batch sizes.
+            # Megatron's forward_backward_func requires uniform micro_batch_size,
+            # so pad all microbatches to the max batch size across microbatches.
+            max_micro_bsz = max(m["sequences"].shape[0] for m in micro_buffer)
+            micro_buffer = [self._pad_microbatch_to_size(m, max_micro_bsz) for m in micro_buffer]
+            micro_bsz = max_micro_bsz
+        else:
+            micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
+        # (matches how status all-reduce treats metrics as identical within a DP group).
+        if (
+            mpu.get_tensor_model_parallel_rank() == 0
+            and mpu.get_pipeline_model_parallel_rank() == 0
+            and mpu.get_context_parallel_rank() == 0
+        ):
+            real_tokens = int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
+            num_microbatches = len(micro_buffer)
+            dp_rank = mpu.get_data_parallel_rank()
+            logger.info(
+                f"sequence packing | dp_rank={dp_rank} microbatches_this_step={num_microbatches} "
+                f"seq_len={seq_len} tokens={real_tokens}"
+            )
 
         metrics_list = self.model.forward_backward_mini_batch(
             micro_batches=micro_buffer,
@@ -916,10 +1137,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
-        for metrics in metrics_list:
+        for m_batch, metrics in zip(micro_buffer, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
                 all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
+            # ...) are meaningless and would drag down the mean-reduced metrics. Summed
+            # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
+            # excluding them here keeps both reductions correct.
+            if m_batch["loss_mask"].sum().item() == 0:
+                continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -934,6 +1161,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+
+        # Token-based batching diagnostics: total microbatches this rank ran and how many
+        # were purely-padding (added to equalize the microbatch count across DP ranks).
+        # Added before all-reduce so they are averaged across DP (num_microbatches is
+        # identical on every rank; num_padding_microbatches reports the per-rank average).
+        if use_token_batching:
+            status["num_microbatches"] = float(len(micro_buffer))
+            status["num_padding_microbatches"] = float(len(micro_buffer) - num_real_microbatches)
+
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
 
@@ -1103,12 +1339,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
-            # Extract and send weights using the sender created at init time
-            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-            await self._weight_transfer_sender.send_chunks(
-                self.weight_extractor.extract_weights(generator_dtype),
-                weight_metadata=weight_metadata,
-            )
+            # Extract and send weights using the sender created at init time.
+            # Disable expandable_segments around the send: under colocate_all the
+            # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
+            # VMM addresses expandable segments uses.
+            with self._expandable_segments_disabled_for_sync():
+                weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+                await self._weight_transfer_sender.send_chunks(
+                    self.weight_extractor.extract_weights(generator_dtype),
+                    weight_metadata=weight_metadata,
+                )
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -1212,50 +1452,10 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """Run inference forward pass.
 
         Returns a :class:`WorkerOutput` whose ``loss_fn_outputs`` carries one
-        per-sample dict with key ``"logprobs"``.
+        per-sample dict with key ``"logprobs"``. Token-based micro-batching (when
+        ``max_tokens_per_microbatch > 0``) is handled inside ``_forward_logprobs``.
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
-        # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
-        micro_batches = data.chunk(micro_bsz)
-
-        # Build micro-batch dicts expected by policy.forward_mini_batch
-        micro_dicts = []
-        device = torch.cuda.current_device()
-        for micro in micro_batches:
-            micro.to(device)
-            sequences = micro["sequences"]
-            attention_mask = micro["attention_mask"]
-            num_actions = micro.metadata["response_length"]
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = micro.get("rollout_expert_indices")
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
-            micro_dicts.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": num_actions,
-                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                }
-            )
-
-        self.model.eval()
-        seq_len = micro_dicts[0]["sequences"].shape[1]
-        mbs = micro_dicts[0]["sequences"].shape[0]
-        with torch.no_grad():
-            log_probs = self.model.forward(
-                micro_batches=micro_dicts,
-                seq_len=seq_len,
-                micro_batch_size=mbs,
-                temperature=self.cfg.algorithm.temperature,
-            )
-
-        log_probs = log_probs.to("cpu")
-        clear_router_replay()
+        log_probs = self._forward_logprobs(data)
         loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
@@ -1306,6 +1506,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             flash_attn=self.cfg.flash_attn,
             # Ref worker only needs main-model logprobs; MTP heads are irrelevant here.
             enable_mtp=False,
+            language_model_only=self.cfg.ref.language_model_only,
         )
 
         self.actor_module = self.make_megatron_module(
@@ -1327,6 +1528,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
 
         # create worker model
         self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+
+        self._set_expandable_segments(True)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method

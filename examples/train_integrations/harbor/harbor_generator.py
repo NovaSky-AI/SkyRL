@@ -7,10 +7,12 @@ from uuid import uuid4
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 from tqdm import tqdm
 from omegaconf import DictConfig
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
 from harbor.models.agent.rollout_detail import RolloutDetail
@@ -202,7 +204,11 @@ class HarborGenerator(GeneratorInterface):
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
         ie_cfg = generator_cfg.inference_engine
-        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
+        if _SKYRL_USE_NEW_INFERENCE:
+            assert isinstance(inference_engine_client, RemoteInferenceClient)
+            self.base_url = inference_engine_client.proxy_url
+        else:
+            self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len

@@ -252,6 +252,83 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     assert torch.allclose(data["returns"], expected_advantages)
 
 
+def test_flush_pending_metrics_logs_and_clears(dummy_config):
+    """Metrics accumulated for an in-flight step are flushed to the tracker."""
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.tracker = MagicMock()
+    trainer.global_step = 7
+    trainer.all_metrics = {"reward/avg_raw_reward": 0.5}
+    trainer.all_timings = {"generate": 42.0}
+
+    trainer.flush_pending_metrics()
+
+    trainer.tracker.log.assert_called_once_with(
+        {"reward/avg_raw_reward": 0.5, "timing/generate": 42.0}, step=7, commit=True
+    )
+    assert trainer.all_metrics == {}
+    assert trainer.all_timings == {}
+
+    # Second call is a no-op once the accumulators are empty.
+    trainer.flush_pending_metrics()
+    trainer.tracker.log.assert_called_once()
+
+
+def test_flush_pending_metrics_swallows_tracker_errors(dummy_config):
+    """A tracker failure during the crash-path flush must not mask the original error."""
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.tracker = MagicMock()
+    trainer.tracker.log.side_effect = RuntimeError("tracker down")
+    trainer.all_metrics = {"reward/avg_raw_reward": 0.5}
+
+    trainer.flush_pending_metrics()  # must not raise
+
+    assert trainer.all_metrics == {}
+    assert trainer.all_timings == {}
+
+
+def test_run_flushes_pending_metrics_before_logging_exception():
+    """`BasePPOExp.run` flushes pending step metrics before `log_exception` finishes the wandb run."""
+    from skyrl.train.entrypoints.main_base import BasePPOExp
+
+    exp = BasePPOExp.__new__(BasePPOExp)
+    trainer = MagicMock()
+    trainer.global_step = 7
+
+    def fake_setup_trainer():
+        # Mirror _setup_trainer: expose the trainer on the exp, then crash
+        # (e.g. an OOM raised from a worker mid-step).
+        exp.trainer = trainer
+        raise RuntimeError("boom")
+
+    exp._setup_trainer = fake_setup_trainer
+
+    with pytest.raises(RuntimeError, match="boom"):
+        exp.run()
+
+    ordered_calls = [
+        name for name, _, _ in trainer.mock_calls if name in ("flush_pending_metrics", "tracker.log_exception")
+    ]
+    assert ordered_calls == ["flush_pending_metrics", "tracker.log_exception"]
+    trainer.tracker.log_exception.assert_called_once()
+    assert trainer.tracker.log_exception.call_args.kwargs["step"] == 7
+
+
 def test_micro_batches_accumulated_initialized():
     """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
 

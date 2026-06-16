@@ -1,7 +1,8 @@
 name: skyrl-train-gpu-ci-h100
 entrypoint: bash ci/gpu_ci_run_h100.sh
-image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron
+image_uri: anyscale/image/skyrl-train-ray-2.51.1-slim-py312-cu128-megatron-2.10-te-efa-1.47:1
 ray_version: "2.51.1"
-compute_config: llm-team-h100-4x:1
+compute_config: k8s-single-node-4h100:1
+cloud: sky-anyscale-aws-us-east-1
 working_dir: .
 max_retries: 0

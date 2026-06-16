@@ -82,6 +82,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
         "distributed_executor_backend": ie_cfg.distributed_executor_backend,
         "speculative_config": ie_cfg.speculative_config,
+        "use_expandable_segments": ie_cfg.use_expandable_segments,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -281,6 +282,7 @@ class BasePPOExp:
             experiment_name=self.cfg.trainer.run_name,
             backends=self.cfg.trainer.logger,
             config=self.cfg,
+            tags=self.cfg.trainer.tags,
         )
 
     def get_inference_client(self) -> InferenceEngineInterface:
@@ -408,6 +410,10 @@ class BasePPOExp:
             # worker logs; route them through the tracker so wandb users see
             # them as an `error/tracebacks` table row.
             if self.trainer is not None and self.trainer.tracker is not None:
+                # Flush metrics already recorded for the in-flight step (e.g.
+                # reward/timing metrics from a completed generation phase)
+                # before log_exception finishes the wandb run.
+                self.trainer.flush_pending_metrics()
                 self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")

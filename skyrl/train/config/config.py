@@ -39,9 +39,37 @@ class BaseConfig(ABC):
 
 
 @dataclass
+class DataLoaderConfig(BaseConfig):
+    num_workers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Prompt DataLoader worker processes. Default of None auto-derives the value "
+                "(0 with the inference HTTP endpoint, else 8). Set 0 for in-process loading "
+                "that never respawns workers at epoch boundaries."
+            )
+        },
+    )
+    persistent_workers: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Keep DataLoader workers alive across epochs instead of respawning them at "
+                "every epoch boundary. Setting this requires `num_workers > 0`"
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.num_workers is not None and self.num_workers < 0:
+            raise ValueError(f"data.dataloader.num_workers must be None or >= 0, got {self.num_workers}.")
+
+
+@dataclass
 class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
     val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +298,10 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     """When True, training and inference share the same GPUs."""
     colocate_policy_ref: bool = True
+    """When colocate_all is False, True (default) still colocates policy and ref
+    on the same GPUs (one shared placement group). Set this item to False to place
+    policy and ref on separate GPUs (their own placement groups); needed when
+    a large model's policy and ref shards can't both fit on one GPU."""
     policy_num_nodes: int = 1
     policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
@@ -556,6 +588,13 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    use_expandable_segments: bool = False
+    """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
+    processes to reduce fragmentation. Independent of the trainer-side
+    ``TrainerConfig.use_expandable_segments``. Default ``False``: it is a safe opt-in
+    on vLLM >= 0.20.1, where the CuMemAllocator auto-disables expandable segments around
+    its sleep/wake memory pool. On older vLLM, sleep mode + expandable segments is a hard
+    error, so leave this off."""
     max_num_seqs: int = 1024
     remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False
@@ -715,6 +754,11 @@ class MTPConfig(BaseConfig):
 @dataclass
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
+    use_expandable_segments: bool = True
+    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training
+    workers to reduce GPU memory fragmentation across the offload/backload and
+    forward/backward cycles. See ``InferenceEngineConfig`` for the
+    equivalent inference-engine knob."""
     sequence_parallel_backend: str = "ulysses"
     strategy: str = "fsdp"
     policy: PolicyConfig = field(default_factory=PolicyConfig)
@@ -749,6 +793,23 @@ class TrainerConfig(BaseConfig):
     critic_mini_batch_size: int = 256
     micro_train_batch_size_per_gpu: int = 1
     micro_forward_batch_size_per_gpu: int = 1
+    max_tokens_per_microbatch: int = -1
+    """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches 
+    are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a 
+    fixed sample count, and micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu are ignored.
+    -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
+    Applies to both forward and training micro-batching.
+
+    NOTE: this is a *soft* cap. Sequences are never split across microbatches, so a single sequence
+    longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
+    cap (no error, no truncation). The true peak microbatch size is therefore
+    ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    recompute_old_logprobs_per_minibatch: bool = True
+    """When True, recomputes policy/ref model logprobs (and critic values) per mini-batch using
+    the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.
+    This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
+    what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
+    first inner step."""
     update_ref_every_epoch: bool = False
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention)."""
@@ -764,6 +825,8 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    tags: Optional[List[str]] = None
+    """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
@@ -900,6 +963,15 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        if self.data.dataloader.num_workers is None:
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            self.data.dataloader.num_workers = 0 if self.generator.inference_engine.enable_http_endpoint else 8
+        if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:
+            raise ValueError(
+                "data.dataloader.persistent_workers requires num_workers > 0, but it was either"
+                " set explicitly to 0 or forced to 0 by the inference HTTP endpoint."
+            )
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side

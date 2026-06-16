@@ -16,7 +16,7 @@ two iteration sequences are identical (same length and same per-position
 ``name``).
 
 Run with::
-    uv run --isolated --extra megatron --extra dev pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_extractor_consistency.py
+    uv run --isolated --extra megatron --extra dev pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_extractor_consistency.py
 
 """
 
@@ -100,6 +100,9 @@ def _make_ref_cfg(model_name: str) -> SkyRLTrainConfig:
         cfg.trainer.ref.megatron_config.transformer_config_kwargs["mtp_num_layers"] = 0
     if is_moe:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
+    if "qwen3.5" in model_name.lower():  # use LM only path for qwen3.5
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     validate_cfg(cfg)
     return cfg
 

@@ -62,8 +62,18 @@ All training models (policy, critic, reward, reference) share the same GPUs.
 
 The policy and critic models are not colocated, but fine-grained placement of the reference and reward models can be controlled with two additional parameters:
 
-- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`) or place them on separate GPUs (`false`)
+- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`, the default) or place them on separate GPUs (`false`)
 - `trainer.placement.colocate_critic_reward`: Colocate critic and reward models (`true`) or place them on separate GPUs (`false`)
+
+<Callout type="warn">
+`colocate_all=false` does not separate the policy and reference models by itself.
+With the default `colocate_policy_ref=true`, policy and reference run on the same physical GPUs
+(one shared placement group): every GPU holds one policy shard and one reference shard at the same time,
+and their combined size must fit in that GPU's memory.
+To give policy and reference their own GPUs
+(separate nodes with whole-node bundles), set `colocate_policy_ref=false`;
+also consider `trainer.policy.fsdp_config.cpu_offload=true`.
+</Callout>
 
 ## Hardware Configuration
 

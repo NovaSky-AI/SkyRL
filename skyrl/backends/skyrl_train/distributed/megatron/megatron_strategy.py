@@ -526,11 +526,23 @@ class MegatronStrategy(DistributedStrategy):
 
         # All ranks call into bridge.
         with io.local_work_dir(output_dir) as work_dir:
-            bridge.save_hf_weights(model.actor_module, work_dir)
+            # strict=False is required for partial exports (e.g. language_model_only
+            # on a Qwen3.5 VL checkpoint, whose shards co-mingle vision and text
+            # weights): the bridge writes a shard only once all its keys are yielded,
+            # so strict=True silently writes zero weights. No-op for complete exports.
+            bridge.save_hf_weights(model.actor_module, work_dir, strict=False)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
+                # Preserve any custom modeling artifacts (e.g. modeling_*.py,
+                # special_tokens_map.json, auto_map-referenced files) that
+                # trust_remote_code models depend on. save_hf_configs below
+                # overwrites config.json/tokenizer files with the strategy's
+                # current view, but save_artifacts is required to copy the
+                # custom Python modules and other artifacts that
+                # save_pretrained() alone does not emit.
+                bridge.hf_pretrained.save_artifacts(work_dir)
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.print(f"Successfully saved HF config and tokenizer to {output_dir}")
 

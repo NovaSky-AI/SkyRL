@@ -237,6 +237,51 @@ class WorkerDispatch:
 
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
+    def forward_from_staged(
+        self,
+        model: str,
+        chunk_refs: List[ObjectRef],
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ) -> WorkerOutput:
+        """Run a forward pass using pre-staged per-DP chunks.
+
+        Consumes per-DP chunks already placed in the object store by :meth:`stage_data`, so
+        serialization of the per-mini-batch chunks is amortized off the dispatch critical path
+        across mini-batches (see :meth:`forward_backward_from_staged`). The chunks are produced
+        exactly as in :meth:`stage_data`, so the per-rank partition (and thus the microbatch packing)
+        matches what ``forward_backward`` sees for the same mini-batch.
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            chunk_refs: Pre-staged ObjectRefs, one per DP rank (from ``stage_data``)
+            loss_fn: Optional resolved loss function name. When set, the worker computes
+                     loss + per-sample outputs without backward (no_grad).
+            loss_fn_config: Optional config overrides for the loss function.
+            model_id: Optional Tinker model_id; selects the LoRA adapter before the forward.
+
+        Returns:
+            :class:`WorkerOutput` aggregated across DP ranks.
+        """
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
+        self.ensure_active_adapter(model, model_id)
+
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = MeshDispatch.dispatch_from_staged(
+            self._actor_groups[model].actor_infos,
+            "forward",
+            chunk_refs=chunk_refs,
+            **kwargs,
+        )
+        results = ray.get(refs)
+        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
+
     def stage_data(
         self,
         model: str,
