@@ -890,11 +890,20 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/finish_session"
         try:
             session = await self._get_session()
-            async with session.post(url, params={"session_id": str(session_id)}) as resp:
+            # Bound this best-effort cleanup call: the shared session has no
+            # timeout (total=None), so an unresponsive router would otherwise
+            # hang the trajectory's finally block forever and wedge the loop.
+            async with session.post(
+                url,
+                params={"session_id": str(session_id)},
+                timeout=aiohttp.ClientTimeout(total=10.0),
+            ) as resp:
                 # Drain the body so the keep-alive connection can be reused.
                 await resp.read()
                 if resp.status >= 400:
                     logger.warning(f"finish_session for session_id={session_id!r} returned HTTP {resp.status}")
+        except asyncio.TimeoutError:
+            logger.warning(f"finish_session for session_id={session_id!r} timed out after 10s (router unresponsive)")
         except Exception as e:
             logger.warning(f"finish_session for session_id={session_id!r} failed: {e}")
 
