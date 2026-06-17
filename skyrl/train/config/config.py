@@ -479,10 +479,6 @@ class FullyAsyncConfig(BaseConfig):
     Set to False for fully async training to reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache)."""
 
-    @property
-    def skip_kv_cache_reset(self) -> bool:
-        return not self.clear_kv_cache_on_weight_sync
-
 
 # ---------------------------------------------------------------------------
 # Sampling / Chat Template
