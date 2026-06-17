@@ -372,6 +372,22 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+# DPPO parameters (only used when policy_loss_type="dppo")
+# See: https://arxiv.org/abs/2602.04879
+@dataclass
+class DPPOConfig(BaseConfig):
+    dppo_type: str = "binary_tv"
+    """DPPO divergence variant: ``"binary_tv"`` or ``"binary_kl"``. Used if ``policy_loss_type="dppo"``."""
+    delta_low: float = 0.2
+    """Divergence threshold for negative advantages (0.2 for TV, 0.05 for KL recommended)."""
+    delta_high: float = 0.2
+    """Divergence threshold for positive advantages (0.2 for TV, 0.05 for KL recommended)."""
+
+    def __post_init__(self):
+        if self.dppo_type not in ["binary_tv", "binary_kl"]:
+            raise ValueError("Invalid DPPO type")
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -453,6 +469,8 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
+    dppo: DPPOConfig = field(default_factory=DPPOConfig)
+    """Only used when ``policy_loss_type="dppo"``."""
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction.
     Must be set explicitly for that reduction mode; otherwise can remain ``None``."""
@@ -474,6 +492,10 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    clear_kv_cache_on_weight_sync: bool = True
+    """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
+    Set to False for fully async training to reuse KV cache from stale policies during generation
+    (avoids recomputation at the cost of using slightly stale KV cache)."""
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +718,9 @@ class TrainerConfig(BaseConfig):
     """Path for exported artifacts (HF models, debug dumps, etc.)."""
     bf16: bool = True
     epochs: int = 1
+    max_training_steps: Optional[int] = None
+    """If set, stop training after this many steps regardless of epochs or dataset size.
+    Useful for CI smoke tests and quick validation runs."""
     update_epochs_per_batch: int = 1
     """Number of gradient update passes over each training batch."""
     train_batch_size: int = 1024

@@ -195,6 +195,8 @@ class RayPPOTrainer:
         if self.train_dataset is not None:
             self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
             self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+            if self.cfg.trainer.max_training_steps is not None:
+                self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
     @torch.no_grad()
     async def eval(self) -> Dict[str, float]:
@@ -270,6 +272,7 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
+        stop_training = False
 
         # booleans tracking whether we save ckpts
         # as well as hf model at step end
@@ -453,9 +456,20 @@ class RayPPOTrainer:
 
                 self.global_step += 1
 
+                if (
+                    self.cfg.trainer.max_training_steps is not None
+                    and self.global_step > self.cfg.trainer.max_training_steps
+                ):
+                    logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                    stop_training = True
+                    break
+
                 del training_input, generator_output
 
             self._fire("on_epoch_end")
+
+            if stop_training:
+                break
 
         pbar.close()
         if self.colocate_all:
