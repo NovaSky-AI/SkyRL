@@ -33,12 +33,7 @@ jobs:
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models') &&
-        (
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR'
-        )
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models')
       )
     runs-on: ubuntu-latest
     defaults:
@@ -60,7 +55,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install basic dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       # Run tests
       - name: GPU tests
         env:
@@ -69,5 +64,5 @@ jobs:
         run: |
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-ci-megatron-models-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml --name "$JOB_NAME" --timeout 1000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 1000
+          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml --name "$JOB_NAME" --timeout 1500
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 1500

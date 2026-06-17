@@ -36,7 +36,7 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -513,6 +513,30 @@ def preprocess_packed_seqs(
         return input_ids_rmpad.unsqueeze(0), packed_seq_params
     else:
         return input_ids, packed_seq_params
+
+
+def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the model packs sequences inside its own ``forward``.
+
+    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
+    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
+    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
+    mbridge / Qwen3VL is not importable, so other models are unaffected.
+    """
+    try:
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
+            Qwen3VLModel,
+        )
+    except ImportError:
+        return False
+
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    for chunk in chunks:
+        unwrapped = unwrap_model(chunk)
+        unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
+        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
+            return True
+    return False
 
 
 def remove_left_padding(

@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
+    model_packs_sequences_internally,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -87,6 +88,18 @@ class MegatronModelWrapper:
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
         self.is_vlm = is_vlm
+        # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
+        # sequences inside their own forward; SkyRL sample packing would then
+        # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
+        # use language_model_only=True (native GPTModel GDN path) to pack.
+        if self.remove_microbatch_padding and model_packs_sequences_internally(self.actor_module):
+            raise ValueError(
+                "remove_microbatch_padding=True (sample packing) is not supported for models that "
+                "pack sequences inside their own forward (e.g. the Qwen3.5 VL Qwen3VLModel): it "
+                "double-packs and corrupts the GatedDeltaNet cu_seqlens. Set "
+                "trainer.policy.language_model_only=True to route Qwen3.5 to the native GPTModel GDN "
+                "packing path, or set trainer.remove_microbatch_padding=False."
+            )
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95

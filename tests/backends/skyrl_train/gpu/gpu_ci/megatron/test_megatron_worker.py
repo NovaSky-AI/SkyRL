@@ -34,7 +34,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 
-MODEL_NAME = "Qwen/Qwen3.5-0.8B"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
@@ -486,7 +486,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         ("policy", 4, 1, 1, 4, 1, 4, True, False, True, None),
     ],
     ids=[
-        "tp2_pp2_policy_seq_packing_x",
+        "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",

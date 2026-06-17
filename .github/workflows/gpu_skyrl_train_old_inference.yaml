@@ -36,12 +36,7 @@ jobs:
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'run_train_old_inference_gpu_ci') &&
-        (
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR'
-        )
+        contains(github.event.pull_request.labels.*.name, 'run_train_old_inference_gpu_ci')
       )
     runs-on: ubuntu-latest
     defaults:
@@ -63,7 +58,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install basic dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       # Run tests
       - name: GPU tests
         env:

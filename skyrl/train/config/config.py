@@ -696,6 +696,9 @@ class TrainerConfig(BaseConfig):
     """Path for exported artifacts (HF models, debug dumps, etc.)."""
     bf16: bool = True
     epochs: int = 1
+    max_training_steps: Optional[int] = None
+    """If set, stop training after this many steps regardless of epochs or dataset size.
+    Useful for CI smoke tests and quick validation runs."""
     update_epochs_per_batch: int = 1
     """Number of gradient update passes over each training batch."""
     train_batch_size: int = 1024

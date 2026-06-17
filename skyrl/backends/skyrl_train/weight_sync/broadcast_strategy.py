@@ -230,6 +230,12 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         if rank == 0:
             assert self._model_update_group is not None, "Rank 0 must have model_update_group"
 
+        # Bracket the whole sync with one layerwise-reload initialize/finalize so
+        # per-chunk reloads don't restore non-chunk layers; see `vllm_worker.py.WorkerWrap` docs
+        if rank == 0:
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+        torch.distributed.barrier()
+
         # All ranks iterate through chunks (weight extraction may involve collective ops)
         for chunk in chunks:
             # Only rank 0 sends request to inference engines
@@ -263,6 +269,10 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 await update_weight_task
 
             torch.distributed.barrier()
+
+        if rank == 0:
+            await self._inference_client.finish_weight_update()
+        torch.distributed.barrier()
 
     def teardown(self) -> None:
         """Destroy the process group used for weight transfer."""
