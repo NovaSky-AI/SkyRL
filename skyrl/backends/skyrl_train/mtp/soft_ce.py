@@ -1,14 +1,9 @@
 # Explicit draft-head losses for decoupled Multi-Token Prediction (MTP).
 #
-# Ported from NeMo-RL's ``DraftCrossEntropyLossFn`` and the ``DRAFT`` branch of
-# ``prepare_loss_input``:
-#   https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/algorithms/loss/loss_functions.py
-#   https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/algorithms/loss/utils.py
-#
-# The soft cross-entropy matches the forward-KL student gradient
-# (``softmax(student) - softmax(teacher)``) and is the default supervision for
-# the draft head: the teacher is the *policy's own* next-token distribution
-# (detached), so training the draft head never pulls on the policy trunk.
+# The default soft cross-entropy gives the forward-KL student gradient
+# (``softmax(student) - softmax(teacher)``); the teacher is the policy's own detached next-token
+# distribution, so training the draft head never pulls on the policy trunk. The draft-loss design
+# is inspired by NeMo-RL (https://github.com/NVIDIA-NeMo/RL), heavily adapted for large-vocab memory.
 
 from typing import Optional
 
@@ -24,54 +19,25 @@ def build_teacher_logits(
     mtp_layer_number: int = 0,
     detach: bool = True,
 ) -> torch.Tensor:
-    """Build the soft-distillation teacher for a given MTP depth.
+    """Build the soft-distillation teacher for MTP depth ``k`` (0-indexed).
 
-    The policy's main logits at position ``t`` are the model's distribution over
-    ``seq[t + 1]``. MTP layer ``k`` (0-indexed) predicts ``seq[t + k + 2]`` at
-    position ``t``, whose teacher distribution (conditioned on the verified
-    prefix) is the main model's distribution at position ``t + k + 1`` — i.e.
-    ``main_logits`` rolled left by ``k + 1``. This generalizes NeMo-RL's
-    single-step roll (its Eagle draft is one layer, rolled by ``-1``).
-
-    Args:
-        main_logits: ``[batch, seq, vocab]`` policy logits.
-        mtp_layer_number: 0-indexed MTP depth ``k``.
-        detach: Detach the teacher so no gradient flows back into the policy
-            trunk (the decoupling that makes this "draft" training).
-
-    Returns:
-        ``[batch, seq, vocab]`` teacher logits, rolled and (optionally) detached.
-        The wrapped-around tail positions are invalid; the caller's loss mask
-        must zero them out (see ``shift_mask_for_mtp``).
+    Depth ``k`` predicts ``seq[t+k+2]`` at position ``t``, whose teacher distribution is the policy's
+    own distribution at ``t+k+1`` — i.e. ``main_logits`` rolled left by ``k+1`` (and detached, so no
+    gradient reaches the trunk). The wrapped tail positions are invalid; the caller's loss mask zeros
+    them (see ``shift_mask_for_mtp``).
     """
     teacher = main_logits.detach() if detach else main_logits
     return torch.roll(teacher, shifts=-(mtp_layer_number + 1), dims=1)
 
 
 def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.Tensor:
-    """Roll a ``[batch, seq]`` loss mask to align with an MTP teacher/label.
+    """Roll a ``[batch, seq]`` loss mask to align with an MTP teacher/label at depth ``k``.
 
-    MTP depth ``k`` supervises position ``t`` against a target read at ``t + k + 1``
-    (the policy distribution / label for ``seq[t + k + 2]``). For that supervision to
-    be valid, BOTH the *source* position ``t`` (where the draft head produced its
-    logits) and the *target* position ``t + k + 1`` (where the teacher/label is read)
-    must be real tokens. We therefore require ``mask[t] AND mask[t + shift]``:
-
-    * ``rolled = roll(mask, -shift)`` is the target-side validity ``mask[t + shift]``,
-      with the wrapped tail zeroed (no valid target past the sequence end).
-    * multiplying by the original ``mask`` re-applies the source-side validity.
-
-    The source-side ``AND`` is what makes this correct under **left padding** (and any
-    padding layout): rolling a left-padded mask left turns the last pad slot into a
-    ``1`` (its target is the first real token), which would otherwise pull a de-padded
-    *zero-logit* (→ uniform) pad position into the loss and inflate it by up to
-    ``log(V)`` per leaked position. Re-ANDing the source mask drops those positions, so
-    the loss no longer depends on the de-pad zero-fill happening to be masked out.
-
-    Note: each de-padded row holds a single sequence, so the one wrapped boundary is
-    handled by zeroing ``rolled``'s tail. If multiple sequences are ever packed into a
-    single row, per-sequence boundaries would need ``roll_tensor``-style cu_seqlens
-    handling here.
+    Supervision at position ``t`` is valid only if both the source ``t`` and the target ``t+shift``
+    are real tokens, so we AND ``mask[t]`` with ``roll(mask, -shift)`` (tail zeroed). Re-ANDing the
+    source mask is what keeps left padding correct: rolling a left-padded mask left would otherwise
+    unmask a pad slot whose de-padded zero-logit (uniform) inflates the loss by up to ``log(V)``.
+    Assumes one sequence per row; packing multiple would need cu_seqlens-aware boundaries.
     """
     shift = mtp_layer_number + 1
     rolled = torch.roll(mask, shifts=-shift, dims=1)
@@ -86,16 +52,11 @@ def unpadded_vocab_shard_width(
 ) -> int:
     """Width of this rank's vocab shard excluding Megatron's padded tail.
 
-    When the global vocab is padded to divide across TP (``should_pad_vocab``), the padding occupies
-    the tail of the last rank(s)' shards (the vocab is partitioned contiguously). Padded weight rows
-    are never trained (zero-filled by the HF conversion), so their logits must not enter the draft
-    loss: in the teacher softmax they leak ~uniform probability mass, and in the teacher top-k they
-    can steal slots from real tokens. Callers slice ``logits[..., :width]`` — a view, so autograd
-    zero-fills the padded tail's gradient and per-rank widths may differ (the loss collectives only
-    reduce ``[..., 1]``/``[...]``-shaped tensors, never the vocab dim).
-
-    Returns ``vocab_shard_width`` unchanged when ``true_vocab_size`` is ``None`` (unknown) or the
-    shard holds no padding.
+    When the vocab is padded to divide across TP (``should_pad_vocab``), the padding lands in the tail
+    of the last rank(s)' shards. Those rows are never trained, so their logits must not enter the draft
+    loss (they leak ~uniform mass into the teacher softmax / top-k). Callers slice ``logits[..., :width]``
+    (a view; autograd zero-fills the dropped tail's grad). Returns the full width when ``true_vocab_size``
+    is ``None`` or the shard holds no padding.
     """
     if true_vocab_size is None:
         return vocab_shard_width
@@ -104,10 +65,8 @@ def unpadded_vocab_shard_width(
 
 
 def _vocab_parallel_softmax(vocab_parallel_logits, group):
-    """Global softmax over a TP-sharded vocab dim. Allocates a single full-vocab output tensor (the
-    ``- logits_max`` subtraction) and does the rest in place on it; the input is NOT mutated (so it is
-    safe even when the caller passes float32 logits, where ``.float()`` is a no-op). Mirrors NeMo-RL's
-    ``_compute_distributed_softmax``."""
+    """Global softmax over a TP-sharded vocab dim. Allocates one full-vocab output (the ``- logits_max``
+    subtraction) and does the rest in place on it; the input is not mutated."""
     logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
     exp_logits = (vocab_parallel_logits - logits_max).exp_()  # new buffer, then in place
@@ -118,10 +77,8 @@ def _vocab_parallel_softmax(vocab_parallel_logits, group):
 
 def _vocab_parallel_log_softmax(vocab_parallel_logits, group):
     """Global log-softmax over a TP-sharded vocab dim. Uses ``torch.logsumexp`` (a fused
-    ``[.,.,V]->[.,.,1]`` reduction) so it never materializes a full-vocab ``exp`` temporary -- the key
-    memory fix at a 248K vocab, where that temp is multiple GiB (NeMo-RL's
-    ``_compute_distributed_log_softmax`` allocates it via an explicit ``.exp().sum()``). Allocates one
-    full-vocab output buffer; the input is NOT mutated."""
+    ``[.,.,V]->[.,.,1]`` reduction) so it never materializes a full-vocab ``exp`` temporary -- multiple
+    GiB at a 248K vocab. Allocates one full-vocab output buffer; the input is not mutated."""
     logits_max = torch.amax(vocab_parallel_logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=group)
     shifted = vocab_parallel_logits - logits_max  # new buffer (input untouched); values now <= 0
@@ -132,16 +89,14 @@ def _vocab_parallel_log_softmax(vocab_parallel_logits, group):
 
 
 class _VocabParallelSoftCrossEntropy(torch.autograd.Function):
-    """Soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v`` when
-    ``student``/``teacher`` logits are sharded across the vocab (TP) dim.
+    """Soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v`` for vocab-(TP)-sharded
+    logits.
 
-    Memory-lean port of NeMo-RL's ``DistributedCrossEntropy`` (``nemo_rl/distributed/model_utils.py``):
-    the per-token cross-entropy is a single ``einsum`` (no full-vocab product tensor) and the student
-    log-prob buffer is reused **in place** for the backward softmax, so only two full-vocab tensors
-    are kept (vs ~6-8 in the naive form -- the difference is several GiB at a 248K vocab). Forward
-    all-reduces across the TP group so the softmax normalizers and the teacher/student dot are over
-    the *global* vocab. Backward returns the classic cross-entropy gradient
-    ``softmax(student) - softmax(teacher)`` (teacher is a detached target; no gradient flows to it).
+    Memory-lean: the per-token CE is a single ``einsum`` (no full-vocab product tensor) and the student
+    log-prob buffer is reused in place as the backward softmax, so only two full-vocab tensors are kept
+    (vs ~6-8 naively -- several GiB at a 248K vocab). Forward all-reduces across the TP group so the
+    normalizers and the dot are over the global vocab; backward returns ``softmax(student) -
+    softmax(teacher)`` (teacher detached, no gradient).
     """
 
     @staticmethod
@@ -255,24 +210,15 @@ def draft_soft_ce(
 
 
 class _VocabParallelTopkSoftCE(torch.autograd.Function):
-    """Top-k approximation of the soft cross-entropy ``-sum_v softmax(teacher)_v * log_softmax(student)_v``
-    that never materializes a full-vocab softmax.
+    """Top-k approximation of the soft cross-entropy that never materializes a full-vocab softmax.
 
-    Only the teacher's top-k tokens are distilled, with teacher and student renormalized over that set.
-    Memory is ``O(seq * k)`` instead of ``O(seq * vocab)`` -- it fits at a 248K vocab *and* avoids the
-    allocator fragmentation that the full-vocab / chunked paths cause.
-
-    Parallelism: the vocab is sharded over the tensor-parallel ``group``. We take **each rank's local
-    top-k** of its shard and reconcile the softmax normalizers and the per-token cross-entropy across
-    the group with ``all_reduce`` (MAX for the stable-softmax shift, SUM for the denominators and the
-    loss). No ``all_gather`` / global-index gather is needed because student and teacher share the same
-    vocab partition, so a rank's local top-k indices address both. This works for ANY tensor-parallel
-    size and is correct across nodes (the collectives run over the configured ``group``); ``group=None``
-    / world-size 1 is the single-device path. The distilled set is the union of the per-rank top-k
-    (<= ``k * tp_size`` tokens) -- a benign, richer signal at larger TP, not a correctness issue.
-
-    Backward is manual (scatter the ``softmax(student) - softmax(teacher)`` gradient back to this rank's
-    own top-k columns), so no gradient flows through the collectives.
+    Only the teacher's top-k tokens are distilled (teacher and student renormalized over that set), so
+    memory is ``O(seq*k)`` instead of ``O(seq*vocab)`` -- fits at a 248K vocab without fragmentation.
+    Under TP, each rank takes its shard's local top-k and reconciles the normalizers and per-token CE
+    across the ``group`` (MAX for the stable-softmax shift, SUM for the rest); no all-gather is needed
+    since student and teacher share the vocab partition. The distilled set is the union of per-rank
+    top-k (<= ``k*tp_size``) -- a benign, richer signal. Backward scatters the
+    ``softmax(student) - softmax(teacher)`` gradient to this rank's own top-k columns.
     """
 
     @staticmethod

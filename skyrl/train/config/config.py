@@ -223,57 +223,33 @@ class MegatronConfig(BaseConfig):
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
     mtp_num_layers: Optional[int] = None
-    """Number of Multi-Token Prediction (MTP) layers/heads to build on the model.
-
-    - ``None`` (default): honor the model's own HF config (``num_nextn_predict_layers``). For models
-      that ship MTP heads (e.g. GLM-4.7-Flash / DeepSeek-V3) this enables and trains them; for models
-      without MTP heads it is a no-op.
-    - An ``int``: explicitly override (e.g. ``0`` to force-disable MTP even for MTP-capable models).
-
-    When MTP layers are present, SkyRL adds the Megatron MTP loss to the training step so the heads
-    track the updated policy, and the heads are synced to vLLM for speculative decoding (set
-    ``generator.inference_engine.speculative_config`` accordingly)."""
+    """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
+    (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
+    trained with the decoupled draft loss and synced to vLLM for speculative decoding."""
     mtp_loss_weight: float = 0.1
-    """Weight ``w`` of the decoupled MTP/draft loss in ``policy_loss + w * draft_loss``.
-
-    SkyRL trains the native MTP heads with an *explicit* loss on *detached* trunk hidden states (so
-    the draft gradient never pulls on the policy backbone) and adds it to the policy loss with this
-    weight, instead of Megatron's opaque in-forward MTP backward-scale. Only used when MTP layers
-    are active."""
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss trains the
+    MTP heads on *detached* trunk hidden states, so it never pulls on the policy backbone. Only used
+    when MTP heads are active."""
     mtp_loss_type: str = "soft_ce"
-    """Supervision for the MTP/draft head:
-
-    - ``"soft_ce"`` (default): soft cross-entropy distillation against the policy's own detached,
-      rolled next-token distribution (matches NeMo-RL's draft training).
-    - ``"hard_ce"``: standard next-token cross-entropy against the ground-truth future tokens
-      (classic MTP-pretraining objective)."""
+    """Draft-head supervision: ``"soft_ce"`` distills against the policy's own detached, rolled
+    next-token distribution; ``"hard_ce"`` is standard next-token cross-entropy."""
     mtp_detach_trunk: bool = True
-    """If True (default, matches NeMo-RL), detach the trunk hidden states feeding the MTP head so
-    only the MTP-head parameters receive the draft gradient. If False, let the draft gradient flow
-    back into the policy backbone (closer to Megatron's native coupled MTP)."""
+    """Detach the trunk hidden states feeding the MTP head so only the head's parameters get the draft
+    gradient. If False, the gradient flows back into the policy backbone (Megatron's coupled MTP)."""
     mtp_detach_shared_output: bool = True
-    """If True (default), fully isolate the shared embedding/output weights from the draft gradient:
-    the draft-loss projection uses a detached output weight AND the MTP block's re-embedding of the
-    rolled input ids is detached, so only the MTP-head parameters (enorm/hnorm/eh_proj/layer/final
-    norm) train. This matters for tied-embedding models (e.g. Qwen3.5), where a trainable shared
-    head means the draft loss directly nudges the policy's own logits every step. Matches slime's
-    MTP-RL training (only ``.mtp.`` params receive gradients). Set False for NeMo-RL's behaviour
-    (shared embedding/head also trained by the draft loss)."""
+    """Also isolate the shared embedding/output weights from the draft loss (detach both the output
+    projection and the MTP block's re-embedding), so only the ``.mtp.`` head params train. Matters for
+    tied-embedding models (e.g. Qwen3.5), where a trainable shared head lets the draft loss nudge the
+    policy's own logits. Set False to train the shared embedding/head with the draft loss too."""
     mtp_loss_chunk_size: Optional[int] = 1024
-    """Sequence-chunk size for the decoupled MTP/draft loss. The draft loss materializes full
-    ``[batch, seq, vocab]`` softmax tensors; at large vocab (e.g. Qwen3.5's 248K) computing the whole
-    response at once OOMs. Chunking the loss over the sequence (with gradient checkpointing) bounds
-    peak memory to one chunk's vocab tensors -- numerically identical, only activation memory differs.
-    ``None`` disables chunking (whole sequence at once). Lower it if the draft loss still OOMs.
-    Ignored when ``mtp_loss_topk`` is set (top-k never materializes the full vocab, so no chunking)."""
+    """Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory at
+    large vocab (e.g. Qwen3.5's 248K, where the full-sequence softmax OOMs). Numerically identical to
+    no chunking. ``None`` disables it; ignored when ``mtp_loss_topk`` is set."""
     mtp_loss_topk: Optional[int] = None
-    """If set, use a **top-k** approximation of the soft-CE draft loss: distill only the teacher's top-k
-    tokens (renormalized over that set) instead of the full vocabulary. Memory is ``O(seq*k)`` instead
-    of ``O(seq*vocab)``, which both fits and avoids allocator fragmentation at large vocab (e.g.
-    Qwen3.5's 248K) -- where even the chunked full-vocab loss OOMs/fragments. Scales to any
-    tensor-parallel size (incl. cross-node): the per-rank top-k is reconciled across the TP group with
-    all-reduce. Only applies to ``mtp_loss_type="soft_ce"``. ``None`` uses the exact full-vocab loss.
-    Typical: 64-128 (acceptance is governed by the top tokens, so the dropped tail is benign)."""
+    """If set, use a top-k approximation of the soft-CE draft loss: distill only the teacher's top-k
+    tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
+    without fragmentation. Reconciled across the TP group, so it scales to any parallel size. Soft-CE
+    only; ``None`` uses the exact full-vocab loss. Typical: 64-128."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -617,12 +593,10 @@ class InferenceEngineConfig(BaseConfig):
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     speculative_config: Optional[Dict[str, Any]] = None
-    """Speculative-decoding config passed through to vLLM (``AsyncEngineArgs.speculative_config``).
-    Use this to enable Multi-Token Prediction (MTP) draft decoding for faster rollout, e.g.
-    ``{"method": "mtp", "num_speculative_tokens": 1}``. With ``method="mtp"`` vLLM loads the MTP
-    heads from the *same* policy checkpoint, so SkyRL's weight sync keeps the draft in sync with
-    the trained policy (requires ``policy.megatron_config.mtp_num_layers`` > 0 on the training side
-    for the heads to actually be trained). ``None`` disables speculative decoding."""
+    """Speculative-decoding config passed through to vLLM (``AsyncEngineArgs.speculative_config``),
+    e.g. ``{"method": "mtp", "num_speculative_tokens": 1}`` for MTP draft decoding. With
+    ``method="mtp"`` vLLM loads the MTP heads from the policy checkpoint, kept in sync by weight sync
+    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train them). ``None`` disables it."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None
@@ -719,27 +693,19 @@ class EnvironmentConfig(BaseConfig):
 
 @dataclass
 class MTPConfig(BaseConfig):
-    """High-level Multi-Token Prediction (MTP) control.
+    """High-level, single user-facing knob for Multi-Token Prediction (MTP).
 
-    This is the single user-facing knob for MTP. When ``enabled``, ``validate_cfg`` propagates it to
-    the training side (``policy.megatron_config.mtp_*`` — train the model's native MTP heads with a
-    decoupled draft loss; the head count comes from the checkpoint's own HF config, overridable via
-    ``policy.megatron_config.mtp_num_layers``) and the inference side
-    (``generator.inference_engine.speculative_config`` — vLLM MTP speculative decoding with
-    ``num_speculative_tokens`` draft tokens per step). The trained heads are kept in sync with the
-    policy via weight sync, so the draft tracks the updated policy.
-
-    The trunk hidden states and embeddings feeding the heads are always detached (decoupled) — that
-    is intrinsic to draft/Eagle training, not a tunable, so it is not exposed here."""
+    When ``enabled``, ``validate_cfg`` propagates it to the training side
+    (``policy.megatron_config.mtp_*``) and the inference side
+    (``generator.inference_engine.speculative_config``), and weight sync keeps the heads tracking the
+    policy. The trunk hidden states feeding the heads are always detached, so it is not a tunable."""
 
     enabled: bool = False
     """Whether to train MTP draft heads and use them for speculative decoding."""
     num_speculative_tokens: int = 1
-    """Draft depth: how many tokens vLLM speculates per decoding step. Decoupled from the number of
-    trained MTP heads — with a single-head checkpoint (Qwen3.5/Qwen3-Next/DeepSeek-V3 all ship one),
-    depths > 1 reuse that head autoregressively at draft time (vLLM never indexes beyond head 0).
-    Expect per-position acceptance to decay with depth, since the head is trained at depth 1 on true
-    trunk hidden states but consumes its own outputs at deeper draft positions."""
+    """Draft depth vLLM speculates per step, independent of the trained head count. Single-head
+    checkpoints (Qwen3.5/Qwen3-Next/DeepSeek-V3) reuse the one head autoregressively at depths > 1;
+    expect acceptance to decay with depth (the head is trained at depth 1)."""
     loss_type: str = "soft_ce"
     """``"soft_ce"`` (distill against the policy's own next-token distribution) or ``"hard_ce"``."""
     loss_weight: float = 0.1

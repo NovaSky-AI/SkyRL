@@ -312,18 +312,11 @@ class MegatronModelWrapper:
         """
         forward_backward_func = get_forward_backward_func()
 
-        # ------------------------------------------------------------------
-        # Multi-Token Prediction (MTP) — decoupled draft-head training.
-        # ------------------------------------------------------------------
-        # If the model was built with native MTP heads (policy.megatron_config.mtp_num_layers),
-        # train them with an explicit, decoupled loss instead of Megatron's in-forward
-        # process_mtp_loss / MTPLossAutoScaler path. This is model-agnostic: any model that exposes a
-        # native MTP block works (GPTModel for DeepSeek/GLM/Qwen3-Next, MambaModel for Qwen3.5/
-        # NemotronH). We keep the heads running inside the model's forward (so we don't have to
-        # reconstruct rotary embeddings) but pass NO labels, so process_mtp_loss short-circuits and no
-        # MTP gradient is coupled onto the trunk. A forward hook captures the MTP block's hidden states
-        # (with its trunk input optionally detached) and we project + score them ourselves. Only
-        # active during training (not forward_only / logprob-only passes).
+        # Multi-Token Prediction (MTP): if the model was built with native MTP heads, train them with
+        # an explicit decoupled loss instead of Megatron's in-forward process_mtp_loss path. The heads
+        # still run inside the forward (so we reuse their rotary embeddings) but with NO labels, so
+        # process_mtp_loss short-circuits and no MTP gradient couples onto the trunk; a forward hook
+        # captures their hidden states (trunk input optionally detached) for us to score. Training only.
         model_config = get_model_config(self.actor_module[0])
         mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
         mcfg = self.cfg.policy.megatron_config
@@ -443,25 +436,19 @@ class MegatronModelWrapper:
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-            # --- Decoupled MTP / draft loss -------------------------------------------------
-            # Score the (detached-input) MTP head against the policy's own next-token
-            # distribution (soft CE) or the ground-truth future tokens (hard CE), over every real
-            # token. Returns a local masked-mean scalar that is folded into the loss below with the
-            # same reduction treatment as the KL/entropy aux terms.
+            # Decoupled MTP / draft loss: score the detached-input MTP head against the policy's own
+            # next-token distribution (soft CE) or the ground-truth future tokens (hard CE). The local
+            # masked-mean scalar is folded into the loss below like the KL/entropy aux terms.
             draft_loss = None
             student_logits_list = data.get("mtp_student_logits")
             if mtp_enabled and student_logits_list:
                 draft_mask = data["attention_mask"].to(logits.dtype)  # [batch, seq_len]
                 vocab_size_tp = logits.shape[-1]
-                # Undo the in-place temperature scaling so the teacher is the true policy
-                # distribution (student logits are produced unscaled).
+                # Undo the in-place temperature scaling so the teacher is the true policy distribution.
                 teacher_src = logits if temperature == 1.0 else logits * temperature
-                # Megatron may pad the global vocab to divide across TP (should_pad_vocab); padded
-                # weight rows are never trained, so their logits would leak probability mass into
-                # the teacher softmax and could steal teacher top-k slots. Slice this rank's shard
-                # to its true width (a view; autograd zero-fills the tail's grad). model_config here
-                # is the bridge provider, whose vocab_size is the true (unpadded) HF vocab; the
-                # vocab_start_index passed to hard CE keeps the PADDED stride (global column offset).
+                # Megatron may pad the vocab to divide across TP; padded rows are never trained, so slice
+                # this rank's shard to its true width to keep them out of the teacher (a view; autograd
+                # zero-fills the tail). hard CE's vocab_start_index keeps the padded (global) stride.
                 true_shard_width = unpadded_vocab_shard_width(
                     getattr(model_config, "vocab_size", None), vocab_size_tp, tp_rank
                 )
@@ -473,10 +460,8 @@ class MegatronModelWrapper:
                 for layer_idx, student_logits in enumerate(student_logits_list):
                     if true_shard_width != vocab_size_tp:
                         student_logits = student_logits[..., :true_shard_width]
-                    # The hard label for position t at depth k is the *token* seq[t+k+2] — one
-                    # position past the soft-CE teacher (a *distribution* read at t+k+1) — so its
-                    # validity mask needs one extra shift. Without it, the last in-range position of
-                    # every row trains against a zeroed/pad label.
+                    # Hard CE's target (token seq[t+k+2]) is one position past the soft-CE teacher
+                    # (a distribution at t+k+1), so its validity mask needs one extra shift.
                     mask_shift = layer_idx + 1 if mtp_loss_type == "hard_ce" else layer_idx
                     layer_mask = shift_mask_for_mtp(draft_mask, mask_shift)
                     if mtp_loss_type == "hard_ce":
@@ -493,11 +478,9 @@ class MegatronModelWrapper:
                         )
                     else:
                         if mtp_loss_topk:
-                            # Top-k draft loss: O(seq*k) memory, no full-vocab softmax (fits + avoids
-                            # fragmentation at large vocab). Reconciled across the TP group, so it
-                            # scales to any tensor-parallel size incl. cross-node. Pass the *un-rolled*
-                            # policy logits + roll_shift so top-k runs on the policy's own logits (no
-                            # ~[S, vocab] rolled-teacher copy); only the small [B, S, k] top-k is rolled.
+                            # Top-k draft loss: O(seq*k) memory, no full-vocab softmax. Pass the un-rolled
+                            # policy logits + roll_shift so top-k runs on them directly and only the small
+                            # [B, S, k] result is rolled (avoids a full rolled-teacher copy).
                             per_layer_losses.append(
                                 draft_soft_ce_topk(
                                     student_logits,
@@ -520,8 +503,8 @@ class MegatronModelWrapper:
                                 )
                             )
                 draft_loss = torch.stack(per_layer_losses).mean()
-                # Drop the dict's reference, this microbatch's autograd graph still holds the
-                # tensor for its own backward, after which it is freed instead of lingering.
+                # Drop the dict's reference so the tensor is freed after this microbatch's backward
+                # (the autograd graph still holds it until then) instead of lingering.
                 del data["mtp_student_logits"]
                 student_logits_list = None
 
@@ -770,18 +753,15 @@ class MegatronModelWrapper:
                 "cannot align against)."
             )
 
-            # Run the policy forward. When MTP is active, a pre-hook records the native MTP block's
-            # arguments (we pass NO labels, so the model's process_mtp_loss short-circuits and the
-            # main logits stay coupled to the trunk; MTPLossAutoScaler never runs).
+            # Run the policy forward; when MTP is active a pre-hook records the MTP block's arguments.
             student_hidden = None
             student_model = None
             with maybe_capture_mtp_hidden(
                 model,
                 mtp_enabled,
                 detach_trunk=mtp_detach_trunk,
-                # Full shared-weight isolation also requires detaching the MTP block's re-embedding
-                # of the rolled input ids (the second gradient path into the tied embedding/lm_head,
-                # next to the output projection handled in project_mtp_hidden_to_logits).
+                # Full shared-weight isolation also detaches the MTP block's re-embedding of the rolled
+                # input ids (the second gradient path into the tied embedding/lm_head).
                 detach_shared_embedding=mtp_detach_shared_output,
             ) as capture:
                 outputs = model(
@@ -799,9 +779,8 @@ class MegatronModelWrapper:
             if not self.remove_microbatch_padding:
                 outputs = depad(outputs)
 
-            # Project the decoupled MTP hidden states through the shared output layer and de-pad into
-            # the same [batch, seq_len, vocab/tp] layout as the main logits, so the draft loss can be
-            # scored against the policy's own distribution (or hard labels) in loss_func.
+            # Project the MTP hidden states through the shared output layer and de-pad to the main
+            # logits' [batch, seq_len, vocab/tp] layout, so loss_func can score the draft loss.
             if student_hidden is not None:
                 student_logits = project_mtp_hidden_to_logits(
                     student_hidden, student_model, detach_output_weight=mtp_detach_shared_output
