@@ -468,9 +468,9 @@ class FullyAsyncConfig(BaseConfig):
     """Knobs for fully async training.
     See https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training."""
 
-    max_staleness_steps: int = 0
+    max_staleness_steps: int = 4
     """Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*,
-    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness. Should be set > 0 for fully async training."""
+    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
