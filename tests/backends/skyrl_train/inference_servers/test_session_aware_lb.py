@@ -9,11 +9,8 @@ drive it through a ``RemoteInferenceClient``. They verify:
 - ``finish_session`` releases replica capacity so subsequent new sessions avoid
   the still-busy replica.
 
-The custom router must expose the ``sticky_least_loaded`` policy. Run
-with the locally-built wheel, e.g.::
-
-    uv run --with vllm-router@/root/router/dist/<wheel>.whl \
-        pytest tests/backends/skyrl_train/inference_servers/test_session_aware_lb.py
+Run:
+    uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/inference_servers/test_session_aware_lb.py
 
 If the installed ``vllm_router`` does not support the policy, the whole module is
 skipped.
