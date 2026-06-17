@@ -15,9 +15,9 @@ from skyrl.train.config import (
     AlgorithmConfig,
     CISPOConfig,
     ClipCovConfig,
+    DPPOConfig,
     KLCovConfig,
     OffPolicyCorrectionConfig,
-    DPPOConfig,
     SAPOConfig,
 )
 
