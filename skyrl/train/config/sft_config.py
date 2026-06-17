@@ -235,6 +235,11 @@ class SFTConfig(BaseConfig):
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
     dummy_run_max_steps: int = 5  # Number of steps to run in dummy mode
 
+    # ---- CI / smoke test support ----
+    max_training_steps: Optional[int] = None
+    """If set, stop training after this many steps regardless of num_steps or num_epochs.
+    Useful for CI smoke tests and quick validation runs."""
+
     def resolved_bin_capacity(self) -> int:
         """FFD bin capacity (max tokens per bin) when sequence packing is enabled.
 
@@ -296,6 +301,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("model.path must be set")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
+    if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:
+        raise ValueError(f"max_training_steps must be > 0, got {cfg.max_training_steps}")
 
     # Eval config
     if cfg.eval_interval < 0:

@@ -18,11 +18,15 @@ import warnings
 
 import torch
 
+from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
+    LayerwiseReloadWorkerMixin,
+)
+
 # Path to this worker extension class for use in CLI args (derived from module path)
 VLLM_WORKER_EXTENSION_CLS = f"{__name__}.WorkerWrap"
 
 
-class WorkerWrap:
+class WorkerWrap(LayerwiseReloadWorkerMixin):
     """
     vLLM worker extension for SkyRL weight synchronization.
 
@@ -32,7 +36,9 @@ class WorkerWrap:
 
     Methods:
         init_weight_update_communicator: Initialize the weight receiver
-        load_weights: Receive and load weights from trainer
+        start_weight_update: Begin a sync; initialize vLLM layerwise reload once
+        load_weights: Receive and load one chunk of weights from trainer
+        finish_weight_update: End a sync; finalize vLLM layerwise reload once
         teardown_weight_receiver: Clean up weight receiver resources
     """
 
@@ -73,9 +79,15 @@ class WorkerWrap:
 
     def load_weights(self, request: bytes) -> None:
         """
-        Load weights using the receiver.
+        Load one chunk of weights using the receiver.
 
-        This method is called via collective_rpc from the weight loader.
+        Called via collective_rpc from the weight loader, once per chunk.
+        When the sender brackets the sync with start_weight_update / finish_weight_update,
+        the chunk is loaded raw and the single finalize runs vLLM's post-load weight
+        processing exactly once over the whole weight set.
+        Without a bracket, it falls back to a self-contained reload_weights
+        (initialize + load + finalize in this one call), correct when the call
+        carries the whole model so finalize sees every layer and restores none.
 
         Args:
             request: Pickled bytes of WeightUpdateRequest.
@@ -92,8 +104,17 @@ class WorkerWrap:
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))
 
+        weight_update_bracketed = getattr(self, "_skyrl_weight_update_active", False)
         with torch.device(self.device), set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(weights_iterator=iter(weight_list))
+            if weight_update_bracketed:
+                self.model_runner.model.load_weights(weights=weight_list)
+            else:
+                self.model_runner.reload_weights(weights_iterator=iter(weight_list))
+
+        if weight_update_bracketed:
+            # Finish consuming IPC-backed tensors before the sender drops them on
+            # its next barrier; matches NewInferenceWorkerWrap.update_weights_ipc
+            torch.accelerator.synchronize()
 
         for weight in weight_list:
             del weight

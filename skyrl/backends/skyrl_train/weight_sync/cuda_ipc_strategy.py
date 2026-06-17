@@ -274,6 +274,12 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         device = torch.cuda.current_device()
         dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
 
+        # Bracket the whole sync with one layerwise-reload initialize/finalize so
+        # per-chunk reloads don't restore non-chunk layers; see `vllm_worker.py.WorkerWrap` docs
+        if rank == 0:
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+        torch.distributed.barrier()
+
         for chunk in chunks:
             names = []
             dtypes = []
@@ -325,6 +331,10 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             torch.cuda.ipc_collect()
             torch.distributed.barrier()
             torch.cuda.synchronize()
+
+        if rank == 0:
+            await self._inference_client.finish_weight_update()
+        torch.distributed.barrier()
 
     def teardown(self) -> None:
         """No-op for CUDA IPC sender (no custom process group to clean up)."""

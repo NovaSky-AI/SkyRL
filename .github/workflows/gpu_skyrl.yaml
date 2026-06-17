@@ -46,7 +46,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       - name: GPU tests
         env:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
