@@ -377,11 +377,15 @@ class CISPOConfig(BaseConfig):
 @dataclass
 class DPPOConfig(BaseConfig):
     dppo_type: str = "binary_tv"
-    """DPPO divergence variant: ``"binary_tv"`` or ``"binary_kl"``."""
+    """DPPO divergence variant: ``"binary_tv"`` or ``"binary_kl"``. Used if ``policy_loss_type="dppo"``."""
     delta_low: float = 0.2
     """Divergence threshold for negative advantages (0.2 for TV, 0.05 for KL recommended)."""
     delta_high: float = 0.2
     """Divergence threshold for positive advantages (0.2 for TV, 0.05 for KL recommended)."""
+
+    def __post_init__(self):
+        if self.dppo_type not in ["binary_tv", "binary_kl"]:
+            raise ValueError("Invalid DPPO type")
 
 
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
