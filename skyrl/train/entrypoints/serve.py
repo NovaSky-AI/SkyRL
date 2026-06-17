@@ -55,9 +55,7 @@ class InferenceOnlyEntrypoint(BasePPOExp):
         if self._inference_router is not None:
             self._inference_router.shutdown()
         for group in (
-            (self._server_groups or [])
-            + (self._prefill_server_groups or [])
-            + (self._decode_server_groups or [])
+            (self._server_groups or []) + (self._prefill_server_groups or []) + (self._decode_server_groups or [])
         ):
             group.shutdown()
 
