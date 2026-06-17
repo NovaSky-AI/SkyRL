@@ -84,6 +84,7 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.log_path=$LOG_DIR \
   trainer.fully_async.max_staleness_steps=$MAX_STALENESS_STEPS \
   trainer.fully_async.num_parallel_generation_workers=$NUM_PARALLEL_GENERATION_WORKERS \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
