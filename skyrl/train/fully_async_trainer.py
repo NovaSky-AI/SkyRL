@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
+    get_metrics_from_generator_output,
     prepare_generator_input,
 )
 from skyrl.train.trainer import RayPPOTrainer
@@ -492,8 +493,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # trained_steps_this_epoch (and, under sample_full_batch, early exhaustion).
             for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups
-                    # under sample_full_batch).
+                    # 1. Wait until we have a full mini-batch buffered (potentially dropping zero-variance groups
+                    # if using sample_full_batch=True).
                     (
                         cur_generation_group_mini_batch,
                         cur_dropped_groups,
@@ -886,6 +887,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             sys.stderr.flush()  # flush before os._exit, which otherwise drops buffered output
             os._exit(1)
 
+    @staticmethod
+    def _reprefix_metrics(metrics: dict, suffix: str) -> dict:
+        """Re-prefix metric keys into a separate view, e.g. ``generate/X`` -> ``generate_<suffix>/X``.
+
+        Keeps the leading namespace so the views group together in trackers (e.g. ``generate_kept`` and
+        ``generate_dropped`` alongside ``generate``).
+        """
+        out = {}
+        for k, v in metrics.items():
+            if "/" in k:
+                prefix, rest = k.split("/", 1)
+                out[f"{prefix}_{suffix}/{rest}"] = v
+            else:
+                out[f"{suffix}/{k}"] = v
+        return out
+
     def convert_generation_group_mini_batch_to_training_input(
         self,
         cur_generation_group_mini_batch: List[GeneratedOutputGroup],
@@ -926,10 +943,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         generator_output = concatenate_generator_outputs(
             generator_outputs, step_wise=self.cfg.generator.step_wise_trajectories
         )
+        kept_rollout_metrics = generator_output["rollout_metrics"]
+        assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."
 
-        # Build the metrics view over kept + dropped groups so reward and generation metrics stay
-        # comparable across runs regardless of zero-variance filtering / sample_full_batch. The dropped
-        # groups are only used for metrics here, never for training.
+        # Build the metrics view over kept + dropped groups so the headline reward and generation
+        # metrics stay comparable across runs regardless of zero-variance filtering / sample_full_batch.
+        # The dropped groups are only used for metrics here, never for training.
         metrics_generator_output = None
         metrics_uids = None
         if dropped_groups:
@@ -941,10 +960,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for g in list(cur_generation_group_mini_batch) + dropped_groups:
                 metrics_uids.extend([g.uid] * len(g.generator_output["response_ids"]))
 
-        # Generation (rollout) metrics: over kept + dropped when sample_full_batch dropped groups.
+        # Headline generation (rollout) metrics: over kept + dropped when sample_full_batch dropped groups.
         rollout_metrics_source = metrics_generator_output if metrics_generator_output is not None else generator_output
-        assert rollout_metrics_source["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(rollout_metrics_source["rollout_metrics"])
+
+        if dropped_groups:
+            # Also break generation metrics out by kept vs dropped, and report reward metrics for the
+            # dropped groups. (Kept reward metrics are uninformative -- non-zero-variance groups always
+            # have a positive sample so pass@n is ~1 -- and loss/avg_final_rewards already covers the
+            # trained set.)
+            dropped_generator_output = concatenate_generator_outputs(
+                [g.generator_output for g in dropped_groups], step_wise=self.cfg.generator.step_wise_trajectories
+            )
+            self.all_metrics.update(self._reprefix_metrics(kept_rollout_metrics, "kept"))
+            self.all_metrics.update(self._reprefix_metrics(dropped_generator_output["rollout_metrics"], "dropped"))
+            dropped_uids = [g.uid for g in dropped_groups for _ in range(len(g.generator_output["response_ids"]))]
+            dropped_reward = get_metrics_from_generator_output(dropped_generator_output, dropped_uids)
+            n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
+            self.all_metrics.update(
+                {
+                    f"reward_dropped/avg_pass_at_{n_samples_per_prompt}": dropped_reward["pass_at_n"],
+                    "reward_dropped/avg_raw_reward": dropped_reward["avg_score"],
+                    "reward_dropped/mean_positive_reward": dropped_reward["mean_positive_reward"],
+                }
+            )
+            dropped_generator_output.pop("rollout_metrics", None)
+
         generator_output.pop("rollout_metrics", None)
         if metrics_generator_output is not None:
             metrics_generator_output.pop("rollout_metrics", None)

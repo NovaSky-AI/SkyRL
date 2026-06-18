@@ -224,6 +224,20 @@ def test_should_keep_group():
     assert keep(_trainer_with_tol(1e-6), _group([0.6667, 0.66670001], [[1], [1]])) is False
 
 
+def test_reprefix_metrics():
+    """generate/X -> generate_<suffix>/X, preserving the leading namespace for tracker grouping."""
+    reprefix = FullyAsyncRayPPOTrainer._reprefix_metrics
+    out = reprefix(
+        {"generate/avg_num_tokens": 10.0, "environment/score": 0.5, "bare": 1},
+        "dropped",
+    )
+    assert out == {
+        "generate_dropped/avg_num_tokens": 10.0,
+        "environment_dropped/score": 0.5,
+        "dropped/bare": 1,
+    }
+
+
 def test_should_keep_group_token_level_rewards():
     """Token-level rewards are collapsed to per-trajectory sequence rewards for the variance check."""
     keep = FullyAsyncRayPPOTrainer._should_keep_group
