@@ -7,6 +7,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -55,6 +56,9 @@ class TrajectoryOutput:
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
+    # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
+    # leave this as None if they do not track timing.
+    e2e_time: Optional[float] = None
 
 
 @dataclass
@@ -62,6 +66,9 @@ class StepWiseOutput:
     """Output from a single agent_loop execution for step-wise training."""
 
     step_outputs: List[TrajectoryOutput]
+    # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
+    # leave this as None if they do not track timing.
+    e2e_time: Optional[float] = None
 
 
 @dataclass
@@ -297,6 +304,20 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
+        agent_loop_start_time = time.monotonic()
+
+        # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
+        # This is no longer needed now given that step wise training is supported
+        # TODO (sumanthrh): This path can be deprecated
+        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
+
+        # Create a new environment instance
+        env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
+        env_extras = self._setup_env_extras(env_class, env_extras, sampling_params, trajectory_id)
+
+        env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
+        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
+
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -579,6 +600,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 env_extras,
                 trajectory_id,
             )
+            agent_loop_output.e2e_time = time.monotonic() - agent_loop_start_time
             return agent_loop_output
 
         finally:
@@ -831,6 +853,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             mininterval=5,
             disable=disable_tqdm,
         )
+        # Per-trajectory end-to-end generation times (one entry per prompt, preserving input order).
+        # ``e2e_time`` is optional for agent loops; if any trajectory did not record it, we omit the
+        # field entirely rather than emit a partially-populated list.
+        trajectory_generation_times = [getattr(output, "e2e_time", None) for output in all_outputs]
+        if any(t is None for t in trajectory_generation_times):
+            trajectory_generation_times = None
 
         if self.generator_cfg.step_wise_trajectories:
             responses = []
@@ -913,6 +941,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
+            "trajectory_generation_times": trajectory_generation_times,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "env_metrics": env_metrics,

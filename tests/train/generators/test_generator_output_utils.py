@@ -30,6 +30,7 @@ def test_generator_output_concatenation():
         "rollout_expert_indices",
         # optional but present in the signature
         "trajectory_ids",
+        "trajectory_generation_times",
         "is_last_step",
         "env_metrics",
         "pixel_values",
@@ -81,6 +82,9 @@ def test_generator_output_concatenation():
         "generate/min_assistant_tokens": 1,
         "generate/max_assistant_tokens": 3,
         "generate/std_assistant_tokens": np.std([2, 2, 3, 1]).item(),
+        # Each response is a single run of 1s, so per-turn counts match response lengths [2, 2, 3, 1].
+        "generate/tokens_per_turn_mean": 2.0,
+        "generate/tokens_per_turn_std": np.std([2, 2, 3, 1]).item(),
     }
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():

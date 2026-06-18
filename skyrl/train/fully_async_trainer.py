@@ -15,10 +15,12 @@ import asyncio
 import inspect
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Set, Tuple
 
+import numpy as np
 import torch
 from loguru import logger
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -57,11 +59,16 @@ class GeneratedOutputGroup:
 
         global_step_when_scheduled (int): The global step when the group was scheduled for generation,
             used for validating the staleness control.
+
+        group_completion_time_s (Optional[float]): Wall-clock time (seconds) for the whole group to
+            finish generation, i.e. the time for the slowest trajectory in the group to complete.
+            None if generation timing was not captured.
     """
 
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
+    group_completion_time_s: Optional[float] = None
 
 
 @dataclass
@@ -826,6 +833,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 3. Generate one rollout group
                 global_step_at_start = self.global_step  # for staleness control
 
+                group_start_time = time.monotonic()
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
                     # blast the console with each worker's progress bar.
@@ -834,6 +842,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                 else:
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                group_completion_time_s = time.monotonic() - group_start_time
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 try:
@@ -842,6 +851,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             generator_output=cur_generator_output,
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
+                            group_completion_time_s=group_completion_time_s,
                         )
                     )
                 except asyncio.QueueFull:
@@ -892,10 +902,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         uids = []
         stalenesses = []
         staleness_violation_count = 0
+        # Per-group completion times (seconds) and the intra-group spread (std and coefficient of
+        # variation) of per-trajectory completion times, used to log generation load-balancing metrics.
+        group_completion_times: List[float] = []
+        intra_group_stds: List[float] = []
+        intra_group_cvs: List[float] = []
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+
+            # Collect per-group / per-trajectory completion-time stats for this group.
+            if cur_generated_output_group.group_completion_time_s is not None:
+                group_completion_times.append(cur_generated_output_group.group_completion_time_s)
+            traj_times = cur_generated_output_group.generator_output.get("trajectory_generation_times")
+            if traj_times and len(traj_times) > 1:
+                traj_times_arr = np.array(traj_times, dtype=np.float64)
+                # Population std of per-trajectory completion times within this group (seconds).
+                group_std = float(traj_times_arr.std())
+                intra_group_stds.append(group_std)
+                # Coefficient of variation = std / mean. Guard against div-by-zero.
+                mean_traj_time = float(traj_times_arr.mean())
+                if mean_traj_time > 0:
+                    intra_group_cvs.append(group_std / mean_traj_time)
             # NOTE(Charlie): for step-wise training each group can contain a variable number of entries
             # (n_samples_per_prompt * variable turns_per_trajectory), so the uid fanout is per-group.
             group_size = len(cur_generated_output_group.generator_output["response_ids"])
@@ -971,6 +1000,25 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_violation_count": staleness_violation_count,
             }
         )
+
+
+        # Log per-group completion-time statistics for the groups consumed in this step. These
+        # surface generation load-balancing behavior (e.g. across vllm-router routing policies):
+        # tail group latency (p90/max) and how unevenly trajectories within a group finish
+        # (intra-group coefficient of variation).
+        if group_completion_times:
+            group_times_arr = np.array(group_completion_times, dtype=np.float64)
+            self.all_metrics.update(
+                {
+                    "async/group_completion_time_mean": float(group_times_arr.mean()),
+                    "async/group_completion_time_p90": float(np.percentile(group_times_arr, 90)),
+                    "async/group_completion_time_max": float(group_times_arr.max()),
+                }
+            )
+        if intra_group_stds:
+            self.all_metrics.update({"async/intra_group_completion_time_std_mean": float(np.mean(intra_group_stds))})
+        if intra_group_cvs:
+            self.all_metrics.update({"async/intra_group_completion_time_cv_mean": float(np.mean(intra_group_cvs))})
 
         # Per-token reward conversion (kept groups only) + reward metrics over the kept+dropped view.
         generator_output, uids = self.postprocess_generator_output(

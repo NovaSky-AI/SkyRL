@@ -339,6 +339,29 @@ def apply_overlong_filtering(
     ]
 
 
+def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
+    """Compute per-turn assistant token counts across a batch of trajectories.
+
+    Each turn's generated tokens are the maximal runs of consecutive non-zero entries in the
+    loss mask; observation/non-assistant tokens are masked to 0 and thus separate turns. Returns
+    a flat list with one entry per turn (across all trajectories). Trajectories whose loss mask is
+    entirely zero (e.g. dropped by overlong filtering) contribute no turns.
+    """
+    turn_token_counts: List[int] = []
+    for mask in loss_masks:
+        if not mask:
+            continue
+        nz = (np.asarray(mask) != 0).astype(np.int8)
+        if nz.sum() == 0:
+            continue
+        # Pad with zeros on both ends so run starts/ends are detected via the first difference.
+        diffs = np.diff(np.concatenate(([0], nz, [0])))
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        turn_token_counts.extend((ends - starts).tolist())
+    return turn_token_counts
+
+
 def get_rollout_metrics(
     responses: List[List[int]],
     rewards: Union[List[float], List[List[float]]],
@@ -396,6 +419,17 @@ def get_rollout_metrics(
                 "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
             }
         )
+
+        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
+        turn_token_counts = compute_turn_token_counts(loss_masks)
+        if turn_token_counts:
+            turn_token_counts_arr = np.array(turn_token_counts)
+            rollout_metrics.update(
+                {
+                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                }
+            )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
