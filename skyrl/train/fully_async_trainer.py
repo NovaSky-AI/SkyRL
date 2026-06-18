@@ -484,71 +484,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 generators_done_watcher = asyncio.create_task(_watch_generators_done())
 
-            epoch_exhausted = False
             # Steps trained in THIS epoch. Not derived from global_step % num_steps_per_epoch because,
             # under sample_full_batch, an epoch can end early and global_step drifts out of alignment with
             # epoch boundaries. On resume mid-epoch the dataloader already reflects this epoch's trained steps.
             trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
-            for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+            # The range is an upper bound on steps this epoch; the actual count is driven by
+            # trained_steps_this_epoch (and, under sample_full_batch, early exhaustion).
+            for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have enough groups buffered.
-                    cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    # Zero-variance groups dropped this step under sample_full_batch. Kept (not freed)
-                    # so they can be included in this step's reward/generation metrics; not trained on.
-                    cur_dropped_groups: List[GeneratedOutputGroup] = []
-                    with Timer("wait_for_generation_buffer", self.all_timings):
-                        buffer_pbar = tqdm(
-                            total=self.mini_batch_size,
-                            initial=0,
-                            desc="Generation Buffer Progress",
-                            position=1,
-                        )
-                        # Without sample_full_batch, we trim the train_dataloader to be perfectly divisible by
-                        # self.mini_batch_size and assume all trajectories succeed (just like sync training), so
-                        # we always get a full mini-batch. With sample_full_batch, we additionally drop
-                        # zero-variance groups and keep pulling until the mini-batch is full of non-zero-variance
-                        # groups, which can exhaust the epoch's prompts mid mini-batch (handled below).
-                        while len(cur_generation_group_mini_batch) < self.mini_batch_size:
-                            # We do finish-time FIFO here (not schedule-time FIFO)
-                            if not self.sample_full_batch:
-                                cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
-                                buffer_pbar.update(1)
-                                buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                                continue
-
-                            group = await self._drain_next_group(generation_output_group_buffer, all_generators_done)
-                            if group is None:
-                                epoch_exhausted = True
-                                break
-                            try:
-                                keep_group = self._should_keep_group(group)
-                                if keep_group:
-                                    cur_generation_group_mini_batch.append(group)
-                                    buffer_pbar.update(1)
-                                    buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                                else:
-                                    # Drop the zero-variance group: give its capacity back to the producers
-                                    # and mark its UID consumed (skipped, not regenerated, on resume).
-                                    cur_dropped_groups.append(group)
-                                    await self._staleness_manager.on_rollout_filtered()
-                                    await self.async_train_dataloader.mark_filtered_uids([group.uid])
-                            except Exception:
-                                go = group.generator_output
-                                rewards = go.get("rewards") if isinstance(go, dict) else None
-                                loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
-                                logger.exception(
-                                    "sample_full_batch: error processing generated group "
-                                    f"(uid={group.uid}, kept_so_far={len(cur_generation_group_mini_batch)}, "
-                                    f"dropped_so_far={len(cur_dropped_groups)}). "
-                                    f"rewards type={type(rewards).__name__} "
-                                    f"len={len(rewards) if hasattr(rewards, '__len__') else 'n/a'} "
-                                    f"value={rewards!r}; "
-                                    f"loss_masks type={type(loss_masks).__name__} "
-                                    f"len={len(loss_masks) if hasattr(loss_masks, '__len__') else 'n/a'}"
-                                )
-                                sys.stderr.flush()
-                                raise
-                        buffer_pbar.close()
+                    # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups
+                    # under sample_full_batch).
+                    (
+                        cur_generation_group_mini_batch,
+                        cur_dropped_groups,
+                        epoch_exhausted,
+                    ) = await self._collect_generation_mini_batch(generation_output_group_buffer, all_generators_done)
 
                     if epoch_exhausted:
                         # Dataset exhausted mid mini-batch: discard the partial batch (marking it consumed/
@@ -757,6 +707,79 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
         )
         return len(kept_indices) > 0
+
+    async def _collect_generation_mini_batch(
+        self,
+        generation_output_group_buffer: asyncio.Queue,
+        all_generators_done: asyncio.Event,
+    ) -> Tuple[List[GeneratedOutputGroup], List[GeneratedOutputGroup], bool]:
+        """Pull a full mini-batch of generated groups from the buffer.
+
+        Without ``sample_full_batch``, blocks until ``mini_batch_size`` groups are available (the
+        dataloader is trimmed to be divisible by ``mini_batch_size`` and all trajectories are assumed to
+        succeed, like sync training). With ``sample_full_batch``, additionally drops zero-variance groups
+        -- freeing their producer capacity and marking their UIDs consumed (skipped, not regenerated, on
+        resume) -- and keeps pulling until ``mini_batch_size`` non-zero-variance groups are collected,
+        which can exhaust the epoch's prompts mid mini-batch.
+
+        Returns ``(kept_groups, dropped_groups, epoch_exhausted)``. When ``epoch_exhausted`` is True the
+        kept groups are a (possibly empty) partial batch the caller should discard. ``dropped_groups`` are
+        retained for metrics only and are never trained on.
+        """
+        kept_groups: List[GeneratedOutputGroup] = []
+        dropped_groups: List[GeneratedOutputGroup] = []
+        epoch_exhausted = False
+        with Timer("wait_for_generation_buffer", self.all_timings):
+            buffer_pbar = tqdm(total=self.mini_batch_size, initial=0, desc="Generation Buffer Progress", position=1)
+            while len(kept_groups) < self.mini_batch_size:
+                # We do finish-time FIFO here (not schedule-time FIFO).
+                if not self.sample_full_batch:
+                    kept_groups.append(await generation_output_group_buffer.get())
+                    buffer_pbar.update(1)
+                    buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
+                    continue
+
+                group = await self._drain_next_group(generation_output_group_buffer, all_generators_done)
+                if group is None:
+                    epoch_exhausted = True
+                    break
+                try:
+                    if self._should_keep_group(group):
+                        kept_groups.append(group)
+                        buffer_pbar.update(1)
+                        buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
+                    else:
+                        # Drop the zero-variance group: give its capacity back to the producers and mark
+                        # its UID consumed (skipped, not regenerated, on resume).
+                        dropped_groups.append(group)
+                        await self._staleness_manager.on_rollout_filtered()
+                        await self.async_train_dataloader.mark_filtered_uids([group.uid])
+                except Exception:
+                    self._log_group_processing_error(group, len(kept_groups), len(dropped_groups))
+                    raise
+            buffer_pbar.close()
+        return kept_groups, dropped_groups, epoch_exhausted
+
+    @staticmethod
+    def _log_group_processing_error(group: GeneratedOutputGroup, kept_so_far: int, dropped_so_far: int) -> None:
+        """Log the offending group's reward / loss-mask shape before a drain-loop error propagates.
+
+        Generator workers ``os._exit`` on error, which can drop buffered output during teardown, so we
+        flush stderr to make sure this diagnostic survives.
+        """
+        go = group.generator_output
+        rewards = go.get("rewards") if isinstance(go, dict) else None
+        loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
+        logger.exception(
+            "sample_full_batch: error processing generated group "
+            f"(uid={group.uid}, kept_so_far={kept_so_far}, dropped_so_far={dropped_so_far}). "
+            f"rewards type={type(rewards).__name__} "
+            f"len={len(rewards) if hasattr(rewards, '__len__') else 'n/a'} "
+            f"value={rewards!r}; "
+            f"loss_masks type={type(loss_masks).__name__} "
+            f"len={len(loss_masks) if hasattr(loss_masks, '__len__') else 'n/a'}"
+        )
+        sys.stderr.flush()
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
