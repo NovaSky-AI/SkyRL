@@ -76,6 +76,9 @@ class InferenceOnlyEntrypoint(BasePPOExp):
         try:
             while True:
                 time.sleep(3600)
+        # TODO: Currently this is run inside a ray task so a KeyboardInterrupt on
+        # driver never reaches here - Ray sends a SIGTERM. We should propagate the
+        # interrupt for better shutdown
         except KeyboardInterrupt:
             logger.info("Received interrupt, shutting down inference servers...")
         finally:
