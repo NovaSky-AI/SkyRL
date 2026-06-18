@@ -281,7 +281,10 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
 
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(
-        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+        result["response_ids"],
+        result["rewards"],
+        loss_masks=result.get("loss_masks"),
+        trajectory_completion_times=result.get("trajectory_generation_times"),
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -368,6 +371,7 @@ def get_rollout_metrics(
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
     loss_masks: Optional[List[List[int]]] = None,
+    trajectory_completion_times: Optional[List[float]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -378,6 +382,8 @@ def get_rollout_metrics(
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
         loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
+        trajectory_completion_times: Optional per-trajectory end-to-end generation times (seconds);
+            used to compute aggregate trajectory completion-time stats (mean / p90 / max)
 
     Returns:
         Dictionary of aggregated metrics
@@ -430,6 +436,16 @@ def get_rollout_metrics(
                     "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
                 }
             )
+
+    if trajectory_completion_times:
+        completion_times_arr = np.array(trajectory_completion_times, dtype=np.float64)
+        rollout_metrics.update(
+            {
+                "generate/trajectory_completion_time_mean": np.mean(completion_times_arr).item(),
+                "generate/trajectory_completion_time_p90": np.percentile(completion_times_arr, 90).item(),
+                "generate/trajectory_completion_time_max": np.max(completion_times_arr).item(),
+            }
+        )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
