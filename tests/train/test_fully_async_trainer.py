@@ -224,7 +224,23 @@ def test_should_keep_group():
     assert keep(_trainer_with_tol(1e-6), _group([0.6667, 0.66670001], [[1], [1]])) is False
 
 
-def test_should_keep_group_rejects_token_level_rewards():
+def test_should_keep_group_token_level_rewards():
+    """Token-level rewards are collapsed to per-trajectory sequence rewards for the variance check."""
     keep = FullyAsyncRayPPOTrainer._should_keep_group
-    with pytest.raises(AssertionError):
-        keep(_trainer_with_tol(0.0), _group([[0.1, 0.2]], [[1, 1]]))
+
+    # Two trajectories, both summing to 1.0 -> zero variance -> drop.
+    assert (
+        keep(
+            _trainer_with_tol(0.0),
+            _group([[0.0, 1.0], [1.0, 0.0]], [[1, 1], [1, 1]]),
+        )
+        is False
+    )
+    # One trajectory sums to 1.0, the other to 0.0 -> variance -> keep.
+    assert (
+        keep(
+            _trainer_with_tol(0.0),
+            _group([[0.0, 1.0], [0.0, 0.0]], [[1, 1], [1, 1]]),
+        )
+        is True
+    )

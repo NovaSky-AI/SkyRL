@@ -14,6 +14,7 @@ High-level notes:
 import asyncio
 import inspect
 import os
+import sys
 import traceback
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Set, Tuple
@@ -517,16 +518,34 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             if group is None:
                                 epoch_exhausted = True
                                 break
-                            if self._should_keep_group(group):
-                                cur_generation_group_mini_batch.append(group)
-                                buffer_pbar.update(1)
-                                buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                            else:
-                                # Drop the zero-variance group: give its capacity back to the producers and
-                                # mark its UID consumed (skipped, not regenerated, on resume).
-                                num_groups_dropped += 1
-                                await self._staleness_manager.on_rollout_filtered()
-                                await self.async_train_dataloader.mark_filtered_uids([group.uid])
+                            try:
+                                keep_group = self._should_keep_group(group)
+                                if keep_group:
+                                    cur_generation_group_mini_batch.append(group)
+                                    buffer_pbar.update(1)
+                                    buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
+                                else:
+                                    # Drop the zero-variance group: give its capacity back to the producers
+                                    # and mark its UID consumed (skipped, not regenerated, on resume).
+                                    num_groups_dropped += 1
+                                    await self._staleness_manager.on_rollout_filtered()
+                                    await self.async_train_dataloader.mark_filtered_uids([group.uid])
+                            except Exception:
+                                go = group.generator_output
+                                rewards = go.get("rewards") if isinstance(go, dict) else None
+                                loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
+                                logger.exception(
+                                    "sample_full_batch: error processing generated group "
+                                    f"(uid={group.uid}, kept_so_far={len(cur_generation_group_mini_batch)}, "
+                                    f"dropped_so_far={num_groups_dropped}). "
+                                    f"rewards type={type(rewards).__name__} "
+                                    f"len={len(rewards) if hasattr(rewards, '__len__') else 'n/a'} "
+                                    f"value={rewards!r}; "
+                                    f"loss_masks type={type(loss_masks).__name__} "
+                                    f"len={len(loss_masks) if hasattr(loss_masks, '__len__') else 'n/a'}"
+                                )
+                                sys.stderr.flush()
+                                raise
                         buffer_pbar.close()
 
                     if epoch_exhausted:
@@ -712,16 +731,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _should_keep_group(self, group: GeneratedOutputGroup) -> bool:
         """Whether a generated group has reward variance and should be trained on (vs. dropped).
 
-        Only defined for response-level rewards. A group with at most one live trajectory (a singleton,
-        or one whose other trajectories were masked upstream) is always kept.
+        Rewards may be response-level (``List[float]``) or token-level (``List[List[float]]``); the
+        latter is collapsed to a per-trajectory sequence reward (sum over tokens), matching how the
+        rest of the trainer treats token-level rewards. A group with at most one live trajectory (a
+        singleton, or one whose other trajectories were masked upstream) is always kept.
         """
         rewards = group.generator_output["rewards"]
-        assert not (
-            rewards and isinstance(rewards[0], list)
-        ), "sample_full_batch requires response-level rewards, but got token-level rewards."
+        if rewards and isinstance(rewards[0], list):
+            # Token-level rewards: collapse each trajectory to a scalar sequence reward.
+            seq_rewards = [float(sum(r)) for r in rewards]
+        else:
+            seq_rewards = rewards
         kept_indices = zero_variance_filter(
-            rewards,
-            [group.uid] * len(rewards),
+            seq_rewards,
+            [group.uid] * len(seq_rewards),
             loss_masks=group.generator_output["loss_masks"],
             tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
         )
@@ -814,13 +837,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False
         except asyncio.CancelledError:
+            # Generators are cancelled when an epoch ends, training stops, or the trainer tears down
+            # after an error elsewhere. This is expected: release any held slot so staleness accounting
+            # stays consistent, then exit cleanly. (Previously this os._exit(1)'d when a slot was held,
+            # which crashed the whole process and, when the cancellation was triggered by an error in
+            # the training loop, killed it before that error's traceback could flush -- masking the
+            # real failure.)
             if "slot_acquired" in locals() and slot_acquired:
-                logger.error("Generation worker cancelled mid-flight (slot acquired). Exiting.")
-                os._exit(1)
+                try:
+                    await self._staleness_manager.on_rollout_rejected()
+                except Exception:
+                    pass
             return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
             logger.error(f"Traceback: \n{traceback.format_exc()}")
+            sys.stderr.flush()  # flush before os._exit, which otherwise drops buffered output
             os._exit(1)
 
     def convert_generation_group_mini_batch_to_training_input(
