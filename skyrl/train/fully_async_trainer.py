@@ -917,6 +917,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 group_completion_times.append(cur_generated_output_group.group_completion_time_s)
             traj_times = cur_generated_output_group.generator_output.get("trajectory_generation_times")
             if traj_times and len(traj_times) > 1:
+                is_last_step = cur_generated_output_group.generator_output.get("is_last_step")
+                if is_last_step:
+                    traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
                 traj_times_arr = np.array(traj_times, dtype=np.float64)
                 # Population std of per-trajectory completion times within this group (seconds).
                 group_std = float(traj_times_arr.std())

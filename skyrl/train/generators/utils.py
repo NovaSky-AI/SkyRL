@@ -279,12 +279,19 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     for key in additional_keys:
         result[key] = _flatten_field(generator_outputs, key)
 
+    # With step-wise training, only use the trajectory generation time from the last step
+    trajectory_generation_times = result.get("trajectory_generation_times")
+    if step_wise and trajectory_generation_times and result.get("is_last_step"):
+        trajectory_generation_times = [
+            t for t, is_last_step in zip(trajectory_generation_times, result.get("is_last_step")) if is_last_step
+        ]
+
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(
         result["response_ids"],
         result["rewards"],
         loss_masks=result.get("loss_masks"),
-        trajectory_completion_times=result.get("trajectory_generation_times"),
+        trajectory_completion_times=trajectory_generation_times,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
