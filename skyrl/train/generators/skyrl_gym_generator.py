@@ -856,9 +856,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Per-trajectory end-to-end generation times (one entry per prompt, preserving input order).
         # ``e2e_time`` is optional for agent loops; if any trajectory did not record it, we omit the
         # field entirely rather than emit a partially-populated list.
-        trajectory_generation_times = [getattr(output, "e2e_time", None) for output in all_outputs]
-        if any(t is None for t in trajectory_generation_times):
-            trajectory_generation_times = None
+        trajectory_generation_times_per_prompt = [getattr(output, "e2e_time", None) for output in all_outputs]
+        if any(t is None for t in trajectory_generation_times_per_prompt):
+            trajectory_generation_times_per_prompt = None
 
         if self.generator_cfg.step_wise_trajectories:
             responses = []
@@ -870,6 +870,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = []
             out_trajectory_ids = []
             out_env_classes = []
+            out_trajectory_generation_times = []
             for i, output in enumerate(all_outputs):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
@@ -881,6 +882,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
+                    # For trajectory completion per turn we just use the trajectory level e2e time
+                    out_trajectory_generation_times.append(getattr(output, "e2e_time", None))
+            # Keep aligned with the per-prompt None handling:
+            if not trajectory_generation_times_per_prompt:
+                out_trajectory_generation_times = None
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -891,6 +897,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_metrics = [output.env_metrics for output in all_outputs]
             is_last_step = None
             out_trajectory_ids = None
+            # One time per trajectory, already aligned 1:1 with responses (None if not all recorded).
+            out_trajectory_generation_times = trajectory_generation_times_per_prompt
 
         has_vision_features = any(getattr(output, "pixel_values", None) is not None for output in all_outputs)
         pixel_values = (
@@ -928,7 +936,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_metrics,
             env_classes,
             loss_masks,
-            trajectory_completion_times=trajectory_generation_times,
+            # NOTE: we only use trajectory completion times per prompt for
+            # metrics, to avoid duplicate entries with step-wise training
+            trajectory_completion_times=trajectory_generation_times_per_prompt,
         )
 
         if self.generator_cfg.zero_reward_on_non_stop:
@@ -948,7 +958,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
-            "trajectory_generation_times": trajectory_generation_times,
+            # NOTE: for completion metrics, we output the completiontime
+            "trajectory_generation_times": out_trajectory_generation_times,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "env_metrics": env_metrics,
