@@ -788,9 +788,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.provider.register_pre_wrap_hook(freeze_moe_router)
 
         # wrap with DDP for training
+        wrap_with_ddp = not self.cfg.policy.inference_only_init
         self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=True,
-            ddp_config=self.cfg.policy.megatron_config.ddp_config,
+            wrap_with_ddp=wrap_with_ddp,
+            ddp_config=self.cfg.policy.megatron_config.ddp_config if wrap_with_ddp else None,
             lora_config=self.cfg.policy.model.lora if self._is_lora else None,
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
             bf16=self.cfg.bf16,
