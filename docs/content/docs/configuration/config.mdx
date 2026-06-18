@@ -603,11 +603,13 @@ def ppo_policy_loss(
 fully_async:
   max_staleness_steps: 4
   num_parallel_generation_workers: 768
+  clear_kv_cache_on_weight_sync: true
 
 ```
 
 - `fully_async.max_staleness_steps`: Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*, then `j - i <= max_staleness_steps`. Larger values increase throughput but also off-policy-ness.
 - `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be \>= `policy_mini_batch_size` and \<= `policy_mini_batch_size * (max_staleness_steps + 1)`.
+- `fully_async.clear_kv_cache_on_weight_sync`: Whether to clear the inference engine KV cache on each weight sync. Defaults to `true`, matching synchronous RL. Set to `false` for fully async training to reuse KV cache from stale policies during generation (avoids recomputation at the cost of using slightly stale KV cache).
 
 ## Generator Configuration
 

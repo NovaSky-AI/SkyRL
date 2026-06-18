@@ -85,6 +85,8 @@ def mock_llm():
         }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
+    # agent_loop releases the trajectory's router session on completion.
+    mock.finish_session = AsyncMock()
     return mock
 
 

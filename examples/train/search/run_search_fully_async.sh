@@ -51,6 +51,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \

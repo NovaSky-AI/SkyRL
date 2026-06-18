@@ -426,16 +426,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
-    if ie_cfg.enable_pd:
-        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
-        assert (
-            ie_cfg.num_prefill < ie_cfg.num_engines
-        ), "num_prefill must be < num_engines (need at least one decode worker)"
-        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
-
-    if not ie_cfg.run_engines_locally:
-        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
-
     if not ie_cfg.async_engine and ie_cfg.backend == "vllm":
         assert (
             cfg.generator.batched
@@ -444,14 +434,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
-
-    if ie_cfg.override_existing_update_group == "auto":
-        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            ie_cfg.override_existing_update_group = "enable"
-        else:
-            # for local engines, we disable
-            ie_cfg.override_existing_update_group = "disable"
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
@@ -475,6 +457,48 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 " to `True` to append tokenizer.eos_token_id to the assistant-generated response "
                 "to match the chat template."
             )
+
+    # Validate inference-engine instantiation / serving topology (shared with
+    # the inference-only serve entrypoint).
+    validate_inference_engine_cfg(cfg)
+
+
+def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
+    """Validates inference-engine config independent of generator/training semantics.
+
+    Covers engine instantiation and serving topology
+
+    Shared between the training path (via :func:`validate_generator_cfg`) and the
+    inference-only serve entrypoint (``skyrl.train.entrypoints.serve``).
+
+    NOTE: this also resolves ``inference_engine.override_existing_update_group="auto"``
+    in place.
+
+    Args:
+        cfg (SkyRLTrainConfig): config to validate
+
+    Raises:
+        ValueError / NotImplementedError / AssertionError: on invalid combinations.
+    """
+    ie_cfg = cfg.generator.inference_engine
+
+    if ie_cfg.enable_pd:
+        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
+        assert (
+            ie_cfg.num_prefill < ie_cfg.num_engines
+        ), "num_prefill must be < num_engines (need at least one decode worker)"
+        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
+
+    if not ie_cfg.run_engines_locally:
+        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
+
+    if ie_cfg.override_existing_update_group == "auto":
+        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
+            # remote engines can be launched separately so we `enable` by default
+            ie_cfg.override_existing_update_group = "enable"
+        else:
+            # for local engines, we disable
+            ie_cfg.override_existing_update_group = "disable"
 
     if ie_cfg.enable_http_endpoint:
         if not ie_cfg.async_engine:

@@ -502,6 +502,10 @@ class FullyAsyncConfig(BaseConfig):
     Dropped groups are marked consumed (skipped, not regenerated, on resume). Makes the per-epoch step
     count an upper bound rather than exact: when the epoch's prompts are exhausted mid mini-batch, the
     partial mini-batch is discarded (also marked consumed) and the epoch ends."""
+    clear_kv_cache_on_weight_sync: bool = True
+    """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
+    Set to False for fully async training to reuse KV cache from stale policies during generation
+    (avoids recomputation at the cost of using slightly stale KV cache)."""
 
 
 # ---------------------------------------------------------------------------

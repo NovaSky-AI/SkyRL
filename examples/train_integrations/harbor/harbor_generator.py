@@ -209,6 +209,9 @@ class HarborGenerator(GeneratorInterface):
             self.base_url = inference_engine_client.proxy_url
         else:
             self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
+        # Kept so we can notify the router when a session (trial attempt) ends,
+        # which lets session-aware routing policies rebalance new trajectories.
+        self.inference_engine_client = inference_engine_client
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -312,11 +315,14 @@ class HarborGenerator(GeneratorInterface):
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
+            # Each attempt is a distinct router session; track it so it can be
+            # released on completion/error/cancellation.
+            session_id = uuid4().hex
             try:
                 # Create a fresh Trial each attempt so agent state is clean on retry.
                 config = deepcopy(self._harbor_trial_config_template)
                 config["task"] = {"path": prompt}
-                config["agent"]["kwargs"]["session_id"] = uuid4().hex
+                config["agent"]["kwargs"]["session_id"] = session_id
                 trial_config = TrialConfig.model_validate(config)
                 trial = await Trial.create(trial_config)
 
@@ -361,6 +367,9 @@ class HarborGenerator(GeneratorInterface):
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
+            finally:
+                if _SKYRL_USE_NEW_INFERENCE:
+                    await self.inference_engine_client.finish_session(session_id)
 
         if not successful:
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
