@@ -30,18 +30,47 @@ def build_teacher_logits(
     return torch.roll(teacher, shifts=-(mtp_layer_number + 1), dims=1)
 
 
-def shift_mask_for_mtp(mask: torch.Tensor, mtp_layer_number: int = 0) -> torch.Tensor:
+def shift_mask_for_mtp(
+    mask: torch.Tensor, mtp_layer_number: int = 0, cu_seqlens: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Roll a ``[batch, seq]`` loss mask to align with an MTP teacher/label at depth ``k``.
 
     Supervision at position ``t`` is valid only if both the source ``t`` and the target ``t+shift``
     are real tokens, so we AND ``mask[t]`` with ``roll(mask, -shift)`` (tail zeroed). Re-ANDing the
     source mask is what keeps left padding correct: rolling a left-padded mask left would otherwise
     unmask a pad slot whose de-padded zero-logit (uniform) inflates the loss by up to ``log(V)``.
-    Assumes one sequence per row; packing multiple would need cu_seqlens-aware boundaries.
+
+    With THD sample packing (``trainer.remove_microbatch_padding=true``) the whole micro-batch is one
+    packed row ``[1, T]`` holding many concatenated sub-sequences, so a single ``torch.roll`` would
+    leak each sub-sequence's target across its boundary into the next one (slime calls the fix the
+    "roll tensor update for MTP"). Pass ``cu_seqlens`` (the packed *padded* segment boundaries,
+    ``packed_seq_params.cu_seqlens_q_padded``) to roll *within* each segment and zero the trailing
+    ``shift`` positions of every segment instead of only the global tail. This masks exactly the
+    positions whose teacher/label roll crosses a boundary, so those rolls can stay plain global
+    ``torch.roll`` (their wrong values land only on now-zeroed positions). Mirrors the CP=1 branch of
+    megatron-core's ``_roll_tensor_packed_seq``; CP>1 is rejected upstream for MTP.
     """
     shift = mtp_layer_number + 1
-    rolled = torch.roll(mask, shifts=-shift, dims=1)
-    rolled[:, -shift:] = 0
+    if cu_seqlens is None:
+        rolled = torch.roll(mask, shifts=-shift, dims=1)
+        rolled[:, -shift:] = 0
+        return mask * rolled
+
+    # Packed: roll each [start, end) segment independently, zeroing its last `shift` positions.
+    bounds = cu_seqlens.tolist() if torch.is_tensor(cu_seqlens) else list(cu_seqlens)
+    rolled = torch.zeros_like(mask)
+    for i in range(len(bounds) - 1):
+        start, end = int(bounds[i]), int(bounds[i + 1])
+        seg_len = end - start
+        if seg_len <= 0:
+            continue
+        seg_rolled = torch.roll(mask[:, start:end], shifts=-shift, dims=1)
+        # Zero the wrapped tail; the whole segment if it is no longer than the shift.
+        if shift < seg_len:
+            seg_rolled[:, -shift:] = 0
+        else:
+            seg_rolled.zero_()
+        rolled[:, start:end] = seg_rolled
     return mask * rolled
 
 

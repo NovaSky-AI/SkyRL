@@ -379,11 +379,18 @@ class MegatronWorker:
 
         provider = bridge.to_megatron_provider()
 
-        # Disable MTP for training: its aux loss is unused, and under full
-        # recompute its checkpointed forward passes packed_seq_params positionally
-        # into tensor_parallel.checkpoint (tensors only), breaking packed-sequence
-        # backward. Mirrors the MTP-disable in model_bridges.py.
-        if getattr(provider, "mtp_num_layers", None):
+        # Disable MTP for ordinary training: Megatron's in-forward MTP aux loss is unused, and under
+        # full recompute its checkpointed forward passes packed_seq_params positionally into
+        # tensor_parallel.checkpoint (tensors only), breaking packed-sequence backward.
+        # EXCEPTION: decoupled MTP/draft training (trainer.mtp.enabled on the policy worker) MUST keep
+        # the heads built — it runs them in-forward in eval mode (which skips the recompute path that
+        # breaks, see mtp/hidden_capture.py), scores a separate draft loss via a forward hook, and
+        # weight-syncs the heads to vLLM. It is compatible with sample packing (the draft loss masks
+        # cross-segment positions, see mtp/soft_ce.py::shift_mask_for_mtp), so we do NOT force packing
+        # off here. The MTP-config block below resolves the final head count.
+        _mtp_cfg = getattr(self.cfg, "mtp", None)
+        _mtp_training = enable_mtp and _mtp_cfg is not None and getattr(_mtp_cfg, "enabled", False)
+        if not _mtp_training and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
             provider.mtp_num_layers = None
 

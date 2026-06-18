@@ -90,6 +90,40 @@ def _build_packed_targets(
     return targets.unsqueeze(0)
 
 
+def _build_packed_valid_mask(
+    attention_mask: torch.Tensor,
+    packed_seq_params,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
+
+    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
+    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
+    ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
+    index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
+    """
+    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=attention_mask.device, dtype=torch.long)
+    total_padded_tokens = int(cu_padded[-1].item())
+    mask = torch.zeros((total_padded_tokens,), dtype=dtype, device=attention_mask.device)
+    if sub_seq_lengths is not None:
+        cu_padded_cpu = cu_padded.detach().cpu().tolist()
+        seg_idx = 0
+        for row_lens in sub_seq_lengths:
+            for seq_len in row_lens:
+                seq_len = int(seq_len)
+                packed_start = cu_padded_cpu[seg_idx]
+                mask[packed_start : packed_start + seq_len] = 1.0
+                seg_idx += 1
+        return mask.unsqueeze(0)
+
+    attn = attention_mask.to(device=cu_padded.device, dtype=torch.bool)
+    token_offsets = attn.to(torch.long).cumsum(dim=1) - 1
+    packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
+    mask[packed_indices[attn]] = 1.0
+    return mask.unsqueeze(0)
+
+
 class MegatronModelWrapper:
     def __init__(
         self,
@@ -442,7 +476,13 @@ class MegatronModelWrapper:
             draft_loss = None
             student_logits_list = data.get("mtp_student_logits")
             if mtp_enabled and student_logits_list:
-                draft_mask = data["attention_mask"].to(logits.dtype)  # [batch, seq_len]
+                # Under THD sample packing the teacher (logits) and student logits are packed
+                # ([1, T, vocab]); use the matching packed real-token mask + segment boundaries so the
+                # MTP roll/mask respect sub-sequence boundaries (see shift_mask_for_mtp). Otherwise the
+                # [batch, seq] attention mask aligns with the de-padded logits.
+                packed = packed_seq_params is not None
+                draft_mask = (data["mtp_packed_mask"] if packed else data["attention_mask"]).to(logits.dtype)
+                mtp_cu_seqlens = packed_seq_params.cu_seqlens_q_padded if packed else None
                 vocab_size_tp = logits.shape[-1]
                 # Undo the in-place temperature scaling so the teacher is the true policy distribution.
                 teacher_src = logits if temperature == 1.0 else logits * temperature
@@ -454,7 +494,10 @@ class MegatronModelWrapper:
                 )
                 if true_shard_width != vocab_size_tp:
                     teacher_src = teacher_src[..., :true_shard_width]
-                hard_labels = build_mtp_next_token_labels(sequences) if mtp_loss_type == "hard_ce" else None
+                # Packed: build labels from packed_targets ([1, T]) so they align with the packed
+                # student/teacher; the global roll's cross-segment entries are zeroed by layer_mask.
+                hard_label_src = data["packed_targets"] if packed else sequences
+                hard_labels = build_mtp_next_token_labels(hard_label_src) if mtp_loss_type == "hard_ce" else None
 
                 per_layer_losses = []
                 for layer_idx, student_logits in enumerate(student_logits_list):
@@ -463,7 +506,7 @@ class MegatronModelWrapper:
                     # Hard CE's target (token seq[t+k+2]) is one position past the soft-CE teacher
                     # (a distribution at t+k+1), so its validity mask needs one extra shift.
                     mask_shift = layer_idx + 1 if mtp_loss_type == "hard_ce" else layer_idx
-                    layer_mask = shift_mask_for_mtp(draft_mask, mask_shift)
+                    layer_mask = shift_mask_for_mtp(draft_mask, mask_shift, cu_seqlens=mtp_cu_seqlens)
                     if mtp_loss_type == "hard_ce":
                         layer_labels = torch.roll(hard_labels, shifts=-(layer_idx + 1), dims=1)
                         per_layer_losses.append(
@@ -732,9 +775,10 @@ class MegatronModelWrapper:
 
             # Recover [batch, seq_len, ...] from Megatron's internal (left-removed) layout. Only used
             # on the non-packed path: with sample packing (remove_microbatch_padding) the logits stay
-            # packed and loss_func consumes packed_targets instead. MTP draft training requires the
-            # non-packed path (the teacher main-logits and the de-padded student logits must share the
-            # [batch, seq, vocab] layout), enforced by the assertion below.
+            # packed ([1, T, vocab]) and loss_func consumes packed_targets instead. MTP draft training
+            # keeps the student logits in whichever layout the teacher (main logits) uses — de-padded
+            # [batch, seq, vocab] without packing, packed [1, T, vocab] with it — so the two always
+            # align (see the packed-aware mask in loss_func / mtp/soft_ce.py).
             def depad(tensor):
                 return recover_left_padding(
                     tensor,
@@ -744,14 +788,14 @@ class MegatronModelWrapper:
                     post_process=is_last_stage,
                 )
 
-            # MTP draft training de-pads the student logits to [batch, seq, vocab] to align with the
-            # teacher (main logits). Sample packing keeps the main logits packed (loss_func consumes
-            # packed_targets), so the two layouts would mismatch — disallow the combination loudly.
-            assert not (mtp_enabled and self.remove_microbatch_padding), (
-                "MTP/draft training requires trainer.remove_microbatch_padding=False "
-                "(sample packing keeps the policy logits packed, which the decoupled draft loss "
-                "cannot align against)."
-            )
+            # The decoupled MTP teacher/label rolls are context-parallel-unaware (a plain global
+            # torch.roll, both here and in the packed path), so MTP draft training requires CP=1.
+            # CP>1 would need the cross-rank boundary exchange that megatron's roll_tensor implements.
+            if mtp_enabled:
+                assert mpu.get_context_parallel_world_size() == 1, (
+                    "MTP/draft training does not support context parallelism "
+                    "(context_parallel_size > 1): the teacher/label roll is CP-unaware."
+                )
 
             # Run the policy forward; when MTP is active a pre-hook records the MTP block's arguments.
             student_hidden = None
@@ -779,13 +823,21 @@ class MegatronModelWrapper:
             if not self.remove_microbatch_padding:
                 outputs = depad(outputs)
 
-            # Project the MTP hidden states through the shared output layer and de-pad to the main
-            # logits' [batch, seq_len, vocab/tp] layout, so loss_func can score the draft loss.
+            # Project the MTP hidden states through the shared output layer so loss_func can score the
+            # draft loss. Match the teacher's layout: keep them packed ([1, T, vocab/tp]) under sample
+            # packing, or de-pad to [batch, seq_len, vocab/tp] otherwise. When packed, also hand
+            # loss_func the packed real-token mask so it can mask cross-segment MTP targets.
             if student_hidden is not None:
                 student_logits = project_mtp_hidden_to_logits(
                     student_hidden, student_model, detach_output_weight=mtp_detach_shared_output
                 )
-                batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
+                if self.remove_microbatch_padding:
+                    batch["mtp_student_logits"] = student_logits
+                    batch["mtp_packed_mask"] = _build_packed_valid_mask(
+                        attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                    )
+                else:
+                    batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
 
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_backward()
