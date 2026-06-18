@@ -27,7 +27,7 @@ from PIL import Image
 
 
 def _pil_to_data_uri(img: Image.Image) -> str:
-    if img.mode in ("RGBA", "LA", "P"):
+    if img.mode != "RGB":
         img = img.convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
