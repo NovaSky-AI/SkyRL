@@ -9,6 +9,7 @@ import pytest
 
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
+    compute_turn_token_counts,
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
     merge_stepwise_output,
@@ -673,3 +674,35 @@ class TestMergeStepwiseOutput:
         cfg.generator.step_wise_trajectories = False
         with pytest.raises(ValueError, match="merge_stepwise_output.*requires.*step_wise_trajectories"):
             validate_cfg(cfg)
+
+
+def test_compute_turn_token_counts():
+    """`compute_turn_token_counts` returns one count per turn (maximal run of non-zero loss-mask
+    entries), flattened across trajectories. Observation/non-assistant tokens (0) split turns;
+    empty or all-zero masks contribute nothing."""
+    # Single turn: all assistant tokens.
+    assert compute_turn_token_counts([[1, 1, 1]]) == [3]
+
+    # Observation tokens (0) split assistant runs into separate turns.
+    assert compute_turn_token_counts([[1, 1, 0, 0, 1, 1, 1]]) == [2, 3]
+
+    # Leading/trailing zeros don't create or extend turns.
+    assert compute_turn_token_counts([[0, 0, 1, 1, 0]]) == [2]
+
+    # Isolated single non-zero tokens are length-1 turns.
+    assert compute_turn_token_counts([[0, 1, 0, 1, 0]]) == [1, 1]
+
+    # Multiple trajectories: flat list across all, preserving order.
+    assert compute_turn_token_counts([[1, 1], [1, 0, 1, 1]]) == [2, 1, 2]
+
+    # All-zero mask (e.g. dropped by overlong filtering) contributes no turns.
+    assert compute_turn_token_counts([[0, 0, 0]]) == []
+
+    # Empty mask is skipped.
+    assert compute_turn_token_counts([[]]) == []
+
+    # Empty batch.
+    assert compute_turn_token_counts([]) == []
+
+    # Mixed batch: only the trajectory with assistant tokens contributes.
+    assert compute_turn_token_counts([[], [0, 0], [1, 1, 1]]) == [3]
