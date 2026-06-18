@@ -493,7 +493,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    num_groups_dropped = 0
+                    # Zero-variance groups dropped this step under sample_full_batch. Kept (not freed)
+                    # so they can be included in this step's reward/generation metrics; not trained on.
+                    cur_dropped_groups: List[GeneratedOutputGroup] = []
                     with Timer("wait_for_generation_buffer", self.all_timings):
                         buffer_pbar = tqdm(
                             total=self.mini_batch_size,
@@ -527,7 +529,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 else:
                                     # Drop the zero-variance group: give its capacity back to the producers
                                     # and mark its UID consumed (skipped, not regenerated, on resume).
-                                    num_groups_dropped += 1
+                                    cur_dropped_groups.append(group)
                                     await self._staleness_manager.on_rollout_filtered()
                                     await self.async_train_dataloader.mark_filtered_uids([group.uid])
                             except Exception:
@@ -537,7 +539,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 logger.exception(
                                     "sample_full_batch: error processing generated group "
                                     f"(uid={group.uid}, kept_so_far={len(cur_generation_group_mini_batch)}, "
-                                    f"dropped_so_far={num_groups_dropped}). "
+                                    f"dropped_so_far={len(cur_dropped_groups)}). "
                                     f"rewards type={type(rewards).__name__} "
                                     f"len={len(rewards) if hasattr(rewards, '__len__') else 'n/a'} "
                                     f"value={rewards!r}; "
@@ -564,12 +566,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         break
 
                     if self.sample_full_batch:
-                        self.all_metrics["async/num_groups_dropped"] = num_groups_dropped
+                        self.all_metrics["async/num_groups_dropped"] = len(cur_dropped_groups)
 
                     # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
+                            self.convert_generation_group_mini_batch_to_training_input,
+                            cur_generation_group_mini_batch,
+                            cur_dropped_groups,
                         )
 
                     # 3. Run training and update consumed UIDs.
@@ -860,9 +864,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             os._exit(1)
 
     def convert_generation_group_mini_batch_to_training_input(
-        self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
+        self,
+        cur_generation_group_mini_batch: List[GeneratedOutputGroup],
+        dropped_groups: Optional[List[GeneratedOutputGroup]] = None,
     ) -> TrainingInputBatch:
-        """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch."""
+        """Concatenate the mini-batch of generated groups into a single GeneratorOutput and convert to a TrainingInputBatch.
+
+        ``dropped_groups`` are the zero-variance groups filtered out this step under ``sample_full_batch``.
+        They are NOT trained on, but are included in the reward and generation metrics so that those
+        metrics stay comparable to runs without zero-variance filtering / sample_full_batch.
+        """
+        dropped_groups = dropped_groups or []
         generator_outputs = []
         uids = []
         stalenesses = []
@@ -891,9 +903,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         generator_output = concatenate_generator_outputs(
             generator_outputs, step_wise=self.cfg.generator.step_wise_trajectories
         )
-        assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
-        self.all_metrics.update(generator_output["rollout_metrics"])
+
+        # Build the metrics view over kept + dropped groups so reward and generation metrics stay
+        # comparable across runs regardless of zero-variance filtering / sample_full_batch. The dropped
+        # groups are only used for metrics here, never for training.
+        metrics_generator_output = None
+        metrics_uids = None
+        if dropped_groups:
+            metrics_generator_output = concatenate_generator_outputs(
+                generator_outputs + [g.generator_output for g in dropped_groups],
+                step_wise=self.cfg.generator.step_wise_trajectories,
+            )
+            metrics_uids = []
+            for g in list(cur_generation_group_mini_batch) + dropped_groups:
+                metrics_uids.extend([g.uid] * len(g.generator_output["response_ids"]))
+
+        # Generation (rollout) metrics: over kept + dropped when sample_full_batch dropped groups.
+        rollout_metrics_source = metrics_generator_output if metrics_generator_output is not None else generator_output
+        assert rollout_metrics_source["rollout_metrics"] is not None, "Rollout metrics should be non-null."
+        self.all_metrics.update(rollout_metrics_source["rollout_metrics"])
         generator_output.pop("rollout_metrics", None)
+        if metrics_generator_output is not None:
+            metrics_generator_output.pop("rollout_metrics", None)
 
         # Log staleness statistics for this step
         self.all_metrics.update(
@@ -906,8 +937,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             }
         )
 
-        # Convert rewards to per-token form and compute reward metrics before training conversion
-        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
+        # Convert rewards to per-token form and compute reward metrics before training conversion.
+        # Reward metrics are computed over kept + dropped groups (metrics_generator_output) when
+        # sample_full_batch dropped groups this step; the conversion still applies to kept groups only.
+        generator_output, uids = self.postprocess_generator_output(
+            generator_output, uids, metrics_generator_output=metrics_generator_output, metrics_uids=metrics_uids
+        )
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
