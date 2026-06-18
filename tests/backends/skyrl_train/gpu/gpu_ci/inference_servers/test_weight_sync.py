@@ -623,13 +623,13 @@ async def test_worker_wrap_multichunk_reload_preserves_moe_forward(
 
     class _InProcessInferenceEngineClient:
         async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-            await engine.collective_rpc("start_weight_update", args=(is_checkpoint_format,))
+            await engine.collective_rpc("skyrl_start_weight_update", args=(is_checkpoint_format,))
 
         async def update_named_weights(self, request: object) -> None:
             await engine.collective_rpc("load_weights", args=(pickle.dumps(request),))
 
         async def finish_weight_update(self) -> None:
-            await engine.collective_rpc("finish_weight_update")
+            await engine.collective_rpc("skyrl_finish_weight_update")
 
     sender = CudaIpcTransferStrategy.create_sender(
         CudaIpcInitInfo(model_dtype_str="bfloat16", override_existing_receiver=True),

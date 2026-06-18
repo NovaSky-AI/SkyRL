@@ -1118,7 +1118,7 @@ class RemoteInferenceClient:
         """
         Start a new chunked weight update via /collective_rpc.
 
-        Calls the NewInferenceWorkerWrap.start_weight_update method on all
+        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on all
         workers. For checkpoint-format weights this initializes layerwise
         reload. Must be called before any update_weights_ipc calls.
 
@@ -1132,7 +1132,7 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/collective_rpc",
             {
-                "method": "start_weight_update",
+                "method": "skyrl_start_weight_update",
                 "kwargs": {"is_checkpoint_format": is_checkpoint_format},
             },
         )
@@ -1145,8 +1145,8 @@ class RemoteInferenceClient:
         Send a single weight chunk via /collective_rpc.
 
         Calls NewInferenceWorkerWrap.update_weights_ipc on all workers.
-        Can be called multiple times between start_weight_update and
-        finish_weight_update.
+        Can be called multiple times between skyrl_start_weight_update and
+        skyrl_finish_weight_update.
 
         Args:
             update_info: Dict with backend-specific update info (names,
@@ -1196,7 +1196,7 @@ class RemoteInferenceClient:
         """
         Finish the current chunked weight update via /collective_rpc.
 
-        Calls NewInferenceWorkerWrap.finish_weight_update on all workers.
+        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
         For checkpoint-format weights, runs layerwise postprocessing.
 
         Returns:
@@ -1204,7 +1204,7 @@ class RemoteInferenceClient:
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "finish_weight_update"},
+            {"method": "skyrl_finish_weight_update"},
         )
 
     async def load_lora_adapter(
