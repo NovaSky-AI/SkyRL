@@ -721,11 +721,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 for t in pending:
                     t.cancel()
                 return get_task.result()
-            # all_generators_done fired first; cancel the item-less get and re-check the buffer.
+            # all_generators_done fired first. Cancel the pending get and loop to re-check the buffer.
+            # If the get had already retrieved an item (racing the cancel), return it rather than
+            # dropping it -- a successful get() pops the item from the queue, so discarding the result
+            # would lose that group. In practice the event is only set after all producers have stopped,
+            # so no put can race here, but returning the item keeps this correct regardless.
             get_task.cancel()
             try:
-                await get_task
-            except BaseException:
+                return await get_task
+            except asyncio.CancelledError:
                 pass
 
     def _should_keep_group(self, group: GeneratedOutputGroup) -> bool:
