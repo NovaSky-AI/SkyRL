@@ -6,13 +6,13 @@ set -x
 # client code / generation configs can be iterated against a fixed deployment.
 # Point your OpenAI-compatible client at the printed proxy_url.
 #
-# bash examples/fully_async/sim_trainer/serve.5b.sh
+# bash examples/fully_async/sim_trainer/run_serve_qwen1.5b.sh
 #
 # Requires 4 GPUs (4 engines x tensor_parallel_size=1). Serving must be
 # non-colocated (there is no trainer to share GPUs with).
 #
 # Override on the command line, e.g. enable prefill-decode (2 prefill + 2 decode):
-#   bash examples/serve/run_serve_qwen1.5b.sh \
+#   bash examples/fully_async/sim_trainer/run_serve_qwen1.5b.sh \
 #     generator.inference_engine.enable_pd=true \
 #     generator.inference_engine.num_prefill=2 \
 #     generator.inference_engine.engine_init_kwargs.kv_transfer_config.kv_connector=NixlConnector

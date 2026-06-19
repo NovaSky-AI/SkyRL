@@ -8,9 +8,9 @@ set -x
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k   # one-time
 #   Run:
 #     1. Launch external servers with 
-#          bash fully-async-sim-trainer/examples/train/fully_async/sim_trainer/run_serve_qwen1.5b.sh
+#          bash examples/train/fully_async/sim_trainer/run_serve_qwen1.5b.sh
 #     2. Launch simulated fully async training - ensure you use the right `EXTERNAL_PROXY_URL` and `EXTERNAL_SERVER_URLS`
-#          bash fully-async-sim-trainer/examples/train/fully_async/sim_trainer/run_fully_async_sim_gsm8k_external.sh
+#          bash examples/train/fully_async/sim_trainer/run_fully_async_sim_gsm8k_external.sh
 
 # Dummy values - substitute with the right URLs
 : "${EXTERNAL_PROXY_URL:="http://127.0.0.1:40859"}"
