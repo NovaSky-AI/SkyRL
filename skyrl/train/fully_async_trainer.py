@@ -514,6 +514,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
                                 f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
                             )
+                        # This is an (early) end of epoch. Save the end-of-epoch checkpoint that the normal
+                        # step-7 is_epoch_end path would have saved -- we break before reaching it. The
+                        # discarded partial is already marked consumed, so resuming here skips it.
+                        if self.cfg.trainer.ckpt_interval > 0:
+                            with Timer("save_checkpoints", self.all_timings):
+                                await asyncio.to_thread(self.save_checkpoints)
+                        if self.cfg.trainer.hf_save_interval > 0:
+                            with Timer("save_hf_model", self.all_timings):
+                                await asyncio.to_thread(self.save_models)
                         break
 
                     if self.sample_full_batch:

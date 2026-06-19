@@ -449,9 +449,11 @@ class AlgorithmConfig(BaseConfig):
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
-    zero_variance_filter_tol: float = 0.0
+    zero_variance_filter_tol: float = 1e-6
     """Two rewards within this absolute tolerance count as equal when detecting zero-variance groups.
-    Only used when ``zero_variance_filter=True``. 0.0 = exact; set ~1e-6 for float (LLM-judge) rewards."""
+    Only used when ``zero_variance_filter=True``. Defaults to 1e-6 so float (LLM-judge) rewards that are
+    effectively identical are still treated as zero-variance; this is a no-op for integer rewards (e.g.
+    0/1) where the spread is either 0 or >= 1. Set to 0.0 for exact equality."""
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2
