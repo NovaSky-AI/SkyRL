@@ -398,7 +398,7 @@ class BasePPOExp:
         # (sleep + pause/resume, no broadcast), typically against external served endpoints.
         # TODO: we should make a top level TrainerConfig.simulate_training flag to provide a consistent way
         # for simulating training steps
-        simulate_training = getattr(getattr(self.cfg.trainer, "fully_async", None), "simulate_training", False)
+        simulate_training = self.cfg.trainer.fully_async.simulate_training
         if simulate_training:
             logger.info(
                 "fully_async.simulate_training=True: skipping build_models() — no policy/critic/ref "
