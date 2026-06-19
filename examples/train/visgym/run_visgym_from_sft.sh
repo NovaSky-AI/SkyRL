@@ -43,7 +43,7 @@ if [ ! -f "$EVAL_DATA_DIR/train.parquet" ]; then
     --output_dir "$EVAL_DATA_DIR"
 fi
 
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp \
   python examples/train/visgym/entrypoint.py \
   --env_variant sft \
   data.train_data="['$DATA_DIR/train.parquet']" \

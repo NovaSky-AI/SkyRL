@@ -5,7 +5,7 @@ import os
 from omegaconf import DictConfig
 from skyrl.train.config import GeneratorConfig, SkyRLTrainConfig, make_config
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl.train.utils import initialize_ray
 import ray
@@ -24,7 +24,7 @@ SkyRLAgentConfig = make_config(generator_cls=SkyRLAgentGeneratorConfig)
 
 
 class SkyRLAgentGenerator(GeneratorInterface):
-    def __init__(self, generator_cfg: SkyRLAgentGeneratorConfig, llm_endpoint_client: InferenceEngineClient, tokenizer):
+    def __init__(self, generator_cfg: SkyRLAgentGeneratorConfig, llm_endpoint_client: InferenceEngineInterface, tokenizer):
         # read the skyagent task yaml
         skyagent_task_yaml_path = generator_cfg.task
         if not os.path.exists(skyagent_task_yaml_path):

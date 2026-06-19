@@ -6,7 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type
 
 import ray
 import torch
@@ -36,9 +36,6 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -58,7 +55,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     reduce_metrics,
 )
 from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
@@ -74,7 +70,7 @@ from skyrl.train.utils.utils import (
 _SET_AFFINITY = False
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import (
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
     from skyrl.train.config.config import InferenceEngineConfig
@@ -376,7 +372,7 @@ class Worker(DistributedTorchRayActor):
 
     async def init_weight_sync_state(
         self,
-        inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]",
+        inference_engine_client: "RemoteInferenceClient",
         inference_engine_cfg: "InferenceEngineConfig",
     ):
         """Initialize state for weight syncing with Inference Engine Client
@@ -397,11 +393,8 @@ class Worker(DistributedTorchRayActor):
             colocate_all=self.cfg.placement.colocate_all,
         )
 
-        # For new inference path, fetch world_size from servers
-        # For legacy path, calculate from config
-        inference_world_size = None
-        if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size, _ = await inference_engine_client.get_world_size()
+        # Fetch the total inference world size from the servers.
+        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(

@@ -9,7 +9,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 import pytest
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch

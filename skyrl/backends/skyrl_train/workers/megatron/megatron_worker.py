@@ -75,7 +75,7 @@ from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import (
+    from skyrl.backends.skyrl_train.inference_servers.base import (
         InferenceEngineInterface,
     )
     from skyrl.train.config.config import InferenceEngineConfig

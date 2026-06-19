@@ -13,7 +13,7 @@ import pytest
 from transformers import AutoTokenizer
 
 import skyrl
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -56,7 +56,6 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
         model=MODEL_QWEN3,
         sleep_level=1,
         engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
-        use_new_inference_servers=True,
     ) as engines:
         client = engines.client
 

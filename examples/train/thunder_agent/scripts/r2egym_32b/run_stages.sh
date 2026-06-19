@@ -52,7 +52,7 @@ ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-2}"
 ROLLOUT_ENGINES="${ROLLOUT_ENGINES:-4}"
 ROLLOUT_GPU_GROUPS_SPEC="${ROLLOUT_GPU_GROUPS_SPEC:-}"
 ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
-VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server}"
+VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-vllm.entrypoints.openai.api_server}"
 SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-18080}"
 
 DOCKER_MODE="${DOCKER_MODE:-rootful}"
@@ -327,7 +327,7 @@ for name in ["ray", "torch", "vllm", "fastapi", "uvicorn"]:
     print(f"{name}={getattr(mod, '__version__', 'ok')}")
 from examples.train.thunder_agent.main_harbor_thunder_agent import HarborThunderAgentFullyAsyncExp
 from examples.train.thunder_agent.skyrl_integration.generator import ThunderAgentHarborGenerator
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap
+from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import NewInferenceWorkerWrap
 print("pr_core_imports=ok")
 PY
     if [ ! -f "$MODEL_PATH/config.json" ]; then

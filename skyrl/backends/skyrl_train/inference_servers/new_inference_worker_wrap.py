@@ -11,8 +11,6 @@ This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
 than all at once.
 
-Used only with the new inference path (_SKYRL_USE_NEW_INFERENCE=1).
-
 TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, vLLM will
 natively support start_weight_update / update_weights / finish_weight_update
 on GPUWorker with dedicated HTTP endpoints. At that point this worker extension

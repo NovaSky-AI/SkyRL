@@ -234,7 +234,6 @@ esac
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-export _SKYRL_USE_NEW_INFERENCE=1
 export SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-8080}"
 # main_thunder_agent.py reads THUNDER_AGENT_ROUTER_PORT for the embedded router.
 export THUNDER_AGENT_ROUTER_PORT="${THUNDER_AGENT_ROUTER_PORT:-$SKYRL_INFERENCE_ROUTER_PORT}"

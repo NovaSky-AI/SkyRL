@@ -68,7 +68,6 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY"}}' # auto prefill backend can crash
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
-export _SKYRL_USE_NEW_INFERENCE=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 
 # On Blackwell, use the following env vars:

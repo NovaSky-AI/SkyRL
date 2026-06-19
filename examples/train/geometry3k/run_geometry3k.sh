@@ -19,7 +19,7 @@ fi
 : "${LOGGER:=console}"
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm"}"
 
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp --with pylatexenc \
+uv run --isolated --extra fsdp --with pylatexenc \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/test.parquet']" \

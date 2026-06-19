@@ -6,20 +6,17 @@ from .base import LoraLoadRequest, WeightChunk, WeightUpdateRequest
 from .broadcast_strategy import (
     BroadcastInitInfo,
     BroadcastTransferStrategy,
-    BroadcastWeightTransferReceiver,
     BroadcastWeightTransferSender,
     BroadcastWeightUpdateRequest,
 )
 from .cuda_ipc_strategy import (
     CudaIpcInitInfo,
     CudaIpcTransferStrategy,
-    CudaIpcWeightTransferReceiver,
     CudaIpcWeightTransferSender,
     CudaIpcWeightUpdateRequest,
 )
 from .transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferReceiver,
     WeightTransferSender,
     WeightTransferStrategy,
 )
@@ -66,15 +63,12 @@ __all__ = [
     "CudaIpcWeightUpdateRequest",
     "WeightTransferStrategy",
     "WeightTransferSender",
-    "WeightTransferReceiver",
     "WeightSyncInitInfo",
     "BroadcastInitInfo",
     "CudaIpcInitInfo",
     "BroadcastTransferStrategy",
     "BroadcastWeightTransferSender",
-    "BroadcastWeightTransferReceiver",
     "CudaIpcTransferStrategy",
     "CudaIpcWeightTransferSender",
-    "CudaIpcWeightTransferReceiver",
     "get_transfer_strategy_cls",
 ]

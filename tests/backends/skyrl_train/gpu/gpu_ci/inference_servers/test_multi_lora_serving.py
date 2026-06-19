@@ -14,7 +14,7 @@ import pytest
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 

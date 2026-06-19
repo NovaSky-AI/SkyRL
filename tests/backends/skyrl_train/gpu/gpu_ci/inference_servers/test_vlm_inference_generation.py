@@ -98,7 +98,6 @@ async def test_render_chat_completion_multimodal(module_scoped_ray_init_fixture)
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         client = engines.client
 
@@ -175,7 +174,6 @@ async def test_sample_with_multimodal_image(module_scoped_ray_init_fixture):
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         client = engines.client
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN3_VL)
@@ -247,7 +245,6 @@ async def test_renderer_text_only(module_scoped_ray_init_fixture):
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
 
@@ -278,7 +275,6 @@ async def test_renderer_mixed_text_and_image(module_scoped_ray_init_fixture):
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
 
@@ -334,7 +330,6 @@ async def test_renderer_decodes_mm_kwargs(module_scoped_ray_init_fixture):
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         renderer = VLLMRenderer(engines.client, model_name=MODEL_QWEN3_VL)
 
@@ -381,7 +376,6 @@ async def test_generate_with_multimodal_features_red_square(module_scoped_ray_in
             "max_model_len": 4096,
             "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
-        use_new_inference_servers=True,
     ) as engines:
         client = engines.client
 

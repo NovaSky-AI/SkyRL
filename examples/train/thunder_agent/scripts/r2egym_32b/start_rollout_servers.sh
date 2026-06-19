@@ -165,7 +165,7 @@ LOG_DIR="${LOG_DIR:-$TMP_LOG_ROOT/$RUN_NAME/rollout}"
 SCRATCH_ROOT="$(resolve_writable_runtime_root "${SCRATCH_ROOT:-/scratch/$USER/skyrl_runtime/${RUN_NAME}-rollout}")"
 PYTHON_BIN="$(resolve_python_bin)"
 ROLLOUT_NOFILE_SOFT="${ROLLOUT_NOFILE_SOFT:-131072}"
-VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server}"
+VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-vllm.entrypoints.openai.api_server}"
 
 mkdir -p "$LOG_DIR" "$SCRATCH_ROOT"
 
@@ -272,7 +272,7 @@ for idx in "${!SERVER_PORTS[@]}"; do
   fi
   : >"$log_file"
   echo "Starting $source_name port=${SERVER_PORTS[$idx]} gpus=${SERVER_GPU_GROUPS[$idx]} log=$log_file"
-  SKYRL_EXTERNAL_SERVER_IDX="$idx" CUDA_VISIBLE_DEVICES="${SERVER_GPU_GROUPS[$idx]}" "$PYTHON_BIN" \
+  SKYRL_EXTERNAL_SERVER_IDX="$idx" VLLM_SERVER_DEV_MODE=1 CUDA_VISIBLE_DEVICES="${SERVER_GPU_GROUPS[$idx]}" "$PYTHON_BIN" \
     -m "$VLLM_SERVER_MODULE" \
     --model "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
@@ -291,7 +291,7 @@ for idx in "${!SERVER_PORTS[@]}"; do
     --trust-remote-code \
     --chat-template "$CHAT_TEMPLATE_PATH" \
     --distributed-executor-backend mp \
-    --worker-extension-cls skyrl.backends.skyrl_train.inference_servers.vllm_worker.WorkerWrap \
+    --worker-extension-cls skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap \
     "${extra_vllm_args[@]}" \
     >"$log_file" 2>&1 &
   SERVER_PIDS+=("$!")

@@ -146,7 +146,7 @@ is a set of `generator.n_samples_per_prompt` number of trajectories generated fo
 
 Generation workers are virtual workers, each is simply an `asyncio.Task` that runs `generator.generate()`
 for a group of trajectories. There is only one `generator` instance (e.g. `SkyRLGymGenerator`) and one
-physical `InferenceEngineClient` in the back serving the actual LLM inference.
+physical `RemoteInferenceClient` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
@@ -166,7 +166,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the `AsyncDataloader`, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
-4. Make `AnyGenerator` (really the `InferenceEngineClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
+4. Make `AnyGenerator` (really the `RemoteInferenceClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the `AsyncStalenessManager`, potentially unblocking
    generation workers stuck on step 1 -- as they can now generate new data that will not be as stale as before.
 6. Repeat from step 1 until the epoch is done.
@@ -281,12 +281,12 @@ underlyingly as the `/chat/completions` endpoint is simply blocked and not retur
 This design makes the implementation of fully async training agnostic to the generator / agent harness as
 the trajectory could be doing anything when weight update is happening -- in the middle of a output generation or in the middle of an interaction with the environment (where the next output generation will simply be blocked until the weight update is finished).
 
-We implement this semantics by implementing SkyRL's `InferenceEngineClient` to keep calling the underlying
+We implement this semantics by implementing SkyRL's `RemoteInferenceClient` to keep calling the underlying
 inference engine's `/chat/completions` endpoint in a while loop, until the finish reason is not an `abort`.
 
-Upon `InferenceEngineClient.pause_generation()`, we abort all the in-flight `/chat/completions` requests,
+Upon `RemoteInferenceClient.pause_generation()`, we abort all the in-flight `/chat/completions` requests,
 and save the partial results, waiting to be re-fed into the underlying inference engine as a new
-`/chat/completions` request when `InferenceEngineClient.resume_generation()` is called.
+`/chat/completions` request when `RemoteInferenceClient.resume_generation()` is called.
 
 See the following two PRs for more details:
 - https://github.com/NovaSky-AI/SkyRL/pull/537

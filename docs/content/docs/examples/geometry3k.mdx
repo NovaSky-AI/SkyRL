@@ -58,7 +58,7 @@ Observations returned by `step()` are plain-text feedback strings (no images) â€
 Key VLM-specific overrides from `examples/train/geometry3k/run_geometry3k.sh`:
 
 ```bash title="examples/train/geometry3k/run_geometry3k.sh"
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.strategy=fsdp \

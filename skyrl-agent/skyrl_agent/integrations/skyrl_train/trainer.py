@@ -26,7 +26,7 @@ from skyrl.train.generators.base import (
     BatchMetadata,
     TrainingPhase,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import get_sampling_params_for_backend
 from skyrl.train.dataset import PromptDataset
 
 from pathlib import Path

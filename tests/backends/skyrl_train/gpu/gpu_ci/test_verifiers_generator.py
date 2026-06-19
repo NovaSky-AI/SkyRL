@@ -8,7 +8,7 @@ import pytest
 import ray
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import GeneratorConfig, SamplingParams

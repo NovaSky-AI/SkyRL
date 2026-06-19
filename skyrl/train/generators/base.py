@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
 import torch
 
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 
 TrainingPhase = Literal["train", "eval"]
 

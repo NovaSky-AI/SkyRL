@@ -72,7 +72,7 @@ Client calls sample()
 SkyRL-Train Backend
     │  Converts Tinker SamplingParams → vLLM params
     ▼
-InferenceEngineClient
+RemoteInferenceClient
     │  Distributes prompts across vLLM engines
     ▼
 Inference Workers (vLLM)
@@ -81,7 +81,7 @@ Inference Workers (vLLM)
 Results aggregated → GeneratedSequence objects returned
 ```
 
-The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `InferenceEngineClient`, which handles load balancing and sticky routing across vLLM workers. 
+The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `RemoteInferenceClient`, which handles load balancing and sticky routing across vLLM workers. 
 
 
 ## Weight Sync

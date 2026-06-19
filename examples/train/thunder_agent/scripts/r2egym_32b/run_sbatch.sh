@@ -43,7 +43,7 @@ export TRAINER_NODE_SPECS="${TRAINER_NODE_SPECS:-${ALLOC_NODES[1]}:$SLURM_JOB_ID
 export DOCKER_MODE="${DOCKER_MODE:-rootful}"
 export PREPULL_R2EGYM_IMAGES="${PREPULL_R2EGYM_IMAGES:-true}"
 export ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
-export VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server}"
+export VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-vllm.entrypoints.openai.api_server}"
 export SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-18080}"
 export RUN_NAME_OVERRIDE="${RUN_NAME_OVERRIDE:-r2egym-ta-mediumhard256-10epoch-nopf-${SLURM_JOB_ID}}"
 

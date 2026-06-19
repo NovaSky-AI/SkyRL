@@ -4,10 +4,6 @@ title: "Inference Architecture"
 
 This page explains how SkyRL's inference engine separates data and control planes, and how weight sync works during training. We design the architecture of SkyRL's HTTP-based inference implementation below.
 
-<Callout type="info">
-The feature flag `_SKYRL_USE_NEW_INFERENCE` gates this codepath. It defaults to `1` (on); set `_SKYRL_USE_NEW_INFERENCE=0` to fall back to the legacy path that uses vLLM engines wrapped via Ray actors. The flag will be removed once the legacy path is deleted.
-</Callout>
-
 ## System Architecture
 
 The system is simple, consisting of 3 pieces:

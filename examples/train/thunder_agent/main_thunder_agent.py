@@ -12,8 +12,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 
@@ -54,12 +53,7 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
         asyncio.run(trainer.train())
 
     def get_inference_client(self) -> InferenceEngineInterface:
-        if _SKYRL_USE_NEW_INFERENCE:
-            return self._get_new_inference_client()
-        raise ValueError(
-            "ThunderAgent integration requires the new inference layer. "
-            "Set _SKYRL_USE_NEW_INFERENCE=1 environment variable."
-        )
+        return self._get_new_inference_client()
 
     def _get_new_inference_client(self):
         """Override to use ThunderAgentRouter instead of InferenceRouter."""

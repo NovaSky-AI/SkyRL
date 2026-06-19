@@ -24,7 +24,7 @@ from loguru import logger
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch

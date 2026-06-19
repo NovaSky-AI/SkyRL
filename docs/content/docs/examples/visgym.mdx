@@ -125,7 +125,7 @@ Each row carries `env_class=visgym`, `visgym_env_id`, and optionally a determini
 Key overrides from both scripts:
 
 ```bash title="examples/train/visgym/run_visgym_from_sft.sh (excerpt)"
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp \
   python examples/train/visgym/entrypoint.py \
   --env_variant sft \
   trainer.policy.model.path="$MODEL_PATH" \         # SFT checkpoint
@@ -145,7 +145,7 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
 ```
 
 ```bash title="examples/train/visgym/run_visgym_from_instruct.sh (excerpt)"
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp \
   python examples/train/visgym/entrypoint.py \
   --env_variant instruct \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \

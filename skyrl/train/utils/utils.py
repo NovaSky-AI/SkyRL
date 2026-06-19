@@ -21,7 +21,6 @@ from ray.util.placement_group import (
 )
 
 from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
@@ -547,9 +546,7 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
 
 
 def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
-    """Validates config options for the new inference layer.
-
-    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
+    """Validates config options for the inference layer.
 
     Config combinations:
     - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
@@ -564,10 +561,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     Raises:
         ValueError: If colocated mode is used with external URLs.
     """
-    if not _SKYRL_USE_NEW_INFERENCE:
-        # Only validate when using the new inference path
-        return
-
     is_colocated = cfg.trainer.placement.colocate_all
     has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
     has_external_servers = cfg.generator.inference_engine.external_server_urls is not None
@@ -728,8 +721,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         if value := os.environ.get(var_name):
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
-
-    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.

@@ -1,12 +1,14 @@
 import sys
 
+import ray
+from transformers import PreTrainedTokenizer
+
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl.train.utils import initialize_ray
-import ray
+
 from ..verifiers_generator import VerifiersGenerator
-from transformers import PreTrainedTokenizer
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
 class VerifiersEntrypoint(BasePPOExp):
@@ -14,7 +16,7 @@ class VerifiersEntrypoint(BasePPOExp):
         self,
         cfg: SkyRLTrainConfig,
         tokenizer: PreTrainedTokenizer,
-        inference_engine_client: InferenceEngineClient,
+        inference_engine_client: InferenceEngineInterface,
     ):
         return VerifiersGenerator(
             generator_cfg=cfg.generator,

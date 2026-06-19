@@ -19,7 +19,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
     generator.inference_engine.run_engines_locally=False \
-    generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
+    `# Set these to the proxy_url / server_urls logged by run_vllm_server.sh (the serve entrypoint)` \
+    generator.inference_engine.external_proxy_url="http://127.0.0.1:8000" \
+    generator.inference_engine.external_server_urls="['http://127.0.0.1:8001']" \
     generator.inference_engine.tensor_parallel_size="$INF_ENGINE_TP" \
     generator.inference_engine.backend="$BACKEND" \
     generator.sampling_params.logprobs=null \

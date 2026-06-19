@@ -24,21 +24,9 @@ in Prometheus text format.
 
 ## Inference path support
 
-| Inference path                                  | Supported |
-| ----------------------------------------------- | --------- |
-| New inference (`_SKYRL_USE_NEW_INFERENCE=1`, default) | Yes  |
-| Old inference + `generator.async_engine=true`   | Yes       |
-| Old inference + `generator.async_engine=false`  | **No**    |
-
-The new inference path ([vllm_server_actor.py:329-339](skyrl/backends/skyrl_train/inference_servers/vllm_server_actor.py#L329-L339))
-always uses `AsyncLLMEngine` and wires the stat logger unconditionally.
-
-The legacy path supports it only when `async_engine=true`
-([vllm_engine.py:359-370](skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py#L359-L370)).
-The synchronous `VLLMInferenceEngine` pops the flag and emits a warning
-([vllm_engine.py:240-247](skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py#L240-L247)):
-vLLM's sync `LLM` class doesn't accept `stat_loggers`. Set
-`generator.async_engine=true` if you need engine metrics on the legacy path.
+The inference servers ([vllm_server_actor.py:329-339](skyrl/backends/skyrl_train/inference_servers/vllm_server_actor.py#L329-L339))
+always use `AsyncLLMEngine` and wire the stat logger unconditionally, so engine
+metrics are always available.
 
 ## Metrics logged to wandb
 
