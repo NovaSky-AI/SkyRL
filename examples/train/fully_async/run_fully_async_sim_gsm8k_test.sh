@@ -1,8 +1,7 @@
 set -x
 
-# Smoke test for the SIMULATED-trainer fully-async path (FullyAsyncTrainerSim).
-# Small model + local vLLM engine + GSM8K, no trainer GPUs (build_models is skipped).
-# Each step generates a mini-batch, sleeps SIM_STEP_SECONDS (stand-in for fwd/bwd), then
+# Fully async GRPO training with a simulated trainer for Qwen2.5-1.5B-Instruct on GSM8K.
+# Each step generates a mini-batch, sleeps SIM_STEP_SECONDS (stand-in for forward/backward), then
 # pause/resume — exercising the whole generation-side loop end to end and logging to wandb.
 #
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k   # one-time
@@ -13,7 +12,7 @@ set -x
 : "${NUM_INFERENCE_ENGINES:=1}"
 : "${LOGGER:=wandb}"
 
-# Tiny fully-async knobs for a quick smoke test.
+# Tiny fully-async knobs for a quick test.
 : "${MINI_BATCH_SIZE:=4}"
 : "${MAX_STALENESS_STEPS:=1}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=4}"   # mb <= npgw <= mb*(staleness+1) = 8
@@ -23,7 +22,7 @@ set -x
 
 RUN_NAME="${RUN_NAME:-gsm8k-sim-qwen0.5b}"
 
-uv run --isolated --env-file .env.ray --extra fsdp \
+uv run --isolated --extra fsdp \
   -m examples.train.fully_async.main_fully_async_sim \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

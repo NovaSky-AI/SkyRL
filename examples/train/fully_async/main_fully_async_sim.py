@@ -63,11 +63,6 @@ class FullyAsyncSimPPOExp(BasePPOExp):
 # max_retries=0: fail once loudly instead of looping, so the crash is easy to read.
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):
-    # DEBUG: dump the Python stack of all threads if the worker hits a fatal native signal
-    # (SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL) or a SIGTERM — to capture where the step-1
-    # WorkerCrashedError originates (the process dies before normal Python unwinding).
-    faulthandler.enable(all_threads=True)
-    faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
     # make sure that the training loop is not run on the head node.
     exp = FullyAsyncSimPPOExp(cfg)
     exp.run()

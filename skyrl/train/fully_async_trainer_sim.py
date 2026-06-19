@@ -34,6 +34,12 @@ class _SimDispatch:
         # No real weight-sync process group in sim mode.
         pass
 
+    def get_lcm_dp_size(self) -> int:
+        # No trainer models are built in sim mode, so there is no data-parallel
+        # group to pad the training batch for. Return 1 so the padding in
+        # ``convert_to_training_input`` (pad to a multiple of dp_size) is a no-op.
+        return 1
+
     async def save_weights_for_sampler(self):
         await self._client.pause_generation()
         try:
