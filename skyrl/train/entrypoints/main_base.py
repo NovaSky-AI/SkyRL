@@ -396,6 +396,8 @@ class BasePPOExp:
         # Build the models — skipped in simulated-trainer mode (no policy/critic/ref components).
         # See FullyAsyncConfig.simulate_training / FullyAsyncTrainerSim: steps are simulated
         # (sleep + pause/resume, no broadcast), typically against external served endpoints.
+        # TODO: we should make a top level TrainerConfig.simulate_training flag to provide a consistent way
+        # for simulating training steps
         simulate_training = getattr(getattr(self.cfg.trainer, "fully_async", None), "simulate_training", False)
         if simulate_training:
             logger.info(
