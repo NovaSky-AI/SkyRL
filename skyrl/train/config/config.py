@@ -497,6 +497,23 @@ class FullyAsyncConfig(BaseConfig):
     Set to False for fully async training to reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache)."""
 
+    # --- Trainer simulation (no real trainer components) ---
+    simulate_training: bool = False
+    """If True, run fully-async generation with a SIMULATED trainer (see
+    ``FullyAsyncTrainerSim``): no policy/critic/ref models are instantiated and no weight
+    broadcast happens. Each step consumes a mini-batch from the generation buffer, sleeps for
+    ``simulate_training_step_seconds``, then issues pause/resume generation (as a real weight
+    sync would) but skips ``broadcast_to_inference_engines``. Used to benchmark the
+    generation/inference side (e.g. router load-balancing policies) on large models without
+    paying for trainer GPUs — typically pointed at already-served endpoints via
+    ``external_proxy_url`` / ``external_server_urls``. The generation-side dynamics (staleness
+    control, rate limiting, pause/resume) remain faithful."""
+    simulate_training_step_seconds: float = 30.0
+    """Wall-clock seconds the simulated dummy training step sleeps (stands in for fwd/bwd/optim)."""
+    simulate_weight_sync_seconds: float = 0.0
+    """Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast.
+    0.0 = pause then immediately resume."""
+
 
 # ---------------------------------------------------------------------------
 # Sampling / Chat Template

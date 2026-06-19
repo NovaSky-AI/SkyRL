@@ -14,6 +14,7 @@ High-level notes:
 import asyncio
 import inspect
 import os
+import sys
 import traceback
 from dataclasses import dataclass
 from typing import Iterable, List, Set, Tuple
@@ -394,6 +395,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             for step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
+                    logger.info(f"Entered step {step_idx}")
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
                     with Timer("wait_for_generation_buffer", self.all_timings):
@@ -624,11 +626,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         except asyncio.CancelledError:
             if "slot_acquired" in locals() and slot_acquired:
                 logger.error("Generation worker cancelled mid-flight (slot acquired). Exiting.")
+                # os._exit() does NOT flush buffers — flush so this reason survives the hard exit.
+                logger.complete()
+                sys.stderr.flush()
+                sys.stdout.flush()
                 os._exit(1)
             return
         except Exception as e:
             logger.error(f"Generator worker errored out with exception: {e}")
             logger.error(f"Traceback: \n{traceback.format_exc()}")
+            # os._exit() does NOT flush buffers — flush so this traceback survives the hard exit.
+            logger.complete()
+            sys.stderr.flush()
+            sys.stdout.flush()
             os._exit(1)
 
     def convert_generation_group_mini_batch_to_training_input(
