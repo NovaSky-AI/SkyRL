@@ -12,6 +12,7 @@ set -x
 #     2. Launch simulated fully async training - ensure you use the right `EXTERNAL_PROXY_URL` and `EXTERNAL_SERVER_URLS`
 #          bash fully-async-sim-trainer/examples/train/fully_async/sim_trainer/run_fully_async_sim_gsm8k_external.sh
 
+# Dummy values - substitute with the right URLs
 : "${EXTERNAL_PROXY_URL:="http://127.0.0.1:40859"}"
 : "${EXTERNAL_SERVER_URLS:=['http://127.0.0.1:8000','http://127.0.0.1:8001']}"
 
