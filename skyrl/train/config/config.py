@@ -498,12 +498,11 @@ class FullyAsyncConfig(BaseConfig):
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
     sample_full_batch: bool = False
-    """Requires ``trainer.algorithm.zero_variance_filter=True``. When True, drop zero-variance groups
-    and keep pulling generated groups until the mini-batch is full of non-zero-variance groups,
-    blocking on generation as needed (the async-native equivalent of DAPO ``dynamic_sampling="filter"``).
-    Dropped groups are marked consumed (skipped, not regenerated, on resume). Makes the per-epoch step
-    count an upper bound rather than exact: when the epoch's prompts are exhausted mid mini-batch, the
-    partial mini-batch is discarded (also marked consumed) and the epoch ends."""
+    """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
+    mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).
+    Dropped groups are marked consumed (not regenerated on resume), so the per-epoch step count becomes
+    an upper bound: if the epoch's prompts run out mid mini-batch, the partial batch is discarded and
+    the epoch ends."""
     clear_kv_cache_on_weight_sync: bool = True
     """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
     Set to False for fully async training to reuse KV cache from stale policies during generation

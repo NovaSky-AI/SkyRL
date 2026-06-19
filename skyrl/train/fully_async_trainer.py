@@ -43,11 +43,6 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 
-# Sentinel enqueued into the generation buffer once all generator workers for an epoch have finished,
-# used to unblock the consumer's blocking `buffer.get()` when `sample_full_batch` exhausts the epoch's
-# prompts mid mini-batch (see `train`).
-_EXHAUSTION_SENTINEL = object()
-
 
 @dataclass
 class GeneratedOutputGroup:
@@ -192,12 +187,10 @@ class _AsyncStalenessManager:
             self._cond.notify_all()
 
     async def on_rollout_filtered(self) -> None:
-        """Called when an already-generated (accepted) group is dropped from training.
+        """Reclassify an already-accepted group as filtered when it is dropped from training.
 
-        Reclassifies the group from accepted to filtered. This is essential to avoid deadlock under
-        ``sample_full_batch``: dropped groups were counted in ``accepted``, but ``current_global_step``
-        only advances on trained steps, so without this the staleness capacity would shrink with every
-        drop and starve the producers exactly when we need them to generate replacements.
+        Without this, dropped groups keep counting toward ``accepted`` while ``current_global_step``
+        only advances on trained steps, shrinking producer capacity on every drop -> deadlock.
         """
         async with self._cond:
             self._stat.accepted -= 1
@@ -237,10 +230,9 @@ class _AsyncDataloader:
         self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
-        # `_consumed_data_uids` is the do-not-redraw set (trained ∪ filtered); `_filtered_data_uids`
-        # is the subset that was dropped rather than trained (e.g. zero-variance groups under
-        # `sample_full_batch`). Both are persisted so dropped prompts are skipped, not regenerated,
-        # on resume. The number trained is `len(consumed) - len(filtered)`.
+        # `_consumed_data_uids` = do-not-redraw set (trained ∪ filtered); `_filtered_data_uids` =
+        # the dropped (not trained) subset. Both persisted so dropped prompts aren't regenerated on
+        # resume; trained count is `len(consumed) - len(filtered)`.
         self._consumed_data_uids: Set[str] = set()
         self._filtered_data_uids: Set[str] = set()
         self._exhausted: bool = False  # currently not used.
@@ -295,11 +287,8 @@ class _AsyncDataloader:
                 self._consumed_data_uids.add(uid)
 
     async def mark_filtered_uids(self, uids: Iterable[str]) -> None:
-        """Mark UIDs as consumed but filtered (dropped rather than trained on).
-
-        Filtered UIDs are added to the do-not-redraw set (so they are skipped within the epoch and
-        on resume) and recorded as filtered (so they are not counted toward trained steps).
-        """
+        """Mark UIDs as dropped (not trained on): added to the do-not-redraw set and recorded as
+        filtered so they are skipped on resume and excluded from the trained-step count."""
         assert self._lock is not None, "Dataloader not initialized; call reset() first"
         async with self._lock:
             for uid in uids:
@@ -423,16 +412,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._staleness_manager.load_state_from_checkpoint(
                         self.global_step + 1
                     )  # +1 due to we haven't incremented yet
-                    # Only trained UIDs map to completed steps; filtered/dropped UIDs are extra consumption.
-                    # Under sample_full_batch an epoch can end early, so the number trained this epoch is
-                    # not derivable from global_step alone -- validate it is a whole number of steps.
+                    # Only trained UIDs map to completed steps (filtered UIDs are extra consumption),
+                    # so validate the trained count is a whole number of steps.
                     num_trained_loaded = len(loaded_consumed_data_uids_set) - len(loaded_filtered_data_uids_set)
                     assert num_trained_loaded % self.mini_batch_size == 0, (
                         "Loaded trained (consumed minus filtered) data UIDs must be a multiple of "
                         f"mini_batch_size={self.mini_batch_size}. Got: {num_trained_loaded}"
                     )
-                    # Resume in the persisted epoch when available; otherwise derive it (older checkpoints,
-                    # which only exist for runs without sample_full_batch, so the derivation is exact).
+                    # Use the persisted epoch; fall back to deriving it for pre-sample_full_batch
+                    # checkpoints (where global_step stays aligned to epoch boundaries).
                     resumed_start_epoch = (
                         loaded_epoch if loaded_epoch is not None else self.global_step // self.num_steps_per_epoch
                     )
@@ -471,10 +459,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 for _ in range(self.num_parallel_generation_workers)
             ]
 
-            # Under sample_full_batch, dropping groups makes an epoch consume extra prompts per trained
-            # step, so it can exhaust before num_steps_per_epoch steps complete. This event lets the
-            # consumer detect exhaustion (all generators finished + buffer drained) instead of blocking
-            # forever on buffer.get().
+            # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
+            # blocking forever on buffer.get() -- under sample_full_batch, drops can exhaust an epoch
+            # before num_steps_per_epoch steps complete.
             all_generators_done = asyncio.Event()
             generators_done_watcher = None
             if self.sample_full_batch:
@@ -485,16 +472,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 generators_done_watcher = asyncio.create_task(_watch_generators_done())
 
-            # Steps trained in THIS epoch. Not derived from global_step % num_steps_per_epoch because,
-            # under sample_full_batch, an epoch can end early and global_step drifts out of alignment with
-            # epoch boundaries. On resume mid-epoch the dataloader already reflects this epoch's trained steps.
+            # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
+            # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
+            # already reflects this epoch's trained steps. The range below is just an upper bound.
             trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
-            # The range is an upper bound on steps this epoch; the actual count is driven by
-            # trained_steps_this_epoch (and, under sample_full_batch, early exhaustion).
             for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have a full mini-batch buffered (potentially dropping zero-variance groups
-                    # if using sample_full_batch=True).
+                    # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
+                    # sample_full_batch).
                     (
                         cur_generation_group_mini_batch,
                         cur_dropped_groups,
@@ -502,8 +487,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     ) = await self._collect_generation_mini_batch(generation_output_group_buffer, all_generators_done)
 
                     if epoch_exhausted:
-                        # Dataset exhausted mid mini-batch: discard the partial batch (marking it consumed/
-                        # filtered so it is not regenerated on resume) and end the epoch early.
+                        # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
+                        # isn't regenerated on resume) and end the epoch early.
                         if cur_generation_group_mini_batch:
                             for _ in cur_generation_group_mini_batch:
                                 await self._staleness_manager.on_rollout_filtered()
@@ -514,9 +499,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
                                 f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
                             )
-                        # This is an (early) end of epoch. Save the end-of-epoch checkpoint that the normal
-                        # step-7 is_epoch_end path would have saved -- we break before reaching it. The
-                        # discarded partial is already marked consumed, so resuming here skips it.
+                        # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
+                        # we break before reaching it.
                         if self.cfg.trainer.ckpt_interval > 0:
                             with Timer("save_checkpoints", self.all_timings):
                                 await asyncio.to_thread(self.save_checkpoints)
@@ -664,14 +648,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _drain_next_group(
         self, buffer: asyncio.Queue, all_generators_done: asyncio.Event
     ) -> Optional[GeneratedOutputGroup]:
-        """Return the next generated group, or None if the epoch's generation is exhausted.
+        """Return the next generated group, or None if generation is exhausted (all workers finished
+        and the buffer is empty).
 
-        Exhaustion means all generator workers have finished (the epoch's prompts are drained) and the
-        buffer is empty. Only used under ``sample_full_batch``, where dropping groups can exhaust the
-        epoch mid mini-batch and a plain blocking ``buffer.get()`` would hang forever.
-
-        Cancelling the pending ``buffer.get()`` once ``all_generators_done`` fires is safe: the event is
-        only set after every generator worker has returned, so no ``put`` can race the cancellation.
+        Only used under ``sample_full_batch``, where dropping groups can exhaust the epoch mid
+        mini-batch and a plain blocking ``buffer.get()`` would hang forever.
         """
         while True:
             if not buffer.empty():
@@ -686,10 +667,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     t.cancel()
                 return get_task.result()
             # all_generators_done fired first. Cancel the pending get and loop to re-check the buffer.
-            # If the get had already retrieved an item (racing the cancel), return it rather than
-            # dropping it -- a successful get() pops the item from the queue, so discarding the result
-            # would lose that group. In practice the event is only set after all producers have stopped,
-            # so no put can race here, but returning the item keeps this correct regardless.
+            # If the get had already pulled an item (racing the cancel), return it rather than drop it
+            # (a successful get() pops from the queue). No put can actually race here since the event is
+            # only set after all producers stop, but this stays correct regardless.
             get_task.cancel()
             try:
                 return await get_task
@@ -697,12 +677,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 pass
 
     def _should_keep_group(self, group: GeneratedOutputGroup) -> bool:
-        """Whether a generated group has reward variance and should be trained on (vs. dropped).
+        """Whether a group has reward variance (train on it) vs. is zero-variance (drop it).
 
-        Rewards may be response-level (``List[float]``) or token-level (``List[List[float]]``); the
-        latter is collapsed to a per-trajectory sequence reward (sum over tokens), matching how the
-        rest of the trainer treats token-level rewards. A group with at most one live trajectory (a
-        singleton, or one whose other trajectories were masked upstream) is always kept.
+        Token-level rewards (``List[List[float]]``) are collapsed to a per-trajectory sum, like the rest
+        of the trainer. Groups with <=1 live trajectory (singletons / mostly masked) are always kept.
         """
         rewards = group.generator_output["rewards"]
         if rewards and isinstance(rewards[0], list):
@@ -725,16 +703,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     ) -> Tuple[List[GeneratedOutputGroup], List[GeneratedOutputGroup], bool]:
         """Pull a full mini-batch of generated groups from the buffer.
 
-        Without ``sample_full_batch``, blocks until ``mini_batch_size`` groups are available (the
-        dataloader is trimmed to be divisible by ``mini_batch_size`` and all trajectories are assumed to
-        succeed, like sync training). With ``sample_full_batch``, additionally drops zero-variance groups
-        -- freeing their producer capacity and marking their UIDs consumed (skipped, not regenerated, on
-        resume) -- and keeps pulling until ``mini_batch_size`` non-zero-variance groups are collected,
-        which can exhaust the epoch's prompts mid mini-batch.
+        Without ``sample_full_batch``, blocks until ``mini_batch_size`` groups are available. With it,
+        drops zero-variance groups (freeing their capacity, marking UIDs consumed) and keeps pulling
+        until ``mini_batch_size`` non-zero-variance groups are collected, which can exhaust the epoch.
 
-        Returns ``(kept_groups, dropped_groups, epoch_exhausted)``. When ``epoch_exhausted`` is True the
-        kept groups are a (possibly empty) partial batch the caller should discard. ``dropped_groups`` are
-        retained for metrics only and are never trained on.
+        Returns ``(kept_groups, dropped_groups, epoch_exhausted)``. On exhaustion the kept groups are a
+        (possibly empty) partial batch to discard; dropped groups are kept for metrics only.
         """
         kept_groups: List[GeneratedOutputGroup] = []
         dropped_groups: List[GeneratedOutputGroup] = []
@@ -772,11 +746,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     @staticmethod
     def _log_group_processing_error(group: GeneratedOutputGroup, kept_so_far: int, dropped_so_far: int) -> None:
-        """Log the offending group's reward / loss-mask shape before a drain-loop error propagates.
-
-        Generator workers ``os._exit`` on error, which can drop buffered output during teardown, so we
-        flush stderr to make sure this diagnostic survives.
-        """
+        """Log the offending group's reward / loss-mask shape before a drain-loop error propagates,
+        flushing stderr (generator ``os._exit`` on teardown can otherwise drop buffered output)."""
         go = group.generator_output
         rewards = go.get("rewards") if isinstance(go, dict) else None
         loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
@@ -878,12 +849,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False
         except asyncio.CancelledError:
-            # Generators are cancelled when an epoch ends, training stops, or the trainer tears down
-            # after an error elsewhere. This is expected: release any held slot so staleness accounting
-            # stays consistent, then exit cleanly. (Previously this os._exit(1)'d when a slot was held,
-            # which crashed the whole process and, when the cancellation was triggered by an error in
-            # the training loop, killed it before that error's traceback could flush -- masking the
-            # real failure.)
+            # Expected on epoch end / shutdown: release any held slot so staleness accounting stays
+            # consistent, then exit cleanly. (Previously os._exit(1) here, which crashed the process and
+            # masked the real traceback when the cancel was triggered by a training-loop error.)
             if "slot_acquired" in locals() and slot_acquired:
                 try:
                     await self._staleness_manager.on_rollout_rejected()
@@ -898,11 +866,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     @staticmethod
     def _reprefix_metrics(metrics: dict, suffix: str) -> dict:
-        """Re-prefix metric keys into a separate view, e.g. ``generate/X`` -> ``generate_<suffix>/X``.
-
-        Keeps the leading namespace so the views group together in trackers (e.g. ``generate_kept`` and
-        ``generate_dropped`` alongside ``generate``).
-        """
+        """Re-prefix metric keys into a separate view (``generate/X`` -> ``generate_<suffix>/X``),
+        keeping the leading namespace so views group together in trackers."""
         out = {}
         for k, v in metrics.items():
             if "/" in k:
@@ -917,11 +882,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         cur_generation_group_mini_batch: List[GeneratedOutputGroup],
         dropped_groups: Optional[List[GeneratedOutputGroup]] = None,
     ) -> TrainingInputBatch:
-        """Concatenate the mini-batch of generated groups into a single GeneratorOutput and convert to a TrainingInputBatch.
+        """Concatenate the mini-batch of generated groups and convert to a TrainingInputBatch.
 
-        ``dropped_groups`` are the zero-variance groups filtered out this step under ``sample_full_batch``.
-        They are NOT trained on, but are included in the reward and generation metrics so that those
-        metrics stay comparable to runs without zero-variance filtering / sample_full_batch.
+        ``dropped_groups`` (zero-variance groups dropped this step under ``sample_full_batch``) are not
+        trained on, but are folded into the reward/generation metrics to keep them comparable across runs.
         """
         dropped_groups = dropped_groups or []
         generator_outputs = []
@@ -955,9 +919,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         kept_rollout_metrics = generator_output["rollout_metrics"]
         assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."
 
-        # Build the metrics view over kept + dropped groups so the headline reward and generation
-        # metrics stay comparable across runs regardless of zero-variance filtering / sample_full_batch.
-        # The dropped groups are only used for metrics here, never for training.
+        # Kept + dropped view for the headline reward/generation metrics, so they stay comparable
+        # across runs regardless of filtering. Dropped groups are used for metrics only, never trained.
         metrics_generator_output = None
         metrics_uids = None
         if dropped_groups:
@@ -974,10 +937,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.all_metrics.update(rollout_metrics_source["rollout_metrics"])
 
         if dropped_groups:
-            # Also break generation metrics out by kept vs dropped, and report reward metrics for the
-            # dropped groups. (Kept reward metrics are uninformative -- non-zero-variance groups always
-            # have a positive sample so pass@n is ~1 -- and loss/avg_final_rewards already covers the
-            # trained set.)
+            # Also split generation metrics by kept vs dropped, plus reward metrics for the dropped
+            # groups. (Kept reward metrics are uninformative -- pass@n ~1 -- and loss/avg_final_rewards
+            # already covers the trained set.)
             dropped_generator_output = concatenate_generator_outputs(
                 [g.generator_output for g in dropped_groups], step_wise=self.cfg.generator.step_wise_trajectories
             )
@@ -1010,9 +972,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             }
         )
 
-        # Convert rewards to per-token form and compute reward metrics before training conversion.
-        # Reward metrics are computed over kept + dropped groups (metrics_generator_output) when
-        # sample_full_batch dropped groups this step; the conversion still applies to kept groups only.
+        # Per-token reward conversion (kept groups only) + reward metrics over the kept+dropped view.
         generator_output, uids = self.postprocess_generator_output(
             generator_output, uids, metrics_generator_output=metrics_generator_output, metrics_uids=metrics_uids
         )
@@ -1036,15 +996,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         filtered_uids_list = self.async_train_dataloader.get_filtered_uids_list()
         # The base method will save the model, dataloader path, trainer_state, and latest_ckpt_global_step.txt.
         global_step_folder = super().save_checkpoints()
-        # In addition, we need to save the consumed UIDs (data we will not redraw this epoch) and, of
-        # those, the filtered UIDs (dropped rather than trained on, e.g. zero-variance groups under
-        # sample_full_batch) so they are skipped -- not regenerated -- on resume.
+        # Also save the consumed UIDs (do-not-redraw this epoch), the filtered subset (so dropped
+        # prompts are skipped, not regenerated, on resume), and the epoch (not derivable from
+        # global_step under sample_full_batch, where an epoch can end early).
         fully_async_state_path = os.path.join(global_step_folder, "fully_async_state.pt")
         fully_async_state = {
             "consumed_uids": consumed_uids_list,
             "filtered_uids": filtered_uids_list,
-            # Persist the epoch explicitly: under sample_full_batch an epoch can end early, so the epoch
-            # is no longer derivable from global_step // num_steps_per_epoch.
             "epoch": self.epoch,
         }
         with io.open_file(fully_async_state_path, "wb") as f:

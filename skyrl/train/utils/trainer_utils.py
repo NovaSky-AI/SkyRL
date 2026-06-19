@@ -575,17 +575,12 @@ def zero_variance_filter(
     tol: float = 0.0,
 ) -> List[int]:
     """
-    Given a list of trajectory level rewards and uids, return the indices of the trajectories to keep.
+    Given trajectory-level rewards and uids, return the indices of the trajectories to keep.
 
-    A group (set of trajectories sharing a uid) is filtered out only when it has more than one
-    *live* trajectory and the spread of their rewards is within ``tol`` (i.e. no GRPO signal).
-    Groups with at most one live trajectory (singletons, or groups whose other trajectories were
-    already masked upstream) are always kept.
-
-    A trajectory is "live" if it has at least one unmasked token (``sum(loss_mask) > 0``). When
-    ``loss_masks`` is None, all trajectories are treated as live. Computing variance over live
-    trajectories only means trajectories masked upstream (e.g. failed or timed-out rollouts) do not
-    make a genuine zero-variance group look like it has variance.
+    A group (trajectories sharing a uid) is dropped only when it has >1 *live* trajectory and their
+    reward spread is within ``tol`` (no GRPO signal); groups with <=1 live trajectory are always kept.
+    A trajectory is "live" if ``sum(loss_mask) > 0`` (or all live when ``loss_masks`` is None) -- so
+    trajectories masked upstream don't make a genuine zero-variance group look varied.
 
     Args:
         rewards: List[float]

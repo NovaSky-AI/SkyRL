@@ -922,11 +922,10 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
 
-        Reward metrics are computed over ``metrics_generator_output`` / ``metrics_uids`` when provided,
-        otherwise over ``generator_output`` / ``uids``. This lets callers report metrics over a superset
-        of the trained output -- e.g. the fully-async ``sample_full_batch`` path passes the dropped
-        zero-variance groups here so reward metrics stay comparable to runs without filtering -- while
-        the per-token / loss-mask conversion below always applies to ``generator_output`` only.
+        Reward metrics are computed over ``metrics_generator_output`` / ``metrics_uids`` when provided
+        (a superset of the trained output -- e.g. sample_full_batch passes the dropped groups so metrics
+        stay comparable), otherwise over ``generator_output`` / ``uids``. The per-token / loss-mask
+        conversion always applies to ``generator_output`` only.
 
         Returns:
             (generator_output, uids) — uids may be shorter than the input when merging.
