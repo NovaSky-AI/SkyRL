@@ -23,38 +23,24 @@ class _SimDispatch:
 
     Replaces the real model→engine weight-sync dispatch. ``save_weights_for_sampler`` stands in
     for the (skipped) weight broadcast by pausing generation, optionally sleeping
-    ``simulate_weight_sync_seconds``, then resuming. Best-effort: against arbitrary external
-    served endpoints pause/resume may be unavailable; in that case we log once and keep going
-    (the sleep still models the wall-clock weight-sync gap) so the benchmark does not crash.
+    ``simulate_weight_sync_seconds``, then resuming.
     """
 
     def __init__(self, inference_engine_client, sync_sleep):
         self._client = inference_engine_client
         self._sync_sleep = float(sync_sleep)
-        self._warned = False
 
     def init_weight_sync_state(self, inference_engine_client):
         # No real weight-sync process group in sim mode.
         pass
 
     async def save_weights_for_sampler(self):
+        await self._client.pause_generation()
         try:
-            await self._client.pause_generation()
-            try:
-                if self._sync_sleep > 0:
-                    await asyncio.sleep(self._sync_sleep)
-            finally:
-                await self._client.resume_generation()
-        except Exception as e:
-            if not self._warned:
-                logger.warning(
-                    f"[SIM] pause/resume_generation failed against the configured endpoints "
-                    f"({e!r}); continuing without pause dynamics (sleeping {self._sync_sleep}s instead). "
-                    "This is expected if the external server does not expose pause/resume."
-                )
-                self._warned = True
             if self._sync_sleep > 0:
                 await asyncio.sleep(self._sync_sleep)
+        finally:
+            await self._client.resume_generation()
 
 
 class FullyAsyncTrainerSim(FullyAsyncRayPPOTrainer):
