@@ -689,6 +689,38 @@ def test_zero_variance_filter_singletons_kept():
     assert kept_indices == [0, 1, 2]
 
 
+def test_zero_variance_filter_tolerance():
+    """Near-equal float rewards are treated as zero-variance when within tol."""
+    rewards = [0.6667, 0.66670001, 1.0, 0.0]
+    uids = ["a", "a", "b", "b"]
+
+    # Exact (tol=0.0): uid "a" has a tiny spread > 0 -> kept.
+    assert zero_variance_filter(rewards, uids, tol=0.0) == [0, 1, 2, 3]
+    # With tol=1e-6, uid "a" collapses to zero-variance and is dropped; uid "b" still varies.
+    assert zero_variance_filter(rewards, uids, tol=1e-6) == [2, 3]
+
+
+def test_zero_variance_filter_ignores_masked_trajectories():
+    """Trajectories masked upstream are excluded from the within-group variance check."""
+    # Group "a": two live trajectories both reward 1.0, plus two masked (reward 0.0).
+    # Naively this looks like spread (1,1,0,0) -> variance, but the masked ones should be ignored,
+    # so the group is detected as zero-variance and dropped.
+    rewards = [1.0, 1.0, 0.0, 0.0]
+    uids = ["a", "a", "a", "a"]
+    loss_masks = [[1, 1], [1, 1], [0, 0], [0, 0]]
+
+    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == []
+
+
+def test_zero_variance_filter_single_live_trajectory_kept():
+    """A group with only one live trajectory (others masked) is kept as a singleton."""
+    rewards = [1.0, 0.0]
+    uids = ["a", "a"]
+    loss_masks = [[1, 1], [0, 0]]
+
+    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == [0, 1]
+
+
 def test_validate_generator_output_valid_case():
     """Test validate_generator_output with valid case."""
     input_batch = GeneratorInput(

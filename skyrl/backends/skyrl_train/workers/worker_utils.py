@@ -264,6 +264,15 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
+        # Add optional fields such as `rollout_logprobs` and `rollout_expert_indices` to padding batch
+        if self.data.get("rollout_logprobs") is not None:
+            ref_tensor = self.data["rollout_logprobs"]
+            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
+        if self.data.get("rollout_expert_indices") is not None:
+            ref_tensor = self.data["rollout_expert_indices"]
+            data["rollout_expert_indices"] = torch.zeros(
+                (batch_size, *ref_tensor.shape[1:]), dtype=ref_tensor.dtype, device=device
+            )
         data.metadata = self.data.metadata
         return data
 

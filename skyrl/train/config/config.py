@@ -449,6 +449,11 @@ class AlgorithmConfig(BaseConfig):
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
+    zero_variance_filter_tol: float = 1e-6
+    """Two rewards within this absolute tolerance count as equal when detecting zero-variance groups.
+    Only used when ``zero_variance_filter=True``. Defaults to 1e-6 so float (LLM-judge) rewards that are
+    effectively identical are still treated as zero-variance; this is a no-op for integer rewards (e.g.
+    0/1) where the spread is either 0 or >= 1. Set to 0.0 for exact equality."""
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2
@@ -492,6 +497,12 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    sample_full_batch: bool = False
+    """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
+    mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).
+    Dropped groups are marked consumed (not regenerated on resume), so the per-epoch step count becomes
+    an upper bound: if the epoch's prompts run out mid mini-batch, the partial batch is discarded and
+    the epoch ends."""
     clear_kv_cache_on_weight_sync: bool = True
     """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
     Set to False for fully async training to reuse KV cache from stale policies during generation

@@ -204,6 +204,14 @@ required-environments = [
 constraint-dependencies = [
     "flashinfer-jit-cache==0.6.8.post1",
     "flashinfer-cubin==0.6.8.post1",
+    # fastapi 0.137.0 refactored include_router() to store `_IncludedRouter` wrapper objects in
+    # `app.routes`, which prometheus-fastapi-instrumentator (pulled in transitively by vLLM) cannot
+    # handle: `_get_route_name` accesses `route.path` and raises
+    # `AttributeError: '_IncludedRouter' object has no attribute 'path'`, so the vLLM server's /health
+    # endpoint 500s and the server never becomes healthy. Cap below 0.137 until the instrumentator is
+    # fixed. See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/370 and
+    # https://github.com/vllm-project/vllm/issues/45596
+    "fastapi<0.137",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras

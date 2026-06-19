@@ -907,7 +907,11 @@ class RayPPOTrainer:
 
     @torch.no_grad()
     def postprocess_generator_output(
-        self, generator_output: GeneratorOutput, uids: List[str]
+        self,
+        generator_output: GeneratorOutput,
+        uids: List[str],
+        metrics_generator_output: Optional[GeneratorOutput] = None,
+        metrics_uids: Optional[List[str]] = None,
     ) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
@@ -918,22 +922,29 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
 
+        Reward metrics are computed over ``metrics_generator_output`` / ``metrics_uids`` when provided
+        (a superset of the trained output -- e.g. sample_full_batch passes the dropped groups so metrics
+        stay comparable), otherwise over ``generator_output`` / ``uids``. The per-token / loss-mask
+        conversion always applies to ``generator_output`` only.
+
         Returns:
             (generator_output, uids) — uids may be shorter than the input when merging.
         """
-        generator_output_for_metrics = generator_output
-        uids_for_metrics = uids
+        metrics_output = metrics_generator_output if metrics_generator_output is not None else generator_output
+        metrics_output_uids = metrics_uids if metrics_uids is not None else uids
+        generator_output_for_metrics = metrics_output
+        uids_for_metrics = metrics_output_uids
         if self.cfg.generator.step_wise_trajectories:
             generator_output_for_metrics = defaultdict(list)
-            for key in generator_output:
-                if isinstance(generator_output[key], list):
+            for key in metrics_output:
+                if isinstance(metrics_output[key], list):
                     generator_output_for_metrics[key] = [
-                        generator_output[key][i]
-                        for i in range(len(generator_output[key]))
-                        if generator_output["is_last_step"][i]
+                        metrics_output[key][i]
+                        for i in range(len(metrics_output[key]))
+                        if metrics_output["is_last_step"][i]
                     ]
             uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
+                uid for uid, is_last_step in zip(metrics_output_uids, metrics_output["is_last_step"]) if is_last_step
             ]
 
         # only use `generator_output_for_metrics` for metrics calculation
@@ -969,7 +980,17 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                kept_indices_set = set(
+                    zero_variance_filter(
+                        rewards,
+                        uids,
+                        loss_masks=generator_output["loss_masks"],
+                        tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
+                    )
+                )
+                num_groups = len(set(uids))
+                num_kept_groups = len({uids[i] for i in kept_indices_set})
+                self.all_metrics["reward/num_zero_variance_filtered"] = num_groups - num_kept_groups
                 generator_output["loss_masks"] = [
                     [0] * len(mask) if i not in kept_indices_set else mask
                     for i, mask in enumerate(generator_output["loss_masks"])
