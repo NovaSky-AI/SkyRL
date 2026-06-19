@@ -269,9 +269,9 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             ref_tensor = self.data["rollout_logprobs"]
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
         if self.data.get("rollout_expert_indices") is not None:
-            tensor = self.data["rollout_expert_indices"]
+            ref_tensor = self.data["rollout_expert_indices"]
             data["rollout_expert_indices"] = torch.zeros(
-                (batch_size, *tensor.shape[1:]), dtype=tensor.dtype, device=device
+                (batch_size, *ref_tensor.shape[1:]), dtype=ref_tensor.dtype, device=device
             )
         data.metadata = self.data.metadata
         return data
