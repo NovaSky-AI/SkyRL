@@ -442,8 +442,8 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not ie_cfg.run_engines_locally:
-            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
+        if not _SKYRL_USE_NEW_INFERENCE and not ie_cfg.run_engines_locally:
+            raise NotImplementedError("Legacy remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
@@ -489,7 +489,7 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
-    if not ie_cfg.run_engines_locally:
+    if not _SKYRL_USE_NEW_INFERENCE and not ie_cfg.run_engines_locally:
         assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
 
     if ie_cfg.override_existing_update_group == "auto":

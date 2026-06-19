@@ -5,7 +5,7 @@ set -x
 # pause/resume — exercising the whole generation-side loop end to end and logging to wandb.
 #
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k   # one-time
-#   bash examples/train/fully_async/run_fully_async_sim_gsm8k_test.sh
+#   bash fully-async-sim-trainer/examples/train/fully_async/sim_trainer/run_fully_async_sim_gsm8k_e2e.sh
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${MODEL:=Qwen/Qwen2.5-0.5B-Instruct}"
