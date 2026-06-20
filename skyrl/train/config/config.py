@@ -579,7 +579,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_chunked_prefill: bool = True
     enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
     but this may affect convergence for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
