@@ -35,7 +35,7 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 # repro run parameters
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
+ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability with vLLM then. TODO: reproduce DAPO with enforce eager `False`
 LR=1e-6
 
 # Fully async specific configuration knobs:
