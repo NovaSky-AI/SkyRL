@@ -264,7 +264,13 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
-        data.metadata = self.data.metadata
+        # add optional fields like rollout_logprobs as well
+        if self.data.get("rollout_logprobs") is not None:
+            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), device=device)
+        data.metadata = {}
+        if self.data.metadata:
+            data.metadata.update(self.data.metadata)
+        data.metadata["is_padding_batch"] = True
         return data
 
     def _sync_num_microbatches(self) -> int:
