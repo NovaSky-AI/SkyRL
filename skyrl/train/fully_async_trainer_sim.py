@@ -79,9 +79,15 @@ class FullyAsyncTrainerSim(FullyAsyncRayPPOTrainer):
         # _run_training). Everything else in train() that touches trainer models is config-gated,
         # so assert those are off — no models are built in sim mode, so they would otherwise crash.
         t = self.cfg.trainer
-        assert t.eval_interval <= 0, "FullyAsyncTrainerSim: set trainer.eval_interval=0 (no models to eval)."
-        assert t.ckpt_interval <= 0, "FullyAsyncTrainerSim: set trainer.ckpt_interval=-1 (no models to checkpoint)."
-        assert t.hf_save_interval <= 0, "FullyAsyncTrainerSim: set trainer.hf_save_interval=-1 (no models to save)."
+        assert (
+            t.eval_interval <= 0
+        ), "FullyAsyncTrainerSim: set trainer.eval_interval<=0 to disable (no models to eval)."
+        assert (
+            t.ckpt_interval <= 0
+        ), "FullyAsyncTrainerSim: set trainer.ckpt_interval<=0 to disable (no models to checkpoint)."
+        assert (
+            t.hf_save_interval <= 0
+        ), "FullyAsyncTrainerSim: set trainer.hf_save_interval<=0 to disable (no models to save)."
         assert not t.update_ref_every_epoch, "FullyAsyncTrainerSim: trainer.update_ref_every_epoch must be false."
         assert self.resume_mode == ResumeMode.NONE, "FullyAsyncTrainerSim: resumption is unsupported (no models)."
         self._step_sleep = float(fa.simulate_training_step_seconds)

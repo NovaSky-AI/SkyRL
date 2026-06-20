@@ -604,12 +604,18 @@ fully_async:
   max_staleness_steps: 4
   num_parallel_generation_workers: 768
   clear_kv_cache_on_weight_sync: true
+  simulate_training: false
+  simulate_training_step_seconds: 30.0
+  simulate_weight_sync_seconds: 0.0
 
 ```
 
 - `fully_async.max_staleness_steps`: Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*, then `j - i <= max_staleness_steps`. Larger values increase throughput but also off-policy-ness.
 - `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be \>= `policy_mini_batch_size` and \<= `policy_mini_batch_size * (max_staleness_steps + 1)`.
 - `fully_async.clear_kv_cache_on_weight_sync`: Whether to clear the inference engine KV cache on each weight sync. Defaults to `true`, matching synchronous RL. Set to `false` for fully async training to reuse KV cache from stale policies during generation (avoids recomputation at the cost of using slightly stale KV cache).
+- `fully_async.simulate_training`: If `true`, run fully-async generation against a *simulated* trainer (`FullyAsyncTrainerSim`): no policy/critic/ref models are built and no weight broadcast happens. Each step consumes a mini-batch, sleeps for `simulate_training_step_seconds`, then issues pause/resume generation (as a real weight sync would) but skips the broadcast. Useful for benchmarking the generation/inference side (e.g. router load-balancing) on large models without paying for trainer GPUs. This is typically pointed at already-served endpoints via `external_proxy_url` / `external_server_urls`. See `examples/train/fully_async/main_fully_async_sim.py`. Requires `eval_interval`, `ckpt_interval`, and `hf_save_interval` all `<= 0`.
+- `fully_async.simulate_training_step_seconds`: Wall-clock seconds the simulated training step sleeps (stands in for fwd/bwd/optim). Only used when `simulate_training=true`. Defaults to `30.0`.
+- `fully_async.simulate_weight_sync_seconds`: Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast. `0.0` means pause then immediately resume. Only used when `simulate_training=true`.
 
 ## Generator Configuration
 

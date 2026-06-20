@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/train/generators/test_generator_output_utils.py
+uv run --extra dev --extra skyrl-train --isolated pytest tests/train/generators/test_generator_output_utils.py
 """
 
 from unittest.mock import patch
@@ -90,6 +90,38 @@ def test_generator_output_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+def test_concatenation_trajectory_generation_times():
+    """`trajectory_generation_times` is concatenated only when *every* output recorded it. If any
+    output is missing it (key absent or None), the metric is dropped to None -- a partial flatten
+    would otherwise misalign with `is_last_step` (see `concatenate_generator_outputs`)."""
+
+    def _base() -> dict:
+        return {
+            "prompt_token_ids": [[1, 2]],
+            "response_ids": [[1, 2]],
+            "rewards": [1.0],
+            "loss_masks": [[1, 1]],
+            "stop_reasons": ["stop"],
+            "rollout_logprobs": None,
+        }
+
+    with_times_1: GeneratorOutput = {**_base(), "trajectory_generation_times": [1.5]}
+    with_times_2: GeneratorOutput = {**_base(), "trajectory_generation_times": [2.5]}
+
+    # All outputs recorded times -> flattened in order.
+    out = concatenate_generator_outputs([with_times_1, with_times_2])
+    assert out["trajectory_generation_times"] == [1.5, 2.5]
+
+    # One output omits the key entirely -> drop to None (no crash, no misalignment).
+    out = concatenate_generator_outputs([with_times_1, _base()])
+    assert out["trajectory_generation_times"] is None
+
+    # One output explicitly None -> drop to None.
+    none_times: GeneratorOutput = {**_base(), "trajectory_generation_times": None}
+    out = concatenate_generator_outputs([with_times_1, none_times])
+    assert out["trajectory_generation_times"] is None
 
 
 def test_get_metrics_from_generator_output():

@@ -888,15 +888,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return out
 
     def _get_intra_group_completion_time_std_cv(
-        self, generated_output_output: GeneratedOutputGroup
+        self, generated_output_group: GeneratedOutputGroup
     ) -> Tuple[Optional[float], Optional[float]]:
-        traj_times = generated_output_output.generator_output.get("trajectory_generation_times")
+        traj_times = generated_output_group.generator_output.get("trajectory_generation_times")
         group_std = None
         group_cv = None
         if traj_times and len(traj_times) > 1:
             # For step wise training, each turn /step contributes one entry.
             # Only take the metrics from the last step
-            is_last_step = generated_output_output.generator_output.get("is_last_step")
+            is_last_step = generated_output_group.generator_output.get("is_last_step")
             if is_last_step:
                 traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
             traj_times_arr = np.array(traj_times, dtype=np.float64)

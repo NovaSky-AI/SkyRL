@@ -306,18 +306,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         agent_loop_start_time = time.monotonic()
 
-        # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
-        # This is no longer needed now given that step wise training is supported
-        # TODO (sumanthrh): This path can be deprecated
-        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
-
-        # Create a new environment instance
-        env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_extras = self._setup_env_extras(env_class, env_extras, sampling_params, trajectory_id)
-
-        env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
-        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
-
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -958,7 +946,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
-            # NOTE: for completion metrics, we output the completiontime
+            # NOTE: for completion metrics, we output the completion time
             "trajectory_generation_times": out_trajectory_generation_times,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
