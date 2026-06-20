@@ -258,12 +258,6 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         raise ValueError(
             "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
         )
-    # ``trajectory_generation_times`` is a metrics-only field that each generator emits all-or-none
-    # per batch (None if any trajectory in the batch lacks a recorded time). A mix across batches is
-    # benign, but a partial flatten would misalign with ``is_last_step`` below -- so only concatenate
-    # when *every* batch recorded it, otherwise drop the metric to None (no crash, no misalignment).
-    all_have_traj_times = all(output.get("trajectory_generation_times") is not None for output in generator_outputs)
-
     first = generator_outputs[0]
     result: GeneratorOutput = {
         "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
@@ -277,7 +271,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
             _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
         "trajectory_generation_times": (
-            _flatten_field(generator_outputs, "trajectory_generation_times") if all_have_traj_times else None
+            _flatten_field(generator_outputs, "trajectory_generation_times")
+            if first.get("trajectory_generation_times") is not None
+            else None
         ),
     }
 
