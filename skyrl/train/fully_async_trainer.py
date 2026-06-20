@@ -887,6 +887,53 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 out[f"{suffix}/{k}"] = v
         return out
 
+    def _get_intra_group_completion_time_std_cv(
+        self, generated_output_output: GeneratedOutputGroup
+    ) -> Tuple[Optional[float], Optional[float]]:
+        traj_times = generated_output_output.generator_output.get("trajectory_generation_times")
+        group_std = None
+        group_cv = None
+        if traj_times and len(traj_times) > 1:
+            # For step wise training, each turn /step contributes one entry.
+            # Only take the metrics from the last step
+            is_last_step = generated_output_output.generator_output.get("is_last_step")
+            if is_last_step:
+                traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
+            traj_times_arr = np.array(traj_times, dtype=np.float64)
+            # Population std of per-trajectory completion times within this group (seconds).
+            group_std = float(traj_times_arr.std())
+            # Coefficient of variation = std / mean. Guard against div-by-zero.
+            mean_traj_time = float(traj_times_arr.mean())
+            if mean_traj_time > 0:
+                group_cv = group_std / mean_traj_time
+        return group_std, group_cv
+
+    def _get_group_completion_metrics(
+        self,
+        group_completion_times: Optional[List[float]],
+        intra_group_stds: Optional[List[float]],
+        intra_group_cvs: Optional[List[float]],
+    ):
+        # Log per-group completion-time statistics for the groups consumed in this step. These
+        # surface generation load-balancing behavior (e.g. across vllm-router routing policies):
+        # tail group latency (p90/max) and how unevenly trajectories within a group finish
+        # (intra-group coefficient of variation).
+        metrics = {}
+        if group_completion_times:
+            group_times_arr = np.array(group_completion_times, dtype=np.float64)
+            metrics.update(
+                {
+                    "generate/group_completion_time_mean": float(group_times_arr.mean()),
+                    "generate/group_completion_time_p90": float(np.percentile(group_times_arr, 90)),
+                    "generate/group_completion_time_max": float(group_times_arr.max()),
+                }
+            )
+        if intra_group_stds:
+            metrics.update({"generate/intra_group_completion_time_std_mean": float(np.mean(intra_group_stds))})
+        if intra_group_cvs:
+            metrics.update({"generate/intra_group_completion_time_cv_mean": float(np.mean(intra_group_cvs))})
+        return metrics
+
     def convert_generation_group_mini_batch_to_training_input(
         self,
         cur_generation_group_mini_batch: List[GeneratedOutputGroup],
@@ -903,7 +950,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         stalenesses = []
         staleness_violation_count = 0
         # Per-group completion times (seconds) and the intra-group spread (std and coefficient of
-        # variation) of per-trajectory completion times, used to log generation load-balancing metrics.
+        # variation) of per-trajectory completion times. Helpful to understand tail latency
         group_completion_times: List[float] = []
         intra_group_stds: List[float] = []
         intra_group_cvs: List[float] = []
@@ -915,19 +962,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Collect per-group / per-trajectory completion-time stats for this group.
             if cur_generated_output_group.group_completion_time_s is not None:
                 group_completion_times.append(cur_generated_output_group.group_completion_time_s)
-            traj_times = cur_generated_output_group.generator_output.get("trajectory_generation_times")
-            if traj_times and len(traj_times) > 1:
-                is_last_step = cur_generated_output_group.generator_output.get("is_last_step")
-                if is_last_step:
-                    traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
-                traj_times_arr = np.array(traj_times, dtype=np.float64)
-                # Population std of per-trajectory completion times within this group (seconds).
-                group_std = float(traj_times_arr.std())
-                intra_group_stds.append(group_std)
-                # Coefficient of variation = std / mean. Guard against div-by-zero.
-                mean_traj_time = float(traj_times_arr.mean())
-                if mean_traj_time > 0:
-                    intra_group_cvs.append(group_std / mean_traj_time)
+            intra_group_std, intra_group_cv = self._get_intra_group_completion_time_std_cv(cur_generated_output_group)
+            if intra_group_std is not None:
+                intra_group_stds.append(intra_group_std)
+            if intra_group_cv is not None:
+                intra_group_cvs.append(intra_group_cv)
+
             # NOTE(Charlie): for step-wise training each group can contain a variable number of entries
             # (n_samples_per_prompt * variable turns_per_trajectory), so the uid fanout is per-group.
             group_size = len(cur_generated_output_group.generator_output["response_ids"])
@@ -968,6 +1008,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         rollout_metrics_source = metrics_generator_output if metrics_generator_output is not None else generator_output
         self.all_metrics.update(rollout_metrics_source["rollout_metrics"])
 
+        group_completion_metrics = self._get_group_completion_metrics(
+            group_completion_times, intra_group_stds, intra_group_cvs
+        )
+
         if dropped_groups:
             # Also split generation metrics by kept vs dropped, plus reward metrics for the dropped
             # groups. (Kept reward metrics are uninformative -- pass@n ~1 -- and loss/avg_final_rewards
@@ -979,6 +1023,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.all_metrics.update(self._reprefix_metrics(dropped_generator_output["rollout_metrics"], "dropped"))
             dropped_uids = [g.uid for g in dropped_groups for _ in range(len(g.generator_output["response_ids"]))]
             dropped_reward = get_metrics_from_generator_output(dropped_generator_output, dropped_uids)
+
             n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
             self.all_metrics.update(
                 {
@@ -988,6 +1033,36 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 }
             )
             dropped_generator_output.pop("rollout_metrics", None)
+
+            # Per-group completion times and intra-group spread for dropped groups
+            dropped_group_completion_times = []
+            dropped_group_intra_group_stds = []
+            dropped_group_intra_group_cvs = []
+            for dropped_group in dropped_groups:
+                if dropped_group.group_completion_time_s is not None:
+                    dropped_group_completion_times.append(dropped_group.group_completion_time_s)
+                intra_group_std, intra_group_cv = self._get_intra_group_completion_time_std_cv(dropped_group)
+                if intra_group_std is not None:
+                    dropped_group_intra_group_stds.append(intra_group_std)
+                if intra_group_cv is not None:
+                    dropped_group_intra_group_cvs.append(intra_group_cv)
+
+            dropped_metrics = self._get_group_completion_metrics(
+                dropped_group_completion_times, dropped_group_intra_group_stds, dropped_group_intra_group_cvs
+            )
+
+            self.all_metrics.update(self._reprefix_metrics(group_completion_metrics, "kept"))
+            self.all_metrics.update(self._reprefix_metrics(dropped_metrics, "dropped"))
+
+            merged_group_completion_times = group_completion_times + dropped_group_completion_times
+            merged_intra_group_stds = intra_group_stds + dropped_group_intra_group_stds
+            merged_intra_group_cvs = intra_group_cvs + dropped_group_intra_group_cvs
+            # get merged metrics with kept + dropped groups
+            group_completion_metrics = self._get_group_completion_metrics(
+                merged_group_completion_times, merged_intra_group_stds, merged_intra_group_cvs
+            )
+
+        self.all_metrics.update(group_completion_metrics)
 
         generator_output.pop("rollout_metrics", None)
         if metrics_generator_output is not None:
@@ -1003,25 +1078,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_violation_count": staleness_violation_count,
             }
         )
-
-
-        # Log per-group completion-time statistics for the groups consumed in this step. These
-        # surface generation load-balancing behavior (e.g. across vllm-router routing policies):
-        # tail group latency (p90/max) and how unevenly trajectories within a group finish
-        # (intra-group coefficient of variation).
-        if group_completion_times:
-            group_times_arr = np.array(group_completion_times, dtype=np.float64)
-            self.all_metrics.update(
-                {
-                    "async/group_completion_time_mean": float(group_times_arr.mean()),
-                    "async/group_completion_time_p90": float(np.percentile(group_times_arr, 90)),
-                    "async/group_completion_time_max": float(group_times_arr.max()),
-                }
-            )
-        if intra_group_stds:
-            self.all_metrics.update({"async/intra_group_completion_time_std_mean": float(np.mean(intra_group_stds))})
-        if intra_group_cvs:
-            self.all_metrics.update({"async/intra_group_completion_time_cv_mean": float(np.mean(intra_group_cvs))})
 
         # Per-token reward conversion (kept groups only) + reward metrics over the kept+dropped view.
         generator_output, uids = self.postprocess_generator_output(
