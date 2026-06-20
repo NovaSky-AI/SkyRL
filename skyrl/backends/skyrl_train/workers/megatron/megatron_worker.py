@@ -1027,6 +1027,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    "is_padding_batch": (
+                        experience.metadata.get("is_padding_batch", False) if experience.metadata else False
+                    ),
                 }
             )
 
@@ -1092,7 +1095,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
             # excluding them here keeps both reductions correct.
-            if m_batch["loss_mask"].sum().item() == 0:
+            if m_batch["is_padding_batch"]:
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
