@@ -15,9 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
 import dataclasses
 import pprint
+import signal
 import traceback
+import weakref
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -89,6 +92,49 @@ class Tracking:
             self.logger["console"] = self.console_logger
 
         self._exception_logged = False
+        self._finished = False
+
+        # `__del__` is not guaranteed to run on signal-driven termination (e.g.
+        # SLURM `scancel` sending SIGTERM), which leaves MLflow runs stuck in
+        # RUNNING. Register an atexit hook and a SIGTERM handler that finalize the
+        # run on abnormal exit. Both reference self weakly (and are removed in
+        # `finish`) so they don't keep the instance alive or disable `__del__`.
+        self_ref = weakref.ref(self)
+
+        def _atexit_handler():
+            tracker = self_ref()
+            if tracker is not None:
+                tracker.finish()
+
+        def _sigterm_handler(signum, frame):
+            tracker = self_ref()
+            if tracker is not None:
+                tracker._handle_sigterm(signum, frame)
+
+        self._atexit_handler = _atexit_handler
+        self._sigterm_handler = _sigterm_handler
+        atexit.register(_atexit_handler)
+
+        # `signal.signal` only works from the main thread of the main interpreter.
+        # Tracking may be constructed inside a Ray worker thread, so guard against
+        # the ValueError and simply skip the handler there (atexit still applies).
+        self._previous_sigterm_handler = None
+        try:
+            self._previous_sigterm_handler = signal.signal(signal.SIGTERM, _sigterm_handler)
+        except ValueError as e:
+            logger.warning(f"Could not register SIGTERM handler for tracking (not main thread?): {e}")
+
+    def _handle_sigterm(self, signum, frame):
+        self.finish(status="KILLED")
+        # Chain to the previous handler so we don't swallow the signal's effect
+        # (e.g. process teardown). If there was no Python-level handler, restore
+        # the default disposition and re-raise SIGTERM.
+        previous = self._previous_sigterm_handler
+        if callable(previous):
+            previous(signum, frame)
+        elif previous == signal.SIG_DFL:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGTERM)
 
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
@@ -97,7 +143,21 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
-    def finish(self):
+    def finish(self, status: str = "FINISHED"):
+        # Idempotent: signal handler, atexit hook, and __del__ can all fire, but
+        # the underlying backends should only be finalized once.
+        if self._finished:
+            return
+        self._finished = True
+
+        # Remove the lifecycle hooks now that the run is finalized.
+        atexit.unregister(self._atexit_handler)
+        if self._previous_sigterm_handler is not None:
+            try:
+                signal.signal(signal.SIGTERM, self._previous_sigterm_handler)
+            except ValueError:
+                pass
+
         for logger_name, logger_instance in self.logger.items():
             # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
             # This is because wandb often errors out with a BrokenPipeError when closing.
@@ -105,6 +165,8 @@ class Tracking:
             try:
                 if logger_name == "wandb":
                     logger_instance.finish(exit_code=0)
+                elif logger_name == "mlflow":
+                    logger_instance.finish(status=status)
                 elif logger_name != "console":
                     logger_instance.finish()
             except Exception as e:
@@ -225,9 +287,9 @@ class _MlflowLoggingAdapter:
         results = {k.replace("@", "_at_"): v for k, v in data.items()}
         self.mlflow.log_metrics(metrics=results, step=step)
 
-    def finish(self):
+    def finish(self, status: str = "FINISHED"):
         if self.we_created_mlflow:
-            self.mlflow.end_run()
+            self.mlflow.end_run(status=status)
 
 
 def _compute_mlflow_params_from_objects(params) -> Dict[str, Any]:
