@@ -359,6 +359,40 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
 
 
 @pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_metrics_use_truncated_responses(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Rollout metrics must describe the truncated responses that are actually
+    returned/trained, not the raw engine output. With max_generate_length below
+    the engine's output length, generate/max_num_tokens must equal the truncated
+    length, matching response_ids and loss_masks."""
+    generator_cfg.sampling_params.max_generate_length = 2  # < len(MOCK_LLM_OUTPUT_IDS) == 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+        "env_extras": [{"answer": "8"}],
+        "env_classes": ["gsm8k"],
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    assert generator_output["response_ids"][0] == MOCK_LLM_OUTPUT_IDS[:2]
+    assert generator_output["loss_masks"][0] == [1] * 2
+    assert generator_output["rollout_metrics"]["generate/max_num_tokens"] == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")
 async def test_generate_interface_compliance(
