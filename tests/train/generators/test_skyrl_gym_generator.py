@@ -85,6 +85,8 @@ def mock_llm():
         }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
+    # agent_loop releases the trajectory's router session on completion.
+    mock.finish_session = AsyncMock()
     return mock
 
 
@@ -1511,3 +1513,138 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     # Validate stop_reasons
     for i, stop_reason in enumerate(generator_output["stop_reasons"]):
         assert isinstance(stop_reason, str), f"stop_reasons[{i}] should be a string"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
+    """Step-wise training: completion-time metrics are computed from per-prompt times.
+
+    In step-wise mode the flattened output has one entry per turn, so a trajectory with N
+    turns contributes N steps. The per-trajectory ``e2e_time`` is replicated across that
+    trajectory's steps in ``trajectory_generation_times`` (so it stays aligned with
+    ``response_ids``), but the aggregate completion-time stats must be computed from the
+    per-prompt times (one per trajectory) to avoid the per-step duplicates skewing them.
+
+    This spies on ``get_rollout_metrics`` to capture the ``trajectory_completion_times`` it
+    actually receives.
+    """
+    import numpy as np
+
+    from skyrl.train.generators import utils as generator_utils
+    from skyrl.train.generators.base import TrajectoryID
+
+    mock_tokenizer.eos_token_id = 4
+
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [201, 202]
+        return "".join([m.get("content", "") for m in messages])
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(input_batch, model=None):
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+        return {
+            "responses": ["step"] * num,
+            "stop_reasons": ["stop"] * num,
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    # Environment that runs for 2 steps before completing.
+    class MultiStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}], reward=0.5, done=False, metadata={}
+                )
+            return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    mock_make.side_effect = lambda *args, **kwargs: MultiStepEnv()
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.step_wise_trajectories = True
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    num_trajectories = 2
+    prompts = [[{"role": "user", "content": f"Q{i}?"}] for i in range(num_trajectories)]
+    env_extras = [{"test": f"value{i}"} for i in range(num_trajectories)]
+    trajectory_ids = [TrajectoryID(instance_id=f"uid{i}", repetition_id=0) for i in range(num_trajectories)]
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": [mock_env_cfg.env_class for _ in prompts],
+        "trajectory_ids": trajectory_ids,
+    }
+
+    # Wrap the real metrics function so we can inspect what it was called with while still
+    # producing the real metrics in the output.
+    spy = MagicMock(side_effect=generator_utils.get_rollout_metrics)
+    with patch("skyrl.train.generators.skyrl_gym_generator.get_rollout_metrics", spy):
+        generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # 2 trajectories x 2 steps each -> 4 flattened steps.
+    num_steps = num_trajectories * 2
+    assert len(generator_output["response_ids"]) == num_steps
+
+    # Metrics are computed from per-prompt times: one entry per trajectory, NOT one per step.
+    assert spy.call_count == 1
+    metrics_times = spy.call_args.kwargs["trajectory_completion_times"]
+    assert metrics_times is not None
+    assert len(metrics_times) == num_trajectories, (
+        f"completion times passed to metrics should be per-prompt (len {num_trajectories}), "
+        f"got len {len(metrics_times)} (per-step duplicates would skew the stats)"
+    )
+    assert all(t is not None and t >= 0.0 for t in metrics_times)
+
+    # The output field is per-step aligned with response_ids, with each trajectory's
+    # trajectory-level time replicated across its steps.
+    out_times = generator_output["trajectory_generation_times"]
+    assert out_times is not None
+    assert len(out_times) == num_steps
+    assert out_times[0] == out_times[1]  # trajectory 0's two steps share its e2e time
+    assert out_times[2] == out_times[3]  # trajectory 1's two steps share its e2e time
+    # The per-prompt times handed to metrics are exactly the distinct per-trajectory values.
+    assert metrics_times == [out_times[0], out_times[2]]
+
+    # Aggregate stats are present and computed over the per-prompt times.
+    rollout_metrics = generator_output["rollout_metrics"]
+    for key in (
+        "generate/trajectory_completion_time_mean",
+        "generate/trajectory_completion_time_p90",
+        "generate/trajectory_completion_time_max",
+    ):
+        assert key in rollout_metrics, f"missing metric {key}"
+    expected = np.array(metrics_times, dtype=np.float64)
+    assert rollout_metrics["generate/trajectory_completion_time_mean"] == pytest.approx(np.mean(expected).item())
+    assert rollout_metrics["generate/trajectory_completion_time_p90"] == pytest.approx(
+        np.percentile(expected, 90).item()
+    )
+    assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())

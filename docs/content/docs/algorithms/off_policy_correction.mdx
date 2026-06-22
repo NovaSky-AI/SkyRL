@@ -267,6 +267,15 @@ When enabled, the metric `token_mask_ratio` is logged, representing the fraction
 # Metrics and Monitoring
 If off-policy correction is enabled, you can view relevant metrics, like the mean/std of the importance sampling ratio, the mean/std of logprob diffs, and the fraction of masked sequences in the logger of your choice under `policy/loss_metrics`.
 
+## Logprob diff metrics
+
+When rollout logprobs are available, SkyRL logs the absolute difference between the rollout logprobs and the training-policy logprobs. There are two variants:
+
+- `policy/rollout_train_logprobs_abs_diff_{mean,std,max,min}`: computed from the policy forward pass over the full training batch (i.e. $\pi_{\theta_{\text{old}}}$ vs $\mu_{\theta_{\text{old}}}$).
+- `policy/minibatch_rollout_logprobs_abs_diff_{mean,std,max,min}`: computed inside each gradient mini-batch from the logprobs the loss actually optimizes against. When `train_batch_size > policy_mini_batch_size`, the policy drifts as it updates across mini-batches, so this captures the diff under that drift.
+
+For losses that optimize directly against the rollout logprobs and do not need the "old" policy logprobs (`policy_loss_type="rollout_is"` or `"dppo"`), the policy forward pass is skipped to save compute when no other component needs those logprobs (no off-policy correction and `use_kl_in_reward=False`). In that case the forward-pass `rollout_train_logprobs_abs_diff` metric is unavailable, and the per-mini-batch `minibatch_rollout_logprobs_abs_diff` metric should be used to monitor logprob drift instead.
+
 Some examples are shown below:
 
 ![Importance Sampling Ratio](/images/algorithms/is_ratio.png)
