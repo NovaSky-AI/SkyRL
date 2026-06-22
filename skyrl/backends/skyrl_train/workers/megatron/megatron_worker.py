@@ -1281,7 +1281,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             and self.cfg.fully_async.clear_kv_cache_on_weight_sync
         ):
             # clear prefix cache
-            cache_reset_task = inference_engine_client.reset_prefix_cache()
+            cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
         torch.cuda.empty_cache()
 
