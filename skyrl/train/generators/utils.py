@@ -446,6 +446,7 @@ def get_rollout_metrics(
                 {
                     "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
                     "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
                 }
             )
 
