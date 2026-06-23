@@ -53,21 +53,26 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
         "distributed_executor_backend",
         "model",
         "dp_size",
+        "use_new_inference_servers",
     ),
     [
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
-        pytest.param(True, "nccl", "fsdp", 2, 2, "ray", MODEL, 1),
-        pytest.param(True, "nccl", "fsdp", 2, 2, "mp", MODEL, 1),
-        pytest.param(False, "nccl", "fsdp", 1, 2, "mp", MODEL, 1),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1, None),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "ray", MODEL, 1, None),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "mp", MODEL, 1, None),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "mp", MODEL, 1, None),
         # moe model, dp > 1
-        pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2),
-        pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2),
+        pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2, None),
+        pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2, None),
+        # sharded_rdt (NIXL pull): non-colocated TP=1 — 1 GPU for the FSDP policy
+        # (rank-0 named actor) + 1 GPU for vLLM. Requires the new inference server
+        # path so the worker extension registers the engine and bakes the plan.
+        pytest.param(False, "sharded_rdt", "fsdp", 1, 1, "ray", MODEL, 1, True),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. "fsdp"
         # is fsdp2 in the current backend (FSDP1 was removed). Colocated
         # uses tp=4 across all 4 GPUs; non-colocated splits 2 GPUs for
         # vLLM (tp=2) and 2 for the FSDP policy.
-        pytest.param(True, "nccl", "fsdp", 1, 4, "ray", QWEN_LARGE_MOE_MODEL, 1, marks=_h100_only),
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", QWEN_LARGE_MOE_MODEL, 1, marks=_h100_only),
+        pytest.param(True, "nccl", "fsdp", 1, 4, "ray", QWEN_LARGE_MOE_MODEL, 1, None, marks=_h100_only),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", QWEN_LARGE_MOE_MODEL, 1, None, marks=_h100_only),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -76,6 +81,7 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
         "non_colocated_nccl_fsdp_vllm_mp",
         "colocate_nccl_fsdp_vllm_dp",
         "non_colocated_nccl_fsdp_vllm_dp",
+        "no_colocate_sharded_rdt_fsdp_vllm",
         "colocate_nccl_fsdp_vllm_qwen3_5_35b_a3b_h100",
         "no_colocate_nccl_fsdp_vllm_qwen3_5_35b_a3b_h100",
     ],
@@ -90,6 +96,7 @@ async def test_policy_local_engines_e2e(
     distributed_executor_backend,
     model,
     dp_size,
+    use_new_inference_servers,
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
@@ -118,6 +125,7 @@ async def test_policy_local_engines_e2e(
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # since we explicitly sync weights
+        use_new_inference_servers=use_new_inference_servers,
     ) as engines:
         client, pg = engines.client, engines.pg
 
@@ -136,6 +144,7 @@ async def test_policy_local_engines_e2e(
             * cfg.generator.inference_engine.num_engines
             * cfg.generator.inference_engine.data_parallel_size,
             cfg=cfg,
+            rdt_master_actor=(weight_sync_backend == "sharded_rdt"),
         )
 
         ray.get(

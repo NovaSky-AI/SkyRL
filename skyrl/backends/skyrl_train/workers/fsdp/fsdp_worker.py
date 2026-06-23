@@ -200,15 +200,23 @@ class FSDPPolicyWorkerBase(RdtProducerMixin, PolicyWorkerBase):
             ), "FSDP preparation should create optimizer and scheduler"
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Call super first to set _transfer_strategy_cls and create sender/receivers
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
-
-        # Initialize weight extractor
+        # Initialize the weight extractor BEFORE super().init_weight_sync_state:
+        # the sharded_rdt strategy's populate_init_info (called inside super)
+        # reads it to fill the bake metadata up front. group_by_module depends on
+        # the transfer strategy, so resolve the strategy here (super recomputes
+        # the same value into self._transfer_strategy_cls).
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
+        from skyrl.backends.skyrl_train.weight_sync import (
+            CudaIpcTransferStrategy,
+            get_transfer_strategy_cls,
+        )
 
-        group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        strategy_cls = get_transfer_strategy_cls(
+            weight_sync_backend=inference_engine_cfg.weight_sync_backend,
+            colocate_all=self.cfg.placement.colocate_all,
+        )
+        group_by_module = strategy_cls is CudaIpcTransferStrategy
         weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
@@ -218,6 +226,11 @@ class FSDPPolicyWorkerBase(RdtProducerMixin, PolicyWorkerBase):
             ),
             weight_prefix=weight_prefix,
         )
+
+        # Run the generic init (sets _transfer_strategy_cls, creates the sender,
+        # initializes receivers, binds this worker). sharded_rdt's
+        # populate_init_info reads self.weight_extractor created above.
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     async def _save_lora_adapters_and_sync(
         self,

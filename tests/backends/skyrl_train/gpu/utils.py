@@ -158,7 +158,13 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str,
+    shared_pg=None,
+    colocate_all=False,
+    num_gpus_per_node=1,
+    num_nodes=1,
+    cfg=None,
+    rdt_master_actor: bool = False,
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -184,6 +190,7 @@ def init_worker_with_type(
         colocate_all=colocate_all,
         sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
         record_memory=cfg.trainer.policy.record_memory,
+        rdt_master_actor=rdt_master_actor,
     )
     # we use policy model path for all tests (regardless of actor type)
     ray.get(model.async_init_model(cfg.trainer.policy.model.path))

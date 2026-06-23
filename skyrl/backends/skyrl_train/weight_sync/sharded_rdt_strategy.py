@@ -324,12 +324,12 @@ class RdtProducerMixin:
     (examples/rl/rlhf_sharded_rdt_fsdp_ep.py).
 
     Host-actor requirements (the worker that mixes this in must provide):
-      * ``self.model`` — the (FSDP-wrapped) model; ``state_dict()`` yields the
-        per-rank shards (DTensors) keyed by the same names ``get_weight_metadata``
-        returns, modulo the extractor's ``weight_prefix``.
-      * ``self.weight_extractor`` — exposes ``weight_prefix`` and a
-        ``_gather_tensor(param)`` that all-gathers a (possibly sharded) param to
-        its full tensor (FSDPWeightExtractor satisfies this).
+      * ``self.weight_extractor`` — the SAME extractor used for ``get_weight_metadata``;
+        exposes ``model`` (whose ``state_dict()`` yields the per-rank shards —
+        DTensors — keyed by the names ``get_weight_metadata`` returns, modulo
+        ``weight_prefix``), ``weight_prefix``, and a ``_gather_tensor(param)`` that
+        all-gathers a (possibly sharded) param to its full tensor
+        (FSDPWeightExtractor satisfies all of these).
       * a ``torch.distributed`` process group (the FSDP group).
 
     Only the rank-0 actor — created named + with ``enable_tensor_transport=True``
@@ -362,7 +362,11 @@ class RdtProducerMixin:
         """
         self._rdt_state()
         prefix = getattr(self.weight_extractor, "weight_prefix", "") or ""
-        sd = self.model.state_dict()
+        # Use the SAME model handle the metadata came from: get_weight_metadata
+        # reads ``weight_extractor.model.state_dict()`` (the inner HF model, e.g.
+        # ``model.embed_tokens.weight``), whereas the worker's ``self.model`` is
+        # the HFModelWrapper whose state_dict keys are prefixed differently.
+        sd = self.weight_extractor.model.state_dict()
         try:
             for name in names:
                 raw = name[len(prefix) :] if prefix and name.startswith(prefix) else name

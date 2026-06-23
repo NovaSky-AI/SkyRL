@@ -14,6 +14,7 @@ Run:
 """
 
 import base64
+import os
 import pickle
 
 import httpx
@@ -32,7 +33,7 @@ from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcIni
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
-MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL = os.environ.get("SKYRL_RDT_TEST_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
 
 
 @ray.remote
