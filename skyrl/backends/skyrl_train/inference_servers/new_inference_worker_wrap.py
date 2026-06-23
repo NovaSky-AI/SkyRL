@@ -32,8 +32,18 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
+def _empty_cuda_cache() -> None:
+    """Release unused CUDA/ROCm cached blocks after full-weight sync."""
+    if not torch.cuda.is_available():
+        return
 
-class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
+    device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(device)
+
+
+class NewInferenceWorkerWrap:
     """
     vLLM worker extension for chunked weight sync (new inference path).
 
@@ -158,3 +168,29 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             )
 
         torch.accelerator.synchronize()
+        _empty_cuda_cache()
+
+    def finish_weight_update(self) -> None:
+        """
+        Finalize the current weight update.
+
+        For checkpoint-format weights, runs layerwise postprocessing
+        (quantization repacking, attention weight processing, etc.).
+        Must be called after all update_weights_ipc calls are done.
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+
+        if self._skyrl_is_checkpoint_format:
+            from vllm.config import set_current_vllm_config
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+            )
+
+            model = self.model_runner.model
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+                finalize_layerwise_reload(model, self.model_config)
+
+        self._skyrl_weight_update_active = False
+        self._skyrl_is_checkpoint_format = True
+        _empty_cuda_cache()
