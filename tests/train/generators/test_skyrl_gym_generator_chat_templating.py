@@ -170,6 +170,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
         }
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    mock_llm.finish_session = AsyncMock()
     chat_template_config = None
     if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_path":
         template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
@@ -363,6 +364,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
             }
 
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
+        mock_llm.finish_session = AsyncMock()
         chat_template_config = None
         if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
             chat_template_config = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")

@@ -32,7 +32,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install basic dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       - name: Install envsubst
         run: sudo apt-get update && sudo apt-get install -y gettext-base
       - name: Tinker rl_loop convergence test

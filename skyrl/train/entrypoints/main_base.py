@@ -393,8 +393,19 @@ class BasePPOExp:
         # during `build_models` (which happens before _setup_trainer returns).
         self.trainer = trainer
 
-        # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+        # Build the models — skipped in simulated-trainer mode (no policy/critic/ref components).
+        # See FullyAsyncConfig.simulate_training / FullyAsyncTrainerSim: steps are simulated
+        # (sleep + pause/resume, no broadcast), typically against external served endpoints.
+        # TODO: we should make a top level TrainerConfig.simulate_training flag to provide a consistent way
+        # for simulating training steps
+        simulate_training = self.cfg.trainer.fully_async.simulate_training
+        if simulate_training:
+            logger.info(
+                "fully_async.simulate_training=True: skipping build_models() — no policy/critic/ref "
+                "models instantiated. Trainer steps will be simulated (sleep + pause/resume, no broadcast)."
+            )
+        else:
+            trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):

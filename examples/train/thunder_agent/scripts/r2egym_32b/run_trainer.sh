@@ -291,6 +291,7 @@ fi
   trainer.algorithm.max_seq_len="$TRAIN_MAX_SEQ_LEN" \
   trainer.fully_async.max_staleness_steps="$FULL_MAX_STALENESS_STEPS" \
   trainer.fully_async.num_parallel_generation_workers="$NUM_PARALLEL_GENERATION_WORKERS" \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.placement.colocate_all=false \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_nodes="$TRAIN_NUM_NODES" \

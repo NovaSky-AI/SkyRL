@@ -453,6 +453,12 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
+    DPPO = "dppo"
+
+
+# Losses that optimize against rollout logprobs, so the "old" logprobs forward pass can be
+# skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
+LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -484,6 +490,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "dppo": [PolicyLossType.DPPO, dppo_policy_loss],
             "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
         }
 
@@ -775,6 +782,78 @@ def rollout_is_policy_loss(
     clip_ratio = masked_mean((~in_range).float(), loss_mask).mean().detach().item()
 
     loss_metrics: dict[str, float] = {"clip_ratio": clip_ratio}
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.DPPO)
+def dppo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """
+    Divergence Proximal Policy Optimization (DPPO) policy loss.
+
+    Replaces PPO's ratio-based clipping with a divergence-based binary mask.
+    Supports Binary-TV and Binary-KL variants.
+    The paper also proposes Top-K TV/KL variants (Equations 15-16), but in
+    Section G.2 the authors find Top-K masking provides no significant benefit
+    over the simpler binary approximation, so we only implement binary here.
+
+    See: https://arxiv.org/abs/2602.04879
+    Reference impl: https://github.com/sail-sg/Stable-RL/blob/main/verl/trainer/ppo/core_algos.py#L1241
+    """
+    # Use rollout logprobs as behavior policy for both ratio and mask
+    # See Section 5.2 of paper
+    mu_log_probs = rollout_logprobs if rollout_logprobs is not None else old_log_probs
+    ratio = safe_exp_delta(log_probs - mu_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+
+    dppo_type = config.dppo.dppo_type
+    delta_low = config.dppo.delta_low
+    delta_high = config.dppo.delta_high
+
+    # Compute DPPO mask
+    with torch.no_grad():
+        current_probs = torch.exp(log_probs)
+        mu_probs = torch.exp(mu_log_probs)
+        prob_diff = current_probs - mu_probs  # Use actual probabilities
+
+        if dppo_type == "binary_tv":
+            # Binary Total Variation (Equation 13)
+            mask = torch.ones_like(advantages)
+            mask[(advantages > 0) & (prob_diff > delta_high)] = 0.0
+            mask[(advantages < 0) & (-prob_diff > delta_low)] = 0.0
+
+        elif dppo_type == "binary_kl":
+            # Binary KL (Equation 14)
+            eps = 1e-8
+            binary_kl = mu_probs * (mu_log_probs - log_probs) + (1 - mu_probs) * torch.log(
+                (1 - mu_probs + eps) / (1 - current_probs + eps)
+            )
+
+            mask = torch.ones_like(advantages)
+            mask[(advantages > 0) & (prob_diff > 0) & (binary_kl > delta_high)] = 0.0
+            mask[(advantages < 0) & (prob_diff < 0) & (binary_kl > delta_low)] = 0.0
+
+        else:
+            raise ValueError(f"Unknown DPPO type: {dppo_type}. Must be 'binary_tv' or 'binary_kl'.")
+
+    # Surrogate loss with divergence-based mask
+    loss = -(ratio * advantages * mask)
+
+    clip_ratio = masked_mean((mask == 0).float(), loss_mask).mean().detach().item()
+    loss_metrics = {"clip_ratio": clip_ratio}
+
+    # Apply off-policy correction
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )

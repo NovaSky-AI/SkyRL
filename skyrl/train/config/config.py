@@ -372,6 +372,22 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+# DPPO parameters (only used when policy_loss_type="dppo")
+# See: https://arxiv.org/abs/2602.04879
+@dataclass
+class DPPOConfig(BaseConfig):
+    dppo_type: str = "binary_tv"
+    """DPPO divergence variant: ``"binary_tv"`` or ``"binary_kl"``. Used if ``policy_loss_type="dppo"``."""
+    delta_low: float = 0.2
+    """Divergence threshold for negative advantages (0.2 for TV, 0.05 for KL recommended)."""
+    delta_high: float = 0.2
+    """Divergence threshold for positive advantages (0.2 for TV, 0.05 for KL recommended)."""
+
+    def __post_init__(self):
+        if self.dppo_type not in ["binary_tv", "binary_kl"]:
+            raise ValueError("Invalid DPPO type")
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -427,12 +443,17 @@ class AlgorithmConfig(BaseConfig):
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
     policy_loss_type: str = "regular"
-    """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, or custom via ``PolicyLossRegistry``."""
+    """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, ``cispo``, ``sapo``, ``"rollout_is"``, ``"dppo"``, or custom via ``PolicyLossRegistry``."""
     loss_reduction: str = "token_mean"
-    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``. ``max_seq_len`` must be set explicitly for ``"seq_mean_token_sum_norm"``."""
+    """``"token_mean"``, ``"sequence_mean"``, ``"prompt_mean"``, or ``"seq_mean_token_sum_norm"``. ``max_seq_len`` must be set explicitly for ``"seq_mean_token_sum_norm"``."""
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
+    zero_variance_filter_tol: float = 1e-6
+    """Two rewards within this absolute tolerance count as equal when detecting zero-variance groups.
+    Only used when ``zero_variance_filter=True``. Defaults to 1e-6 so float (LLM-judge) rewards that are
+    effectively identical are still treated as zero-variance; this is a no-op for integer rewards (e.g.
+    0/1) where the spread is either 0 or >= 1. Set to 0.0 for exact equality."""
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2
@@ -453,6 +474,8 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
+    dppo: DPPOConfig = field(default_factory=DPPOConfig)
+    """Only used when ``policy_loss_type="dppo"``."""
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction.
     Must be set explicitly for that reduction mode; otherwise can remain ``None``."""
@@ -474,6 +497,33 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    sample_full_batch: bool = False
+    """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
+    mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).
+    Dropped groups are marked consumed (not regenerated on resume), so the per-epoch step count becomes
+    an upper bound: if the epoch's prompts run out mid mini-batch, the partial batch is discarded and
+    the epoch ends."""
+    clear_kv_cache_on_weight_sync: bool = True
+    """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
+    Set to False for fully async training to reuse KV cache from stale policies during generation
+    (avoids recomputation at the cost of using slightly stale KV cache)."""
+
+    # --- Trainer simulation (no real trainer components) ---
+    simulate_training: bool = False
+    """If True, run fully-async generation with a SIMULATED trainer (see
+    ``FullyAsyncTrainerSim``): no policy/critic/ref models are instantiated and no weight
+    broadcast happens. Each step consumes a mini-batch from the generation buffer, sleeps for
+    ``simulate_training_step_seconds``, then issues pause/resume generation (as a real weight
+    sync would) but skips ``broadcast_to_inference_engines``. Used to benchmark the
+    generation/inference side (e.g. router load-balancing policies) on large models without
+    paying for trainer GPUs — typically pointed at already-served endpoints via
+    ``external_proxy_url`` / ``external_server_urls``. The generation-side dynamics (staleness
+    control, rate limiting, pause/resume) remain faithful."""
+    simulate_training_step_seconds: float = 30.0
+    """Wall-clock seconds the simulated dummy training step sleeps (stands in for fwd/bwd/optim)."""
+    simulate_weight_sync_seconds: float = 0.0
+    """Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast.
+    0.0 = pause then immediately resume."""
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +579,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_chunked_prefill: bool = True
     enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
     but this may affect convergence for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
@@ -696,6 +746,9 @@ class TrainerConfig(BaseConfig):
     """Path for exported artifacts (HF models, debug dumps, etc.)."""
     bf16: bool = True
     epochs: int = 1
+    max_training_steps: Optional[int] = None
+    """If set, stop training after this many steps regardless of epochs or dataset size.
+    Useful for CI smoke tests and quick validation runs."""
     update_epochs_per_batch: int = 1
     """Number of gradient update passes over each training batch."""
     train_batch_size: int = 1024

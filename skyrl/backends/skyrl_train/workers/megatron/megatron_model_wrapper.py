@@ -32,6 +32,9 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_forward,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    compute_minibatch_rollout_logprob_diff_metrics,
+)
 from skyrl.train.config import TrainerConfig
 
 
@@ -513,6 +516,9 @@ class MegatronModelWrapper:
             }
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
+            metrics.update(
+                compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
+            )
             return loss, metrics
 
         def forward_step(batch_iter, model):

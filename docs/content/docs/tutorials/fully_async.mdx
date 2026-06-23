@@ -91,6 +91,14 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be `&gt;= trainer.policy_mini_batch_size` to avoid wasted throughput,
   and `&lt;= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- `trainer.fully_async.sample_full_batch`: When `true` (requires `trainer.algorithm.zero_variance_filter=true`),
+  groups whose rewards have no variance (zero GRPO signal) are dropped rather than loss-masked, and the trainer keeps
+  pulling generated groups until the mini-batch is full of non-zero-variance groups (blocking on generation as needed).
+  This is the async-native equivalent of DAPO `dynamic_sampling.type="filter"`. Dropped groups are marked consumed, so
+  they are skipped (not regenerated) on resume. Because dropping consumes extra prompts per trained step, this makes the
+  per-epoch step count an **upper bound** rather than exact: when an epoch's prompts are exhausted mid mini-batch, the
+  partial mini-batch is discarded (also marked consumed) and the epoch ends early. Defaults to `false` (zero-variance
+  groups are loss-masked but still occupy a mini-batch slot).
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -248,6 +256,8 @@ Possible ways for handling such rare groups that violate the `S` bound:
 #### Checkpointing semantics
 
 When saving a checkpoint, only trainer-consumed state is recorded. On resume, we set `accepted := consumed` (and do not restore those that were running or about-to-be-consumed in the buffer), which preserves the capacity invariant without reintroducing stale or partially generated work.
+
+With `sample_full_batch`, consumed state is split into **trained** and **filtered** (dropped) UIDs, both persisted to the checkpoint. The do-not-redraw set is their union, so dropped (and end-of-epoch discarded) prompts are skipped — not regenerated — on resume, while only trained UIDs count toward completed steps (`accepted == trained == (global_step - 1) * mini_batch_size`).
 
 <Callout type="info">
 `AsyncStalenessManager` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small `S`, the system may stall more often; increasing `S` trades off stricter on-policy-ness for higher throughput.
