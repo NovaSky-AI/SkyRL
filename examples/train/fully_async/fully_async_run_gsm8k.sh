@@ -30,6 +30,7 @@ set -x
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
 GEO_MASK_LOW=0.99
+ENFORCE_EAGER=false
 
 RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
@@ -78,5 +79,5 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   $@

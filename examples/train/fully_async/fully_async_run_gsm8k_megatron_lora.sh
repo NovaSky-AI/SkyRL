@@ -31,6 +31,7 @@ LR=1e-5
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
 GEO_MASK_LOW=0.99
+ENFORCE_EAGER=false
 
 RUN_NAME=gsm8k-fully-async-qwen3-0.6B_lora_${LORA_RANK}_${LORA_ALPHA}
 
@@ -82,5 +83,5 @@ uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_asyn
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   $@

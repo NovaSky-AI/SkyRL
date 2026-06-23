@@ -36,7 +36,7 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 # repro run parameters
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true
+ENFORCE_EAGER=false
 LR=1e-6
 
 # Fully async specific configuration knobs:
