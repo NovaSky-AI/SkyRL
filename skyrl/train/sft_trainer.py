@@ -80,14 +80,13 @@ from skyrl.utils.tok import get_tokenizer
 def _tokenize_chat_slice_worker(args):
     """Worker function for parallel chat-format tokenization with slice-based loading.
 
-    Each worker loads the full dataset (HF caches it locally after the parent's
-    first call) and tokenizes only its assigned index range.
+    Each worker memory-maps the parent's on-disk arrow dataset and tokenizes
+    only its assigned index range.
 
     Must be top-level for pickling with spawn.
     """
     (
-        dataset_name,
-        dataset_split,
+        arrow_path,
         start_idx,
         end_idx,
         tokenizer_path,
@@ -108,9 +107,9 @@ def _tokenize_chat_slice_worker(args):
 
     train_on_what = TrainOnWhat(train_on_what_str)
 
-    # Reload the dataset using the original split string and slice by index.
-    # The parent has already loaded once so this hits the HF cache.
-    dataset = load_dataset(dataset_name, split=dataset_split)
+    # ``load_from_disk`` mmaps the parent's arrow files, so each worker reads only
+    # its ``[start_idx, end_idx)`` rows instead of re-decoding the full source.
+    dataset = Dataset.load_from_disk(arrow_path)
     dataset_slice = dataset.select(range(start_idx, end_idx))
 
     # Tokenize and filter inline
@@ -134,12 +133,12 @@ def _tokenize_chat_slice_worker(args):
 def _tokenize_alpaca_slice_worker(args):
     """Worker function for parallel Alpaca-format tokenization with slice-based loading.
 
-    Each worker loads the full dataset (HF caches it locally after the parent's
-    first call) and tokenizes only its assigned index range.
+    Each worker memory-maps the parent's on-disk arrow dataset and tokenizes
+    only its assigned index range.
 
     Must be top-level for pickling with spawn.
     """
-    dataset_name, dataset_split, start_idx, end_idx, tokenizer_path, max_length = args
+    arrow_path, start_idx, end_idx, tokenizer_path, max_length = args
 
     # Worker loads tokenizer from cached path
     tokenizer = AutoTokenizer.from_pretrained(
@@ -149,8 +148,9 @@ def _tokenize_alpaca_slice_worker(args):
         local_files_only=True,
     )
 
-    # Reload the dataset using the original split string and slice by index.
-    dataset = load_dataset(dataset_name, split=dataset_split)
+    # mmap the parent's arrow files and slice by index (see
+    # ``_tokenize_chat_slice_worker``).
+    dataset = Dataset.load_from_disk(arrow_path)
     dataset_slice = dataset.select(range(start_idx, end_idx))
 
     # Tokenize and filter inline
@@ -977,13 +977,20 @@ class SFTTrainer:
         # Parallel tokenization path with slice-based loading
         logger.info(f"Tokenizing dataset with {num_workers} workers (slice-based loading)...")
 
-        # Cache tokenizer to temp dir for fast worker loading
-        tokenizer_cache_dir = tempfile.mkdtemp(prefix="skyrl_tokenizer_")
+        # Both temp dirs are created inside the ``try`` so the ``finally`` cleans
+        # them up even if creation or ``save_to_disk`` fails partway.
+        tokenizer_cache_dir = ""
+        dataset_arrow_dir = ""
         try:
+            tokenizer_cache_dir = tempfile.mkdtemp(prefix="skyrl_tokenizer_")
+            # Materialize once to a temp arrow dir; workers mmap it via
+            # ``load_from_disk`` instead of each re-decoding the source, keeping total
+            # read I/O at ~1x rather than ~num_workers x.
+            dataset_arrow_dir = tempfile.mkdtemp(prefix="skyrl_sft_arrow_")
             self.tokenizer.save_pretrained(tokenizer_cache_dir)
+            dataset.save_to_disk(dataset_arrow_dir)
 
-            # Slice the already-loaded dataset; the original split string is
-            # forwarded to workers verbatim so HF parses it (no local regex).
+            # Slice the already-materialized dataset by absolute row index.
             dataset_size = len(dataset)
             chunk_size = max(1, dataset_size // num_workers)
 
@@ -1007,8 +1014,7 @@ class SFTTrainer:
                     system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
                     worker_args.append(
                         (
-                            dataset_name,
-                            dataset_split,
+                            dataset_arrow_dir,
                             worker_start,
                             worker_end,
                             tokenizer_cache_dir,
@@ -1022,8 +1028,7 @@ class SFTTrainer:
                 elif "instruction" in columns and "output" in columns:
                     worker_args.append(
                         (
-                            dataset_name,
-                            dataset_split,
+                            dataset_arrow_dir,
                             worker_start,
                             worker_end,
                             tokenizer_cache_dir,
@@ -1066,10 +1071,11 @@ class SFTTrainer:
             return tokenized
 
         finally:
-            # Cleanup temp tokenizer cache
+            # Cleanup temp tokenizer cache and materialized arrow dataset
             import shutil
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
+            shutil.rmtree(dataset_arrow_dir, ignore_errors=True)
 
     def load_dataset(self) -> list:
         """Load and tokenize the training dataset."""
