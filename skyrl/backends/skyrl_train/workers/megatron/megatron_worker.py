@@ -848,6 +848,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 logger.info("freeze_moe_router=True: freezing MoE router params")
             self.provider.register_pre_wrap_hook(freeze_moe_router)
 
+        # MTP C-full: isolate the draft head into its own grad buffer + optimizer so the policy's
+        # distributed grad reduction is byte-identical to a no-MTP model (the head's presence in the
+        # shared grad buffer otherwise perturbs the policy reduction and collapses entropy — see
+        # mtp/separate_optim.py). Step 1, here: freeze the head BEFORE the policy DDP wrap so Megatron's
+        # DDP (which only buckets requires_grad params) excludes it from the policy grad buffer. The head
+        # is re-enabled and given its own buffer + optimizer after the policy optimizer is built.
+        self._mtp_separate = None
+        self._mtp_cfull_enabled = bool(
+            self.cfg.policy.megatron_config.mtp_separate_optimizer and getattr(self.provider, "mtp_num_layers", None)
+        )
+        if self._mtp_cfull_enabled:
+            from skyrl.backends.skyrl_train.mtp.separate_optim import (
+                freeze_mtp_params_pre_wrap,
+            )
+
+            self.provider.register_pre_wrap_hook(freeze_mtp_params_pre_wrap)
+            if self._rank == 0:
+                logger.info("MTP C-full: registered pre-wrap hook to isolate the draft head's grad buffer")
+
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
@@ -889,6 +908,30 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 num_training_steps=num_training_steps,
             )
 
+            # MTP C-full step 2: re-enable the draft head and give it its OWN grad buffer +
+            # DistributedOptimizer (the policy optimizer above already excludes it — it was frozen
+            # before the policy wrap). The head co-trains at full strength while the policy reduction
+            # stays byte-identical to a no-MTP model. See mtp/separate_optim.py.
+            if self._mtp_cfull_enabled:
+                from skyrl.backends.skyrl_train.mtp.separate_optim import (
+                    SeparateMTPOptimizer,
+                )
+
+                # Fresh optim config for the head (don't share the policy's object).
+                mtp_optim_config = init_megatron_optim_config(
+                    self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
+                )
+                self._mtp_separate = SeparateMTPOptimizer(
+                    policy_module=self.actor_module[0],
+                    ddp_config=self.cfg.policy.megatron_config.ddp_config,
+                    optim_config=mtp_optim_config,
+                    scheduler_config=self.cfg.policy.optimizer_config,
+                    num_training_steps=num_training_steps,
+                )
+                if self._rank == 0:
+                    n = sum(p.numel() for p in self._mtp_separate.mtp_params)
+                    logger.info(f"MTP C-full: isolated draft head ({n:,} params) into its own grad buffer + optimizer")
+
         # create worker model
         self.model = MegatronModelWrapper(
             config=self.cfg,
@@ -896,6 +939,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
         )
+
+        # MTP C-full step 3: hide the draft head from the POLICY finalize (which would otherwise coalesce
+        # the head's layernorm grads into the policy TP all-reduce, perturbing it). Must run AFTER the
+        # wrapper, which sets finalize_model_grads_func on this same model_config object.
+        if self._mtp_separate is not None:
+            from megatron.core.utils import get_model_config
+
+            from skyrl.backends.skyrl_train.mtp.separate_optim import (
+                make_policy_finalize_excluding_mtp,
+            )
+
+            get_model_config(self.actor_module[0]).finalize_model_grads_func = make_policy_finalize_excluding_mtp(
+                self._mtp_separate.mtp_params
+            )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
@@ -1037,6 +1094,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
             chunk.zero_grad_buffer()
+        # MTP C-full: zero the isolated draft-head grad buffer too (it lives outside self.actor_module).
+        if self._mtp_separate is not None:
+            self._mtp_separate.zero_grad_buffer()
 
         all_metrics = defaultdict(list)
 
@@ -1213,7 +1273,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         if self.optimizer is None:
             raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
-        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+
+        # MTP C-full: hide the draft head during the POLICY step so its grad-norm + clip EXCLUDE the
+        # head (Megatron's grad-norm iterates the GPTModel's requires_grad params and reads main_grad;
+        # the head is structurally still in the GPTModel, so without this it dilutes the policy clip).
+        # The policy step then matches a no-MTP run; the head is finalized + stepped separately after.
+        if self._mtp_separate is not None:
+            with self._mtp_separate.hidden():
+                grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+            self._mtp_grad_norm = self._mtp_separate.step()
+        else:
+            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0
@@ -1221,6 +1291,38 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
+
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+        """Save the policy checkpoint, plus the C-full MTP head's separate optimizer state.
+
+        The isolated draft-head optimizer (``self._mtp_separate``) lives OUTSIDE ``self.optimizer``, so
+        the strategy's checkpoint does not cover it. Persist its (DP-sharded) state per global rank
+        alongside the policy checkpoint so resume restores the head's optimizer momentum / scheduler.
+        """
+        super().save_checkpoint(ckpt_dir, tokenizer=tokenizer)
+        if self._mtp_separate is not None:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            torch.save(self._mtp_separate.state_dict(), os.path.join(ckpt_dir, f"mtp_optim_rank{self._rank}.pt"))
+
+    def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
+        states = super().load_checkpoint(
+            ckpt_dir,
+            load_optimizer_states=load_optimizer_states,
+            load_lr_scheduler_states=load_lr_scheduler_states,
+        )
+        # Restore the C-full MTP head's separate optimizer state. Guarded on existence so a checkpoint
+        # written without C-full (or a topology change) degrades to "fresh head optimizer" instead of
+        # crashing the resume.
+        if self._mtp_separate is not None and load_optimizer_states:
+            mtp_path = os.path.join(ckpt_dir, f"mtp_optim_rank{self._rank}.pt")
+            if os.path.exists(mtp_path):
+                self._mtp_separate.load_state_dict(torch.load(mtp_path, map_location="cpu"))
+            elif self._rank == 0:
+                logger.warning(
+                    f"MTP C-full: no separate-optimizer checkpoint at {mtp_path}; "
+                    "the draft head's optimizer state was not restored."
+                )
+        return states
 
     def get_lr(self) -> Optional[float]:
         """
