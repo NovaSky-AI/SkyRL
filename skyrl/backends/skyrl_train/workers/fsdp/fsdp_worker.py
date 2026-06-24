@@ -276,10 +276,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
+
+        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
         if (
             use_prefix_cache
             and torch.distributed.get_rank() == 0
-            and self.cfg.fully_async.clear_kv_cache_on_weight_sync
+            and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
         ):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)

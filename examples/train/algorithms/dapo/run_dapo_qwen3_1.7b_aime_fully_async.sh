@@ -53,6 +53,7 @@ RUN_NAME=dapo_qwen3_1.7b_base-async-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-bs${
 uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully_async \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \

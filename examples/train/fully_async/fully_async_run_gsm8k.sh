@@ -36,9 +36,9 @@ RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
-  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
   trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
@@ -79,4 +79,5 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=true \
   $@
