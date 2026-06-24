@@ -350,6 +350,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Some async-specific validations
         assert (
+            self.cfg.trainer.fully_async.enabled
+        ), "trainer.fully_async.enabled must be True when using the fully async trainer."
+        assert (
             self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
         ), "train_batch_size must equal policy_mini_batch_size for fully async training"
         assert (
