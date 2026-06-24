@@ -46,6 +46,9 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     build_mtp_next_token_labels,
     masked_mean,
 )
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    compute_minibatch_rollout_logprob_diff_metrics,
+)
 from skyrl.train.config import TrainerConfig
 
 # One-shot guard for the MTP_PROFILE diagnostic capture (see forward_backward_mini_batch).
@@ -704,6 +707,9 @@ class MegatronModelWrapper:
                 metrics["mtp_loss"] = draft_loss.detach().item()
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
+            metrics.update(
+                compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
+            )
             return loss, metrics
 
         def forward_step(batch_iter, model):

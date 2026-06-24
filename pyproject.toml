@@ -204,6 +204,14 @@ required-environments = [
 constraint-dependencies = [
     "flashinfer-jit-cache==0.6.8.post1",
     "flashinfer-cubin==0.6.8.post1",
+    # fastapi 0.137.0 refactored include_router() to store `_IncludedRouter` wrapper objects in
+    # `app.routes`, which prometheus-fastapi-instrumentator (pulled in transitively by vLLM) cannot
+    # handle: `_get_route_name` accesses `route.path` and raises
+    # `AttributeError: '_IncludedRouter' object has no attribute 'path'`, so the vLLM server's /health
+    # endpoint 500s and the server never becomes healthy. Cap below 0.137 until the instrumentator is
+    # fixed. See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/370 and
+    # https://github.com/vllm-project/vllm/issues/45596
+    "fastapi<0.137",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -318,8 +326,8 @@ megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = [
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14-cp38-abi3-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
+    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
 
 

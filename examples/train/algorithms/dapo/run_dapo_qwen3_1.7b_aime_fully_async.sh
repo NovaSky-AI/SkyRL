@@ -35,7 +35,7 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 # repro run parameters
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
+ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability with vLLM then. TODO: reproduce DAPO with enforce eager `False`
 LR=1e-6
 
 # Fully async specific configuration knobs:
@@ -55,6 +55,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   data.val_data="['$TEST_FILE']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
   trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
   trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \

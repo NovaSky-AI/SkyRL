@@ -881,9 +881,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 logger.info("MTP C-full: registered pre-wrap hook to isolate the draft head's grad buffer")
 
         # wrap with DDP for training
+        wrap_with_ddp = not self.cfg.policy.inference_only_init
         self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=True,
-            ddp_config=self.cfg.policy.megatron_config.ddp_config,
+            wrap_with_ddp=wrap_with_ddp,
+            ddp_config=self.cfg.policy.megatron_config.ddp_config if wrap_with_ddp else None,
             lora_config=self.cfg.policy.model.lora if self._is_lora else None,
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
             bf16=self.cfg.bf16,
@@ -1160,6 +1161,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    "is_padding_batch": (
+                        experience.metadata.get("is_padding_batch", False) if experience.metadata else False
+                    ),
                 }
             )
 
@@ -1225,7 +1229,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
             # excluding them here keeps both reductions correct.
-            if m_batch["loss_mask"].sum().item() == 0:
+            if m_batch["is_padding_batch"]:
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
@@ -1447,7 +1451,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
-        if use_prefix_cache and torch.distributed.get_rank() == 0:
+        if (
+            use_prefix_cache
+            and torch.distributed.get_rank() == 0
+            and self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        ):
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
