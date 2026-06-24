@@ -254,6 +254,12 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
     mcfg.mtp_loss_type = mtp.loss_type
     mcfg.mtp_loss_weight = mtp.loss_weight
 
+    # DEBUG GUARD: SKYRL_DISABLE_SPEC=1 keeps MTP head TRAINING on (the decoupled draft loss set
+    # above) but leaves vLLM rollout in plain autoregressive (lossless) decode — isolates the
+    # MTP-training machinery from the spec-decode rollout sampler.
+    if os.environ.get("SKYRL_DISABLE_SPEC") == "1":
+        return
+
     # Inference side: vLLM MTP speculative decoding with the same draft depth. Don't clobber an
     # explicit user-provided speculative_config.
     ie_cfg = cfg.generator.inference_engine
