@@ -140,10 +140,21 @@ def discover_ray_metrics_urls() -> List[str]:
 class VLLMMetricsScraper:
     """Per-step snapshot of selected vLLM metrics from Ray's metrics agents.
 
-    ``sample()`` reports deltas vs. the previous step (used by the fully-async
-    trainer). ``mark_pre_eval()`` + ``sample_split()`` let the sync trainer
-    report the train rollout under ``vllm/*`` and the eval rollout under
-    ``vllm/eval/*`` instead of blending them.
+    Two ways to derive a window:
+
+    * ``sample()`` reports deltas vs. the previous call against a wall-clock (or
+      caller-supplied generation) interval — used by the fully-async trainer.
+    * ``start(label)`` / ``pause()`` / ``resume()`` / ``stop()`` measure an
+      explicit window and own its timing. The scraper accumulates only the
+      un-paused time between ``start`` and ``stop``, so the caller never has to
+      thread a generation-time value back in or mark boundaries by ordering.
+      ``stop()`` returns the metrics nested under ``{label}/`` (e.g.
+      ``vllm/train/generation_throughput_tok_s``). The sync trainer uses this to
+      report the train rollout under ``vllm/train/*`` and the eval rollout under
+      ``vllm/eval/*`` instead of blending them.
+
+    The two paths keep independent state, so a process may use either (the sync
+    trainer uses windows; the fully-async trainer uses ``sample()``).
     """
 
     def __init__(
@@ -155,9 +166,15 @@ class VLLMMetricsScraper:
         self._timeout = request_timeout_s
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
-        self._mid_snapshot: Optional[Dict[str, float]] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
+        # Explicit-window state (start/pause/resume/stop). ``_label is None``
+        # means no window is open.
+        self._label: Optional[str] = None
+        self._window_prev: Optional[Dict[str, float]] = None
+        self._window_time_s: float = 0.0
+        self._active_since: Optional[float] = None  # start of the current un-paused span
+        self._paused: bool = False
         if not self._urls:
             logger.warning(
                 "VLLMMetricsScraper: ray.nodes() returned no metrics endpoints; "
@@ -240,41 +257,61 @@ class VLLMMetricsScraper:
         self._prev_timestamp = now
         return out
 
-    async def mark_pre_eval(self) -> None:
-        """Snapshot the counters right before the eval rollout for :meth:`sample_split`."""
-        self._mid_snapshot = await self._read_snapshot()
+    async def start(self, label: str) -> None:
+        """Open a metrics window labelled ``label`` (e.g. ``"vllm/train"``).
 
-    async def sample_split(
-        self,
-        *,
-        generate_time_s: Optional[float] = None,
-        eval_generate_time_s: Optional[float] = None,
-    ) -> Dict[str, float]:
-        """Sync-trainer sampling that separates train and eval rollouts.
-
-        ``vllm/*`` covers the train rollout (previous step -> pre-eval mark);
-        when :meth:`mark_pre_eval` was called, ``vllm/eval/*`` covers the eval
-        rollout (mark -> now). Each is divided by its own generation time.
+        Snapshots the counters and starts the active-time clock. The window is
+        un-paused, so time accumulates immediately; call :meth:`pause` right
+        after if the work between ``start`` and the first generation should be
+        excluded from the throughput denominator.
         """
-        cur = await self._read_snapshot()
-        mid = self._mid_snapshot
-        self._mid_snapshot = None
-        if cur is None:
+        if self._label is not None:
+            raise ValueError(f"`start({label!r})` called while window {self._label!r} is still open")
+        self._window_prev = await self._read_snapshot()
+        self._label = label
+        self._window_time_s = 0.0
+        self._active_since = time.monotonic()
+        self._paused = False
+
+    def pause(self) -> None:
+        """Stop accumulating active time until the next :meth:`resume`."""
+        if self._label is None:
+            raise ValueError("`pause` called without an open window")
+        if self._paused:
+            raise ValueError("`pause` called without `resume`")
+        self._window_time_s += time.monotonic() - self._active_since
+        self._active_since = None
+        self._paused = True
+
+    def resume(self) -> None:
+        """Resume accumulating active time after a :meth:`pause`."""
+        if self._label is None:
+            raise ValueError("`resume` called without an open window")
+        if not self._paused:
+            raise ValueError("`resume` called without `pause`")
+        self._active_since = time.monotonic()
+        self._paused = False
+
+    async def stop(self) -> Dict[str, float]:
+        """Close the window and return its metrics nested under ``{label}/``.
+
+        The throughput denominator is the active (un-paused) time accumulated
+        between :meth:`start` and now. Returns ``{}`` when no endpoints are
+        configured.
+        """
+        if self._label is None:
+            raise ValueError("`stop` called without an open window")
+        new_snapshot = await self._read_snapshot()
+        if not self._paused:
+            self._window_time_s += time.monotonic() - self._active_since
+        label, prev, window = self._label, self._window_prev, self._window_time_s
+        self._label = None
+        self._window_prev = None
+        self._active_since = None
+        self._paused = False
+        if new_snapshot is None:
             return {}
-
-        # Train rollout ends at the pre-eval mark when eval ran, else at cur.
-        train_end = mid if mid is not None else cur
-        train_window = generate_time_s if (generate_time_s is not None and generate_time_s > 0) else None
-        out = self._window_metrics(self._prev_aggregated, train_end, train_window, "vllm/")
-
-        if mid is not None:
-            eval_window = (
-                eval_generate_time_s if (eval_generate_time_s is not None and eval_generate_time_s > 0) else None
-            )
-            out.update(self._window_metrics(mid, cur, eval_window, "vllm/eval/"))
-
-        self._prev_aggregated = cur
-        return out
+        return self._window_metrics(prev, new_snapshot, window, f"{label}/")
 
     @classmethod
     def _window_metrics(
