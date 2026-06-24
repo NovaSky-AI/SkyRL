@@ -729,7 +729,12 @@ class SFTTrainer:
         from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 
         if self.sft_cfg.use_sequence_packing:
+            from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+                is_fp8_enabled,
+            )
+
             self._validate_packing_cfg()
+            transformer_config_kwargs = self.sft_cfg.megatron_config.transformer_config_kwargs or {}
             return PackedDataCollator(
                 tokenizer=tokenizer,
                 max_tokens_per_microbatch=self.sft_cfg.resolved_bin_capacity(),
@@ -739,6 +744,7 @@ class SFTTrainer:
                 dp_size=self._dp_size(),
                 batch_size=self.sft_cfg.batch_size,
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
+                fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
             )
         return DefaultCollator(
             tokenizer=tokenizer,

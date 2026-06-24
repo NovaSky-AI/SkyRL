@@ -23,6 +23,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
     vocab_parallel_entropy_packed_sequences,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -184,12 +185,14 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
+            model_config = get_model_config(model)
+            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
                     batch["attention_mask"],
-                    model_config=get_model_config(model),
+                    model_config=model_config,
                     remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
@@ -206,6 +209,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                     sub_seq_lengths=sub_seq_lengths,
+                    fp8_enabled=fp8_enabled,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -219,6 +223,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     position_ids,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    fp8_enabled=fp8_enabled,
                 )
                 packed_seq_params = None
 
@@ -528,12 +533,14 @@ class MegatronModelWrapper:
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
 
+            model_config = get_model_config(model)
+            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
                     batch["attention_mask"],
-                    model_config=get_model_config(model),
+                    model_config=model_config,
                     remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
@@ -558,6 +565,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                     sub_seq_lengths=sub_seq_lengths,
+                    fp8_enabled=fp8_enabled,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -571,6 +579,7 @@ class MegatronModelWrapper:
                     attention_mask,
                     position_ids,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    fp8_enabled=fp8_enabled,
                 )
                 packed_seq_params = None
 
