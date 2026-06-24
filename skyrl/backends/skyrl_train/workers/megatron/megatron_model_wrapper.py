@@ -348,9 +348,10 @@ class MegatronModelWrapper:
 
         # Multi-Token Prediction (MTP): if the model was built with native MTP heads, train them with
         # an explicit decoupled loss instead of Megatron's in-forward process_mtp_loss path. The heads
-        # still run inside the forward (so we reuse their rotary embeddings) but with NO labels, so
-        # process_mtp_loss short-circuits and no MTP gradient couples onto the trunk; a forward hook
-        # captures their hidden states (trunk input optionally detached) for us to score. Training only.
+        # still run inside the forward (so we reuse their rotary embeddings); the native process_mtp_loss
+        # is disabled at its call sites (see mtp/native_loss_patch.py, applied at config time) so no
+        # native MTP gradient couples onto the trunk. A forward hook captures the heads' hidden states
+        # (trunk input optionally detached) for us to score. Training only.
         model_config = get_model_config(self.actor_module[0])
         mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
         mcfg = self.cfg.policy.megatron_config

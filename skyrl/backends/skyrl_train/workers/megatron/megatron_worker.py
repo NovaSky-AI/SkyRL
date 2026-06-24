@@ -477,11 +477,24 @@ class MegatronWorker:
             # loss (see MegatronModelWrapper) instead of Megatron's in-forward
             # process_mtp_loss / MTPLossAutoScaler path. The explicit weight is
             # megatron_config.mtp_loss_weight.
+            #
+            # CRITICAL: GPTModel/HybridModel.forward call process_mtp_loss unconditionally when MTP
+            # heads exist, and Megatron now DERIVES labels from input_ids ("e.g. RL training") so
+            # passing no labels no longer short-circuits it. Left active, that native hard-CE loss
+            # back-props into the policy trunk (inflated grad-norm, entropy collapse), independent of
+            # mtp_loss_weight. Patch process_mtp_loss to a no-op at its call sites so only SkyRL's
+            # decoupled loss trains the head. Must run before any forward (here, at config time).
+            from skyrl.backends.skyrl_train.mtp.native_loss_patch import (
+                disable_native_mtp_loss,
+            )
+
+            disable_native_mtp_loss()
             logger.info(
                 f"MTP enabled (decoupled): mtp_num_layers={provider.mtp_num_layers}, "
                 f"mtp_loss_type={megatron_config.mtp_loss_type}, "
                 f"mtp_loss_weight={megatron_config.mtp_loss_weight}, "
-                f"mtp_detach_trunk={megatron_config.mtp_detach_trunk}"
+                f"mtp_detach_trunk={megatron_config.mtp_detach_trunk} "
+                "(native process_mtp_loss disabled)"
             )
 
         provider.finalize()
