@@ -79,6 +79,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  trainer.fully_async.clear_kv_cache_on_weight_sync=true \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   $@
