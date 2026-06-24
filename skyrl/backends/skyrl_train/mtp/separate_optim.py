@@ -183,21 +183,36 @@ class SeparateMTPOptimizer:
 
     @contextlib.contextmanager
     def hidden(self):
-        """Temporarily set the head's params ``requires_grad=False`` so the POLICY optimizer's
-        grad-norm + clip EXCLUDE the head. Megatron computes the policy grad-norm by iterating the
-        GPTModel's ``requires_grad`` params and reading ``main_grad`` — and the head is *structurally*
-        still inside the GPTModel (so capture/replay/export work), so without this it would pick up the
-        head's grad (from its separate buffer) and dilute the policy clip exactly like the un-isolated
-        run. This is a pure read-time filter while the policy step runs; the head's grads stay in its
-        own buffer and are clipped/stepped separately by :meth:`step`."""
-        saved = [(p, p.requires_grad) for p in self.mtp_params]
+        """Exclude the head from the POLICY optimizer's grad-norm + clip for the duration of the
+        policy step, then restore so the separate MTP optimizer (stepped right after) reduces/steps
+        the real grads.
+
+        IMPORTANT: Megatron's ``get_main_grads_for_grad_norm()`` collects a param's grad whenever
+        ``grad is not None`` — it does NOT check ``requires_grad``. So flipping ``requires_grad`` alone
+        (the original implementation) does NOT remove the head from the policy grad-norm/clip: the head's
+        grad is already populated by backward, so it still gets counted and inflates ``policy/grad_norm``,
+        over-clipping the policy (a head→policy coupling through the shared clip). We therefore stash and
+        clear the grad-bearing attributes Megatron may read (``grad`` / ``main_grad`` / ``decoupled_grad``)
+        so the head is genuinely invisible to the policy norm, and restore them on exit (the underlying
+        grad-buffer data is untouched — we only detach the attribute references). ``requires_grad`` is
+        also cleared for any path that does honor it."""
+        _GRAD_ATTRS = ("grad", "main_grad", "decoupled_grad")
+        saved = []
         for p in self.mtp_params:
+            grads = {a: getattr(p, a, None) for a in _GRAD_ATTRS}
+            saved.append((p, p.requires_grad, grads))
             p.requires_grad = False
+            for a in _GRAD_ATTRS:
+                if getattr(p, a, None) is not None:
+                    setattr(p, a, None)
         try:
             yield
         finally:
-            for p, rg in saved:
+            for p, rg, grads in saved:
                 p.requires_grad = rg
+                for a, g in grads.items():
+                    if g is not None:
+                        setattr(p, a, g)
 
     def finalize_grads(self) -> None:
         """Reduce the head's accumulated grads: DP reduce-scatter (own buffer) + TP all-reduce of the
