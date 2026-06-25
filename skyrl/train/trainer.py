@@ -33,7 +33,11 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
+    off_policy_correction_enabled,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    LOSSES_WITHOUT_OLD_LOGPROBS,
     AdaptiveKLController,
     FixedKLController,
     apply_loss_reduction_to_advantages_minibatch,
@@ -84,6 +88,7 @@ from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    finalize_minibatch_rollout_logprob_diff_std,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -907,7 +912,11 @@ class RayPPOTrainer:
 
     @torch.no_grad()
     def postprocess_generator_output(
-        self, generator_output: GeneratorOutput, uids: List[str]
+        self,
+        generator_output: GeneratorOutput,
+        uids: List[str],
+        metrics_generator_output: Optional[GeneratorOutput] = None,
+        metrics_uids: Optional[List[str]] = None,
     ) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
@@ -918,22 +927,29 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
 
+        Reward metrics are computed over ``metrics_generator_output`` / ``metrics_uids`` when provided
+        (a superset of the trained output -- e.g. sample_full_batch passes the dropped groups so metrics
+        stay comparable), otherwise over ``generator_output`` / ``uids``. The per-token / loss-mask
+        conversion always applies to ``generator_output`` only.
+
         Returns:
             (generator_output, uids) — uids may be shorter than the input when merging.
         """
-        generator_output_for_metrics = generator_output
-        uids_for_metrics = uids
+        metrics_output = metrics_generator_output if metrics_generator_output is not None else generator_output
+        metrics_output_uids = metrics_uids if metrics_uids is not None else uids
+        generator_output_for_metrics = metrics_output
+        uids_for_metrics = metrics_output_uids
         if self.cfg.generator.step_wise_trajectories:
             generator_output_for_metrics = defaultdict(list)
-            for key in generator_output:
-                if isinstance(generator_output[key], list):
+            for key in metrics_output:
+                if isinstance(metrics_output[key], list):
                     generator_output_for_metrics[key] = [
-                        generator_output[key][i]
-                        for i in range(len(generator_output[key]))
-                        if generator_output["is_last_step"][i]
+                        metrics_output[key][i]
+                        for i in range(len(metrics_output[key]))
+                        if metrics_output["is_last_step"][i]
                     ]
             uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
+                uid for uid, is_last_step in zip(metrics_output_uids, metrics_output["is_last_step"]) if is_last_step
             ]
 
         # only use `generator_output_for_metrics` for metrics calculation
@@ -969,7 +985,17 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                kept_indices_set = set(
+                    zero_variance_filter(
+                        rewards,
+                        uids,
+                        loss_masks=generator_output["loss_masks"],
+                        tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
+                    )
+                )
+                num_groups = len(set(uids))
+                num_kept_groups = len({uids[i] for i in kept_indices_set})
+                self.all_metrics["reward/num_zero_variance_filtered"] = num_groups - num_kept_groups
                 generator_output["loss_masks"] = [
                     [0] * len(mask) if i not in kept_indices_set else mask
                     for i, mask in enumerate(generator_output["loss_masks"])
@@ -1151,6 +1177,21 @@ class RayPPOTrainer:
         output = self.dispatch.forward(model, data_fwd_pass)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key=key)
 
+    def _skip_policy_forward(self, training_input: TrainingInputBatch) -> bool:
+        """Whether the policy forward pass producing the "old" logprobs can be skipped.
+
+        Safe only when the loss optimizes against rollout logprobs and nothing else reads the
+        old logprobs: rollout logprobs are present (these losses fall back to old logprobs
+        without them), the KL reward penalty is off, and off-policy correction is disabled.
+        """
+        algorithm = self.cfg.trainer.algorithm
+        return (
+            algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
+            and training_input.get("rollout_logprobs", None) is not None
+            and not algorithm.use_kl_in_reward
+            and not off_policy_correction_enabled(algorithm.off_policy_correction)
+        )
+
     @torch.no_grad()
     def fwd_logprobs_values_reward(
         self,
@@ -1201,13 +1242,17 @@ class RayPPOTrainer:
             )
             self.dispatch.empty_cache("ref")
 
-        # Policy forward
-        action_log_probs = self._execute_forward_pass(
-            "policy",
-            data_fwd_pass,
-            key="logprobs",
-            mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
-        )
+        # Policy forward. Skipped for losses that optimize against rollout logprobs (see
+        # `_skip_policy_forward`), where the resulting logprobs are never read.
+        if self._skip_policy_forward(training_input):
+            action_log_probs = None
+        else:
+            action_log_probs = self._execute_forward_pass(
+                "policy",
+                data_fwd_pass,
+                key="logprobs",
+                mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
+            )
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()
@@ -1215,16 +1260,16 @@ class RayPPOTrainer:
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
-        action_log_probs = action_log_probs[: len(sequences_all)]
+        action_log_probs = action_log_probs[: len(sequences_all)] if action_log_probs is not None else None
         values = values[: len(sequences_all)] if values is not None else None
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
-        if training_input.get("rollout_logprobs", None) is not None:
-            # calculates the difference in probs between inference and trainer components
-            # only consider response tokens
+        if training_input.get("rollout_logprobs", None) is not None and action_log_probs is not None:
+            # Abs diff between rollout and forward-pass logprobs, over response tokens. When the
+            # forward pass is skipped, the worker's `minibatch_rollout_logprobs_abs_diff_*` is used.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
@@ -1388,6 +1433,7 @@ class RayPPOTrainer:
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
+        finalize_minibatch_rollout_logprob_diff_std(reduced_metrics)
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

@@ -375,7 +375,7 @@ algorithm:
   # this adds training batch level normalization to advantages
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
-  policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
+  policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov", "cispo", "sapo", "rollout_is", "dppo", or customizable with PolicyLossRegistry
   loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "prompt_mean"
   grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
   zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
@@ -490,6 +490,9 @@ algorithm:
   - `clip_cov`: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on [this paper](https://arxiv.org/abs/2505.22617).
   - `kl_cov`: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on [this paper](https://arxiv.org/abs/2505.22617).
   - `cispo`: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in [MiniMax-M1](https://arxiv.org/abs/2506.13585).
+  - `sapo`: Soft Adaptive Policy Optimization ([SAPO](https://arxiv.org/html/2511.20347v1)) proposed by the Qwen team 
+  - `rollout_is`: The agentic loss from section 4.1.2 of the [GLM-5 tech report](https://arxiv.org/pdf/2602.15763). Uses rollout logprobs and Icepop style clipping with additional stop gradient for masked tokens.
+  - `dppo`: DPPO algorithm from [Rethinking the Trust Region in LLM Reinforcement Learning](https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability divergences rather than probability ratios to improve over PPO clipping behavior.
   - Custom policy losses can be registered with the `PolicyLossRegistry`
 
 - `algorithm.loss_reduction`: Type of loss reduction to use. Options include:
@@ -604,12 +607,18 @@ fully_async:
   max_staleness_steps: 4
   num_parallel_generation_workers: 768
   clear_kv_cache_on_weight_sync: true
+  simulate_training: false
+  simulate_training_step_seconds: 30.0
+  simulate_weight_sync_seconds: 0.0
 
 ```
 
 - `fully_async.max_staleness_steps`: Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*, then `j - i <= max_staleness_steps`. Larger values increase throughput but also off-policy-ness.
 - `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be \>= `policy_mini_batch_size` and \<= `policy_mini_batch_size * (max_staleness_steps + 1)`.
 - `fully_async.clear_kv_cache_on_weight_sync`: Whether to clear the inference engine KV cache on each weight sync. Defaults to `true`, matching synchronous RL. Set to `false` for fully async training to reuse KV cache from stale policies during generation (avoids recomputation at the cost of using slightly stale KV cache).
+- `fully_async.simulate_training`: If `true`, run fully-async generation against a *simulated* trainer (`FullyAsyncTrainerSim`): no policy/critic/ref models are built and no weight broadcast happens. Each step consumes a mini-batch, sleeps for `simulate_training_step_seconds`, then issues pause/resume generation (as a real weight sync would) but skips the broadcast. Useful for benchmarking the generation/inference side (e.g. router load-balancing) on large models without paying for trainer GPUs. This is typically pointed at already-served endpoints via `external_proxy_url` / `external_server_urls`. See `examples/train/fully_async/main_fully_async_sim.py`. Requires `eval_interval`, `ckpt_interval`, and `hf_save_interval` all `<= 0`.
+- `fully_async.simulate_training_step_seconds`: Wall-clock seconds the simulated training step sleeps (stands in for fwd/bwd/optim). Only used when `simulate_training=true`. Defaults to `30.0`.
+- `fully_async.simulate_weight_sync_seconds`: Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast. `0.0` means pause then immediately resume. Only used when `simulate_training=true`.
 
 ## Generator Configuration
 

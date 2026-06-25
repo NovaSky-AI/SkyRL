@@ -34,7 +34,7 @@ TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=512
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true
+ENFORCE_EAGER=false
 LR=1e-5
 
 uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
