@@ -116,9 +116,9 @@ fsdp = [
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -137,14 +137,14 @@ megatron = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -236,10 +236,10 @@ override-dependencies = [
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.11.post2 pin. Override it to our version.
-    "flashinfer-python==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.11.post2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # our exact 0.6.12 pin (the version vLLM 0.23.0 requires). Override it to our version.
+    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv.extra-build-dependencies]

@@ -63,11 +63,7 @@ def patch_numel_loaded():
     _meta.get_numel_loaded = get_numel_loaded
 
 
-try:
-    # use patched version, based on https://github.com/vllm-project/vllm/pull/44814
-    patch_numel_loaded()
-except ImportError:
-    pass
+_PATCHED_LAYERWISE_NUMEL_LOADED = False
 
 
 class LayerwiseReloadWorkerMixin:
@@ -111,6 +107,14 @@ class LayerwiseReloadWorkerMixin:
                 "skyrl_start_weight_update called while a weight update is "
                 "already active. Call skyrl_finish_weight_update first."
             )
+
+        # Ensure the get_numel_loaded patch is in effect before layerwise
+        # reload runs.
+        global _PATCHED_LAYERWISE_NUMEL_LOADED
+        if not _PATCHED_LAYERWISE_NUMEL_LOADED:
+            # use patched version, based on https://github.com/vllm-project/vllm/pull/44814
+            patch_numel_loaded()
+            _PATCHED_LAYERWISE_NUMEL_LOADED = True
 
         if is_checkpoint_format:
             # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
