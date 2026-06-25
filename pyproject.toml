@@ -19,7 +19,6 @@ dependencies = [
     "tokenizers>=0.21.2",
     "transformers>=5.6.1,<=5.8.0",
     "typer>=0.17.4",
-    # "wandb>=0.23.0",
     "peft==0.18.1",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
