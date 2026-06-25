@@ -448,7 +448,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step)
+                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -548,7 +548,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 5. Set logs for this training step.
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step)
+                self.tracker.log(self.all_metrics, step=self.global_step, commit=True)
                 self.all_metrics = {}
                 pbar.update(1)
 
@@ -576,7 +576,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                 if self._vllm_metrics_scraper is not None:
                     timing_payload.update(await self._vllm_metrics_scraper.sample())
-                self.tracker.log(timing_payload, step=self.global_step)
+                self.tracker.log(timing_payload, step=self.global_step, commit=True)
                 self.all_timings = {}
                 self.global_step += 1
 
