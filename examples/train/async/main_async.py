@@ -35,6 +35,7 @@ class AsyncPPOExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     # make sure that the training loop is not run on the head node.
