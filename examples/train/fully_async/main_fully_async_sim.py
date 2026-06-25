@@ -54,12 +54,6 @@ class FullyAsyncSimPPOExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
-    def run(self):
-        # _setup_trainer skips build_models() when fully_async.simulate_training=true.
-        trainer = self._setup_trainer()
-        asyncio.run(trainer.train())
-
-
 # max_retries=0: fail once loudly instead of looping, so the crash is easy to read.
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):

@@ -10,6 +10,7 @@ from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 import asyncio
 from skyrl.train.utils import initialize_ray
 import ray
+from loguru import logger
 
 
 class FullyAsyncPPOExp(BasePPOExp):
@@ -34,12 +35,6 @@ class FullyAsyncPPOExp(BasePPOExp):
             generator=generator,
             colocate_pg=colocate_pg,
         )
-
-    def run(self):
-        trainer = self._setup_trainer()
-        # Start the async training loop
-        asyncio.run(trainer.train())
-
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: SkyRLTrainConfig):

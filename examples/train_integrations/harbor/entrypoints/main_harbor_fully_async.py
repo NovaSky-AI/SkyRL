@@ -42,10 +42,6 @@ class HarborFullyAsyncExp(HarborExp):
             colocate_pg=colocate_pg,
         )
 
-    def run(self):
-        trainer = self._setup_trainer()
-        asyncio.run(trainer.train())
-
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
