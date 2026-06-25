@@ -548,7 +548,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 5. Set logs for this training step.
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step, commit=True)
+                self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
                 self.all_metrics = {}
                 pbar.update(1)
 
