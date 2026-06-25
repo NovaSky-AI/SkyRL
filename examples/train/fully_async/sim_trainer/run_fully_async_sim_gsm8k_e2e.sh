@@ -27,6 +27,7 @@ uv run --isolated --extra fsdp \
   -m examples.train.fully_async.main_fully_async_sim \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.simulate_training=true \
   trainer.fully_async.simulate_training_step_seconds=$SIM_STEP_SECONDS \
   trainer.fully_async.simulate_weight_sync_seconds=$SIM_WEIGHT_SYNC_SECONDS \

@@ -375,8 +375,13 @@ class VLLMServerActor(ServerActorProtocol):
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache."""
-            await engine.reset_prefix_cache()
+            """Reset the prefix cache, optionally resetting in-flight requests too."""
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            reset_running_requests = data.get("reset_running_requests", False)
+            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
 
         @app.post("/skyrl/v1/load_lora_adapter")
