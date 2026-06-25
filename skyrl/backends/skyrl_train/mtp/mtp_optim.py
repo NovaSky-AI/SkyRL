@@ -58,13 +58,13 @@ def freeze_mtp_params_pre_wrap(model_or_models: Union[torch.nn.Module, List[torc
             if is_mtp_param_name(name):
                 param.requires_grad = False
                 num_frozen += 1
-    # Only registered when C-full is on, so zero matches means the `.mtp.` naming drifted -- the head
-    # would silently train in the policy grad buffer and defeat the isolation. Fail loud instead.
+    # Only registered when the separate MTP optimizer is on, so zero matches means the `.mtp.` naming
+    # drifted -- the head would silently train in the policy grad buffer and defeat the isolation. Fail loud.
     if num_frozen == 0:
         raise RuntimeError(
             "freeze_mtp_params_pre_wrap matched no parameters via is_mtp_param_name (expected '.mtp.' "
-            "or 'mtp.' in the name). The MTP submodule naming likely changed -- C-full grad isolation "
-            "would silently break. Update is_mtp_param_name in mtp/mtp_optim.py."
+            "or 'mtp.' in the name). The MTP submodule naming likely changed -- the head's grad "
+            "isolation would silently break. Update is_mtp_param_name in mtp/mtp_optim.py."
         )
     return model_or_models
 
@@ -112,7 +112,7 @@ def _build_mtp_ddp_config(ddp_config) -> DistributedDataParallelConfig:
 
 
 class MTPOptimizer:
-    """Owns the MTP/draft head's isolated grad buffer + ``DistributedOptimizer`` (C-full).
+    """Owns the MTP/draft head's isolated grad buffer + ``DistributedOptimizer``.
 
     The head stays inside the policy ``GPTModel`` (so capture / replay / weight-export are unchanged) but
     its params are excluded from the policy DDP buffer (via :func:`freeze_mtp_params_pre_wrap`) and wrapped

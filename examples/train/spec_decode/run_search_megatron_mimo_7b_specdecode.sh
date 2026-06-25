@@ -1,34 +1,15 @@
 set -x
 
 # Colocated GRPO multi-turn SearchR1 training+generation for XiaomiMiMo/MiMo-7B-RL (dense) with
-# Megatron, WITH native Multi-Token Prediction (MTP) speculative decoding (k=3) for faster rollout.
-#
-# This is the MiMo-7B-RL + Megatron + spec-decode counterpart of examples/train/search/run_search.sh
-# (which trains Qwen2.5-3B-Instruct with FSDP and NO spec decode). The SearchR1 recipe knobs
-# (dataset, search env, multi-turn sampling, search server) are kept identical to run_search.sh /
-# run_search_megatron.sh; only the model, the FSDP->Megatron strategy, and the MTP block differ.
-#
-# MTP on MiMo-7B-RL (see run_megatron_dapo_mimo_7b_rl_specdecode.sh for the full rationale):
-#   - MiMo ships 1 native MTP head (`num_nextn_predict_layers: 1`), so both the training-side head
-#     and the inference-side drafter come from the same pretrained weights (no cold-start head).
-#   - Plain Qwen2-style dense backbone (no GDN), so megatron sample packing IS supported
-#     (remove_microbatch_padding=true) and no special vLLM prefill backend is needed.
-#   - Untied embeddings => the decoupled draft loss (mtp_detach_shared_output default true) trains
-#     ONLY the MTP-head params; the draft gradient never nudges the policy backbone.
-#   - vLLM MTP speculative decoding draft depth = k = num_speculative_tokens. Here k=3: the single
-#     trained head is reused autoregressively at draft time. Acceptance is logged as
-#     `vllm/draft_acceptance_rate`.
-#
-# Runs on 1 node of 8xH100s (80GB each).
+# Megatron, with native Multi-Token Prediction (MTP) speculative decoding (k=3). Runs on 1x8 H100.
 #
 # Setup (see examples/train/search/README.md):
 #   1. Dataset parquet:
 #        uv run --isolated examples/train/search/searchr1_dataset.py --local_dir /mnt/local_storage/data/searchR1
 #   2. Download the wiki-18 e5 index + corpus into the same dir, assemble e5_Flat.index, gunzip corpus.
 #   3. Start the local e5 retrieval server (separate faiss-gpu conda env) on :8000.
-# Then launch:
 #   export WANDB_API_KEY=<your_key_here>
-#   bash examples/train/megatron/run_search_megatron_mimo_7b_specdecode.sh
+#   bash examples/train/spec_decode/run_search_megatron_mimo_7b_specdecode.sh
 
 MODEL_NAME="XiaomiMiMo/MiMo-7B-RL"
 # Dataset on the fast, non-persistent local disk (not the ~/default quota).

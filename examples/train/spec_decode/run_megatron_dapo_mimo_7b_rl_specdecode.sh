@@ -1,43 +1,9 @@
 set -x
 
-# Colocated DAPO training+generation for XiaomiMiMo/MiMo-7B-RL (dense) on DAPO with
-# Megatron, WITH native Multi-Token Prediction (MTP) speculative decoding for faster rollout.
-#
-# This is the MiMo-7B-RL counterpart of run_megatron_dapo_qwen3.5_9b_specdecode.sh. The
-# DAPO knobs (batch sizes, LR, sampling, clipping) are kept identical to the Qwen recipe so the
-# reward-curve / throughput comparison stays apples-to-apples; only the model and the few
-# architecture-specific flags below differ.
-#
-# Why MiMo-7B-RL is a good MTP target:
-#   - MiMo was pretrained WITH MTP. The released checkpoint ships one native MTP module
-#     (`num_nextn_predict_layers: 1`, the DeepSeek-style key), so both the training-side head and
-#     the inference-side drafter come from the same pretrained weights — no cold-start head.
-#   - The backbone is a plain Qwen2-style dense transformer (36 layers, full attention,
-#     `attention_bias: true`), so there are NO GDN / linear-attention layers. Two consequences vs
-#     the Qwen3.5 recipe: (a) megatron sample packing IS supported, so we set
-#     remove_microbatch_padding=true for better throughput; (b) we drop the `gdn_prefill_backend`
-#     vLLM engine kwarg — it does nothing here.
-#   - Embeddings are UNTIED (`tie_word_embeddings: false`). The decoupled draft loss therefore
-#     isolates the output projection by detaching `output_layer.weight` (the untied branch of
-#     mtp_detach_shared_output, on by default), so the draft gradient trains ONLY the MTP-head params.
-#
-# What MTP on does (single high-level `trainer.mtp` knob, see skyrl/train/config/config.py):
-#   - Training side: megatron-bridge's MiMo bridge builds MiMo-7B-RL's native MTP head (from
-#     `num_nextn_predict_layers`) and trains it with a decoupled draft loss (top-k soft-CE
-#     distillation against the policy's own detached next-token distribution). The draft gradient
-#     never pulls on the policy backbone.
-#   - Inference side: enables vLLM MTP speculative decoding. The generic `{"method": "mtp"}` config
-#     auto-detects MiMo's `mimo_mtp` drafter from the model config. With a single trained head,
-#     depth>1 reuses that head autoregressively at draft time. SkyRL's weight sync keeps the draft
-#     head in sync with the trained policy each step.
-#   - The per-step draft acceptance rate is logged as `vllm/draft_acceptance_rate`.
-#
-# Runs on 1 node of 8xH100s (80GB each).
-#
-# Prepare data onto the fast local disk first:
-#   DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-# Then launch:
-#   bash examples/train/megatron/run_megatron_dapo_mimo_7b_rl_specdecode.sh
+# Colocated DAPO training+generation for XiaomiMiMo/MiMo-7B-RL (dense) on DAPO data with Megatron,
+# with native Multi-Token Prediction (MTP) speculative decoding for faster rollout. Runs on 1x8 H100.
+# DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/spec_decode/run_megatron_dapo_mimo_7b_rl_specdecode.sh
 
 MODEL_NAME="XiaomiMiMo/MiMo-7B-RL"
 # Use the fast, non-persistent local disk for data (not the ~/default quota).
@@ -122,7 +88,7 @@ MTP_LOSS_WEIGHT=0.2
 # Top-k draft loss: distill only the teacher's top-k tokens instead of the full vocab, keeping
 # draft-loss memory at O(seq*k) vs O(seq*vocab). Only applies to mtp_loss_type="soft_ce". Here k=256.
 MTP_LOSS_TOPK=256
-# Train the MTP head in the policy's native DDP buffer + optimizer (no separate C-full buffer); the
+# Train the MTP head in the policy's native DDP buffer + optimizer (no separate MTP buffer); the
 # native MTP loss stays patched off and the draft loss stays autograd-decoupled, so no MTP grad
 # reaches the policy -- only the ~ulp-level (DP>=3) grad-buffer reduction reordering is given up.
 MTP_SEPARATE_OPTIMIZER=false

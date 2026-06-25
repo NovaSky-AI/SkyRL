@@ -242,7 +242,7 @@ class MegatronConfig(BaseConfig):
     tied-embedding models (e.g. Qwen3.5), where a trainable shared head lets the draft loss nudge the
     policy's own logits. Set False to train the shared embedding/head with the draft loss too."""
     mtp_separate_optimizer: bool = True
-    """C-full: give the MTP/draft head its OWN grad buffer + DistributedOptimizer, fully isolated from
+    """Give the MTP/draft head its OWN grad buffer + DistributedOptimizer, fully isolated from
     the policy's. The decoupled draft loss is autograd-clean, but when the head shares the policy's
     Megatron DDP grad buffer its mere presence changes the layout — and thus the floating-point result —
     of the policy gradient's distributed reduction (DP reduce-scatter + TP all-reduce of layernorm

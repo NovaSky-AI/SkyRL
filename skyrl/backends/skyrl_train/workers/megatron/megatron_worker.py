@@ -379,15 +379,9 @@ class MegatronWorker:
 
         provider = bridge.to_megatron_provider()
 
-        # Disable MTP for ordinary training: Megatron's in-forward MTP aux loss is unused, and under
-        # full recompute its checkpointed forward passes packed_seq_params positionally into
-        # tensor_parallel.checkpoint (tensors only), breaking packed-sequence backward.
-        # EXCEPTION: decoupled MTP/draft training (trainer.mtp.enabled on the policy worker) MUST keep
-        # the heads built — it runs them in-forward in eval mode (which skips the recompute path that
-        # breaks, see mtp/hidden_capture.py), scores a separate draft loss via a forward hook, and
-        # weight-syncs the heads to vLLM. It is compatible with sample packing (the draft loss masks
-        # cross-segment positions, see mtp/soft_ce.py::shift_mask_for_mtp), so we do NOT force packing
-        # off here. The MTP-config block below resolves the final head count.
+        # Disable MTP heads for ordinary training -- the native in-forward MTP loss breaks
+        # packed-sequence backward under full recompute. EXCEPTION: decoupled MTP/draft training
+        # (trainer.mtp.enabled) keeps them built.
         _mtp_cfg = getattr(self.cfg, "mtp", None)
         _mtp_training = enable_mtp and _mtp_cfg is not None and getattr(_mtp_cfg, "enabled", False)
         if not _mtp_training and getattr(provider, "mtp_num_layers", None):
@@ -438,26 +432,15 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # Multi-Token Prediction (MTP) head configuration. Model-agnostic: megatron-bridge populates
-        # provider.mtp_num_layers from whichever HF key the model uses — DeepSeek/GLM via
-        # num_nextn_predict_layers, Qwen3.5/Qwen3-Next via the generic
-        # (mtp_num_hidden_layers -> mtp_num_layers) config mapping. We layer SkyRL's explicit config
-        # on top:
-        #   - enable_mtp=False (ref worker): force MTP off (the heads don't affect ref logprobs
-        #     and would only waste compute/memory).
-        #   - mtp_num_layers set: override the model default (0 force-disables).
-        #   - mtp_num_layers=None: keep whatever the bridge inferred from the model.
+        # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
+        # ref worker (enable_mtp=False) forces off; an explicit mtp_num_layers
+        # overrides (0 disables); None keeps the bridge's inferred count.
         if not enable_mtp:
             provider.mtp_num_layers = None
         elif megatron_config.mtp_num_layers is not None:
             provider.mtp_num_layers = megatron_config.mtp_num_layers or None
-        # When MTP training is requested (trainer.mtp.enabled), the model must actually resolve to
-        # >= 1 head — otherwise the draft loss would silently no-op (the wrapper keys off
-        # model_config.mtp_num_layers). _apply_mtp_config no longer forces a head count, so a model
-        # whose checkpoint ships no MTP layers lands here with mtp_num_layers=None; users who want
-        # to train fresh heads from scratch can still force-build them via
-        # policy.megatron_config.mtp_num_layers (note vLLM's `method: mtp` would also need the HF
-        # config to declare them).
+        # MTP training requires the model to resolve to >= 1 head, else the draft loss silently
+        # no-ops (the wrapper keys off model_config.mtp_num_layers) -- fail loud instead.
         mtp_cfg = getattr(self.cfg, "mtp", None)
         if (
             enable_mtp
@@ -472,18 +455,9 @@ class MegatronWorker:
                 "policy.megatron_config.mtp_num_layers to force-build fresh heads."
             )
         if getattr(provider, "mtp_num_layers", None):
-            # The native MTP heads are still *built* (so the megatron-bridge weight mappings
-            # round-trip them to HF / vLLM), but SkyRL trains them with a decoupled, explicit
-            # loss (see MegatronModelWrapper) instead of Megatron's in-forward
-            # process_mtp_loss / MTPLossAutoScaler path. The explicit weight is
-            # megatron_config.mtp_loss_weight.
-            #
-            # CRITICAL: GPTModel/HybridModel.forward call process_mtp_loss unconditionally when MTP
-            # heads exist, and Megatron now DERIVES labels from input_ids ("e.g. RL training") so
-            # passing no labels no longer short-circuits it. Left active, that native hard-CE loss
-            # back-props into the policy trunk (inflated grad-norm, entropy collapse), independent of
-            # mtp_loss_weight. Patch process_mtp_loss to a no-op at its call sites so only SkyRL's
-            # decoupled loss trains the head. Must run before any forward (here, at config time).
+            # Heads stay built (for HF/vLLM weight round-trip) but SkyRL trains them with its own
+            # decoupled loss. Disable Megatron's native in-forward MTP loss (must run before any
+            # forward) or it back-props into the policy trunk and collapses entropy. See native_loss_patch.py.
             from skyrl.backends.skyrl_train.mtp.native_loss_patch import (
                 disable_native_mtp_loss,
             )
@@ -861,24 +835,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 logger.info("freeze_moe_router=True: freezing MoE router params")
             self.provider.register_pre_wrap_hook(freeze_moe_router)
 
-        # MTP C-full: isolate the draft head into its own grad buffer + optimizer so the policy's
-        # distributed grad reduction is byte-identical to a no-MTP model (the head's presence in the
-        # shared grad buffer otherwise perturbs the policy reduction and collapses entropy — see
-        # mtp/mtp_optim.py). Step 1, here: freeze the head BEFORE the policy DDP wrap so Megatron's
-        # DDP (which only buckets requires_grad params) excludes it from the policy grad buffer. The head
-        # is re-enabled and given its own buffer + optimizer after the policy optimizer is built.
+        # mtp_separate_optimizer: isolate the draft head into its own grad buffer +
+        # optimizer; see mtp/mtp_optim.py. Step 1: freeze the head before the policy DDP wrap so it's
+        # excluded from the policy grad buffer (Megatron only buckets requires_grad params).
         self._mtp_separate = None
-        self._mtp_cfull_enabled = bool(
+        self._mtp_separate_optim_enabled = bool(
             self.cfg.policy.megatron_config.mtp_separate_optimizer and getattr(self.provider, "mtp_num_layers", None)
         )
-        if self._mtp_cfull_enabled:
+        if self._mtp_separate_optim_enabled:
             from skyrl.backends.skyrl_train.mtp.mtp_optim import (
                 freeze_mtp_params_pre_wrap,
             )
 
             self.provider.register_pre_wrap_hook(freeze_mtp_params_pre_wrap)
             if self._rank == 0:
-                logger.info("MTP C-full: registered pre-wrap hook to isolate the draft head's grad buffer")
+                logger.info("MTP separate optimizer: registered pre-wrap hook to isolate the draft head's grad buffer")
 
         # wrap with DDP for training
         wrap_with_ddp = not self.cfg.policy.inference_only_init
@@ -922,11 +893,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 num_training_steps=num_training_steps,
             )
 
-            # MTP C-full step 2: re-enable the draft head and give it its OWN grad buffer +
-            # DistributedOptimizer (the policy optimizer above already excludes it — it was frozen
-            # before the policy wrap). The head co-trains at full strength while the policy reduction
-            # stays byte-identical to a no-MTP model. See mtp/mtp_optim.py.
-            if self._mtp_cfull_enabled:
+            # MTP separate optimizer step 2: re-enable the head and give it its own grad buffer + optimizer.
+            if self._mtp_separate_optim_enabled:
                 from skyrl.backends.skyrl_train.mtp.mtp_optim import (
                     MTPOptimizer,
                 )
@@ -944,7 +912,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
                 if self._rank == 0:
                     n = sum(p.numel() for p in self._mtp_separate.mtp_params)
-                    logger.info(f"MTP C-full: isolated draft head ({n:,} params) into its own grad buffer + optimizer")
+                    logger.info(
+                        f"MTP separate optimizer: isolated draft head ({n:,} params) into its own grad buffer + optimizer"
+                    )
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -954,9 +924,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
-        # MTP C-full step 3: hide the draft head from the POLICY finalize (which would otherwise coalesce
-        # the head's layernorm grads into the policy TP all-reduce, perturbing it). Must run AFTER the
-        # wrapper, which sets finalize_model_grads_func on this same model_config object.
+        # MTP separate optimizer step 3: hide the head from the policy finalize (must run after the wrapper sets
+        # finalize_model_grads_func).
         if self._mtp_separate is not None:
             from megatron.core.utils import get_model_config
 
@@ -1108,7 +1077,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
             chunk.zero_grad_buffer()
-        # MTP C-full: zero the isolated draft-head grad buffer too (it lives outside self.actor_module).
+        # MTP separate optimizer: zero the isolated draft-head grad buffer too (it lives outside self.actor_module).
         if self._mtp_separate is not None:
             self._mtp_separate.zero_grad_buffer()
 
@@ -1291,7 +1260,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.optimizer is None:
             raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
 
-        # MTP C-full: hide the draft head during the POLICY step so its grad-norm + clip EXCLUDE the
+        # MTP separate optimizer: hide the draft head during the POLICY step so its grad-norm + clip EXCLUDE the
         # head (Megatron's grad-norm iterates the GPTModel's requires_grad params and reads main_grad;
         # the head is structurally still in the GPTModel, so without this it dilutes the policy clip).
         # The policy step then matches a no-MTP run; the head is finalized + stepped separately after.
@@ -1310,7 +1279,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return grad_norm
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
-        """Save the policy checkpoint, plus the C-full MTP head's separate optimizer state.
+        """Save the policy checkpoint, plus the MTP head's separate optimizer state.
 
         The isolated draft-head optimizer (``self._mtp_separate``) lives OUTSIDE ``self.optimizer``, so
         the strategy's checkpoint does not cover it. Persist its (DP-sharded) state per global rank
@@ -1327,16 +1296,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
-        # Restore the C-full MTP head's separate optimizer state. Guarded on existence so a checkpoint
-        # written without C-full (or a topology change) degrades to "fresh head optimizer" instead of
-        # crashing the resume.
+        # Restore the MTP head's separate optimizer state. Guarded on existence so a checkpoint
+        # written without the separate MTP optimizer (or a topology change) degrades to "fresh head
+        # optimizer" instead of crashing the resume.
         if self._mtp_separate is not None and load_optimizer_states:
             mtp_path = os.path.join(ckpt_dir, f"mtp_optim_rank{self._rank}.pt")
             if os.path.exists(mtp_path):
                 self._mtp_separate.load_state_dict(torch.load(mtp_path, map_location="cpu"))
             elif self._rank == 0:
                 logger.warning(
-                    f"MTP C-full: no separate-optimizer checkpoint at {mtp_path}; "
+                    f"MTP separate optimizer: no checkpoint at {mtp_path}; "
                     "the draft head's optimizer state was not restored."
                 )
         return states

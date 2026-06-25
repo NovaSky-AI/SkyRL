@@ -1,34 +1,9 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO with Megatron,
-# WITH Multi-Token Prediction (MTP) speculative decoding for faster rollout.
-#
-# This is the spec-decode counterpart of run_megatron_dapo_qwen3.5_9b.sh. Every
-# knob below is IDENTICAL to the no-spec script (same batch sizes, LR, parallelism,
-# sampling) so a reward-curve / throughput comparison is apples-to-apples. The ONLY
-# difference is the `trainer.mtp.*` block at the bottom.
-#
-# What MTP on does (single high-level `trainer.mtp` knob, see skyrl/train/config/config.py):
-#   - Training side: builds + trains Qwen3.5-9B's native MTP head (the model ships
-#     `mtp_num_hidden_layers: 1`) with a decoupled draft loss (top-k soft-CE distillation against
-#     the policy's own detached next-token distribution). The draft gradient never pulls on
-#     the policy backbone.
-#   - Inference side: enables vLLM MTP speculative decoding
-#     (`speculative_config={"method": "mtp", "num_speculative_tokens": 3}`). With a single trained
-#     head, depth>1 reuses that head autoregressively at draft time. vLLM loads the MTP head from the
-#     same policy checkpoint, and SkyRL's weight sync keeps the draft head in sync with the trained
-#     policy each step.
-#   - The per-step draft acceptance rate is logged as `vllm/draft_acceptance_rate`.
-#
-# Runs on 1 node of 8xH100s (80GB each).
-#
-# NOTE: verify the exact HF repo id for the 9B model before running
-#   (e.g. `hf download Qwen/Qwen3.5-9B` / check https://huggingface.co/Qwen).
-#
-# Prepare data onto the fast local disk first:
-#   DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-# Then launch:
-#   bash examples/train/megatron/run_megatron_dapo_qwen3.5_9b_specdecode.sh
+# Colocated DAPO training+generation for Qwen3.5-9B (dense) on DAPO data with Megatron,
+# with Multi-Token Prediction (MTP) speculative decoding for faster rollout. Runs on 1x8 H100.
+# DATA_DIR=/mnt/local_storage/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/spec_decode/run_megatron_dapo_qwen3.5_9b_specdecode.sh
 
 MODEL_NAME="Qwen/Qwen3.5-9B"
 # Use the fast, non-persistent local disk for data (not the ~/default quota).
