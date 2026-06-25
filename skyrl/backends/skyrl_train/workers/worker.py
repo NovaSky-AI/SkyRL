@@ -338,6 +338,10 @@ class Worker(DistributedTorchRayActor):
         return {
             "allocated": torch.cuda.memory_allocated(),
             "reserved": torch.cuda.memory_reserved(),
+            # High-water marks (persist across empty_cache / offload, until reset_peak_memory_stats),
+            # so they capture the in-step fwd/bwd peak even when queried after the policy is offloaded.
+            "max_allocated": torch.cuda.max_memory_allocated(),
+            "max_reserved": torch.cuda.max_memory_reserved(),
             "free": free,
             "total": total,
         }

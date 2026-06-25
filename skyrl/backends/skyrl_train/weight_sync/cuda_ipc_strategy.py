@@ -197,8 +197,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         world_size = torch.distributed.get_world_size()
         device = torch.cuda.current_device()
         gpu_uuid = str(torch.cuda.get_device_properties(device).uuid)
-        dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
-        dtype_name = self._init_info.model_dtype_str.split(".")[-1]
 
         if rank == 0:
             await self._inference_client.start_weight_update(is_checkpoint_format=True)
@@ -206,8 +204,13 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
 
         for chunk in chunks:
             # --- pack all tensors in this chunk into one contiguous buffer ---
-            # Chunk tensors share a single dtype by construction (see
-            # weight_extractor_utils.py), so offsets in element units are safe.
+            # Chunk tensors share a single dtype by construction (the weight extractor
+            # emits one chunk per dtype), so offsets in element units are safe. Derive
+            # the packed dtype from the chunk itself rather than assuming model_dtype,
+            # so fp32 params (e.g. the MoE router bias) are transferred without bf16
+            # down-casting; the receiver rebuilds at this dtype from the IPC handle.
+            chunk_dtype = chunk.tensors[0].dtype
+            dtype_name = str(chunk_dtype).split(".")[-1]
             names: List[str] = []
             dtype_names: List[str] = []
             shapes: List[List[int]] = []
@@ -217,7 +220,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             packed_tensor = torch.empty(
                 total_numel,
                 device=device,
-                dtype=dtype,
+                dtype=chunk_dtype,
                 requires_grad=False,
             )
 
@@ -231,28 +234,49 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 shapes.append(list(shape) if not isinstance(shape, list) else shape)
                 sizes.append(size)
 
-            # --- one IPC handle per rank for the packed buffer ---
+            # --- one IPC handle per rank for the packed buffer, plus THIS rank's own
+            # per-param metadata. Each rank packs a DIFFERENT set/order of params into its
+            # buffer (e.g. expert chunks carry per-EP-rank expert names), so the receiver
+            # must slice each GPU's buffer with THAT GPU's own names/sizes — not rank 0's.
+            # Using rank 0's metadata for every GPU mis-slices any buffer whose layout
+            # differs from rank 0's, which happens under EP>16 / PP>2 and silently loads
+            # the wrong tensor under each name (no crash; byte totals still match). See
+            # NEMOTRON_ULTRA_FINDINGS.md.
             ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
-            local_handle_dict: Dict[str, IpcHandle] = {gpu_uuid: ipc_handle}
-            gathered: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
-            torch.distributed.all_gather_object(gathered, local_handle_dict)
+            local_entry: Dict[str, Any] = {
+                gpu_uuid: {
+                    "handle": ipc_handle,
+                    "names": names,
+                    "dtype_names": dtype_names,
+                    "shapes": shapes,
+                    "sizes": sizes,
+                }
+            }
+            gathered: List[Optional[Dict[str, Any]]] = [None] * world_size
+            torch.distributed.all_gather_object(gathered, local_entry)
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
             if rank == 0:
-                merged_handles: Dict[str, IpcHandle] = {}
+                merged: Dict[str, Any] = {}
                 for d in gathered:
                     if d is not None:
-                        merged_handles.update(d)
+                        merged.update(d)
 
-                pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
+                # {gpu_uuid: handle} (back-compat) and {gpu_uuid: per-GPU metadata} (the fix).
+                merged_handles: Dict[str, IpcHandle] = {uuid: e["handle"] for uuid, e in merged.items()}
+                per_gpu_meta: Dict[str, Any] = {
+                    uuid: {k: e[k] for k in ("names", "dtype_names", "shapes", "sizes")} for uuid, e in merged.items()
+                }
                 chunk_update_info: Dict[str, Any] = {
+                    # rank 0's flat metadata kept for receivers not yet using per-GPU metadata
                     "names": names,
                     "dtype_names": dtype_names,
                     "shapes": shapes,
                     "sizes": sizes,
-                    "ipc_handles_pickled": pickled,
+                    "ipc_handles_pickled": base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8"),
+                    "per_gpu_meta_pickled": base64.b64encode(pickle.dumps(per_gpu_meta)).decode("utf-8"),
                 }
                 await self._inference_client.update_weights_ipc(chunk_update_info)
 

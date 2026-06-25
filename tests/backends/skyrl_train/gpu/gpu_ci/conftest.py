@@ -6,7 +6,11 @@ import pytest
 import ray
 from loguru import logger
 
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
+from skyrl.env_vars import (
+    _SKYRL_USE_NEW_INFERENCE,
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    SKYRL_PYTHONPATH_EXPORT,
+)
 from skyrl.train.utils.utils import peer_access_supported
 
 
@@ -46,6 +50,38 @@ def _build_ray_env_vars():
         if pythonpath is None:
             raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
         env_vars["PYTHONPATH"] = pythonpath
+
+    # Mirror prepare_runtime_environment: for multi-node tests over EFA, the
+    # driver's LD_LIBRARY_PATH (e.g. /opt/amazon/efa/lib) must reach the Ray
+    # workers so NCCL picks up the EFA provider. Set SKYRL_LD_LIBRARY_PATH_EXPORT=1.
+    if SKYRL_LD_LIBRARY_PATH_EXPORT:
+        ld_library_path = os.environ.get("LD_LIBRARY_PATH")
+        if ld_library_path is None:
+            raise RuntimeError("SKYRL_LD_LIBRARY_PATH_EXPORT is set but LD_LIBRARY_PATH is not defined in environment")
+        env_vars["LD_LIBRARY_PATH"] = ld_library_path
+
+    # Forward debugging/observability env vars to the Ray workers when set on the
+    # driver. Useful for multi-node bring-up: NCCL_DEBUG / FI_* surface
+    # NCCL+EFA init failures, and SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 stops the
+    # inference-server actors from redirecting their stdout to per-node log
+    # files (so crash tracebacks reach the driver). vLLM additionally copies
+    # NCCL_*/FI_* prefixed vars from the engine to its TP/PP workers.
+    # HF_* / HUGGING_FACE_* let the workers find a pre-staged model cache
+    # (e.g. HF_HOME on a large node-local disk for very big models) and use an
+    # HF token; vLLM also copies HF_-prefixed vars to its TP/PP workers.
+    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S is read at import time inside
+    # the VLLMServerActor worker process, so it must be forwarded to take effect. Very
+    # large models (e.g. 550B) loaded across multi-node PP engines can take well over
+    # the 600s default to become healthy.
+    _DEBUG_PASSTHROUGH = (
+        "SKYRL_DUMP_INFRA_LOG_TO_STDOUT",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S",
+    )
+    _DEBUG_PREFIXES = ("NCCL_", "FI_", "HF_", "HUGGING_FACE_", "VLLM_")
+    for name, value in os.environ.items():
+        if name in _DEBUG_PASSTHROUGH or name.startswith(_DEBUG_PREFIXES):
+            env_vars.setdefault(name, value)
 
     return env_vars
 

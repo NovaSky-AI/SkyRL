@@ -42,6 +42,38 @@ try:
 except ImportError:
     pass
 
+# Workaround for a SECOND vLLM layerwise-reload corruption affecting NemotronH/Mamba.
+# `get_numel_loaded` counts elements copied by a weight loader to decide when a layer is
+# fully loaded (so it can be finalized). A `composed_weight_loader` copies into its param
+# twice (initial load + in-place transform), so the counter reports 2x the param's numel.
+# That inflated count can reach the layer's total before all params arrive, finalizing the
+# layer early and leaving trailing params (e.g. Mamba `mixer.D`) UNINITIALIZED -> NaN logits.
+# Whether it trips depends on the order params arrive (i.e. the weight-sync chunk/bucket
+# layout), which is why it corrupts at some Megatron EP/PP configs (PP>2, EP>16) but not
+# others. Fix mirrors vLLM PR #44814: cap each loader call's counted elements at the
+# destination param's numel(). Patch both the `meta` source and the `layerwise` import-site
+# reference (layerwise.py does `from .meta import get_numel_loaded` at module load).
+# Remove once the vLLM version includes https://github.com/vllm-project/vllm/pull/44814 .
+try:
+    from vllm.model_executor.model_loader.reload import (
+        layerwise as _vllm_reload_layerwise,
+    )
+    from vllm.model_executor.model_loader.reload import meta as _vllm_reload_meta
+
+    _orig_get_numel_loaded = _vllm_reload_meta.get_numel_loaded
+
+    def _capped_get_numel_loaded(weight_loader, args):
+        numel, return_value = _orig_get_numel_loaded(weight_loader, args)
+        param = getattr(args, "arguments", {}).get("param", None)
+        if isinstance(param, torch.Tensor):
+            numel = min(numel, param.numel())
+        return numel, return_value
+
+    _vllm_reload_meta.get_numel_loaded = _capped_get_numel_loaded
+    _vllm_reload_layerwise.get_numel_loaded = _capped_get_numel_loaded
+except (ImportError, AttributeError):
+    pass
+
 
 class LayerwiseReloadWorkerMixin:
     """Bracket a multi-chunk weight sync with one vLLM layerwise-reload init/finalize.

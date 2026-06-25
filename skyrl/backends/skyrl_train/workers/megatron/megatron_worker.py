@@ -85,6 +85,19 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
 
+# Parameters that must be weight-synced in their native (fp32) precision rather than
+# down-cast to the inference dtype (bf16). The MoE router score-correction bias
+# (HF `*.gate.e_score_correction_bias`) has large magnitude (~25-57) with tiny
+# per-expert offsets (std ~7e-4) far below bf16's ULP at that scale, so bf16 rounding
+# collapses the offsets and corrupts expert routing after weight sync. vLLM keeps the
+# router in fp32 (moe_router_dtype="fp32"), so we transfer this param in fp32.
+_FP32_SYNC_SUFFIXES = ("e_score_correction_bias",)
+
+
+def _sync_dtype_for(name: str, default_dtype: "torch.dtype", native_dtype: "torch.dtype") -> "torch.dtype":
+    """Dtype to weight-sync ``name`` in: native (fp32) for routing-critical params, else default."""
+    return native_dtype if name.endswith(_FP32_SYNC_SUFFIXES) else default_dtype
+
 
 class MegatronWeightExtractor(WeightExtractor):
     """Extracts weights from Megatron model-parallel models.
@@ -216,7 +229,6 @@ class MegatronWeightExtractor(WeightExtractor):
         names = []
         dtype_names = []
         shapes = []
-        dtype_name = str(dtype).split(".")[-1]
         # Collect parameter metadata in the same order
         # as provided by `.extract_weights`.
         if not self.enable_bucketing:
@@ -226,7 +238,7 @@ class MegatronWeightExtractor(WeightExtractor):
                 conversion_tasks=None,
             ):
                 names.append(name)
-                dtype_names.append(dtype_name)
+                dtype_names.append(str(_sync_dtype_for(name, dtype, tensor.dtype)).split(".")[-1])
                 shapes.append(list(tensor.shape))
                 del tensor
         else:
@@ -242,7 +254,7 @@ class MegatronWeightExtractor(WeightExtractor):
                 ):
                     names.append(name)
                     shapes.append(list(tensor.shape))
-                    dtype_names.append(dtype_name)
+                    dtype_names.append(str(_sync_dtype_for(name, dtype, tensor.dtype)).split(".")[-1])
                     del tensor
 
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
@@ -277,11 +289,12 @@ class MegatronWeightExtractor(WeightExtractor):
             )
 
             for name, tensor in hf_params_generator:
-                tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+                out_dtype = _sync_dtype_for(name, dtype, tensor.dtype)
+                tensor = tensor.to(device=device, dtype=out_dtype, non_blocking=True)
 
                 yield WeightChunk(
                     names=[name],
-                    dtypes=[str(dtype)],
+                    dtypes=[str(out_dtype)],
                     shapes=[list(tensor.shape)],
                     tensors=[tensor],
                 )
@@ -298,29 +311,30 @@ class MegatronWeightExtractor(WeightExtractor):
                     conversion_tasks=bucket_tasks,
                 )
 
-                # Collect all parameters in this bucket into one chunk
-                names = []
-                dtypes_list = []
-                shapes = []
-                tensors = []
-
+                # Collect this bucket's params, grouped by output dtype. Each emitted
+                # chunk must be uniform-dtype because the CUDA-IPC sender packs a chunk
+                # into a single contiguous buffer of one dtype. Most params down-cast to
+                # `dtype` (bf16); routing-critical fp32 params (see _FP32_SYNC_SUFFIXES)
+                # keep their native dtype and ride a separate fp32 chunk.
+                groups: dict = {}  # out_dtype -> (names, dtypes_list, shapes, tensors)
                 for name, tensor in hf_params_generator:
-                    # Move to device and convert dtype
-                    tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+                    out_dtype = _sync_dtype_for(name, dtype, tensor.dtype)
+                    tensor = tensor.to(device=device, dtype=out_dtype, non_blocking=True)
+                    g = groups.setdefault(out_dtype, ([], [], [], []))
+                    g[0].append(name)
+                    g[1].append(str(out_dtype))
+                    g[2].append(list(tensor.shape))
+                    g[3].append(tensor)
 
-                    names.append(name)
-                    dtypes_list.append(str(dtype))
-                    shapes.append(list(tensor.shape))
-                    tensors.append(tensor)
-
-                # Yield one chunk containing all parameters in this bucket
-                if tensors:
-                    yield WeightChunk(
-                        names=names,
-                        dtypes=dtypes_list,
-                        shapes=shapes,
-                        tensors=tensors,
-                    )
+                # Yield one chunk per dtype group in this bucket.
+                for names, dtypes_list, shapes, tensors in groups.values():
+                    if tensors:
+                        yield WeightChunk(
+                            names=names,
+                            dtypes=dtypes_list,
+                            shapes=shapes,
+                            tensors=tensors,
+                        )
 
 
 class MegatronWorker:

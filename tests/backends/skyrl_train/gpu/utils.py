@@ -44,7 +44,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
+from skyrl.env_vars import (
+    _SKYRL_USE_NEW_INFERENCE,
+    SKYRL_PYTHONPATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+)
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.replay_buffer import Experience
@@ -584,7 +588,7 @@ class InferenceEngineState:
                 [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(raw_pg, timeout=60)
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
             shared_pg = ResolvedPlacementGroup(raw_pg)
             sleep = True
         else:

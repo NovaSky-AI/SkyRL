@@ -25,6 +25,7 @@ from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
+    _ensure_chat_template,
     get_test_generator_input,
     init_worker_with_type,
 )
@@ -83,11 +84,25 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
     # weight-sync, so skip optimizer construction entirely.
-    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
-        "nemotron-3-nano" in model_name.lower()
+    is_large_moe = (
+        ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
+        or ("nemotron-3-nano" in model_name.lower())
+        or ("nemotron-3-ultra" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
+    if "nemotron-3-ultra" in model_name.lower():
+        # Nemotron-Ultra ships MTP layers (num_nextn_predict_layers=1). Megatron-Bridge's
+        # Mamba provider builds an `mtp_hybrid_override_pattern` from that, and its
+        # finalize() does `[pattern] * mtp_num_layers`. SkyRL disables MTP for
+        # training by nulling mtp_num_layers, but for the Mamba provider that leaves
+        # the pattern set -> `[pattern] * None` -> TypeError. Clear both up front
+        # (transformer_config_kwargs are applied right before provider.finalize()).
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(
+            {"mtp_num_layers": 0, "mtp_hybrid_override_pattern": None}
+        )
     validate_cfg(cfg)
     return cfg
 
@@ -108,6 +123,14 @@ def _engine_overrides_for_model(model_name: str) -> dict:
         # Megatron policy init also needs room alongside vLLM on the same
         # GPU, so lower vLLM's pool footprint.
         overrides["gpu_memory_utilization"] = 0.5
+    if "Nemotron-3-Ultra" in model_name:
+        # 550B sharded 16-way (vLLM TP8 x PP2) is ~69 GB of weights per GPU, so
+        # the KV pool needs gmu well above 0.5 just to leave cache room. vLLM
+        # and the Megatron policy alternate on-GPU via sleep/wake (sleep_level=2),
+        # so vLLM can claim most of the H200 while loading. Cap context to 4096.
+        # Starting point -- tune alongside the parallelism.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.85
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
     if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
@@ -195,10 +218,10 @@ async def construct_training_input_from_generator_output(generator_output, token
 @pytest.mark.asyncio
 @pytest.mark.megatron_models
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold",
+    "tp,pp,cp,ep,etp,inference_tp,inference_pp,num_gpus,num_nodes,model_name,vllm_threshold,megatron_threshold",
     [
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_tp2_ep2"),
-        pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_pp2_cp2"),
+        pytest.param(2, 1, 1, 2, 1, 2, 1, 4, 1, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_tp2_ep2"),
+        pytest.param(1, 2, 2, 1, None, 2, 1, 4, 1, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_pp2_cp2"),
         pytest.param(
             2,
             1,
@@ -206,7 +229,9 @@ async def construct_training_input_from_generator_output(generator_output, token
             2,
             1,
             2,
+            1,
             4,
+            1,
             "eatang/glm-4.7-flash-tiny-random",
             1e-1,
             2e-2,
@@ -220,7 +245,9 @@ async def construct_training_input_from_generator_output(generator_output, token
             2,
             1,
             4,
+            1,
             4,
+            1,
             "eatang/qwen3.5-moe-tiny-random",
             1e-1,
             2e-1,
@@ -237,7 +264,9 @@ async def construct_training_input_from_generator_output(generator_output, token
             1,
             None,
             2,
+            1,
             2,
+            1,
             "Qwen/Qwen3.5-0.8B",
             1e-1,
             5e-2,
@@ -257,7 +286,9 @@ async def construct_training_input_from_generator_output(generator_output, token
             4,
             1,
             4,
+            1,
             4,
+            1,
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
             5e-1,
             5e-2,
@@ -275,26 +306,110 @@ async def construct_training_input_from_generator_output(generator_output, token
             4,
             1,
             4,
+            1,
             4,
+            1,
             "Qwen/Qwen3.5-35B-A3B",
             3e-1,
             5e-2,
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
+        # Nemotron-3-Ultra (550B MoE, ~55B activated, bf16) on 8 nodes x 8xH200
+        # = 64 GPUs. Megatron mesh: TP=8 PP=2 CP=1 EP=16 ETP=1 -> DP=4
+        # (8*2 = 16 GPUs per model replica, 64/16 = 4 DP, ~69 GiB weights/GPU).
+        # vLLM: TP=8 (intra-node, NVLink) x PP=4 (across 4 nodes, EFA) = 32
+        # GPUs/engine, num_engines = 64/32 = 2 (colocated over the same 64 GPUs).
+        # vLLM TP must divide NemotronH's Mamba n_groups (=8), so TP=16 is invalid;
+        # the cross-node parallelism comes from PP instead. vLLM PP=4 (not 2) shards
+        # vLLM weights ~34 GiB/GPU so that during the colocated Megatron->vLLM weight
+        # broadcast the policy shard (~69 GiB) + woken vLLM weights (~34 GiB) fit
+        # alongside the broadcast buffers on the 141 GiB H200 (PP=2 -> ~69+69 OOMs).
+        # Needs VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 (compiled-DAG shm channel crashes
+        # the raylet cross-node) and the ray distributed executor backend.
+        pytest.param(
+            8,
+            2,
+            1,
+            16,
+            1,
+            8,
+            4,
+            64,
+            8,
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            3e-1,
+            # 550B hybrid-MoE diverges more between vLLM and Megatron than the
+            # smaller MoE cases (observed diff mean ~0.059, driven by a minority
+            # of high-divergence tokens: Megatron logprob std ~0.445 vs vLLM ~0.178).
+            8e-2,
+            id="nemotron3-ultra_tp8pp4_mega_tp8pp2ep16_8node",
+            marks=pytest.mark.h100,
+        ),
+        # Same as above but EP=32 (full expert sharding, ETP=1 -> EDP=1). This is the
+        # parallelism the full-FT training recipe uses (EP=16 OOMs there once the
+        # optimizer is added). Diagnostic: training at EP=32 produced GARBAGE vLLM
+        # generations from step 1, while EP=16 (above) passes -> this isolates whether
+        # the Megatron->vLLM expert weight gather is correct at EP=32. A blown-up
+        # post-sync diff (vs pre-sync OK) would pin the bug to the EP=32 sync gather.
+        pytest.param(
+            8,
+            2,
+            1,
+            32,
+            1,
+            8,
+            4,
+            64,
+            8,
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            3e-1,
+            8e-2,
+            id="nemotron3-ultra_tp8pp4_mega_tp8pp2ep32_8node",
+            marks=pytest.mark.h100,
+        ),
+        # Same as the validated EP=16 case but Megatron PP=4 (vs 2). DISCRIMINATOR: full-FT
+        # training at EP=16/PP=4 produced GARBAGE vLLM generations, while this inference-only
+        # path at EP=16/PP=2 passes (0.298). PP=4 is the only parallelism change from the
+        # validated case, so if this PASSES, PP=4 sync is fine and the training garbage comes
+        # from the full-FT optimizer init; if it FAILS, PP=4 itself breaks the weight-sync gather.
+        pytest.param(
+            8,
+            4,
+            1,
+            16,
+            1,
+            8,
+            4,
+            64,
+            8,
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            3e-1,
+            8e-2,
+            id="nemotron3-ultra_tp8pp4_mega_tp8pp4ep16_8node",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
-    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, vllm_threshold, megatron_threshold
+    tp, pp, cp, ep, etp, inference_tp, inference_pp, num_gpus, num_nodes, model_name, vllm_threshold, megatron_threshold
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
+    assert num_gpus % num_nodes == 0, f"num_gpus ({num_gpus}) must be divisible by num_nodes ({num_nodes})"
+    num_gpus_per_node = num_gpus // num_nodes
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_actor_config(model_name=model_name)
         cfg.trainer.strategy = "megatron"
         cfg.generator.inference_engine.tensor_parallel_size = inference_tp
-        cfg.generator.inference_engine.num_engines = num_gpus // inference_tp
+        cfg.generator.inference_engine.pipeline_parallel_size = inference_pp
+        cfg.generator.inference_engine.num_engines = num_gpus // (inference_tp * inference_pp)
+        # Colocated weight sync keeps the Megatron policy shard and the woken vLLM
+        # weights on the same GPUs simultaneously. For large models this is tight;
+        # the expandable_segments allocator reclaims fragmentation so the weight
+        # broadcast's working buffers fit.
+        cfg.generator.inference_engine.use_expandable_segments = True
         cfg.generator.sampling_params = SamplingParams(
             max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,
@@ -305,6 +420,11 @@ async def test_logprobs_matching_roundtrip(
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
+        # Some checkpoints (e.g. NemotronH-Ultra) ship no chat template; install a
+        # minimal one so the generator can format prompts. No-op if one exists.
+        # vLLM and Megatron both see the same formatted input, so the logprob
+        # comparison stays valid.
+        _ensure_chat_template(tokenizer)
 
         engine_overrides = _engine_overrides_for_model(model_name)
         async with InferenceEngineState.create(
@@ -331,7 +451,8 @@ async def test_logprobs_matching_roundtrip(
                 generator, client, model_name, tokenizer, return_training_input=True
             )
             await client.sleep()
-            cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+            cfg.trainer.placement.policy_num_nodes = num_nodes
+            cfg.trainer.placement.policy_num_gpus_per_node = num_gpus_per_node
             cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
             cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
             cfg.trainer.policy.megatron_config.context_parallel_size = cp
@@ -344,7 +465,8 @@ async def test_logprobs_matching_roundtrip(
                 "policy",
                 shared_pg=pg,
                 colocate_all=True,
-                num_gpus_per_node=num_gpus,
+                num_gpus_per_node=num_gpus_per_node,
+                num_nodes=num_nodes,
                 cfg=cfg,
             )
             ray.get(

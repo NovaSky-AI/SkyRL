@@ -748,6 +748,43 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
+    # The inference-server health-wait timeout is read at import time inside the
+    # VLLMServerActor process (a Ray worker actor), so it must be forwarded to take
+    # effect. Large models (e.g. 550B) loaded across multi-node PP engines from disk
+    # can take well over the 600s default to become healthy.
+    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
+        logger.info(
+            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
+        )
+        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+
+    # Forward HuggingFace + cache-location env vars to the Ray workers. Without this,
+    # workers fall back to the default home dir (`~/.cache`) for the HF model cache and
+    # uv/Triton/Inductor/vLLM build caches. For large models on nodes with a small home
+    # disk, that means re-downloading the checkpoint to (and filling) the home disk,
+    # which can take the node down. Point these at a large disk (e.g. /mnt/local_storage)
+    # via the launch env so workers read the pre-staged model and write caches there.
+    for var_name in (
+        "HF_HOME",
+        "HF_HUB_OFFLINE",
+        "HF_TOKEN",
+        "HF_HUB_ENABLE_HF_TRANSFER",
+        "HUGGING_FACE_HUB_TOKEN",
+        "XDG_CACHE_HOME",
+        "UV_CACHE_DIR",
+        "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "TMPDIR",
+        # vLLM executor selection: cross-node serving needs the V2 (MultiprocExecutor)
+        # backend; the default compiled-DAG executor both crashes the raylet on the
+        # cross-node hop and takes a KV-cache-init path that KeyErrors on NemotronH.
+        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND",
+        "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE",
+    ):
+        if value := os.environ.get(var_name):
+            env_vars.setdefault(var_name, value)
+
     return env_vars
 
 

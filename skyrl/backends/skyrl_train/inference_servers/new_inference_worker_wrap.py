@@ -91,6 +91,19 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
+
+        # Each GPU's packed buffer was built from a DIFFERENT set/order of params, so slice
+        # it with THIS GPU's own metadata when available (falling back to the flat rank-0
+        # metadata for older senders). Using rank 0's metadata for every GPU silently
+        # mis-slices buffers whose layout differs from rank 0's (EP>16 / PP>2 expert chunks).
+        per_gpu_pickled = update_info.get("per_gpu_meta_pickled")
+        if per_gpu_pickled is not None:
+            per_gpu = pickle.loads(base64.b64decode(per_gpu_pickled))
+            meta = per_gpu.get(physical_gpu_id)
+            if meta is not None:
+                names = meta["names"]
+                shapes = meta["shapes"]
+                sizes = meta["sizes"]
         func, args = handles[physical_gpu_id]
         # Remap device index to the LOCAL current-device.
         list_args = list(args)
