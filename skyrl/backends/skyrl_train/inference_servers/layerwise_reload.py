@@ -6,6 +6,8 @@ Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that both
 layerwise reload once per weight sync rather than once per chunk.
 """
 
+import inspect
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -13,6 +15,53 @@ import torch
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+
+def get_numel_loaded(weight_loader: Callable, args: inspect.BoundArguments) -> tuple[int, object]:
+    """
+    Determine how many elements would be loaded by a weight loader call.
+
+    Args:
+        weight_loader: used to load weights
+        args: bound arguments to weight loader
+
+    Returns:
+        number of elements loaded by the weight loader, the return value of the
+        weight loader
+    """
+    # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
+    from vllm.model_executor.model_loader.reload.meta import CopyCounter
+
+    with CopyCounter() as counter:
+        return_value = weight_loader(*args.args, **args.kwargs)
+
+    # A weight loader fills a single destination parameter, so the number of
+    # loaded elements is at most that parameter's size. Some loaders copy into
+    # the parameter more than once -- e.g. ``composed_weight_loader`` runs an
+    # in-place post-load transform (``param.copy_(fn(param))``) on top of the
+    # initial copy -- which would make CopyCounter report twice the parameter
+    # size. Over-counting inflates the layer's loaded-element total and can
+    # finalize the layer before every parameter is loaded, silently dropping
+    # the trailing parameter(s) (e.g. Mamba ``mixer.D``). Cap the count at the
+    # destination size to keep the per-layer accounting correct.
+    numel = counter.copied_numel
+    param = args.arguments.get("param", None)
+    if isinstance(param, torch.Tensor):
+        numel = min(numel, param.numel())
+    return numel, return_value
+
+
+def patch_numel_loaded():
+    # vLLM's layerwise reload binds get_numel_loaded at import time
+    # (`from .meta import get_numel_loaded`), so its call site at
+    # layerwise.py uses the `layerwise` module's own binding. Rebind that
+    # attribute to our patched version to substitute the symbol.
+    from vllm.model_executor.model_loader.reload import layerwise as _layerwise
+    from vllm.model_executor.model_loader.reload import meta as _meta
+
+    _layerwise.get_numel_loaded = get_numel_loaded
+    _meta.get_numel_loaded = get_numel_loaded
+
 
 # Workaround for a vLLM layerwise-reload corruption affecting NemotronH/Mamba.
 # MambaMixer2 registers `conv_weights` as a non-persistent buffer that is a
@@ -39,6 +88,8 @@ try:
     )
 
     _VLLM_SKIP_TENSORS.add("conv_weights")
+    # use patched version
+    patch_numel_loaded()
 except ImportError:
     pass
 
