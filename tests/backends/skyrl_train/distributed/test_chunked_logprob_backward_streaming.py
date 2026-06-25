@@ -85,14 +85,16 @@ def tp_group():
     inside ``_compute_distributed_log_softmax`` is the identity. This isolates
     the streamed-buffer refactor from the (separately tested) TP reduction.
     """
+    initialized_here = False
     if not dist.is_initialized():
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(get_free_port())
         os.environ["RANK"] = "0"
         os.environ["WORLD_SIZE"] = "1"
         dist.init_process_group(backend="gloo", rank=0, world_size=1)
+        initialized_here = True
     yield dist.group.WORLD
-    if dist.is_initialized():
+    if initialized_here and dist.is_initialized():
         dist.destroy_process_group()
 
 
