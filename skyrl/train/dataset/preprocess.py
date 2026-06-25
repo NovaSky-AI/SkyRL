@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def _verify_inputs(
     prompts: List[List[int]],
     responses: List[List[int]],
-    rewards: Optional[List[torch.Tensor]],
+    rewards: Optional[List[Union[List[float], torch.Tensor]]],
     loss_masks: List[List[int]],
 ):
     assert (
@@ -30,11 +30,22 @@ def _verify_inputs(
     )
 
 
+def _reward_to_numpy(custom_reward: Union[List[float], torch.Tensor]) -> np.ndarray:
+    if isinstance(custom_reward, torch.Tensor):
+        reward_arr = custom_reward.detach().to(device="cpu", dtype=torch.float32).numpy()
+    else:
+        reward_arr = np.asarray(custom_reward, dtype=np.float32)
+
+    if reward_arr.ndim != 1:
+        raise ValueError(f"Expected a 1D per-token reward sequence, got shape {reward_arr.shape}")
+    return reward_arr
+
+
 def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
     prompts: List[List[int]],
     responses: List[List[int]],
-    rewards: List[List[float]],
+    rewards: List[Union[List[float], torch.Tensor]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
     rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
@@ -158,11 +169,12 @@ def convert_prompts_responses_to_batch_tensors(
     for i, lm in enumerate(loss_masks):
         ret_loss_masks_np[i, max_response - len(lm) :] = lm
 
-    # Same thing for rewards. ``np.asarray`` handles both Python lists and the
-    # per-token reward tensors produced by the reward postprocessing.
+    # Same thing for rewards. Tensor rewards are made explicit here instead of
+    # relying on NumPy's implicit torch conversion path, which cannot handle CUDA
+    # or grad-tracking tensors.
     ret_rewards_np = np.zeros((num_samples, max_response), dtype=np.float32)
     for i, custom_reward in enumerate(rewards):
-        reward_arr = np.asarray(custom_reward, dtype=np.float32)
+        reward_arr = _reward_to_numpy(custom_reward)
         ret_rewards_np[i, max_response - reward_arr.shape[0] :] = reward_arr
 
     ret_loss_masks = torch.from_numpy(ret_loss_masks_np)

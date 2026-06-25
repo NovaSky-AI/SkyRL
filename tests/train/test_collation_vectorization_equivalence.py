@@ -201,6 +201,45 @@ def test_rl_preprocess_accepts_tensor_rewards():
     assert torch.equal(rew, r_rew)
 
 
+def test_rl_preprocess_accepts_grad_tensor_rewards():
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    prompts = [[1, 2, 3], [4, 5]]
+    responses = [[10], [20, 21, 22]]
+    rewards = [
+        torch.tensor([1.0], requires_grad=True),
+        torch.tensor([0.5, 0.6, 0.7], requires_grad=True),
+    ]
+    loss_masks = [[1], [1, 0, 1]]
+
+    _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, responses, rewards, loss_masks
+    )
+
+    expected = torch.tensor([[0.0, 0.0, 1.0], [0.5, 0.6, 0.7]], dtype=torch.float32)
+    assert torch.equal(rew, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_rl_preprocess_accepts_cuda_tensor_rewards():
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    prompts = [[1, 2, 3], [4, 5]]
+    responses = [[10], [20, 21, 22]]
+    rewards = [
+        torch.tensor([1.0], device="cuda"),
+        torch.tensor([0.5, 0.6, 0.7], device="cuda"),
+    ]
+    loss_masks = [[1], [1, 0, 1]]
+
+    _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, responses, rewards, loss_masks
+    )
+
+    expected = torch.tensor([[0.0, 0.0, 1.0], [0.5, 0.6, 0.7]], dtype=torch.float32)
+    assert torch.equal(rew, expected)
+
+
 # ---------------------------------------------------------------------------
 # SFT unpacked: collate_sft_batch
 # ---------------------------------------------------------------------------
