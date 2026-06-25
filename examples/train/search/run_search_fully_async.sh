@@ -49,6 +49,7 @@ RUN_NAME=skyrl-search_4turns_maxgeneratelen_500-fully-async-geoMask${GEO_MASK_LO
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \
