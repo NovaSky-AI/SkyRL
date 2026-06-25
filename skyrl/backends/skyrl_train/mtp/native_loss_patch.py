@@ -1,26 +1,13 @@
 """Disable Megatron's native in-forward MTP loss (``process_mtp_loss``).
 
-SkyRL trains the MTP/draft head with its OWN decoupled soft-CE distillation loss (see
-``mtp/soft_ce.py`` and ``MegatronModelWrapper``), NOT Megatron's pretraining-style MTP auxiliary
-loss. But ``GPTModel.forward`` / ``HybridModel.forward`` call ``process_mtp_loss`` unconditionally
-whenever the model is built with MTP heads (``mtp_num_layers`` set) and run in training/eval. That
-native loss is a hard cross-entropy whose gradient — unless ``mtp_detach_heads`` is set — flows
-straight into the shared trunk and output embedding, corrupting the RL policy (inflated grad-norm
-and entropy collapse), with a magnitude set by Megatron's own scaling (so it is independent of
-SkyRL's ``mtp_loss_weight``).
+SkyRL trains the MTP head with its own decoupled soft-CE loss, but ``GPTModel``/``HybridModel`` call
+``process_mtp_loss`` unconditionally when MTP heads exist; its hard-CE gradient flows into the shared
+trunk and corrupts the RL policy (inflated grad-norm, entropy collapse). SkyRL used to short-circuit
+it by passing no labels, but a megatron-core update derives labels from ``input_ids`` -- so we now
+replace ``process_mtp_loss`` at its call sites with a no-op instead.
 
-Megatron only short-circuits the native loss when BOTH ``labels`` and ``input_ids`` are None. A
-megatron-core update added "derive labels from ``input_ids`` (e.g. RL training)", so passing no
-labels no longer disables it. Rather than depend on that label / forward-gating behaviour (which is
-exactly what silently broke), we replace ``process_mtp_loss`` at its call sites with a no-op that
-returns the main-model hidden chunk and computes no loss. SkyRL's decoupled head training is
-unaffected — the head still trains via SkyRL's explicit loss.
-
-Robustness: this patch is loud, not silent. It raises if a target module no longer exposes
-``process_mtp_loss`` (a Megatron rename). Its one blind spot is Megatron *inlining* the loss into
-the forward instead of calling the function — which the grad-isolation acceptance test (the policy
-gradient must match a no-MTP build, see ``tests/.../megatron/test_mtp_grad_coupling.py``) is there
-to catch.
+Loud, not silent: raises if a target module no longer exposes ``process_mtp_loss`` (a Megatron
+rename). Blind spot: Megatron inlining the loss into the forward (no test currently covers this).
 """
 
 from __future__ import annotations

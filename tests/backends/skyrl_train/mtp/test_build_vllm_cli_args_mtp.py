@@ -12,6 +12,7 @@ from skyrl.train.config import SkyRLTrainConfig
 @pytest.mark.vllm
 def test_build_vllm_cli_args_speculative_config_mtp(monkeypatch):
     """speculative_config is passed through to vLLM for MTP draft decoding."""
+    pytest.importorskip("vllm")
     import vllm.platforms
     from vllm.platforms.interface import UnspecifiedPlatform
 

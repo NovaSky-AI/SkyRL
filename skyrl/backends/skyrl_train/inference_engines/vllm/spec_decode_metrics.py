@@ -1,18 +1,13 @@
-# Cumulative speculative-decoding (MTP draft) acceptance accounting for vLLM v1.
-#
-# vLLM's async engine (the one SkyRL uses for generation + weight sync) does not expose
-# ``get_metrics()``, so we attach a tiny custom stat logger that runs in the AsyncLLM frontend
-# process (= the SkyRL engine actor) and accumulates the per-iteration spec-decode counters
-# (``num_draft_tokens`` / ``num_accepted_tokens`` / ``num_accepted_tokens_per_pos``). The engine
-# reads these cumulative counters and the generator turns them into per-step acceptance rates:
-# one overall rate (accepted / drafted) plus one rate per draft position (how often the k-th
-# speculated token was accepted), so multi-token drafting (num_speculative_tokens > 1) shows the
-# per-depth acceptance decay. The number of per-position metrics tracks whatever depth vLLM
-# reports, so it grows/shrinks with the configured draft depth automatically.
+# Cumulative speculative-decoding (MTP draft) acceptance accounting for vLLM v1. vLLM's async engine
+# has no ``get_metrics()``, so we attach a tiny stat logger in the AsyncLLM frontend that accumulates
+# the per-iteration draft/accept counters. The generator turns the cumulative counts into per-step
+# acceptance rates -- one overall and one per draft position (grows with num_speculative_tokens).
 
 from __future__ import annotations
 
 from typing import Any, Optional
+
+from loguru import logger
 
 
 def _add_per_pos(into: list, add) -> None:
@@ -35,6 +30,9 @@ def make_spec_decode_stat_logger_class():
     class SpecDecodeStatLogger(StatLoggerBase):
         """Accumulate cumulative spec-decode draft/accept counts across scheduler iterations."""
 
+        # Process-global one-shot guard: warn once if vLLM stops exposing `spec_decoding_stats`.
+        _warned_missing_spec_field = False
+
         def __init__(self, vllm_config, engine_index: int = 0):
             self.engine_index = engine_index
             self.num_drafts = 0
@@ -46,7 +44,20 @@ def make_spec_decode_stat_logger_class():
             self.num_accepted_tokens_per_pos: list = []
 
         def record(self, scheduler_stats=None, iteration_stats=None, mm_cache_stats=None, engine_idx: int = 0):
-            stats = getattr(scheduler_stats, "spec_decoding_stats", None) if scheduler_stats is not None else None
+            if scheduler_stats is None:
+                return
+            # Absent field (vs. present-but-None = no drafting this iter) means vLLM renamed it; warn
+            # once so the metrics don't silently go empty.
+            if not hasattr(scheduler_stats, "spec_decoding_stats"):
+                if not SpecDecodeStatLogger._warned_missing_spec_field:
+                    SpecDecodeStatLogger._warned_missing_spec_field = True
+                    logger.warning(
+                        "vLLM SchedulerStats has no 'spec_decoding_stats' field; spec-decode (MTP "
+                        "draft) acceptance metrics will be empty. vLLM's metrics API likely changed "
+                        "-- update inference_engines/vllm/spec_decode_metrics.py."
+                    )
+                return
+            stats = scheduler_stats.spec_decoding_stats
             if stats is not None:
                 self.num_drafts += stats.num_drafts
                 self.num_draft_tokens += stats.num_draft_tokens

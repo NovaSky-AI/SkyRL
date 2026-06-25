@@ -1,42 +1,8 @@
-"""C-full: isolate the MTP / draft head into its OWN grad buffer + ``DistributedOptimizer``.
+"""Isolate the MTP / draft head into its OWN grad buffer + ``DistributedOptimizer``.
 
-Why this exists
----------------
-The decoupled draft loss is autograd-clean (it only reaches ``.mtp.*`` params; the trunk hidden and
-the shared output/embedding weights are detached). But when the MTP head shares the policy's single
-Megatron DDP grad buffer, the head's mere *presence* changes the layout of that buffer and therefore
-the floating-point result of the POLICY gradient's distributed reduction (the DP reduce-scatter and the
-TP all-reduce of sequence-parallel / layernorm grads, both of which coalesce every ``requires_grad``
-param into one flat tensor). That perturbation is deterministic and systematic, and the RL feedback
-loop amplifies it into the policy-entropy collapse observed on MiMo-7B with MTP enabled.
-
-Neither separating the grad *clip* (the head's grad does not dilute the policy via the clip — verified)
-nor pinning the NCCL algorithm fixes it, because the channel is the shared *buffer/reduction* itself.
-The robust fix is to make the policy's grad buffer + reduction byte-identical to a model built with NO
-MTP head, while still co-training the head at full strength.
-
-Mechanism
----------
-Megatron exposes no "exclude these params from the buffer" API; the only lever is ``requires_grad`` at
-DDP-construction time (DDP buckets only ``requires_grad`` params, and changing it *after* the wrap
-deadlocks distributed-optimizer init). So:
-
-1. :func:`freeze_mtp_params_pre_wrap` (a provider pre-wrap hook) sets the ``.mtp`` params
-   ``requires_grad=False`` *before* the policy is DDP-wrapped, so they are excluded from the policy
-   grad buffer -> the policy buffer is byte-identical to the no-MTP build.
-2. After the policy optimizer is built, :class:`SeparateMTPOptimizer` flips the head back to
-   ``requires_grad=True`` and wraps the SAME ``host.mtp`` submodule (left in place inside ``GPTModel``,
-   so capture / replay / weight-export are unchanged) in its own Megatron DDP + ``DistributedOptimizer``.
-3. The policy's own ``finalize_model_grads`` would still coalesce the head's layernorm grads into the
-   policy TP all-reduce (it iterates every ``requires_grad`` param of the GPTModel). :func:`make_policy_finalize_excluding_mtp`
-   wraps it to transiently hide the head during the policy finalize (backward is already complete, so
-   this is only a read-time filter), keeping the policy reduction byte-identical to the no-MTP build.
-4. The combined ``policy + weight * draft`` backward auto-routes each param's grad to its own buffer
-   (the draft loss is autograd-decoupled). We finalize + step the head's optimizer alongside the policy's.
-
-Acceptance test: with C-full on, the fixed-batch no-clip policy-param trajectory must match the no-MTP
-run within the run-to-run nondeterminism floor (see
-``tests/.../megatron/test_mtp_grad_coupling.py::test_mtp_fixed_batch_param_drift``).
+Even though the draft loss is autograd-clean (it only touches ``.mtp.*`` params), letting the head
+share the policy's single Megatron DDP grad buffer changes that buffer's layout and perturbs the
+floating-point result of the policy gradient's distributed reduction.
 """
 
 from __future__ import annotations
@@ -78,7 +44,7 @@ def freeze_mtp_params_pre_wrap(model_or_models: Union[torch.nn.Module, List[torc
     """Provider pre-wrap hook: set the MTP/draft-head params ``requires_grad=False`` so Megatron's DDP
     excludes them from the POLICY grad buffer (the only Megatron lever for buffer exclusion is
     ``requires_grad`` at construction time). They are re-enabled and given their own buffer + optimizer
-    by :class:`SeparateMTPOptimizer` after the policy is wrapped. Result: the policy grad buffer and its
+    by :class:`MTPOptimizer` after the policy is wrapped. Result: the policy grad buffer and its
     distributed reduction are byte-identical to a model built with no MTP head.
 
     Modifies in place AND returns the model unchanged. (The bridge's ``pre_wrap_hook`` property
@@ -86,10 +52,20 @@ def freeze_mtp_params_pre_wrap(model_or_models: Union[torch.nn.Module, List[torc
     break the chain for any subsequent hook — we must return the model.)
     """
     models = model_or_models if isinstance(model_or_models, list) else [model_or_models]
+    num_frozen = 0
     for model in models:
         for name, param in model.named_parameters():
             if is_mtp_param_name(name):
                 param.requires_grad = False
+                num_frozen += 1
+    # Only registered when C-full is on, so zero matches means the `.mtp.` naming drifted -- the head
+    # would silently train in the policy grad buffer and defeat the isolation. Fail loud instead.
+    if num_frozen == 0:
+        raise RuntimeError(
+            "freeze_mtp_params_pre_wrap matched no parameters via is_mtp_param_name (expected '.mtp.' "
+            "or 'mtp.' in the name). The MTP submodule naming likely changed -- C-full grad isolation "
+            "would silently break. Update is_mtp_param_name in mtp/mtp_optim.py."
+        )
     return model_or_models
 
 
@@ -101,7 +77,7 @@ def make_policy_finalize_excluding_mtp(mtp_params: List[torch.nn.Parameter]):
     head's grads were included, that coalesced reduction would differ from the no-MTP build -> the exact
     perturbation we are eliminating. Backward is already complete when finalize runs, so transiently
     clearing the head's ``requires_grad`` is a pure read-time filter (no effect on the head's grads,
-    which already live in the separate MTP buffer and are reduced by :meth:`SeparateMTPOptimizer.step`).
+    which already live in the separate MTP buffer and are reduced by :meth:`MTPOptimizer.step`).
     """
 
     def finalize(model, *args, **kwargs):
@@ -121,7 +97,7 @@ def _build_mtp_ddp_config(ddp_config) -> DistributedDataParallelConfig:
     """Build the head's ``DistributedDataParallelConfig`` from the policy's, but with overlap disabled.
 
     ``overlap_grad_reduce=False`` so the head's grads simply accumulate into its buffer across
-    micro-batches and are reduced once in :meth:`SeparateMTPOptimizer.finalize_grads` — there is no
+    micro-batches and are reduced once in :meth:`MTPOptimizer.finalize_grads` — there is no
     per-microbatch sync to coordinate with the policy's pipeline schedule (the head is not in the chunk
     list passed to ``forward_backward_func``). ``overlap_param_gather=False`` for the same reason.
     """
@@ -135,7 +111,7 @@ def _build_mtp_ddp_config(ddp_config) -> DistributedDataParallelConfig:
     return cfg
 
 
-class SeparateMTPOptimizer:
+class MTPOptimizer:
     """Owns the MTP/draft head's isolated grad buffer + ``DistributedOptimizer`` (C-full).
 
     The head stays inside the policy ``GPTModel`` (so capture / replay / weight-export are unchanged) but
@@ -153,7 +129,7 @@ class SeparateMTPOptimizer:
         self.mtp_module = _resolve_mtp_module(policy_module)
         if self.mtp_module is None:
             raise RuntimeError(
-                "SeparateMTPOptimizer: no `.mtp` head found on the policy model. Enable MTP "
+                "MTPOptimizer: no `.mtp` head found on the policy model. Enable MTP "
                 "(trainer.mtp.enabled / mtp_num_layers) or disable mtp_separate_optimizer."
             )
 

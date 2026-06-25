@@ -864,7 +864,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # MTP C-full: isolate the draft head into its own grad buffer + optimizer so the policy's
         # distributed grad reduction is byte-identical to a no-MTP model (the head's presence in the
         # shared grad buffer otherwise perturbs the policy reduction and collapses entropy — see
-        # mtp/separate_optim.py). Step 1, here: freeze the head BEFORE the policy DDP wrap so Megatron's
+        # mtp/mtp_optim.py). Step 1, here: freeze the head BEFORE the policy DDP wrap so Megatron's
         # DDP (which only buckets requires_grad params) excludes it from the policy grad buffer. The head
         # is re-enabled and given its own buffer + optimizer after the policy optimizer is built.
         self._mtp_separate = None
@@ -872,7 +872,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.policy.megatron_config.mtp_separate_optimizer and getattr(self.provider, "mtp_num_layers", None)
         )
         if self._mtp_cfull_enabled:
-            from skyrl.backends.skyrl_train.mtp.separate_optim import (
+            from skyrl.backends.skyrl_train.mtp.mtp_optim import (
                 freeze_mtp_params_pre_wrap,
             )
 
@@ -925,17 +925,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # MTP C-full step 2: re-enable the draft head and give it its OWN grad buffer +
             # DistributedOptimizer (the policy optimizer above already excludes it — it was frozen
             # before the policy wrap). The head co-trains at full strength while the policy reduction
-            # stays byte-identical to a no-MTP model. See mtp/separate_optim.py.
+            # stays byte-identical to a no-MTP model. See mtp/mtp_optim.py.
             if self._mtp_cfull_enabled:
-                from skyrl.backends.skyrl_train.mtp.separate_optim import (
-                    SeparateMTPOptimizer,
+                from skyrl.backends.skyrl_train.mtp.mtp_optim import (
+                    MTPOptimizer,
                 )
 
                 # Fresh optim config for the head (don't share the policy's object).
                 mtp_optim_config = init_megatron_optim_config(
                     self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
                 )
-                self._mtp_separate = SeparateMTPOptimizer(
+                self._mtp_separate = MTPOptimizer(
                     policy_module=self.actor_module[0],
                     ddp_config=self.cfg.policy.megatron_config.ddp_config,
                     optim_config=mtp_optim_config,
@@ -960,7 +960,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._mtp_separate is not None:
             from megatron.core.utils import get_model_config
 
-            from skyrl.backends.skyrl_train.mtp.separate_optim import (
+            from skyrl.backends.skyrl_train.mtp.mtp_optim import (
                 make_policy_finalize_excluding_mtp,
             )
 

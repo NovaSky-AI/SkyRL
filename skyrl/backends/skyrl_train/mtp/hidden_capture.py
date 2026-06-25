@@ -1,16 +1,8 @@
-# Decoupled capture of the trunk hidden states that feed the MTP/draft head. Inspired by NeMo-RL's
-# draft-model training (https://github.com/NVIDIA-NeMo/RL), adapted for SkyRL's Megatron backend.
-#
-# Works for any Megatron model with native MTP heads exposing ``self.mtp`` (the shared
-# ``MultiTokenPredictionBlock``): ``GPTModel`` (DeepSeek-V3 / GLM / Qwen3-Next) and ``MambaModel``
-# (Qwen3.5 / NemotronH). The in-forward ``self.mtp(...)`` passes the trunk hidden states through to
-# ``process_mtp_loss`` as the main logits, so we must not tamper with it. Instead:
-#   1. a forward pre-hook records the kwargs Megatron built for ``self.mtp`` (without modifying them);
-#   2. after the forward, we re-invoke ``self.mtp`` with those kwargs but the trunk hidden states
-#      detached -- the decoupled draft pass, whose gradient reaches the MTP head but never the policy
-#      backbone. Reusing the kwargs avoids reconstructing rotary embeddings / attention masks.
-# The replay costs one extra MTP-block forward (typically a single layer) -- a deliberate trade for
-# robustness over reaching into GPTModel's rotary/mask construction.
+# Decoupled capture of the trunk hidden states feeding the MTP/draft head (inspired by NeMo-RL,
+# adapted for SkyRL's Megatron backend). Works for any Megatron model exposing ``self.mtp``.
+# A forward pre-hook records the kwargs Megatron builds for ``self.mtp``; after the forward we
+# re-invoke it with the trunk hidden states detached, so the draft gradient reaches the head but not
+# the policy backbone. Reusing the captured kwargs avoids rebuilding rotary embeddings / masks.
 
 from __future__ import annotations
 
@@ -50,15 +42,15 @@ def _mtp_layer_offset(mtp_block) -> int:
     (the trunk hidden states plus any MTP outputs forwarded from earlier pipeline/VP stages),
     appends one new chunk per MTP depth, and concatenates everything along dim 0. ``offset`` is 0 in
     the common single-stage case; we resolve it via megatron-core so the replay split below is also
-    correct under PP/VPP. Falls back to 0 if the helper is unavailable (older megatron-core)."""
+    correct under PP/VPP. Falls back to 0 only if the helper is missing (older megatron-core); other
+    errors propagate rather than silently returning 0 and mis-splitting the hidden states."""
     try:
         from megatron.core.transformer.multi_token_prediction import (
             get_mtp_layer_offset,
         )
-
-        return int(get_mtp_layer_offset(mtp_block.config, getattr(mtp_block, "vp_stage", None)))
-    except Exception:
+    except ImportError:
         return 0
+    return int(get_mtp_layer_offset(mtp_block.config, getattr(mtp_block, "vp_stage", None)))
 
 
 class MTPHiddenCapture:

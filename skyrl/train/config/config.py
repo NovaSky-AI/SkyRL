@@ -249,7 +249,7 @@ class MegatronConfig(BaseConfig):
     grads). That perturbation is deterministic and the RL feedback loop amplifies it into policy-entropy
     collapse. With this on, the policy's grad buffer and reduction are byte-identical to a model built
     with no MTP head, while the head still co-trains at full strength. Only used when MTP heads are
-    active. See skyrl/backends/skyrl_train/mtp/separate_optim.py."""
+    active. See skyrl/backends/skyrl_train/mtp/mtp_optim.py."""
     mtp_loss_chunk_size: Optional[int] = 1024
     """Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory at
     large vocab (e.g. Qwen3.5's 248K, where the full-sequence softmax OOMs). Numerically identical to

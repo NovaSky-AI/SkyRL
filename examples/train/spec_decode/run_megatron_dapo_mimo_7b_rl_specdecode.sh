@@ -51,7 +51,7 @@ NUM_GPUS_PER_NODE=8
 # (the policy is offloaded during generation under colocate_all).
 NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
-LOGGER="wandb"  # change to "console" to print to stdout
+LOGGER="${LOGGER:-wandb}"  # change to "console" to print to stdout (or set LOGGER env var)
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -113,7 +113,7 @@ TIS_TYPE=token
 MTP_ENABLED=true
 MTP_NUM_SPECULATIVE_TOKENS=3
 MTP_LOSS_TYPE="soft_ce" # "soft_ce" (distill against policy) | "hard_ce" (ground-truth next tokens)
-MTP_LOSS_WEIGHT=0.5
+MTP_LOSS_WEIGHT=0.2
 # NOTE: trainer.policy.megatron_config.mtp_detach_shared_output defaults to true. MiMo has UNTIED
 # embeddings, so this detaches the (separate) output_layer.weight passed into the draft projection,
 # along with the MTP block's re-embedding, so the draft gradient trains ONLY the MTP-head params and
@@ -122,6 +122,10 @@ MTP_LOSS_WEIGHT=0.5
 # Top-k draft loss: distill only the teacher's top-k tokens instead of the full vocab, keeping
 # draft-loss memory at O(seq*k) vs O(seq*vocab). Only applies to mtp_loss_type="soft_ce". Here k=256.
 MTP_LOSS_TOPK=256
+# Train the MTP head in the policy's native DDP buffer + optimizer (no separate C-full buffer); the
+# native MTP loss stays patched off and the draft loss stays autograd-decoupled, so no MTP grad
+# reaches the policy -- only the ~ulp-level (DP>=3) grad-buffer reduction reordering is given up.
+MTP_SEPARATE_OPTIMIZER=false
 
 
 # MiMo flags -- plain Qwen2-style dense attention (no GDN), so sample packing is supported and no
@@ -200,6 +204,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.mtp.loss_type=$MTP_LOSS_TYPE \
   trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
   trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
+  trainer.policy.megatron_config.mtp_separate_optimizer=$MTP_SEPARATE_OPTIMIZER \
   trainer.logger="$LOGGER" \
   trainer.project_name="mimo_7b_rl_dapo" \
   trainer.run_name="sd_dapo_mimo_7b_rl_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \

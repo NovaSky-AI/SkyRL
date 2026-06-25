@@ -115,8 +115,7 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
             else:
                 self.model_runner.reload_weights(weights_iterator=iter(weight_list))
             # Re-sync the spec-decode (MTP/Eagle) drafter from the same weights after the main load;
-            # the main-model load never touches the separate drafter module. No-op when spec decoding
-            # is disabled.
+            # the main-model load never touches the separate drafter module.
             _reload_spec_decode_drafter(self.model_runner, weight_list)
 
         if weight_update_bracketed:
