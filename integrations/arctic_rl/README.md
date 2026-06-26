@@ -1,16 +1,13 @@
 # Arctic RL Integration for SkyRL
 
-Routes SkyRL's GRPO training loop through the Arctic RL server — **all GPU operations** (training, generation, log-probs, weight sync) happen on the server. The SkyRL client is CPU-only.
-
-## Architecture
+Routes SkyRL's GRPO training loop through the [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) server — **all GPU operations** (training, generation, log-probs, weight sync) run on the server. The SkyRL client is CPU-only and orchestrates over HTTP.
 
 ```
 SkyRL Client (CPU-only, ray num_gpus=0)
   - Data loading, reward scoring (skyrl-gym)
-  - Orchestration: generate → score → train
+  - Orchestration: generate -> score -> train
   - HTTP calls to Arctic RL server
         |
-        | HTTP (torch-serialized batches)
         v
 Arctic RL Server (own Ray cluster, all GPUs)
   - DeepSpeed Workers: forward/backward, GRPO loss, optimizer step
@@ -18,212 +15,183 @@ Arctic RL Server (own Ray cluster, all GPUs)
   - NCCL weight sync between training and inference
 ```
 
-## Validated Results
+## Quick Start (GSM8K, 4 GPUs, single node)
 
-### Arctic RL Server Backend (this integration)
-
-**Setup**: Qwen2.5-1.5B-Instruct, 4 DeepSpeed training GPUs + 2 ArcticInference (vLLM) sampling GPUs + 1 log-prob GPU (7x H200), GRPO with 5 samples/prompt.
-
-| Step | GSM8K Eval (pass@1) | Training Reward |
-|------|-------------------|-----------------|
-| 0 (base) | 7.8% | — |
-| 5 | 33% | 0.22 |
-| 10 | 63% | 0.60 |
-| 30 | 70% | 0.65 |
-| 45 | 73% | 0.81 |
-| 75 | **75.4%** | 0.82 |
-
-### SkyRL Default (FSDP2 baseline)
-
-| Model | GSM8K Accuracy (1,319 test) |
-|---|---|
-| Base (Qwen2.5-1.5B-Instruct) | 7.43% |
-| Trained (step 59) | **79.00%** |
-
-## Quick Start
-
-### Prerequisites
-
-- Linux x86_64, NVIDIA GPU with CUDA 12.8 driver (Hopper recommended).
-- [`uv`](https://docs.astral.sh/uv/) installed
-  (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+The fastest way to verify a clean install: GSM8K trains end-to-end on 4 GPUs with no manual data prep. Auto-downloads `Qwen/Qwen3-0.6B` from HuggingFace and writes GSM8K parquets on first launch.
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/Snowflake-AI-Research/SkyRL.git
+git clone https://github.com/NovaSky-AI/SkyRL.git
 cd SkyRL
 uv sync --extra arctic-rl
-```
-
-The `arctic-rl` extra pulls in `arctic-platform` and `arctic-inference[vllm]`
-from their public `main` branches; vLLM and torch arrive transitively via
-`arctic-inference[vllm]`, SkyRL training core via `skyrl[skyrl-train]`. No
-manual installs of arctic-platform / arctic-inference / vLLM / torch needed.
-
-Add `--extra fsdp` *only* if you also want to run the SkyRL native FSDP
-backend side-by-side (the two extras pin different vLLM versions, so
-`arctic-rl` alone is preferred for pure Arctic runs).
-
-SkyRL's base `transformers` pin (`>=5.0.0,<=5.3.0`, for the megatron
-backend) conflicts with vLLM 0.18 + arctic-platform, so after `uv sync`
-force the older line:
-
-```bash
 uv pip install --upgrade 'transformers>=4.57,<5'
 ```
 
-### 2. Start a Ray cluster
+The `arctic-rl` extra pulls `arctic-platform`, `arctic-inference[vllm]`, and `liger-kernel` from their public `main` branches; vLLM and torch arrive transitively via `arctic-inference[vllm]`. The `transformers` line is a one-time pin: SkyRL's base extra requires `>=5.0`, but vLLM 0.18 (what arctic-inference targets) requires `<5`.
 
-Single-node (8 GPUs):
+### 2. Start Ray
 
 ```bash
-uv run ray start --head --num-gpus=8
+uv run ray start --head --num-gpus=4
+uv run ray status   # should show 4/4 GPUs
 ```
 
-Multi-node (e.g. 4 × 8 H200):
+### 3. Run
+
+```bash
+bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
+```
+
+That's it. The recipe auto-preps GSM8K parquets to `$HOME/data/gsm8k/` and starts training. Pass `LOGGER=wandb WANDB_API_KEY=...` to log to W&B; the default `LOGGER=console` runs with no credentials.
+
+#### What to expect
+
+On 4 H200 GPUs (1 inference engine, 2 training, 1 log-prob), at default batch sizes (`train_batch_size=256`, `n_samples_per_prompt=4`):
+
+| Phase | Wall clock |
+| --- | --- |
+| Cold eval (6 iters) | ~2 min |
+| Step 1 (cold) | ~56s (generate + train + sync) |
+| `sync_weights` (steady state) | <0.1s |
+| `train_critic_and_policy` | ~12s |
+
+Reward signal at the first four steps from a clean run on locked public-main `arctic-platform` + `arctic-inference`:
+
+```
+step 0  avg_final_rewards: 0.229
+step 1  avg_final_rewards: 0.247
+step 2  avg_final_rewards: 0.280
+step 3  avg_final_rewards: 0.337   loss=0.104  grad_norm=0.22
+```
+
+## Enabling Arctic RL on Your Own Recipe
+
+Any stock SkyRL recipe becomes an Arctic RL recipe by appending a single override:
+
+```bash
+uv run -m skyrl.train.entrypoints.main_base \
+    trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
+    trainer.arctic_rl.zero_stage=2 \
+    <... your existing recipe overrides ...>
+```
+
+`trainer.override_entrypoint` tells `skyrl.train.entrypoints.main_base` to dispatch into `integrations/arctic_rl/entrypoint.py:main()` after Hydra parsing. No changes to `main_base.py` required; no `PYTHONPATH` setup either — `integrations/` is a PEP-420 namespace package, reachable from the SkyRL repo root.
+
+### Arctic-specific knobs
+
+All under `trainer.arctic_rl.*`. Defaults are filled in by `integrations/arctic_rl/config.py` if unset.
+
+| Knob | Default | Purpose |
+| --- | --- | --- |
+| `zero_stage` | `0` | DeepSpeed ZeRO stage. Use `2` for ~1B params, `3` for ≥7B. ZeRO ≥ 1 is required for bf16 + fp32 grad accumulation. |
+| `offload_optimizer` | `false` | Offload optimizer state to CPU (needs `zero_stage>=2`). |
+| `offload_param` | `false` | Offload ZeRO-3 param shards to CPU (needs `zero_stage>=3`). |
+| `colocate` | `false` | Share GPUs between training and sampling. |
+| `log_prob_gpus` | `0` | Dedicated log-prob GPUs (0 = colocate with sampling vLLM). |
+| `use_zorro` | `false` | Enable Snowflake's ZoRRo trainer (chunked / fused GRPO loss). |
+| `use_liger` | `false` | Enable Liger fused kernels in the policy fwd/bwd. |
+| `attn_implementation` | `flash_attention_2` | `flash_attention_2` or `flash_attention_3` (Hopper, needs FA3 wheel). |
+| `use_arctic_inference` | `false` | Use Arctic's vLLM wrapper (required for FCA / Arctic spec-dec). |
+| `cuda_ipc_weight_sync` | `false` | Zero-copy IPC weight sync (colocate-only). |
+| `vllm_enforce_eager` | `false` | Disable vLLM cudagraph compilation. |
+| `vllm_max_num_seqs` | `256` | vLLM batching cap. |
+| `vllm_config` | `None` | Raw `vllm.AsyncEngineArgs` overrides — see below. |
+
+### Raw vLLM overrides via `vllm_config`
+
+Performance knobs that the high-level schema doesn't model go through `trainer.arctic_rl.vllm_config`. The dict is merged on top of the integration's vLLM defaults and forwarded verbatim to `vllm.AsyncEngineArgs`:
+
+```bash
+trainer.arctic_rl.vllm_config="{
+    compilation_config: {
+        cudagraph_mode: PIECEWISE,
+        pass_config: {fuse_allreduce_rms: false},
+    },
+    speculative_config: {
+        method: arctic,
+        model: <hf-id-or-local-path>,
+        num_speculative_tokens: 3,
+    },
+    forest_cascade_attn_configs: '{}',
+}"
+```
+
+This routes through `arctic-platform`'s public-main `ArcticRLClientConfig.vllm_config` field, which forwards every key into vLLM — typed fields land on `ModelConfig`, unknown keys land in `extra_engine_kwargs`. Use this for things like:
+
+- `compilation_config` — pin `cudagraph_mode` or disable a specific compile pass (`fuse_allreduce_rms` collides with multi-replica/node FlashInfer; turn it off when you see `Flashinfer workspace must be initialized` asserts).
+- `speculative_config` — point at an Arctic draft head for inference-time spec-decoding.
+- `forest_cascade_attn_configs` — enable Arctic's FCA attention pass (`"{}"` uses defaults).
+
+OmegaConf parses flow-style YAML, so leave a space after every `:` and quote string values that contain colons.
+
+## Multi-node setup
+
+The integration is identical for multi-node — only the Ray bringup changes.
 
 ```bash
 # On the head node:
 uv run ray start --head --port=6379 --num-gpus=8
 
-# On each worker node (same SkyRL checkout + same env installed):
+# On each worker node (same SkyRL checkout, same env):
 uv run ray start --address=<HEAD_IP>:6379 --num-gpus=8
 
 # Confirm:
-uv run ray status   # should show 32/32 GPUs across 4 nodes
+uv run ray status
 ```
 
-### 3. (Hopper only) Install FlashAttention-3
+GPU layout is derived from standard SkyRL knobs and `trainer.arctic_rl.*`:
 
-The 32B BIRD recipe targets `flash_attention_3` for the 2× speedup vs FSDP.
-PyTorch publishes [official FA3 wheels](https://dev-discuss.pytorch.org/t/flash-attention-3-wheels/3322)
-ABI-stable for any Python ≥ 3.9, torch ≥ 2.9. Pick the index matching your
-CUDA build:
+- Training GPUs: `trainer.placement.policy_num_gpus_per_node * trainer.placement.policy_num_nodes`
+- Sampling GPUs: `generator.inference_engine.num_engines * generator.inference_engine.tensor_parallel_size`
+- Log-prob GPUs: `trainer.arctic_rl.log_prob_gpus` (0 = colocate with sampling)
+
+When `trainer.arctic_rl.colocate=true`, training and sampling share the same GPU set; otherwise the two sets must be disjoint.
+
+### (Optional) FlashAttention-3 on Hopper
+
+The 8B / 32B recipes target `flash_attention_3` for best throughput. PyTorch publishes [official FA3 wheels](https://dev-discuss.pytorch.org/t/flash-attention-3-wheels/3322), ABI-stable for any Python ≥ 3.9, torch ≥ 2.9:
 
 ```bash
 uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-(`cu126`, `cu130` indices also available.) Skip this if you're on FA2 — set
-`ATTN_IMPL=flash_attention_2` when launching.
+(`cu126` / `cu130` indices also available.) If you don't install FA3, set `trainer.arctic_rl.attn_implementation=flash_attention_2` on the launcher.
 
-### 4. Prepare data
+## BIRD-SQL recipes
 
-Models auto-download to `$HF_HOME` on first use (Qwen3 weights are public,
-no HF auth required). GSM8K parquets auto-prep on first launch via SkyRL's
-bundled `gsm8k_dataset.py`.
+`integrations/arctic_rl/examples/run_bird_grpo_*` ships 8B and 32B BIRD-SQL recipes. These currently require manual BIRD data prep (raw download + `integrations/arctic_rl/envs/preprocess_bird.py`); a one-command HuggingFace-hosted parquet bundle is on the roadmap. See the launcher source for the current path.
 
-For BIRD-SQL, run the bundled preprocessor against your raw BIRD SQLite
-dump (downloadable from <https://bird-bench.github.io/>):
-
-```bash
-python integrations/arctic_rl/envs/preprocess_bird.py \
-    --bird_dir   /path/to/raw/bird \
-    --output_dir $HOME/data/bird \
-    --max_tokens 16384 \
-    --tokenizer  Qwen/Qwen3-1.7B
-```
-
-This writes `train.parquet` and `val.parquet` to `$DATA_DIR` in the
-verl-compatible format the launcher expects (`--help` for the full set of
-flags, including Spider / GretelAI sources).
-
-### 5. Run
-
-Use with any stock SkyRL recipe — append a single CLI flag:
-
-```bash
-uv run -m skyrl.train.entrypoints.main_base \
-    trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
-    <... your existing recipe overrides ...>
-```
-
-Arctic-specific knobs go under `trainer.arctic_rl.*` (e.g.
-`trainer.arctic_rl.colocate=true`, `trainer.arctic_rl.zero_stage=3`); the
-entrypoint auto-fills sensible defaults if you set none.
-
-Or invoke one of the provided launchers:
-
-```bash
-# GSM8K, 4 H200s (single node):
-DATA_DIR=$HOME/data/gsm8k LOGGER=console \
-    bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
-
-# BIRD-SQL, Qwen3-32B, 32 H200s (4 nodes):
-DATA_DIR=$HOME/data/bird HF_HOME=$HOME/.cache/huggingface LOGGER=console \
-    bash integrations/arctic_rl/examples/run_bird_grpo_32b_32gpu.sh
-```
-
-Launchers default to `LOGGER=wandb` (parity with the original recipes); pass
-`LOGGER=console` for no-credentials smoke runs. When `LOGGER=wandb`, set
-`WANDB_API_KEY` in your environment.
-
-## Configuration
-
-### GPU Allocation
-
-GPU layout is derived from standard SkyRL knobs:
-- Training GPUs: `trainer.placement.policy_num_gpus_per_node * trainer.placement.policy_num_nodes`
-- Sampling GPUs: `generator.inference_engine.num_engines * generator.inference_engine.tensor_parallel_size`
-- Log-prob GPUs: `trainer.arctic_rl.log_prob_gpus` (default: 0 — log-probs colocate with sampling vLLM)
-- Colocation between training and sampling: `trainer.arctic_rl.colocate` (default: false)
-
-### Key Training Parameters
-
-The launch script passes these to SkyRL via Hydra overrides:
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `trainer.train_batch_size` | 256 | Prompts per step |
-| `trainer.policy_mini_batch_size` | 2 | Prompts per mini-batch |
-| `generator.n_samples_per_prompt` | 5 | Completions per prompt |
-| `trainer.policy.optimizer_config.lr` | 1e-6 | Learning rate |
-| `trainer.epochs` | 20 | Training epochs |
-| `trainer.eval_interval` | 5 | Eval every N steps |
-
-DeepSpeed config is set automatically:
-- `gradient_accumulation_steps` = `train_batch_size * n_samples / (policy_mini_batch_size * n_samples)` = 128
-- `gradient_clipping` = 1.0
-- `optimizer` = AdamW with lr from config
-
-## File Structure
+## File structure
 
 ```
 integrations/arctic_rl/                # importable as integrations.arctic_rl
 ├── README.md
-├── __init__.py                       # exports ArcticPPOTrainer, ArcticGenerator
-├── trainer.py                        # ArcticPPOTrainer: routes training to server
-├── generator.py                      # ArcticGenerator: routes generation to server vLLM
-├── config.py                         # ArcticRLTrainerConfig + build_rl_config
-├── entrypoint.py                     # dispatched here from main_base
+├── __init__.py                        # exports ArcticPPOTrainer, ArcticGenerator
+├── trainer.py                         # ArcticPPOTrainer: routes training to server
+├── generator.py                       # ArcticGenerator: routes generation to server vLLM
+├── config.py                          # ArcticRLTrainerConfig + build_rl_config
+├── entrypoint.py                      # dispatched here from main_base
 ├── envs/
-│   ├── bird.py                       # skyrl-gym BIRD SQL env
-│   ├── bird_reward.py                # vendored V6b SQL reward fn (verl PR #6 parity)
-│   └── preprocess_bird.py            # vendored BIRD parquet preprocessor
+│   ├── bird.py                        # skyrl-gym BIRD SQL env
+│   ├── bird_reward.py                 # vendored verl PR #6 SQL reward fn
+│   └── preprocess_bird.py             # raw BIRD -> verl parquets
 └── examples/
-    └── run_*.sh                      # launchers (call main_base with override_entrypoint)
+    ├── run_gsm8k_grpo_4gpu.sh         # 4-GPU GSM8K smoke / reference recipe
+    └── run_bird_grpo_*.sh             # BIRD-SQL recipes (require manual data prep)
 ```
 
-`integrations/` is a PEP 420 namespace package (no `__init__.py`); the
-`arctic_rl` package below it is reachable as `integrations.arctic_rl` from
-the SkyRL repo root with no `PYTHONPATH` setup. It is distinct from the
-upstream `arctic_training` PyPI package's `arctic_training.arctic_rl`
-sub-namespace — both coexist at import time without collision.
+## How it works
 
-## How It Works
+1. **`arctic_rl.entrypoint`** spawns the Arctic RL server as a subprocess with a clean environment (stripped `CUDA_VISIBLE_DEVICES` and `RAY_*` vars so the server gets its own GPU access), then hands control to SkyRL's trainer.
 
-1. **`arctic_rl.entrypoint`** creates an `ArcticRLClient` which spawns the server as a subprocess with a clean environment (stripped `CUDA_VISIBLE_DEVICES` and `RAY_*` vars so the server gets its own GPU access)
-
-2. **`ArcticPPOTrainer`** overrides the standard SkyRL training loop:
+2. **`ArcticPPOTrainer`** replaces three steps of SkyRL's training loop:
    - `fwd_logprobs_values_reward` → no-op (server computes old log-probs internally)
    - `compute_advantages_and_returns` → no-op (server computes GRPO advantages from rewards)
-   - `train_critic_and_policy` → sends batches to server via HTTP, server runs GRPO loss + backward
+   - `train_critic_and_policy` → ships batches to the server over HTTP; server runs GRPO loss + backward + step
 
-3. **`ArcticGenerator`** routes generation to server vLLM and scores completions via `skyrl-gym`
+3. **`ArcticGenerator`** routes generation to server vLLM and scores completions client-side via `skyrl-gym`.
 
-4. **Server-side `grpo_loss`** (in `processors.py`) is self-contained:
-   - Computes per-token log-probs with causal shift
-   - Derives old log-probs by detaching (correct for `update_epochs_per_batch=1`)
-   - Computes group-relative advantages from per-sequence rewards
-   - Applies PPO clipped surrogate (eps_clip=0.2)
+4. **Server-side GRPO loss** is self-contained: per-token log-probs with causal shift, old log-probs by detaching (correct for `update_epochs_per_batch=1`), group-relative advantages from per-sequence rewards, PPO clipped surrogate.
+
+The SkyRL ↔ Arctic RL protocol is minimal: server takes `(sequences, rewards, loss_mask)`, returns updated weights for NCCL sync. All reward scoring and data orchestration live on the SkyRL side, all GPU compute lives on the Arctic side.
