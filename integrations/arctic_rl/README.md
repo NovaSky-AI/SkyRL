@@ -58,20 +58,27 @@ uv run -m skyrl.train.entrypoints.main_base \
 | `vllm_max_num_seqs` | `256` | vLLM batching cap. |
 | `vllm_config` | `None` | Raw `vllm.AsyncEngineArgs` overrides (see below). |
 
-### Raw vLLM overrides — `trainer.arctic_rl.vllm_config`
+### Escape hatch — `trainer.arctic_rl.vllm_config`
 
-For anything the high-level schema doesn't model — `compilation_config`, `speculative_config`, Forest Cascade Attention configs — pass a dict that's forwarded verbatim to vLLM:
+The simple case (`use_zorro=true use_arctic_inference=true`) is enough for most users — cudagraph mode, attention pass selection, KV-cache settings, weight-sync wiring are all handled inside arctic-platform + arctic-inference. You shouldn't need to think about vLLM flags.
+
+For knobs that aren't yet exposed as typed `trainer.arctic_rl.*` fields — currently Forest Cascade Attention configs, Arctic speculative decoding, and one multi-replica fused-allreduce workaround — `vllm_config` is a dict forwarded verbatim to `vllm.AsyncEngineArgs` via `arctic-platform`'s `ArcticRLClientConfig.vllm_config` (public main, unmodified):
 
 ```bash
 trainer.arctic_rl.vllm_config="{
-    compilation_config: {cudagraph_mode: PIECEWISE,
-                         pass_config: {fuse_allreduce_rms: false}},
-    speculative_config: {method: arctic, model: <hf-id>, num_speculative_tokens: 3},
     forest_cascade_attn_configs: '{}',
+    speculative_config: {method: arctic, model: <hf-id>, num_speculative_tokens: 3},
+    compilation_config: {pass_config: {fuse_allreduce_rms: false}},
 }"
 ```
 
-This routes through `arctic-platform`'s `ArcticRLClientConfig.vllm_config` (public main, unmodified) — typed keys land on `ModelConfig`, unknown keys land in `extra_engine_kwargs`. No patches to arctic-platform or arctic-inference required.
+Why each of those three appears here today, and why we expect them to disappear:
+
+- **`forest_cascade_attn_configs`** — should be implied by `use_arctic_inference=true`. Will be folded into the high-level knob in a follow-up.
+- **`speculative_config`** — should be a typed `trainer.arctic_rl.speculative_model` field. arctic-platform's `arctic_inference_config` schema already has slots for this; we'll wire SkyRL to it once the public-main schema reconciles.
+- **`compilation_config.pass_config.fuse_allreduce_rms: false`** — arctic-inference's `use_fca=True` default is `true`, which collides with FlashInfer workspace allocation on multi-replica/multi-node setups (per-process IPC port collision). The right fix is inside arctic-inference (auto-disable when `world_size > tp_size`); this `vllm_config` override is the interim workaround on multi-node runs.
+
+In short: `vllm_config` exists for the long tail; it shouldn't be in the critical path of getting the speedup.
 
 ## Architecture
 
@@ -134,6 +141,43 @@ integrations/arctic_rl/
     └── run_bird_grpo_*.sh      (BIRD recipes — manual data prep today)
 ```
 
-## BIRD-SQL recipes
+## BIRD-SQL: 32B Qwen3 on 32 × H200
 
-`examples/run_bird_grpo_8b_32gpu.sh` and `run_bird_grpo_32b_32gpu.sh` reproduce the 32B Arctic-Text2SQL-R2 setup. They currently require manual BIRD raw-data download + `python integrations/arctic_rl/envs/preprocess_bird.py`; a single-command HuggingFace-hosted parquet bundle is on the roadmap. See the launcher source for the current path.
+`examples/run_bird_grpo_32b_32gpu.sh` reproduces the 32B Arctic-Text2SQL-R2 setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). End-to-end from a clean machine:
+
+```bash
+# 1. Clone + install
+git clone https://github.com/Snowflake-AI-Research/SkyRL.git && cd SkyRL
+uv sync --extra arctic-rl
+uv pip install --upgrade 'transformers>=4.57,<5'   # vllm 0.18 pin
+
+# 2. Ray up (4-node example; repeat on each worker)
+uv run ray start --head --port=6379 --num-gpus=8
+# on each worker:
+#   uv run ray start --address=<head>:6379 --num-gpus=8
+
+# 3. (Hopper) FA3 wheel
+uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
+
+# 4. BIRD data — raw download + preprocess (a one-command HF bundle is on the roadmap)
+mkdir -p /data/bird && cd /data/bird
+wget https://bird-bench.oss-cn-beijing.aliyuncs.com/train.zip && unzip train.zip
+wget https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip   && unzip dev.zip
+cd -
+python integrations/arctic_rl/envs/preprocess_bird.py \
+    --bird_dir   /data/bird \
+    --output_dir $HOME/data/bird \
+    --max_tokens 32768 \
+    --tokenizer  Qwen/Qwen3-1.7B
+
+# 5. Run
+DATA_DIR=$HOME/data/bird WANDB_API_KEY=<key> \
+    bash integrations/arctic_rl/examples/run_bird_grpo_32b_32gpu.sh
+```
+
+Notes:
+
+- BIRD raw data is gated behind <https://bird-bench.github.io>; the `wget` URLs above are the public mirrors arctic-platform's txt2sql README uses.
+- `--max_tokens 32768` matches the recipe's `trainer.max_prompt_length=32768`. Drop this lower only if you also lower the recipe's prompt length.
+- `preprocess_bird.py` writes verl-format parquets whose `extra_info.db_path` is absolute. The SQLite files at those paths must be readable on every node at training time — either a shared filesystem, or mirror `/data/bird/` to each worker.
+- An 8B variant `run_bird_grpo_8b_32gpu.sh` ships for quick smoke tests on the same cluster.
