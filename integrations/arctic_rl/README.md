@@ -116,19 +116,6 @@ uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
 
 Skip and set `trainer.arctic_rl.attn_implementation=flash_attention_2` if you don't want FA3.
 
-## What you get vs. SkyRL FSDP2
-
-For the deep dive on where the numbers come from — split attention, Forest Cascade, Arctic Speculator — read the [ZoRRo blog post](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). The headline:
-
-| Optimization | Speedup on Arctic-Text2SQL-R2 (Qwen3-32B, 32 × H200) |
-| --- | --- |
-| ZoRRo training (split attention) | 6× actor update, 5× log-prob |
-| Forest Cascade + Arctic spec-dec | 1.7× rollout generation |
-| End-to-end RL iteration | **3.5×** (5 days → 1.5 days) |
-| Max context window | **3.2×** (20 K → 64 K) |
-
-This integration exposes the same stack to SkyRL users.
-
 ## File layout
 
 ```
