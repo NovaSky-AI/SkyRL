@@ -71,27 +71,21 @@ RESPONSE_LEN=4096
 TP_SIZE=4
 NUM_ENGINES=$((NUM_GPUS / TP_SIZE))
 
-# Inference-engine performance knobs (FCA + Arctic speculative decoding +
-# the FlashInfer-safe compilation_config). Routed raw to vLLM via
-# trainer.arctic_rl.vllm_config. See run_bird_grpo_32b_32gpu.sh for the
-# full rationale.
-USE_FCA=${USE_FCA:-True}
+# Inference-engine optimizations are opt-in via typed knobs on
+# ``trainer.arctic_rl`` — the integration auto-injects the matching raw
+# vLLM kwargs (FCA, multi-replica FlashInfer workaround, Arctic
+# speculative_config) so the launcher never needs a raw vllm_config block.
+#   - ``use_arctic_inference=true``  -> FCA on, fuse_allreduce_rms workaround
+#                                       when num_engines > 1.
+#   - ``speculative_model=<path>``   -> Arctic speculative decoding on with
+#                                       ``num_speculative_tokens`` draft tokens.
 SPEC_MODEL=${SPEC_MODEL:-}
 NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS:-3}
 
-VLLM_CFG_PARTS=()
-if [[ "${USE_FCA}" == "True" ]]; then
-    VLLM_CFG_PARTS+=('forest_cascade_attn_configs: "{}"')
-    VLLM_CFG_PARTS+=('compilation_config: {cudagraph_mode: PIECEWISE, pass_config: {fuse_allreduce_rms: false}}')
-fi
-if [[ -n "${SPEC_MODEL}" && -d "${SPEC_MODEL}" ]]; then
-    VLLM_CFG_PARTS+=("speculative_config: {method: arctic, model: ${SPEC_MODEL}, num_speculative_tokens: ${NUM_SPEC_TOKENS}}")
-fi
-
-VLLM_CFG_OVERRIDE=()
-if (( ${#VLLM_CFG_PARTS[@]} > 0 )); then
-    IFS=, VLLM_CFG_BODY="${VLLM_CFG_PARTS[*]}" ; unset IFS
-    VLLM_CFG_OVERRIDE+=("trainer.arctic_rl.vllm_config={${VLLM_CFG_BODY}}")
+ARCTIC_SPEC_OVERRIDE=()
+if [[ -n "${SPEC_MODEL}" ]]; then
+    ARCTIC_SPEC_OVERRIDE+=("trainer.arctic_rl.speculative_model=${SPEC_MODEL}")
+    ARCTIC_SPEC_OVERRIDE+=("trainer.arctic_rl.num_speculative_tokens=${NUM_SPEC_TOKENS}")
 fi
 
 cd "${SKYRL_DIR}"
@@ -120,7 +114,7 @@ cd "${SKYRL_DIR}"
     trainer.arctic_rl.use_arctic_inference=true \
     trainer.arctic_rl.server_logs=true \
     trainer.arctic_rl.startup_timeout=1800 \
-    "${VLLM_CFG_OVERRIDE[@]}" \
+    "${ARCTIC_SPEC_OVERRIDE[@]}" \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/val.parquet']" \
     trainer.algorithm.advantage_estimator=grpo \

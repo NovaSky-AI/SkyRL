@@ -193,39 +193,52 @@ class ArcticRLTrainerConfig(BaseConfig):
     converged path; typical 2-3x rollout speedup on long-context prompts.
     Requires ``arctic_inference`` to be installed.
     """
+    speculative_model: Optional[str] = None
+    """HF id or local path of an Arctic draft-head checkpoint. When set
+    (and ``use_arctic_inference=True``), the integration auto-injects::
+
+        speculative_config: {
+            method: arctic,
+            model: <speculative_model>,
+            num_speculative_tokens: <num_speculative_tokens>,
+        }
+
+    into the rollout vLLM engine. Leave ``None`` to disable speculative
+    decoding. End users normally set just this field — no raw
+    ``vllm_config`` block needed.
+    """
+    num_speculative_tokens: int = 3
+    """Number of draft tokens proposed per target-model step. Only used
+    when ``speculative_model`` is set.
+    """
     arctic_inference_config: Optional[dict] = None
     """Optional ArcticInference high-level schema (e.g. ``zorro_inference:
     {enable: true}``, ``speculative_decoding: {model: ...}``). Forwarded
     as-is to ``ArcticRLClientConfig.arctic_inference_config``, where
     arctic-platform's ``parse_arctic_inference_rollout`` translates the
     recognised keys (``use_fca``, ``spec_model``) into ``ModelConfig``
-    fields. Unknown keys are dropped by that helper -- pass raw vLLM
-    kwargs (e.g. ``compilation_config``, ``speculative_config``,
-    ``forest_cascade_attn_configs``) via ``vllm_config`` below instead.
+    fields. Most users should leave this ``None`` and use the typed
+    ``speculative_model`` / ``use_arctic_inference`` knobs above — the
+    integration injects the matching raw vLLM kwargs automatically.
     """
     vllm_config: Optional[dict] = None
-    """Optional raw ``vllm.AsyncEngineArgs`` overrides for the sampling +
-    log-prob engines. Merged on top of the integration's built-in defaults
-    (TP, ``max_num_seqs``, etc.), user keys win on conflict. Mirrors
-    arctic-platform's own ``ArcticRLClientConfig.vllm_config`` field name
-    and semantics: every key is forwarded into vLLM (those matching
-    ``ModelConfig`` fields become typed fields, the rest land in
-    ``extra_engine_kwargs``).
+    """Escape hatch for raw ``vllm.AsyncEngineArgs`` keys that aren't yet
+    exposed as typed ``trainer.arctic_rl.*`` fields.
 
-    Use this for performance knobs the high-level
-    ``arctic_inference_config`` schema doesn't model, e.g.::
+    Merged on top of the integration's defaults (TP, ``max_num_seqs``,
+    auto-injected FCA / speculative_config / ``fuse_allreduce_rms``
+    workaround); **user keys win on conflict**. Mirrors arctic-platform's
+    own ``ArcticRLClientConfig.vllm_config`` field name and semantics:
+    every key is forwarded to vLLM (those matching ``ModelConfig`` fields
+    become typed fields, the rest land in ``extra_engine_kwargs``).
+
+    The simple case never needs this — ``use_arctic_inference=true`` and
+    ``speculative_model=<id>`` cover FCA + Arctic spec-dec automatically.
+    Reach for ``vllm_config`` only when you need an inference-engine knob
+    the typed fields don't cover, e.g.::
 
         trainer.arctic_rl.vllm_config={
-            compilation_config: {
-                cudagraph_mode: PIECEWISE,
-                pass_config: {fuse_allreduce_rms: false},
-            },
-            speculative_config: {
-                method: arctic,
-                model: "<path-or-hf-id>",
-                num_speculative_tokens: 3,
-            },
-            forest_cascade_attn_configs: "{}",
+            compilation_config: {cudagraph_mode: FULL},
         }
     """
 
@@ -369,11 +382,49 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
     if arl.vllm_max_num_batched_tokens is not None:
         vllm_cfg["max_num_batched_tokens"] = int(arl.vllm_max_num_batched_tokens)
 
+    # ------------------------------------------------------------------
+    # Auto-inject Arctic Inference vLLM kwargs from typed top-level knobs.
+    # The intent: keep the user's recipe free of raw ``vllm_config`` blocks
+    # for the common Arctic flows. User-supplied ``arl.vllm_config`` is
+    # still merged on top below and wins on conflict.
+    # ------------------------------------------------------------------
+    num_engines = int(cfg.generator.inference_engine.num_engines)
+
+    if arl.use_arctic_inference:
+        # FCA is the headline Arctic Inference optimization; enable it
+        # whenever the user opts into Arctic Inference. ``"{}"`` =
+        # arctic-inference defaults.
+        vllm_cfg.setdefault("forest_cascade_attn_configs", "{}")
+
+        # Multi-replica FlashInfer workaround. arctic-inference's
+        # ``use_fca=True`` default also enables ``fuse_allreduce_rms``,
+        # which collides with per-process FlashInfer IPC port allocation
+        # when ``world_size > tp_size`` (multiple replicas per node).
+        # Symptom: ``AssertionError: Flashinfer workspace must be
+        # initialized when using flashinfer``. Auto-disable for the
+        # multi-replica topology; single-replica keeps the fused path.
+        # Long-term fix belongs inside arctic-inference; this is the
+        # interim workaround so end users never have to know.
+        if num_engines > 1:
+            comp_cfg = vllm_cfg.setdefault("compilation_config", {})
+            pass_cfg = comp_cfg.setdefault("pass_config", {})
+            pass_cfg.setdefault("fuse_allreduce_rms", False)
+
+    # Arctic speculative decoding: opt-in via a single typed flag.
+    if arl.speculative_model:
+        vllm_cfg.setdefault(
+            "speculative_config",
+            {
+                "method": "arctic",
+                "model": str(arl.speculative_model),
+                "num_speculative_tokens": int(arl.num_speculative_tokens),
+            },
+        )
+
     # Layer user-supplied raw vLLM kwargs on top of the integration's
-    # defaults. arctic-platform forwards this dict to vLLM verbatim (any
-    # key not on ``ModelConfig`` lands in ``extra_engine_kwargs``), so this
-    # is where performance knobs like ``compilation_config``,
-    # ``speculative_config``, and ``forest_cascade_attn_configs`` belong.
+    # defaults + auto-injected Arctic kwargs. arctic-platform forwards
+    # this dict to vLLM verbatim (any key not on ``ModelConfig`` lands in
+    # ``extra_engine_kwargs``); user keys win on conflict.
     if arl.vllm_config is not None:
         user_vllm = OmegaConf.to_container(
             OmegaConf.create(arl.vllm_config),

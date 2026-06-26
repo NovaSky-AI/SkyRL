@@ -36,9 +36,12 @@ uv run -m skyrl.train.entrypoints.main_base \
     trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
     trainer.arctic_rl.use_zorro=true \
     trainer.arctic_rl.use_arctic_inference=true \
+    trainer.arctic_rl.speculative_model=<hf-id-or-path> \
     trainer.arctic_rl.zero_stage=2 \
     <... your existing recipe overrides ...>
 ```
+
+The integration translates each typed `arctic_rl.*` knob into the matching arctic-platform / vLLM payload — no raw `vllm_config` blocks required for FCA, speculative decoding, or the multi-replica FlashInfer workaround.
 
 `trainer.override_entrypoint` tells `main_base` to dispatch into the Arctic entrypoint after Hydra parsing. No `PYTHONPATH` setup, no edits to `main_base.py`.
 
@@ -47,7 +50,9 @@ uv run -m skyrl.train.entrypoints.main_base \
 | Knob | Default | Purpose |
 | --- | --- | --- |
 | `use_zorro` | `false` | Enable ZoRRo split-attention + prompt dedup in the trainer. |
-| `use_arctic_inference` | `false` | Enable Forest Cascade Attention + Arctic spec-dec in the rollout. |
+| `use_arctic_inference` | `false` | Enable Forest Cascade Attention in the rollout (auto-injects the multi-replica `fuse_allreduce_rms` workaround when needed). |
+| `speculative_model` | `None` | HF id / local path of an Arctic draft head. Set this to turn on Arctic speculative decoding — no raw `vllm_config` needed. |
+| `num_speculative_tokens` | `3` | Draft tokens per target-model step (only when `speculative_model` is set). |
 | `use_liger` | `false` | Liger fused kernels in the policy fwd/bwd. |
 | `zero_stage` | `0` | DeepSpeed ZeRO (use `2` for ~1B, `3` for ≥7B; required for bf16 + fp32 grad). |
 | `offload_optimizer` | `false` | CPU offload optimizer state (`zero_stage≥2`). |
@@ -56,29 +61,27 @@ uv run -m skyrl.train.entrypoints.main_base \
 | `attn_implementation` | `flash_attention_2` | `flash_attention_2` or `flash_attention_3` (Hopper, optional wheel). |
 | `cuda_ipc_weight_sync` | `false` | Zero-copy IPC weight sync (colocate-only). |
 | `vllm_max_num_seqs` | `256` | vLLM batching cap. |
-| `vllm_config` | `None` | Raw `vllm.AsyncEngineArgs` overrides (see below). |
+| `vllm_config` | `None` | Escape hatch for raw `vllm.AsyncEngineArgs` keys not covered above (see below). |
 
 ### Escape hatch — `trainer.arctic_rl.vllm_config`
 
-The simple case (`use_zorro=true use_arctic_inference=true`) is enough for most users — cudagraph mode, attention pass selection, KV-cache settings, weight-sync wiring are all handled inside arctic-platform + arctic-inference. You shouldn't need to think about vLLM flags.
-
-For knobs that aren't yet exposed as typed `trainer.arctic_rl.*` fields — currently Forest Cascade Attention configs, Arctic speculative decoding, and one multi-replica fused-allreduce workaround — `vllm_config` is a dict forwarded verbatim to `vllm.AsyncEngineArgs` via `arctic-platform`'s `ArcticRLClientConfig.vllm_config` (public main, unmodified):
+The simple case is fully typed:
 
 ```bash
-trainer.arctic_rl.vllm_config="{
-    forest_cascade_attn_configs: '{}',
-    speculative_config: {method: arctic, model: <hf-id>, num_speculative_tokens: 3},
-    compilation_config: {pass_config: {fuse_allreduce_rms: false}},
-}"
+trainer.arctic_rl.use_zorro=true \
+trainer.arctic_rl.use_arctic_inference=true \
+trainer.arctic_rl.speculative_model=<hf-id-or-path>     # optional spec-dec
 ```
 
-Why each of those three appears here today, and why we expect them to disappear:
+That alone gives you ZoRRo (training-side), FCA (rollout), the multi-replica FlashInfer workaround, and Arctic speculative decoding — the integration translates each typed flag into the matching `vllm.AsyncEngineArgs` keys for you.
 
-- **`forest_cascade_attn_configs`** — should be implied by `use_arctic_inference=true`. Will be folded into the high-level knob in a follow-up.
-- **`speculative_config`** — should be a typed `trainer.arctic_rl.speculative_model` field. arctic-platform's `arctic_inference_config` schema already has slots for this; we'll wire SkyRL to it once the public-main schema reconciles.
-- **`compilation_config.pass_config.fuse_allreduce_rms: false`** — arctic-inference's `use_fca=True` default is `true`, which collides with FlashInfer workspace allocation on multi-replica/multi-node setups (per-process IPC port collision). The right fix is inside arctic-inference (auto-disable when `world_size > tp_size`); this `vllm_config` override is the interim workaround on multi-node runs.
+`vllm_config` is the escape hatch for vLLM knobs the typed fields don't yet cover — e.g. a non-default `cudagraph_mode`, a custom `compilation_config` pass, or any future vLLM field arctic-inference doesn't model. The dict is forwarded verbatim to `vllm.AsyncEngineArgs` via arctic-platform's `ArcticRLClientConfig.vllm_config` (public main, unmodified), and **user keys win on conflict** with the auto-injected defaults:
 
-In short: `vllm_config` exists for the long tail; it shouldn't be in the critical path of getting the speedup.
+```bash
+trainer.arctic_rl.vllm_config="{compilation_config: {cudagraph_mode: FULL}}"
+```
+
+You should not need this in the happy path. If you reach for it, the typed-knob layer probably should grow a new field — file a follow-up.
 
 ## Architecture
 

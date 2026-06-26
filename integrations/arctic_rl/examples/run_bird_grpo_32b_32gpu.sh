@@ -87,47 +87,23 @@ RESPONSE_LEN=4096
 TP_SIZE=4
 NUM_ENGINES=$((NUM_GPUS / TP_SIZE))
 
-# Inference-engine performance knobs, forwarded raw to vLLM via
-# trainer.arctic_rl.vllm_config:
-#
-#   * FCA (forest cascade attention): enabled by setting
-#     ``forest_cascade_attn_configs`` (anything arctic-inference
-#     recognises; "{}" = defaults).
-#
-#   * Arctic speculative decoding: ``speculative_config`` with
-#     ``method=arctic`` + a draft head + 3 spec tokens.
-#
-#   * ``compilation_config``: pin ``cudagraph_mode=PIECEWISE`` and
-#     ``pass_config.fuse_allreduce_rms=false``. The fuse_allreduce_rms
-#     override dodges the FlashInfer-workspace assert that fires when
-#     >1 vLLM replica per node tries to use the fused-allreduce compile
-#     pass simultaneously (per-process IPC port collision).
-#
-# We route via ``vllm_config`` (NOT ``arctic_inference_config``) because
-# arctic-platform's ``build_model_config`` forwards ``vllm_config``
-# verbatim to vLLM, whereas ``arctic_inference_config`` is filtered by
-# ``parse_arctic_inference_rollout`` which only knows the high-level
-# ``use_fca`` / ``spec_model`` schema and drops everything else.
-#
-# Flow-style dict values need a space after every `:` — OmegaConf.from_cli
-# runs yaml.load on each rhs.
-USE_FCA=${USE_FCA:-True}
+# Inference-engine optimizations are opt-in via typed knobs on
+# ``trainer.arctic_rl`` — the integration auto-injects the matching raw
+# vLLM kwargs (FCA, multi-replica FlashInfer workaround, Arctic
+# speculative_config) so the launcher never needs a raw vllm_config block.
+#   - ``use_arctic_inference=true``  -> FCA on, fuse_allreduce_rms workaround
+#                                       when num_engines > 1.
+#   - ``speculative_model=<path>``   -> Arctic speculative decoding on with
+#                                       ``num_speculative_tokens`` draft tokens.
+# ``vllm_config`` remains as an escape hatch for any vLLM knob the typed
+# fields don't cover; nothing in this recipe needs it.
 SPEC_MODEL=${SPEC_MODEL:-}
 NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS:-3}
 
-VLLM_CFG_PARTS=()
-if [[ "${USE_FCA}" == "True" ]]; then
-    VLLM_CFG_PARTS+=('forest_cascade_attn_configs: "{}"')
-    VLLM_CFG_PARTS+=('compilation_config: {cudagraph_mode: PIECEWISE, pass_config: {fuse_allreduce_rms: false}}')
-fi
-if [[ -n "${SPEC_MODEL}" && -d "${SPEC_MODEL}" ]]; then
-    VLLM_CFG_PARTS+=("speculative_config: {method: arctic, model: ${SPEC_MODEL}, num_speculative_tokens: ${NUM_SPEC_TOKENS}}")
-fi
-
-VLLM_CFG_OVERRIDE=()
-if (( ${#VLLM_CFG_PARTS[@]} > 0 )); then
-    IFS=, VLLM_CFG_BODY="${VLLM_CFG_PARTS[*]}" ; unset IFS
-    VLLM_CFG_OVERRIDE+=("trainer.arctic_rl.vllm_config={${VLLM_CFG_BODY}}")
+ARCTIC_SPEC_OVERRIDE=()
+if [[ -n "${SPEC_MODEL}" ]]; then
+    ARCTIC_SPEC_OVERRIDE+=("trainer.arctic_rl.speculative_model=${SPEC_MODEL}")
+    ARCTIC_SPEC_OVERRIDE+=("trainer.arctic_rl.num_speculative_tokens=${NUM_SPEC_TOKENS}")
 fi
 
 cd "${SKYRL_DIR}"
@@ -156,7 +132,7 @@ cd "${SKYRL_DIR}"
     trainer.arctic_rl.use_arctic_inference=true \
     trainer.arctic_rl.server_logs=true \
     trainer.arctic_rl.startup_timeout=1800 \
-    "${VLLM_CFG_OVERRIDE[@]}" \
+    "${ARCTIC_SPEC_OVERRIDE[@]}" \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/val.parquet']" \
     trainer.algorithm.advantage_estimator=grpo \
