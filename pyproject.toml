@@ -167,6 +167,13 @@ harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
 ]
 
+arctic-rl = [
+    "skyrl[skyrl-train]",
+    "arctic-platform",
+    "arctic-inference[vllm]",
+    "liger-kernel",
+]
+
 dev = [
     "mkdocs",
     "mkdocs-material",
