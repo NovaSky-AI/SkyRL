@@ -5,7 +5,7 @@ This module provides NewInferenceWorkerWrap, a vLLM worker extension that
 enables chunked weight updates from training to inference using the
 start/update/finish lifecycle:
 
-    start_weight_update   ->  one or more update_weights_ipc  ->  finish_weight_update
+    skyrl_start_weight_update   ->  one or more update_weights_ipc  ->  skyrl_finish_weight_update
 
 This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
@@ -40,9 +40,9 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
     vLLM worker extension for chunked weight sync (new inference path).
 
     Provides a three-phase weight update protocol via collective_rpc:
-        1. start_weight_update: Prepare model for receiving weights
+        1. skyrl_start_weight_update: Prepare model for receiving weights
         2. update_weights_ipc: Receive and load one chunk of weights
-        3. finish_weight_update: Finalize the model after all chunks
+        3. skyrl_finish_weight_update: Finalize the model after all chunks
 
     Attributes accessed from the host GPUWorker (via mixin inheritance):
         self.weight_transfer_engine
@@ -70,7 +70,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -151,7 +151,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(

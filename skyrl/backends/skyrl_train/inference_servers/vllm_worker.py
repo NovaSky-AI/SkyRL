@@ -36,9 +36,9 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
 
     Methods:
         init_weight_update_communicator: Initialize the weight receiver
-        start_weight_update: Begin a sync; initialize vLLM layerwise reload once
+        skyrl_start_weight_update: Begin a sync; initialize vLLM layerwise reload once
         load_weights: Receive and load one chunk of weights from trainer
-        finish_weight_update: End a sync; finalize vLLM layerwise reload once
+        skyrl_finish_weight_update: End a sync; finalize vLLM layerwise reload once
         teardown_weight_receiver: Clean up weight receiver resources
     """
 
@@ -82,7 +82,7 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
         Load one chunk of weights using the receiver.
 
         Called via collective_rpc from the weight loader, once per chunk.
-        When the sender brackets the sync with start_weight_update / finish_weight_update,
+        When the sender brackets the sync with skyrl_start_weight_update / skyrl_finish_weight_update,
         the chunk is loaded raw and the single finalize runs vLLM's post-load weight
         processing exactly once over the whole weight set.
         Without a bracket, it falls back to a self-contained reload_weights

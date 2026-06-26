@@ -408,13 +408,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(
             engine.collective_rpc,
-            "start_weight_update",
+            "skyrl_start_weight_update",
             args=(is_checkpoint_format,),
         )
 
     async def finish_weight_update(self):
         engine = self._get_engine()
-        return await asyncio.to_thread(engine.collective_rpc, "finish_weight_update")
+        return await asyncio.to_thread(engine.collective_rpc, "skyrl_finish_weight_update")
 
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -654,13 +654,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def start_weight_update(self, is_checkpoint_format: bool = True):
         engine = self._get_engine()
         return await engine.collective_rpc(
-            "start_weight_update",
+            "skyrl_start_weight_update",
             args=(is_checkpoint_format,),
         )
 
     async def finish_weight_update(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("finish_weight_update")
+        return await engine.collective_rpc("skyrl_finish_weight_update")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests
