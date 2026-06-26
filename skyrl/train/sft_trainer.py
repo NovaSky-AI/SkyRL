@@ -1595,16 +1595,6 @@ class SFTTrainer:
 
         batch_size = self.sft_cfg.batch_size
 
-        # Early validation: dataset must have at least batch_size examples.
-        # With the dataloader's drop_last=True, a dataset smaller than batch_size
-        # yields an empty dataloader (len == 0), which would otherwise surface as
-        # an unhandled StopIteration in the training loop rather than a clear error.
-        if len(tokenized) < batch_size:
-            raise ValueError(
-                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
-                f"Reduce batch_size or use more data."
-            )
-
         self._validate_batch_parallelism()
 
         # Build stateful dataloaders (replaces manual list shuffling/slicing).
@@ -1614,9 +1604,22 @@ class SFTTrainer:
         if eval_tokenized is not None:
             self.eval_dataloader = self.build_eval_dataloader(eval_tokenized)
 
+        # Validate the invariant the training loop relies on: the dataloader must
+        # yield at least one batch. With drop_last=True this fails when the sampler
+        # emits fewer than batch_size indices -- either because the dataset is
+        # smaller than batch_size (built-in samplers) or a custom sampler's
+        # num_samples is < batch_size. Catching it here turns an otherwise opaque
+        # StopIteration in the training loop into a clear error.
+        if len(self.train_dataloader) == 0:
+            raise ValueError(
+                f"Train dataloader is empty (0 batches with drop_last=True): the sampler yields fewer "
+                f"than batch_size={batch_size} indices (dataset has {len(tokenized)} examples). "
+                f"Reduce batch_size, use more data, or increase the custom sampler's num_samples."
+            )
+
         # steps_per_epoch is derived from the dataloader (which honors
-        # drop_last=True); callbacks rely on it.
-        steps_per_epoch = max(1, len(self.train_dataloader))
+        # drop_last=True); callbacks rely on it. Guaranteed >= 1 by the check above.
+        steps_per_epoch = len(self.train_dataloader)
 
         if self.sft_cfg.num_steps is None:
             logger.info(

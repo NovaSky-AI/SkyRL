@@ -312,6 +312,28 @@ def test_random_dataloader_uses_shuffle_not_sampler():
     assert isinstance(dl.generator, torch.Generator)
 
 
+class TestEmptyDataloaderInvariant:
+    """len(train_dataloader) == 0 is the condition train() guards against
+    (it would otherwise crash with an opaque StopIteration). With drop_last=True
+    this arises in two ways."""
+
+    def test_dataset_smaller_than_batch_size(self):
+        # Built-in sampler: fewer examples than batch_size -> 0 full batches.
+        dl = _make_trainer(sampler="random", batch_size=4).build_train_dataloader(list(range(2)))
+        assert len(dl) == 0
+
+    def test_custom_sampler_num_samples_below_batch_size(self):
+        # Custom sampler shrinks the effective length via num_samples,
+        # independent of the (large) dataset size.
+        dl = _make_trainer(
+            sampler="custom",
+            batch_size=4,
+            sampler_class_path=_CUSTOM_SAMPLER_PATH,
+            sampler_kwargs={"num_samples": 2},
+        ).build_train_dataloader(list(range(100)))
+        assert len(dl) == 0
+
+
 # ---------------------------------------------------------------------------
 # Example: CurriculumLearningSampler (shipped under examples/, loaded by path)
 # ---------------------------------------------------------------------------
