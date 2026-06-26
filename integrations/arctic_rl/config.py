@@ -46,8 +46,14 @@ class ArcticRLTrainerConfig(BaseConfig):
     groups.  ARL colocation is server-side GPU sharing — ``colocate_all`` must
     stay ``false`` when using the ARL backend.
     """
-    use_zorro: bool = False
-    """Enable ZoRRO (prompt deduplication) on the training server."""
+    use_zorro: bool = True
+    """Enable ZoRRO (prompt deduplication) on the training server.
+
+    Defaults to ``True`` — ZoRRo is the trainer-side speedup that motivates
+    using the Arctic RL integration in the first place. Disable explicitly
+    (``trainer.arctic_rl.use_zorro=false``) if you need vanilla GRPO for a
+    baseline comparison.
+    """
     zero_stage: int = 0
     """DeepSpeed ZeRO stage (0, 2, or 3)."""
     log_prob_gpus: int = 0
@@ -56,12 +62,13 @@ class ArcticRLTrainerConfig(BaseConfig):
     """Offload optimizer state to CPU when ``zero_stage >= 2``."""
 
     # -- Model / kernel knobs (verl: actor_rollout_ref.model.*) -------------
-    use_liger: bool = False
+    use_liger: bool = True
     """Enable Liger fused MLP/RMSNorm kernels on the training engine.
 
-    Server reads from ``ds_worker_config.use_liger``
-    (``arctic_platform/rl/deepspeed_worker.py:155``). Requires
-    ``liger_kernel`` to be installed.
+    Defaults to ``True`` — Liger is a pure fused-kernel speedup with no
+    behavioral effect. ``liger-kernel`` ships with the ``arctic-rl`` extra
+    so it is always available. Server reads from ``ds_worker_config.use_liger``
+    (``arctic_platform/rl/deepspeed_worker.py:155``).
     """
     attn_implementation: str = "flash_attention_2"
     """HF attention implementation passed to ``Qwen3ForCausalLM.from_pretrained``.
@@ -87,10 +94,12 @@ class ArcticRLTrainerConfig(BaseConfig):
     """
 
     # -- Logits / loss memory knobs (verl: arctic_rl.train.logits.*) --------
-    logits_optimization: Optional[str] = None
+    logits_optimization: Optional[str] = "memory"
     """``"memory"`` enables chunked logits compute on the server (ZoRRO
-    only). None = full materialization. verl converged reference: "memory".
-    Maps to ``ppo_trainer.yaml: arctic_rl.train.logits.optimization``.
+    only); ``None`` = full materialization. Defaults to ``"memory"`` to
+    match the ``use_zorro=True`` default — without it, ZoRRo materializes
+    the full B*R logits tensor and OOMs on long-context recipes. Maps to
+    ``ppo_trainer.yaml: arctic_rl.train.logits.optimization``.
     """
     logits_optimization_peak_mem_size_in_gib: float = 4.0
     """Per-chunk peak memory budget for the chunked-logits path. Matches
@@ -185,13 +194,20 @@ class ArcticRLTrainerConfig(BaseConfig):
     """
 
     # -- ArcticInference (FCA / fast-continuous-attention; verl: rollout.name=arctic)
-    use_arctic_inference: bool = False
+    use_arctic_inference: bool = True
     """Enable Arctic Inference (FCA + custom kernels) for the vLLM
-    sampling engine. Passes ``arctic_inference_config={}`` to
-    ``ArcticRLClientConfig`` which sets ``ARCTIC_INFERENCE_ENABLED=1``
-    on the sampling Ray workers. Matches verl's ``rollout.name=arctic``
-    converged path; typical 2-3x rollout speedup on long-context prompts.
-    Requires ``arctic_inference`` to be installed.
+    sampling engine.
+
+    Defaults to ``True`` — if you're using the ``integrations.arctic_rl``
+    entrypoint at all, Arctic Inference is the rollout-side speedup you
+    came here for. Setting this auto-injects
+    ``forest_cascade_attn_configs="{}"`` (and the multi-replica
+    ``fuse_allreduce_rms`` workaround when ``num_engines > 1``) into the
+    rollout vLLM engine; ``ARCTIC_INFERENCE_ENABLED=1`` is set on every
+    sampling Ray worker. Matches verl's ``rollout.name=arctic`` converged
+    path; typical 2-3x rollout speedup on long-context prompts. Requires
+    ``arctic_inference`` to be installed (ships with the ``arctic-rl``
+    extra).
     """
     speculative_model: Optional[str] = None
     """HF id or local path of an Arctic draft-head checkpoint. When set

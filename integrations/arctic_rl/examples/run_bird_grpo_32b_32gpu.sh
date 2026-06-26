@@ -113,23 +113,13 @@ cd "${SKYRL_DIR}"
     trainer.arctic_rl.colocate=true \
     trainer.arctic_rl.zero_stage=3 \
     trainer.arctic_rl.offload_optimizer=true \
-    trainer.arctic_rl.offload_param=false \
-    trainer.arctic_rl.log_prob_gpus=0 \
-    trainer.arctic_rl.use_zorro=true \
-    trainer.arctic_rl.use_liger=true \
     trainer.arctic_rl.attn_implementation=${ATTN_IMPL} \
-    trainer.arctic_rl.enable_gradient_checkpointing=true \
-    trainer.arctic_rl.ulysses_sequence_parallel_size=1 \
-    trainer.arctic_rl.logits_optimization=memory \
     trainer.arctic_rl.cuda_ipc_weight_sync=true \
     trainer.arctic_rl.low_memory_weight_sync=true \
     trainer.arctic_rl.lr_warmup_ratio=0.05 \
     'trainer.arctic_rl.optimizer_betas=[0.9,0.95]' \
     trainer.arctic_rl.vllm_enforce_eager=false \
-    trainer.arctic_rl.vllm_enable_prefix_caching=true \
     trainer.arctic_rl.vllm_max_num_batched_tokens=40960 \
-    trainer.arctic_rl.vllm_max_num_seqs=256 \
-    trainer.arctic_rl.use_arctic_inference=true \
     trainer.arctic_rl.server_logs=true \
     trainer.arctic_rl.startup_timeout=1800 \
     "${ARCTIC_SPEC_OVERRIDE[@]}" \

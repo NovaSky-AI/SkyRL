@@ -29,31 +29,30 @@ sync_weights steady state: <0.1s
 
 ## Drop into your own recipe
 
-Any stock SkyRL recipe becomes an Arctic RL recipe by appending one flag:
+Any stock SkyRL recipe becomes an Arctic RL recipe by appending **one flag**:
 
 ```bash
 uv run -m skyrl.train.entrypoints.main_base \
     trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
-    trainer.arctic_rl.use_zorro=true \
-    trainer.arctic_rl.use_arctic_inference=true \
-    trainer.arctic_rl.speculative_model=<hf-id-or-path> \
-    trainer.arctic_rl.zero_stage=2 \
     <... your existing recipe overrides ...>
 ```
 
-The integration translates each typed `arctic_rl.*` knob into the matching arctic-platform / vLLM payload — no raw `vllm_config` blocks required for FCA, speculative decoding, or the multi-replica FlashInfer workaround.
+That's it. ZoRRo (training-side dedup + memory-chunked logits), Forest Cascade Attention (rollout), Liger fused kernels, and the multi-replica FlashInfer workaround are all **on by default**. Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to also turn on Arctic speculative decoding.
 
 `trainer.override_entrypoint` tells `main_base` to dispatch into the Arctic entrypoint after Hydra parsing. No `PYTHONPATH` setup, no edits to `main_base.py`.
 
 ### `trainer.arctic_rl.*` knobs
 
+Defaults assume you came here to use Arctic RL; opt **out** of optimizations explicitly if you need a baseline comparison.
+
 | Knob | Default | Purpose |
 | --- | --- | --- |
-| `use_zorro` | `false` | Enable ZoRRo split-attention + prompt dedup in the trainer. |
-| `use_arctic_inference` | `false` | Enable Forest Cascade Attention in the rollout (auto-injects the multi-replica `fuse_allreduce_rms` workaround when needed). |
-| `speculative_model` | `None` | HF id / local path of an Arctic draft head. Set this to turn on Arctic speculative decoding — no raw `vllm_config` needed. |
+| `use_arctic_inference` | **`true`** | Forest Cascade Attention in the rollout (auto-injects the multi-replica `fuse_allreduce_rms` workaround when needed). |
+| `use_zorro` | **`true`** | ZoRRo split-attention + prompt dedup in the trainer. |
+| `logits_optimization` | **`"memory"`** | Chunked logits compute on the server (ZoRRo only). |
+| `use_liger` | **`true`** | Liger fused MLP/RMSNorm kernels. |
+| `speculative_model` | `None` | HF id / local path of an Arctic draft head — set this to enable Arctic speculative decoding. |
 | `num_speculative_tokens` | `3` | Draft tokens per target-model step (only when `speculative_model` is set). |
-| `use_liger` | `false` | Liger fused kernels in the policy fwd/bwd. |
 | `zero_stage` | `0` | DeepSpeed ZeRO (use `2` for ~1B, `3` for ≥7B; required for bf16 + fp32 grad). |
 | `offload_optimizer` | `false` | CPU offload optimizer state (`zero_stage≥2`). |
 | `offload_param` | `false` | CPU offload ZeRO-3 param shards. |
@@ -65,15 +64,7 @@ The integration translates each typed `arctic_rl.*` knob into the matching arcti
 
 ### Escape hatch — `trainer.arctic_rl.vllm_config`
 
-The simple case is fully typed:
-
-```bash
-trainer.arctic_rl.use_zorro=true \
-trainer.arctic_rl.use_arctic_inference=true \
-trainer.arctic_rl.speculative_model=<hf-id-or-path>     # optional spec-dec
-```
-
-That alone gives you ZoRRo (training-side), FCA (rollout), the multi-replica FlashInfer workaround, and Arctic speculative decoding — the integration translates each typed flag into the matching `vllm.AsyncEngineArgs` keys for you.
+The integration translates `arctic_rl.*` knobs into the corresponding `vllm.AsyncEngineArgs` keys for you — FCA, the multi-replica FlashInfer workaround, and Arctic speculative decoding are all auto-injected when their typed flag is on.
 
 `vllm_config` is the escape hatch for vLLM knobs the typed fields don't yet cover — e.g. a non-default `cudagraph_mode`, a custom `compilation_config` pass, or any future vLLM field arctic-inference doesn't model. The dict is forwarded verbatim to `vllm.AsyncEngineArgs` via arctic-platform's `ArcticRLClientConfig.vllm_config` (public main, unmodified), and **user keys win on conflict** with the auto-injected defaults:
 
