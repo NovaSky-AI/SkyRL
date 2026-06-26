@@ -175,6 +175,12 @@ class MegatronHFExportConfig(BaseConfig):
     """In distributed save, only ranks 0, N, 2N, ... write shards (e.g. 8 = one
     writer per 8-GPU node). Ignored when ``distributed_save`` is False."""
 
+    def __post_init__(self) -> None:
+        # save_every_n_ranks indexes ranks via modulo/floor-div in the bridge's
+        # distributed save; < 1 raises ZeroDivisionError there. Fail fast instead.
+        if self.save_every_n_ranks < 1:
+            raise ValueError(f"save_every_n_ranks must be >= 1, got {self.save_every_n_ranks}")
+
 
 @dataclass
 class MegatronLoraConfig(BaseConfig):
