@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.config import SFTConfig
 from skyrl.train.dataset.samplers import StatefulSequentialSampler, import_sampler_class
@@ -73,13 +74,23 @@ class _ExampleKwargSampler(torch.utils.data.Sampler[int]):
 _CUSTOM_SAMPLER_PATH = f"{__name__}._ExampleKwargSampler"
 
 
-def _load_curriculum_cls():
-    """Import the example CurriculumLearningSampler by file path."""
-    path = Path(__file__).resolve().parents[2] / "examples" / "train" / "sft" / "curriculum_sampler.py"
-    spec = importlib.util.spec_from_file_location("curriculum_sampler_example", path)
+def _load_example_cls(filename: str, class_name: str):
+    """Import a sampler class from an examples/train/sft/*.py file by path."""
+    path = Path(__file__).resolve().parents[2] / "examples" / "train" / "sft" / filename
+    spec = importlib.util.spec_from_file_location(f"{filename[:-3]}_example", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.CurriculumLearningSampler
+    return getattr(mod, class_name)
+
+
+def _load_curriculum_cls():
+    """Import the example CurriculumLearningSampler by file path."""
+    return _load_example_cls("curriculum_sampler.py", "CurriculumLearningSampler")
+
+
+def _load_data_mixing_cls():
+    """Import the example DataMixingSampler by file path."""
+    return _load_example_cls("data_mixing_sampler.py", "DataMixingSampler")
 
 
 def _make_trainer(**overrides) -> SFTTrainer:
@@ -360,3 +371,110 @@ class TestCurriculumExample:
         resumed.load_state_dict(state)
         assert list(resumed) == rest
         assert consumed + rest == list(cls(list(range(30)), lengths=[10, 10, 10], num_samples=30, seed=3))
+
+
+# ---------------------------------------------------------------------------
+# Example: DataMixingSampler (WeightedRandomSampler-based, loaded by path)
+# ---------------------------------------------------------------------------
+
+
+class TestDataMixingExample:
+    # data = two sources of 10 each: indices [0,10) = source 0, [10,20) = source 1.
+    DATA = list(range(20))
+    LENGTHS = [10, 10]
+
+    def test_len_matches_num_samples(self):
+        cls = _load_data_mixing_cls()
+        sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5], num_samples=64)
+        assert len(sampler) == 64
+
+    def test_validates_lengths_sum(self):
+        cls = _load_data_mixing_cls()
+        with pytest.raises(ValueError, match="must equal len"):
+            cls(self.DATA, lengths=[10, 5], weights=[0.5, 0.5])
+
+    def test_validates_weights_align(self):
+        cls = _load_data_mixing_cls()
+        with pytest.raises(ValueError, match="must align"):
+            cls(self.DATA, lengths=self.LENGTHS, weights=[1.0])
+
+    def test_rejects_degenerate_weights(self):
+        cls = _load_data_mixing_cls()
+        with pytest.raises(ValueError, match="non-negative with a positive sum"):
+            cls(self.DATA, lengths=self.LENGTHS, weights=[0.0, 0.0])
+
+    def test_deterministic_for_same_seed(self):
+        cls = _load_data_mixing_cls()
+        a = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
+        b = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
+        assert a == b
+
+    def test_differs_for_different_seed(self):
+        cls = _load_data_mixing_cls()
+        a = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
+        b = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=2))
+        assert a != b
+
+    def test_weighting_biases_the_mix(self):
+        cls = _load_data_mixing_cls()
+        # Source 0 weighted 4x source 1 -> ~80% of draws from indices [0,10).
+        plan = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=4000, seed=7))
+        frac_source0 = sum(1 for idx in plan if idx < 10) / len(plan)
+        assert 0.75 < frac_source0 < 0.85, frac_source0
+
+    def test_equal_weights_balanced(self):
+        cls = _load_data_mixing_cls()
+        plan = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5], num_samples=4000, seed=7))
+        frac_source0 = sum(1 for idx in plan if idx < 10) / len(plan)
+        assert 0.45 < frac_source0 < 0.55, frac_source0
+
+    def test_size_imbalance_still_matches_weights(self):
+        cls = _load_data_mixing_cls()
+        # Source 0 is tiny (2 examples) but weighted equally; source-level mix
+        # should still be ~50/50 because weight is divided across examples.
+        data = list(range(12))  # source 0: [0,2), source 1: [2,12)
+        plan = list(cls(data, lengths=[2, 10], weights=[0.5, 0.5], num_samples=4000, seed=9))
+        frac_source0 = sum(1 for idx in plan if idx < 2) / len(plan)
+        assert 0.45 < frac_source0 < 0.55, frac_source0
+
+    def test_state_dict_resume(self):
+        cls = _load_data_mixing_cls()
+        sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3)
+        it = iter(sampler)
+        consumed = [next(it) for _ in range(11)]
+        state = sampler.state_dict()
+        assert state == {"position": 11}
+        rest = list(it)
+
+        resumed = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3)
+        resumed.load_state_dict(state)
+        assert list(resumed) == rest
+        assert consumed + rest == list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3))
+
+    def test_resume_through_stateful_dataloader(self):
+        """The sampler's state is captured in the dataloader checkpoint and resumes."""
+        cls = _load_data_mixing_cls()
+
+        def make_dl():
+            sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=5)
+            return StatefulDataLoader(
+                self.DATA,
+                batch_size=4,
+                sampler=sampler,
+                shuffle=False,
+                drop_last=True,
+                collate_fn=lambda x: list(x),
+            )
+
+        dl = make_dl()
+        it = iter(dl)
+        next(it)
+        next(it)
+        state = dl.state_dict()
+        assert "_sampler_iter_state" in state
+        rest_full = [b for b in it]
+
+        dl2 = make_dl()
+        dl2.load_state_dict(state)
+        rest_resumed = [b for b in dl2]
+        assert rest_full == rest_resumed

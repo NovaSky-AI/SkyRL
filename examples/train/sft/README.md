@@ -164,6 +164,23 @@ PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
     num_steps=200 batch_size=4
 ```
 
+### Data mixing example
+
+[`data_mixing_sampler.py`](data_mixing_sampler.py) is a reference custom sampler
+(`DataMixingSampler`) that mixes a concatenation of sources with per-source
+`weights`, using torch's native `WeightedRandomSampler` for the weighted draw.
+Each source's weight is divided across its examples, so the source-level mixing
+proportion matches `weights` regardless of how many examples each source has.
+Order the dataset by source and give `lengths`/`weights` per source:
+
+```bash
+PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+    sampler=custom \
+    sampler_class_path=data_mixing_sampler.DataMixingSampler \
+    'sampler_kwargs={lengths: [8000, 2000], weights: [0.5, 0.5], num_samples: 800, seed: 42}' \
+    num_steps=200 batch_size=4
+```
+
 ## Limitations
 
 - **Limited `train_on_what` options**: Supports training on all or the last assistant message.
