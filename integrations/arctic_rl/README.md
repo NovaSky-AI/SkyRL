@@ -1,19 +1,25 @@
 # Arctic RL Integration for SkyRL
 
-Routes SkyRL's GRPO training loop through the [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) server — **all GPU operations** (training, generation, log-probs, weight sync) run on the server. The SkyRL client is CPU-only and orchestrates over HTTP.
+Routes SkyRL's GRPO training loop through [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) — **all GPU operations** (training, generation, log-probs, weight sync) run on Arctic's Ray actors. The SkyRL driver process holds 0 GPUs and orchestrates via Ray actor calls.
 
 ```
-SkyRL Client (CPU-only, ray num_gpus=0)
-  - Data loading, reward scoring (skyrl-gym)
-  - Orchestration: generate -> score -> train
-  - HTTP calls to Arctic RL server
-        |
-        v
-Arctic RL Server (own Ray cluster, all GPUs)
-  - DeepSpeed Workers: forward/backward, GRPO loss, optimizer step
-  - ArcticInference (vLLM) Replicas: generation, log-probs
-  - NCCL weight sync between training and inference
+                       Single Ray cluster
+ +----------------------------------------------------------------+
+ |                                                                |
+ |   SkyRL driver (num_gpus=0)        Arctic RL Ray actors        |
+ |   - Data loading                   - ArcticRLRayServerState    |
+ |   - skyrl-gym reward scoring       - DeepSpeedWorker (xN)      |
+ |   - generate -> score -> train     - InferenceWorker (xM)      |
+ |                                      = ArcticInference vLLM    |
+ |          |                                  ^                  |
+ |          +---- ray.get(actor.x.remote()) ---+                  |
+ |                                                                |
+ |   NCCL weight sync runs directly between DeepSpeedWorker       |
+ |   and InferenceWorker GPUs (no driver involvement).            |
+ +----------------------------------------------------------------+
 ```
+
+`arctic-platform` supports both Ray and HTTP transports (`comm_protocol="ray"` vs `"http"`); the HTTP path is for remote dss-platform deployments. This integration pins `comm_protocol="ray"` so the SkyRL driver and the Arctic server actors live in the same Ray cluster and talk via in-cluster actor calls — no HTTP server, no separate process group.
 
 ## Quick Start (GSM8K, 4 GPUs, single node)
 
@@ -183,15 +189,15 @@ integrations/arctic_rl/                # importable as integrations.arctic_rl
 
 ## How it works
 
-1. **`arctic_rl.entrypoint`** spawns the Arctic RL server as a subprocess with a clean environment (stripped `CUDA_VISIBLE_DEVICES` and `RAY_*` vars so the server gets its own GPU access), then hands control to SkyRL's trainer.
+1. **`arctic_rl.entrypoint.main`** pre-initializes the Arctic RL Ray actors on the driver (one `ArcticRLRayServerState` actor that owns `DeepSpeedWorker` and `InferenceWorker` child actors), grabs their handles via `pre_client.get_server_state()`, then launches the SkyRL trainer as another Ray task in the same cluster, passing the actor handles in as `server_state`. The trainer reattaches via `create_arctic_rl_client(reconnect_cfg, server_state)` so it talks to the same actors the driver started.
 
 2. **`ArcticPPOTrainer`** replaces three steps of SkyRL's training loop:
-   - `fwd_logprobs_values_reward` → no-op (server computes old log-probs internally)
-   - `compute_advantages_and_returns` → no-op (server computes GRPO advantages from rewards)
-   - `train_critic_and_policy` → ships batches to the server over HTTP; server runs GRPO loss + backward + step
+   - `fwd_logprobs_values_reward` → no-op (server actors compute old log-probs internally)
+   - `compute_advantages_and_returns` → no-op (server actors compute GRPO advantages from rewards)
+   - `train_critic_and_policy` → ships batches to the server actors via `ray.get(actor.train.remote(...))`; the actors run GRPO loss + backward + step
 
-3. **`ArcticGenerator`** routes generation to server vLLM and scores completions client-side via `skyrl-gym`.
+3. **`ArcticGenerator`** routes generation to the `InferenceWorker` (vLLM) actors and scores completions client-side via `skyrl-gym`.
 
 4. **Server-side GRPO loss** is self-contained: per-token log-probs with causal shift, old log-probs by detaching (correct for `update_epochs_per_batch=1`), group-relative advantages from per-sequence rewards, PPO clipped surrogate.
 
-The SkyRL ↔ Arctic RL protocol is minimal: server takes `(sequences, rewards, loss_mask)`, returns updated weights for NCCL sync. All reward scoring and data orchestration live on the SkyRL side, all GPU compute lives on the Arctic side.
+The SkyRL ↔ Arctic RL protocol is minimal: server actors take `(sequences, rewards, loss_mask)` and return updated weights via NCCL sync directly to the `InferenceWorker` GPUs (the driver never sees the weights). All reward scoring and data orchestration live on the SkyRL side, all GPU compute lives on the Arctic actors.
