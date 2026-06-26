@@ -222,11 +222,12 @@ class TestRandomDataloader:
         dl_b = _make_trainer(sampler="random", batch_size=4, seed=999).build_train_dataloader(data)
         assert _flatten(dl_a) != _flatten(dl_b)
 
-    def test_drop_last(self):
-        # 41 items, batch_size 4 -> 10 full batches, last partial dropped.
+    def test_keeps_partial_tail_batch(self):
+        # drop_last=False: 41 items, batch_size 4 -> ceil(41/4) = 11 batches
+        # (the trailing partial batch is padded in collate, not dropped).
         data = list(range(41))
         dl = _make_trainer(sampler="random", batch_size=4, seed=1).build_train_dataloader(data)
-        assert len(dl) == 10
+        assert len(dl) == 11
 
     def test_resume_mid_epoch(self):
         data = list(range(40))
@@ -313,25 +314,79 @@ def test_random_dataloader_uses_shuffle_not_sampler():
 
 
 class TestEmptyDataloaderInvariant:
-    """len(train_dataloader) == 0 is the condition train() guards against
-    (it would otherwise crash with an opaque StopIteration). With drop_last=True
-    this arises in two ways."""
+    """With drop_last=False a sub-batch_size dataset is padded into one batch
+    (not dropped); the dataloader is only empty when the sampler yields nothing,
+    which is the condition train() guards against (opaque StopIteration)."""
 
-    def test_dataset_smaller_than_batch_size(self):
-        # Built-in sampler: fewer examples than batch_size -> 0 full batches.
+    def test_dataset_smaller_than_batch_size_is_one_batch(self):
+        # Built-in sampler: fewer examples than batch_size -> 1 (padded) batch.
         dl = _make_trainer(sampler="random", batch_size=4).build_train_dataloader(list(range(2)))
-        assert len(dl) == 0
+        assert len(dl) == 1
 
-    def test_custom_sampler_num_samples_below_batch_size(self):
-        # Custom sampler shrinks the effective length via num_samples,
-        # independent of the (large) dataset size.
+    def test_custom_sampler_num_samples_below_batch_size_is_one_batch(self):
+        # Custom sampler shrinks the effective length via num_samples, but the
+        # tail is padded rather than dropped -> 1 batch.
         dl = _make_trainer(
             sampler="custom",
             batch_size=4,
             sampler_class_path=_CUSTOM_SAMPLER_PATH,
             sampler_kwargs={"num_samples": 2},
         ).build_train_dataloader(list(range(100)))
+        assert len(dl) == 1
+
+    def test_empty_dataset_is_zero_batches(self):
+        # Only a truly empty dataset yields 0 batches (the guarded condition).
+        # Uses the sequential sampler: the built-in random path errors earlier
+        # (torch's RandomSampler rejects an empty data_source at construction).
+        dl = _make_trainer(sampler="sequential", batch_size=4).build_train_dataloader([])
         assert len(dl) == 0
+
+
+class TestTailBatchPadding:
+    """The final short batch is padded up to batch_size (via the real collator),
+    with padded rows masked out of the loss, so every example is trained on."""
+
+    @staticmethod
+    def _example(n_in=6, n_act=3):
+        return {
+            "input_ids": list(range(1, n_in + 1)),
+            "attention_mask": [1] * n_in,
+            "num_actions": n_act,
+            "loss_mask": [1] * n_act,
+        }
+
+    def _trainer_with_real_collator(self, batch_size=4, micro=2):
+        import types
+
+        from skyrl.train.dataset.collators import DefaultCollator
+
+        trainer = _make_trainer(sampler="sequential", batch_size=batch_size)
+        trainer.collator = DefaultCollator(types.SimpleNamespace(pad_token_id=0), micro)
+        return trainer
+
+    def test_tail_batch_padded_and_masked(self):
+        trainer = self._trainer_with_real_collator(batch_size=4)
+        data = [self._example() for _ in range(6)]  # 1 full batch + tail of 2
+        dl = trainer.build_train_dataloader(data)
+        assert len(dl) == 2  # ceil(6/4), nothing dropped
+
+        last = list(dl)[-1]
+        # Padded up to batch_size rows...
+        assert last["sequences"].shape[0] == 4
+        # ...with the 2 padded rows masked out of the loss (loss_mask == 0),
+        # while the 2 real rows keep their (scaled, nonzero) loss_mask.
+        loss_mask = last["loss_mask"]
+        assert (loss_mask[2:] == 0).all()
+        assert (loss_mask[:2] != 0).any()
+
+    def test_full_batches_unaffected(self):
+        trainer = self._trainer_with_real_collator(batch_size=4)
+        data = [self._example() for _ in range(8)]  # exactly 2 full batches
+        dl = trainer.build_train_dataloader(data)
+        assert len(dl) == 2
+        for batch in dl:
+            assert batch["sequences"].shape[0] == 4
+            assert (batch["loss_mask"] != 0).any()
 
 
 # ---------------------------------------------------------------------------

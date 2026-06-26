@@ -666,15 +666,30 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     return batch
 
 
-def collate_sft_examples(examples: list, collator, batch_size: int) -> TrainingInputBatch:
+def collate_sft_examples(
+    examples: list, collator, batch_size: int, pad_to_batch_size: bool = False
+) -> TrainingInputBatch:
     """Top-level collate function for the SFT ``StatefulDataLoader``.
 
     Defined at module scope (not a lambda/closure) so it is picklable when the
     dataloader uses worker processes with the ``spawn`` start method. Delegates
     to the trainer's configured ``collator`` (``DefaultCollator`` or
     ``PackedDataCollator``).
+
+    When ``pad_to_batch_size`` is set (the train path, non-packed), a final
+    short batch is padded up to ``batch_size`` rows via
+    :func:`pad_training_input_batch`, which zeros ``loss_mask`` on the padded
+    rows so they contribute no gradient. This lets every example in an epoch be
+    trained on (instead of dropping the tail) while still dispatching a full,
+    evenly-shardable ``batch_size`` batch. Packed batches are never row-padded
+    (their rows are FFD bins, already rounded to a multiple of ``dp_size``).
     """
-    return collator(examples, batch_size=batch_size)
+    batch = collator(examples, batch_size=batch_size)
+    if pad_to_batch_size:
+        pad_rows = batch_size - len(examples)
+        if pad_rows > 0:
+            batch = pad_training_input_batch(batch, pad_rows)
+    return batch
 
 
 # ---------------------------------------------------------------------------
@@ -1176,8 +1191,11 @@ class SFTTrainer:
         """Build the training ``StatefulDataLoader``.
 
         Sampling order is seeded for reproducibility and captured in the dataloader's
-        ``state_dict`` for checkpoint/resume. Uses ``drop_last=True`` so every
-        step sees a full ``batch_size`` mini-batch.
+        ``state_dict`` for checkpoint/resume. Uses ``drop_last=False`` so every
+        example in an epoch is trained on: a final short batch is padded up to
+        ``batch_size`` in :func:`collate_sft_examples` (padded rows are masked
+        out of the loss), instead of being dropped. (Packed batches are not
+        row-padded; the FFD packer already handles a short example list.)
 
         Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
         bit-exactly (the common case). For the built-in ``"random"`` sampler,
@@ -1193,6 +1211,9 @@ class SFTTrainer:
             collate_sft_examples,
             collator=self.collator,
             batch_size=self.sft_cfg.batch_size,
+            # Packed batches dispatch FFD-bin rows (already a multiple of
+            # dp_size), so only the un-packed path pads to batch_size.
+            pad_to_batch_size=not self.sft_cfg.use_sequence_packing,
         )
 
         seeded_generator = torch.Generator()
@@ -1209,7 +1230,9 @@ class SFTTrainer:
             # only enable the built-in random sampler when none was provided.
             shuffle=sampler is None,
             collate_fn=collate_fn,
-            drop_last=True,
+            # Keep the trailing partial batch (padded in collate) so no example
+            # is dropped within an epoch.
+            drop_last=False,
             generator=seeded_generator,
             num_workers=num_workers,
             persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
@@ -1605,20 +1628,21 @@ class SFTTrainer:
             self.eval_dataloader = self.build_eval_dataloader(eval_tokenized)
 
         # Validate the invariant the training loop relies on: the dataloader must
-        # yield at least one batch. With drop_last=True this fails when the sampler
-        # emits fewer than batch_size indices -- either because the dataset is
-        # smaller than batch_size (built-in samplers) or a custom sampler's
-        # num_samples is < batch_size. Catching it here turns an otherwise opaque
-        # StopIteration in the training loop into a clear error.
+        # yield at least one batch. With drop_last=False (the final short batch is
+        # padded, not dropped) this only happens when the sampler yields nothing
+        # at all -- an empty dataset or a custom sampler with num_samples=0.
+        # Catching it here turns an otherwise opaque StopIteration in the training
+        # loop into a clear error.
         if len(self.train_dataloader) == 0:
             raise ValueError(
-                f"Train dataloader is empty (0 batches with drop_last=True): the sampler yields fewer "
-                f"than batch_size={batch_size} indices (dataset has {len(tokenized)} examples). "
-                f"Reduce batch_size, use more data, or increase the custom sampler's num_samples."
+                f"Train dataloader is empty (0 batches): the sampler yields no indices "
+                f"(dataset has {len(tokenized)} examples). "
+                f"Provide a non-empty dataset, or set the custom sampler's num_samples > 0."
             )
 
-        # steps_per_epoch is derived from the dataloader (which honors
-        # drop_last=True); callbacks rely on it. Guaranteed >= 1 by the check above.
+        # steps_per_epoch is derived from the dataloader. With drop_last=False it
+        # is ceil(len(sampler) / batch_size) -- the trailing partial batch counts
+        # as a step. Callbacks rely on it; guaranteed >= 1 by the check above.
         steps_per_epoch = len(self.train_dataloader)
 
         if self.sft_cfg.num_steps is None:
@@ -1721,9 +1745,14 @@ class SFTTrainer:
                 step_result = self.train_step(batch, self.global_step)
                 all_timings.update(step_result["timings"])
 
-            # Compute throughput using actual (non-padding) tokens
+            # Compute throughput using actual (non-padding) tokens. A padded
+            # tail batch appends ``pad_size`` rows (copies of row 0) that are
+            # masked out of the loss; exclude them from the token count so the
+            # throughput metric reflects only real tokens.
             batch_padded_seq_len = batch["sequences"].shape[1]
-            actual_num_tokens = batch["attention_mask"].sum().item()
+            pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
+            real_rows = batch["attention_mask"].shape[0] - pad_size
+            actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
             self._total_tokens_processed += actual_num_tokens
             tokens_per_second = actual_num_tokens / all_timings["step"]
 
