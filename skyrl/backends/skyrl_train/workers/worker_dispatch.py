@@ -434,6 +434,10 @@ class WorkerDispatch:
             )
         )
 
+    def finalize_pending_saves(self, model: str) -> None:
+        """Block until any in-flight async checkpoint write for ``model`` completes."""
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "finalize_pending_saves"))
+
     def load_checkpoint(
         self,
         model: str,

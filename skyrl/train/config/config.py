@@ -222,6 +222,12 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    async_dist_ckpt_save: bool = False
+    """Write the torch_dist checkpoint from a background process so training resumes
+    immediately; the pending write is finalized at the next checkpoint and at shutdown.
+    The on-disk format is identical to a synchronous save. Only the sharded
+    model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
+    Falls back to synchronous for cloud paths."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
