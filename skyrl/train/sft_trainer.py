@@ -1175,14 +1175,13 @@ class SFTTrainer:
     def build_train_dataloader(self, tokenized: list) -> StatefulDataLoader:
         """Build the training ``StatefulDataLoader``.
 
-        Replaces the previous manual list shuffling/slicing. Sampling order is
-        seeded for reproducibility and captured in the dataloader's
+        Sampling order is seeded for reproducibility and captured in the dataloader's
         ``state_dict`` for checkpoint/resume. Uses ``drop_last=True`` so every
         step sees a full ``batch_size`` mini-batch.
 
         Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
         bit-exactly (the common case). For the built-in ``"random"`` sampler,
-        epochs *after* the resumed one are re-shuffled into a valid but not
+        epochs after the resumed one are re-shuffled into a valid but not
         byte-identical order (the generator advances differently after a
         partially-replayed epoch) -- this matches the RL trainer's dataloader.
         Custom samplers that span the whole run in a single pass (e.g. the
@@ -1214,7 +1213,6 @@ class SFTTrainer:
             generator=seeded_generator,
             num_workers=num_workers,
             persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
-            # Ray uses the spawn start method; forking inside Ray is unsafe.
             multiprocessing_context="spawn" if num_workers > 0 else None,
         )
 
@@ -1323,21 +1321,20 @@ class SFTTrainer:
 
         # Restore train dataloader / sampler position so sampling resumes from
         # the exact next example (mirrors the RL trainer's data.pt handling).
-        if self.train_dataloader is not None:
-            dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
-            if io.exists(dataloader_state_path):
-                try:
-                    with io.open_file(dataloader_state_path, "rb") as f:
-                        dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                    self.train_dataloader.load_state_dict(dataloader_state)
-                    logger.info("Restored train dataloader state")
-                except Exception as e:
-                    logger.warning(f"Failed to restore dataloader state: {e}")
-            else:
-                logger.warning(
-                    f"No data.pt found at {dataloader_state_path}; dataloader will start from the "
-                    "beginning of its sampling order (older checkpoint or RNG-only resume)."
-                )
+        dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
+        if io.exists(dataloader_state_path):
+            try:
+                with io.open_file(dataloader_state_path, "rb") as f:
+                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+                self.train_dataloader.load_state_dict(dataloader_state)
+                logger.info("Restored train dataloader state")
+            except Exception as e:
+                logger.warning(f"Failed to restore dataloader state: {e}")
+        else:
+            logger.warning(
+                f"No data.pt found at {dataloader_state_path}; dataloader will start from the "
+                "beginning of its sampling order (older checkpoint or RNG-only resume)."
+            )
 
         logger.info(f"Successfully resumed from global_step_{global_step}")
         return global_step
@@ -1598,7 +1595,10 @@ class SFTTrainer:
 
         batch_size = self.sft_cfg.batch_size
 
-        # Early validation: dataset must have at least batch_size examples
+        # Early validation: dataset must have at least batch_size examples.
+        # With the dataloader's drop_last=True, a dataset smaller than batch_size
+        # yields an empty dataloader (len == 0), which would otherwise surface as
+        # an unhandled StopIteration in the training loop rather than a clear error.
         if len(tokenized) < batch_size:
             raise ValueError(
                 f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
@@ -1621,7 +1621,7 @@ class SFTTrainer:
         if self.sft_cfg.num_steps is None:
             logger.info(
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
-                f"{steps_per_epoch} steps/epoch * {self.sft_cfg.num_epochs} = "
+                f"{len(self.train_dataloader)} steps/epoch * {self.sft_cfg.num_epochs} = "
                 f"{self.sft_cfg.num_epochs * steps_per_epoch} steps"
             )
 
@@ -1686,7 +1686,6 @@ class SFTTrainer:
         # SkyRL starts counting at step 1
         self.global_step = start_step + 1 if start_step > 0 else 1
         self._fire("on_epoch_start")
-        epoch_in_progress = True
 
         # Iterate once on global_step rather than looping epoch-by-epoch: a
         # single iterator is advanced across steps, and only re-created at an
@@ -1802,11 +1801,11 @@ class SFTTrainer:
             self.global_step += 1
         self.global_step = min(self.global_step, num_steps)
 
-        # Pair the leading on_epoch_start: fire on_epoch_end if we exited the
-        # loop mid-epoch
-        if epoch_in_progress:
-            self._fire("on_epoch_end")
-            epoch_in_progress = False
+        # Close the final epoch. The loop always exits with exactly one epoch
+        # open (boundaries are detected lazily at the top of the loop and
+        # immediately re-opened), so this is the single matching on_epoch_end
+        # for the last on_epoch_start.
+        self._fire("on_epoch_end")
 
         # Save final checkpoint (if checkpointing is enabled). Skip if the last
         # in-loop iteration already saved (either via ckpt_interval or via a
