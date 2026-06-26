@@ -33,10 +33,13 @@ import torch
 from loguru import logger
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.trainer import RayPPOTrainer
 
 
 def _run(coro):
@@ -54,10 +57,9 @@ def _run(coro):
         return asyncio.run(coro)
     except RuntimeError:
         import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(
-                lambda c=coro: asyncio.new_event_loop().run_until_complete(c)
-            ).result()
+            return pool.submit(lambda c=coro: asyncio.new_event_loop().run_until_complete(c)).result()
 
 
 class ArcticPPOTrainer(RayPPOTrainer):
@@ -115,9 +117,7 @@ class ArcticPPOTrainer(RayPPOTrainer):
         (matches verl's pre-update_actor ``compute_log_prob`` placement).
         """
         ep = int(self.cfg.trainer.update_epochs_per_batch)
-        assert ep == 1, (
-            f"ArcticPPOTrainer requires update_epochs_per_batch=1, got {ep}"
-        )
+        assert ep == 1, f"ArcticPPOTrainer requires update_epochs_per_batch=1, got {ep}"
 
         if self._stashed_rewards is not None:
             data["rewards"] = self._stashed_rewards
@@ -129,7 +129,8 @@ class ArcticPPOTrainer(RayPPOTrainer):
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
         status = self.dispatch.forward_backward(
-            "policy", data,
+            "policy",
+            data,
             loss_fn="verl_grpo",
             loss_fn_config={"n_samples": n_samples},
         )
@@ -153,6 +154,7 @@ class ArcticPPOTrainer(RayPPOTrainer):
 # ---------------------------------------------------------------------------
 # Dispatch — duck-types the WorkerDispatch interface used by RayPPOTrainer
 # ---------------------------------------------------------------------------
+
 
 class _ArcticDispatch:
     """Routes ``WorkerDispatch`` calls to the Arctic RL server.
@@ -185,24 +187,17 @@ class _ArcticDispatch:
         # version skew.
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
         self._pad_token_id: int = (
-            self.tokenizer.pad_token_id
-            if self.tokenizer.pad_token_id is not None
-            else self.tokenizer.eos_token_id
+            self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         )
 
         # DP size = number of training GPUs (Arctic-RL training is DP-only;
         # no TP/PP on the training side). The verl_grpo loss uses this to
         # compute the correct global-mean normalization.
-        self._dp_size: int = (
-            cfg.trainer.placement.policy_num_gpus_per_node
-            * cfg.trainer.placement.policy_num_nodes
-        )
+        self._dp_size: int = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
 
         # Sampling temperature is part of the loss math (apply_temperature
         # post-processor divides logits by it). Recipe knob.
-        self._temperature: float = float(
-            getattr(cfg.generator.sampling_params, "temperature", 1.0) or 1.0
-        )
+        self._temperature: float = float(getattr(cfg.generator.sampling_params, "temperature", 1.0) or 1.0)
 
         # ZoRRO toggle — mirror SkyRL's `arl.use_zorro` onto the server-side
         # `meta.zorro_train_enable` so the two stay in sync. Defaults to False.
@@ -294,17 +289,17 @@ class _ArcticDispatch:
         ``[B, P + R]`` shape where ``P = max(prompt_len)`` and
         ``R = max(response_len)``.
         """
-        sequences = data["sequences"]                # [B, S]
-        attention_mask = data["attention_mask"]      # [B, S]
-        response_mask = data["response_mask"]        # [B, R_sky]  R_sky = max_r
+        sequences = data["sequences"]  # [B, S]
+        attention_mask = data["attention_mask"]  # [B, S]
+        response_mask = data["response_mask"]  # [B, R_sky]  R_sky = max_r
         B, S = sequences.shape
         device = sequences.device
         pad_id = self._pad_token_id
 
         # Real per-sample lengths.
-        total_lens = attention_mask.sum(dim=1)        # [B] = p_i + r_i
-        response_lens = response_mask.sum(dim=1)      # [B] = r_i
-        prompt_lens = total_lens - response_lens      # [B] = p_i
+        total_lens = attention_mask.sum(dim=1)  # [B] = p_i + r_i
+        response_lens = response_mask.sum(dim=1)  # [B] = r_i
+        prompt_lens = total_lens - response_lens  # [B] = p_i
 
         max_p = int(prompt_lens.max().item())
         max_r = int(response_lens.max().item())
@@ -339,8 +334,8 @@ class _ArcticDispatch:
             pad_i = S - p_i - r_i  # left pad in SkyRL layout
 
             # SkyRL slice locations:
-            prompt_slice = sequences[i, pad_i : pad_i + p_i]      # [p_i]
-            response_slice = sequences[i, pad_i + p_i :]          # [r_i]
+            prompt_slice = sequences[i, pad_i : pad_i + p_i]  # [p_i]
+            response_slice = sequences[i, pad_i + p_i :]  # [r_i]
 
             # verl placement: prompt sits in positions [max_p - p_i : max_p],
             # response sits in positions [max_p : max_p + r_i].
@@ -356,7 +351,7 @@ class _ArcticDispatch:
             # input_ids. This matches verl's response-only tensor convention.
             R_sky = response_mask.shape[1]
             for k in optional_response_keys:
-                src = data[k][i, R_sky - r_i :]   # the real per-token values
+                src = data[k][i, R_sky - r_i :]  # the real per-token values
                 new_opts[k][i, :r_i] = src
 
         # position_ids derived from attention_mask: cumsum-1, pad→0 (drops
@@ -421,7 +416,6 @@ class _ArcticDispatch:
         cfg = self.cfg
         algo = cfg.trainer.algorithm
         n_samples = cfg.generator.n_samples_per_prompt
-        arl = getattr(cfg.trainer, "arctic_rl", None)
 
         # actor_config — fields read by verl_grpo.VerlPolicyConfig.
         # SkyRL stores most of these on `cfg.trainer.algorithm`.
@@ -581,9 +575,7 @@ class _ArcticDispatch:
         if lp is None:
             lp = result["batch"].get("log_probs")
         if lp is None:
-            raise RuntimeError(
-                f"fwd_no_grad returned no logprobs; got keys={list(result.get('batch', {}).keys())}"
-            )
+            raise RuntimeError(f"fwd_no_grad returned no logprobs; got keys={list(result.get('batch', {}).keys())}")
         if isinstance(lp, list):
             lp = torch.tensor(lp)
         return lp
@@ -720,6 +712,7 @@ class _ArcticDispatch:
 # Stub — satisfies self.policy_model usage in RayPPOTrainer / FullyAsync
 # ---------------------------------------------------------------------------
 
+
 class _ArcticPolicyStub:
     """No-op stub for ``self.policy_model``."""
 
@@ -767,6 +760,7 @@ class _ArcticInferenceEngineStub:
 # Fully-async variant
 # ---------------------------------------------------------------------------
 
+
 def _make_arctic_fully_async_trainer_class():
     """Build the fully-async Arctic trainer class with a deferred import.
 
@@ -810,10 +804,7 @@ def _make_arctic_fully_async_trainer_class():
             # bridge's old-log-prob call lives inside forward_backward, so
             # multi-epoch would collapse `ratio == 1` every epoch.
             ep = int(self.cfg.trainer.update_epochs_per_batch)
-            assert ep == 1, (
-                f"ArcticFullyAsyncPPOTrainer: update_epochs_per_batch must "
-                f"be 1; got {ep}."
-            )
+            assert ep == 1, f"ArcticFullyAsyncPPOTrainer: update_epochs_per_batch must " f"be 1; got {ep}."
 
             if self._stashed_rewards is not None:
                 data["rewards"] = self._stashed_rewards
@@ -825,7 +816,8 @@ def _make_arctic_fully_async_trainer_class():
             all_metrics: Dict[str, List[float]] = defaultdict(list)
 
             status = self.dispatch.forward_backward(
-                "policy", data,
+                "policy",
+                data,
                 loss_fn="verl_grpo",
                 loss_fn_config={"n_samples": n_samples},
             )

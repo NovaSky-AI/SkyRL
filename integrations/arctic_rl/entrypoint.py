@@ -12,9 +12,9 @@ import sys
 from typing import Any, Optional
 
 import ray
+from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
 from loguru import logger
 
-from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils import validate_cfg
@@ -64,8 +64,9 @@ class ArcticRLExp(BasePPOExp):
             sampling_params=cfg.generator.sampling_params,
         )
 
-    def get_trainer(self, cfg, tracker, tokenizer, train_dataset, eval_dataset,
-                    inference_engine_client, generator, colocate_pg):
+    def get_trainer(
+        self, cfg, tracker, tokenizer, train_dataset, eval_dataset, inference_engine_client, generator, colocate_pg
+    ):
         return ArcticPPOTrainer(
             cfg=cfg,
             tracker=tracker,
@@ -88,6 +89,7 @@ class ArcticRLExp(BasePPOExp):
         cfg_colocate = bool(getattr(arl_cfg, "colocate", False)) if arl_cfg else False
 
         from .trainer import _ArcticInferenceEngineStub
+
         ie_stub = _ArcticInferenceEngineStub(client=self.arctic_client, colocate=cfg_colocate)
 
         tracker = self.get_tracker()
@@ -127,10 +129,11 @@ def main() -> None:
     empty ``ArcticRLTrainerConfig()`` (=Arctic with default settings) so the
     user only needs the one ``override_entrypoint`` flag to opt into Arctic.
     """
-    from .config import ArcticRLTrainerConfig, ArcticSkyRLConfig
     # Register Arctic-RL-shipped envs (bird / bird_sql) with skyrl-gym before
     # any code path tries to ``make()`` them. Side-effect import.
     from . import envs  # noqa: F401
+    from .config import ArcticRLTrainerConfig, ArcticSkyRLConfig
+
     # Strip the dispatch flag itself: it was consumed by main_base.py's peek-
     # ahead and is not a real ArcticTrainerConfig field, so a strict parse
     # would reject it.
@@ -148,15 +151,14 @@ def main() -> None:
     # client also owns an in-process server actor state that the reconnecting
     # worker needs (http: None). Policy flags read from `cfg` (see
     # _ArcticDispatch.__init__).
-    server_state = (
-        pre_client.get_server_state() if rl_config.comm_protocol == "ray" else None
-    )
+    server_state = pre_client.get_server_state() if rl_config.comm_protocol == "ray" else None
     logger.info(
         f"ArcticRL jobs ready — training={pre_client.training_job_id}, "
         f"sample={pre_client.sampling_job_id}, log_prob={pre_client.log_prob_job_id}"
     )
 
     from skyrl.train.utils.utils import prepare_runtime_environment
+
     env_vars = prepare_runtime_environment(cfg)
     # Forward ARCTIC_* env vars to Ray workers — moved here from core utils per
     # reviewer feedback (core stays integration-agnostic).
@@ -167,9 +169,7 @@ def main() -> None:
     env_vars.update({k: v for k, v in os.environ.items() if k.startswith("WANDB_")})
     # Forward the SkyRL repo root on Ray workers' PYTHONPATH so they can import
     # ``integrations.arctic_rl.*`` when deserializing the skyrl_entrypoint task.
-    _repo_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     _existing_pp = env_vars.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
     env_vars["PYTHONPATH"] = _repo_root + (os.pathsep + _existing_pp if _existing_pp else "")
     runtime_env = {"env_vars": env_vars}
@@ -179,7 +179,9 @@ def main() -> None:
     ray.init(num_gpus=0, runtime_env=runtime_env, ignore_reinit_error=True)
     ray.get(
         skyrl_entrypoint.options(runtime_env=runtime_env).remote(
-            cfg, reconnect_config=reconnect_cfg, server_state=server_state,
+            cfg,
+            reconnect_config=reconnect_cfg,
+            server_state=server_state,
         )
     )
 

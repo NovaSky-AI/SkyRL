@@ -10,8 +10,8 @@ Provides ``ArcticPPOTrainer`` and ``ArcticGenerator`` that route all GPU work
 to an Arctic RL server; depends on ``arctic_platform.rl`` for the client.
 """
 
-from .trainer import ArcticPPOTrainer
-from .generator import ArcticGenerator
 from . import envs as _envs  # noqa: F401  side-effect: register `bird` env
+from .generator import ArcticGenerator
+from .trainer import ArcticPPOTrainer
 
 __all__ = ["ArcticPPOTrainer", "ArcticGenerator"]

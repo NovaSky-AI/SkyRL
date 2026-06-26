@@ -31,8 +31,9 @@ verl-format parquet — no schema rewriting needed):
 
 from typing import Any, Dict
 
-from .bird_reward import compute_score
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+
+from .bird_reward import compute_score
 
 
 class BirdEnv(BaseTextEnv):

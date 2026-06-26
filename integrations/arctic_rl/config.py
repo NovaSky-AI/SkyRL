@@ -12,14 +12,14 @@ lazily dispatches here. All shared knobs (GPU counts, vLLM settings, colocation)
 are derived from existing SkyRL config fields by ``build_rl_config``.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from arctic_platform.rl import ArcticRLClientConfig
 from omegaconf import OmegaConf
+
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.config import BaseConfig, TrainerConfig, make_config
-
 
 # ---------------------------------------------------------------------------
 # Arctic RL backend configuration
@@ -279,10 +279,7 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
         )
 
     # -- Derived from existing SkyRL configs ---------------------------------
-    training_gpus = (
-        cfg.trainer.placement.policy_num_gpus_per_node
-        * cfg.trainer.placement.policy_num_nodes
-    )
+    training_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
     # Arctic-Platform's `sampling_gpus` is the TOTAL sampling-side GPU count,
     # not the replica count (replicas = sampling_gpus // tp_size); SkyRL's
     # `num_engines` is the replica count, so multiply by `tp_size`.
@@ -302,7 +299,6 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
 
     n_samples = cfg.generator.n_samples_per_prompt
     mini_batch_size = cfg.trainer.policy_mini_batch_size * n_samples
-    train_batch_size_global = cfg.trainer.train_batch_size * n_samples
 
     max_prompt = int(cfg.trainer.max_prompt_length)
     max_resp = int(cfg.generator.sampling_params.max_generate_length)
@@ -337,8 +333,7 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
     # so the effective DP world is ``training_gpus // ulysses_sp``.
     ulysses_sp = max(1, int(arl.ulysses_sequence_parallel_size))
     assert training_gpus % ulysses_sp == 0, (
-        f"training_gpus ({training_gpus}) must be divisible by "
-        f"ulysses_sequence_parallel_size ({ulysses_sp})"
+        f"training_gpus ({training_gpus}) must be divisible by " f"ulysses_sequence_parallel_size ({ulysses_sp})"
     )
     dp_world = max(1, training_gpus // ulysses_sp)
     mini_per_dp = max(1, mini_batch_size // dp_world)
@@ -350,9 +345,7 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
         f"n_samples_per_prompt={n_samples}, use_zorro={arl.use_zorro}"
     )
     grad_accum_steps = max(1, mini_per_dp // train_micro_batch_size_per_gpu)
-    assert (
-        mini_batch_size == train_micro_batch_size_per_gpu * grad_accum_steps * dp_world
-    ), (
+    assert mini_batch_size == train_micro_batch_size_per_gpu * grad_accum_steps * dp_world, (
         f"DeepSpeed batch assertion would fail: train_batch_size={mini_batch_size} "
         f"!= micro={train_micro_batch_size_per_gpu} * grad_accum={grad_accum_steps} "
         f"* dp_world={dp_world} (= {train_micro_batch_size_per_gpu * grad_accum_steps * dp_world})"
@@ -383,13 +376,11 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
     # ``speculative_config``, and ``forest_cascade_attn_configs`` belong.
     if arl.vllm_config is not None:
         user_vllm = OmegaConf.to_container(
-            OmegaConf.create(arl.vllm_config), resolve=True,
+            OmegaConf.create(arl.vllm_config),
+            resolve=True,
         )
         if not isinstance(user_vllm, dict):
-            raise TypeError(
-                f"trainer.arctic_rl.vllm_config must be a dict, got "
-                f"{type(user_vllm).__name__}"
-            )
+            raise TypeError(f"trainer.arctic_rl.vllm_config must be a dict, got " f"{type(user_vllm).__name__}")
         vllm_cfg.update(user_vllm)
 
     # -- DeepSpeed engine config (training) ---------------------------------
@@ -464,9 +455,7 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
             temperature=float(getattr(cfg.generator.sampling_params, "temperature", 1.0) or 1.0),
             use_unpad=True,
             logits_optimization=arl.logits_optimization,
-            logits_optimization_peak_mem_size_in_gib=float(
-                arl.logits_optimization_peak_mem_size_in_gib
-            ),
+            logits_optimization_peak_mem_size_in_gib=float(arl.logits_optimization_peak_mem_size_in_gib),
             logits_compute_from_fp32_inputs=bool(arl.logits_compute_from_fp32_inputs),
             logits_compute_in_fp32=bool(arl.logits_compute_in_fp32),
         )
@@ -531,11 +520,14 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
         # ``OmegaConf.create(x)`` round-trip normalizes both plain ``dict``
         # and ``DictConfig`` inputs, matching the ``OmegaConf.to_container``
         # idiom used in ``arctic-verl/verl/workers/remote_client/arctic_rl.py``.
-        arctic_inference_config=OmegaConf.to_container(
-            OmegaConf.create(arl.arctic_inference_config), resolve=True,
-        )
-        if arl.use_arctic_inference and arl.arctic_inference_config is not None
-        else None,
+        arctic_inference_config=(
+            OmegaConf.to_container(
+                OmegaConf.create(arl.arctic_inference_config),
+                resolve=True,
+            )
+            if arl.use_arctic_inference and arl.arctic_inference_config is not None
+            else None
+        ),
         full_determinism=bool(arl.determinism_full),
         seed=int(arl.determinism_seed),
         startup_timeout=arl.startup_timeout,

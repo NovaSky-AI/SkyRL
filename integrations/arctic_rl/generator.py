@@ -12,8 +12,11 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-import skyrl_gym
-from skyrl.train.generators.base import GeneratorInput, GeneratorInterface, GeneratorOutput
+from skyrl.train.generators.base import (
+    GeneratorInput,
+    GeneratorInterface,
+    GeneratorOutput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,14 +130,13 @@ class ArcticGenerator(GeneratorInterface):
                 if i == 0:
                     logger.warning(
                         "ArcticGenerator: no env_classes for sample %d (len=%d)",
-                        i, len(env_classes),
+                        i,
+                        len(env_classes),
                     )
                 scoring_inputs.append(None)
                 continue
 
-            env_config = (
-                getattr(self.skyrl_gym_cfg, env_class, dict()) if self.skyrl_gym_cfg else dict()
-            )
+            env_config = getattr(self.skyrl_gym_cfg, env_class, dict()) if self.skyrl_gym_cfg else dict()
             scoring_inputs.append(
                 {
                     "env_class": env_class,
@@ -147,11 +149,7 @@ class ArcticGenerator(GeneratorInterface):
 
         loop = asyncio.get_running_loop()
         futures = [
-            (
-                loop.run_in_executor(self._scoring_pool, _score_one, payload)
-                if payload is not None
-                else None
-            )
+            (loop.run_in_executor(self._scoring_pool, _score_one, payload) if payload is not None else None)
             for payload in scoring_inputs
         ]
         rewards: List[float] = []
@@ -163,9 +161,7 @@ class ArcticGenerator(GeneratorInterface):
                 rewards.append(await fut)
             except Exception as e:
                 if i == 0:
-                    logger.warning(
-                        "ArcticGenerator reward scoring failed: %s", e, exc_info=True
-                    )
+                    logger.warning("ArcticGenerator reward scoring failed: %s", e, exc_info=True)
                 rewards.append(0.0)
 
         return GeneratorOutput(
