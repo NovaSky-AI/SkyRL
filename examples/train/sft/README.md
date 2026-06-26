@@ -73,6 +73,11 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
+| `sampler` | `random` | Training sampler: `random` (shuffle each epoch), `sequential` (in-order), or `custom` (load from `sampler_class_path`) |
+| `sampler_class_path` | `None` | Import path (`module.path.ClassName`) to a custom stateful sampler; required when `sampler=custom` |
+| `sampler_kwargs` | `{}` | Keyword args forwarded to the custom sampler constructor |
+| `dataloader_num_workers` | `0` | Worker processes for the training/eval `StatefulDataLoader` (0 = main process) |
+| `dataloader_persistent_workers` | `false` | Keep dataloader workers alive across epochs (only with `dataloader_num_workers > 0`) |
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
 | `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
@@ -120,6 +125,44 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
     max_tokens_per_microbatch=4096
 ```
 
+
+## Samplers and the stateful dataloader
+
+`SFTTrainer` feeds the training loop from a
+[`torchdata.stateful_dataloader.StatefulDataLoader`](https://pytorch.org/data/main/stateful_dataloader.html).
+The sampling position is written into each checkpoint (`data.pt`) so a
+`resume_from` run continues from the exact next example of the in-progress
+epoch.
+
+Three sampler strategies are built in:
+
+- `sampler=random` (default) — reshuffles every epoch using `seed`. The
+  in-progress epoch resumes bit-exactly; later epochs are re-shuffled into a
+  valid (but not byte-identical) order, matching the RL trainer's behavior.
+- `sampler=sequential` — iterates the dataset in order
+  ([`StatefulSequentialSampler`](../../../skyrl/train/dataset/samplers.py)).
+- `sampler=custom` — loads your own stateful sampler from `sampler_class_path`,
+  instantiated as `ClassName(tokenized, **sampler_kwargs)`. A custom sampler
+  only needs `__iter__`/`__len__` plus `state_dict`/`load_state_dict` to be
+  checkpointable. The module must be importable, i.e. on `PYTHONPATH`.
+
+### Curriculum learning example
+
+[`curriculum_sampler.py`](curriculum_sampler.py) is a reference custom sampler
+(`CurriculumLearningSampler`) that walks through difficulty-ordered subsets,
+progressively unlocking harder data. Order the dataset easy→hard and give the
+per-stage `lengths`. Set `num_samples=num_steps*batch_size` so the whole
+schedule is covered in a single pass (this keeps the curriculum state intact
+across epoch boundaries and makes resume bit-exact across the entire run).
+Put the file's directory on `PYTHONPATH` so the dotted path resolves:
+
+```bash
+PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+    sampler=custom \
+    sampler_class_path=curriculum_sampler.CurriculumLearningSampler \
+    'sampler_kwargs={lengths: [2000, 2000, 2000], num_samples: 800, seed: 42}' \
+    num_steps=200 batch_size=4
+```
 
 ## Limitations
 

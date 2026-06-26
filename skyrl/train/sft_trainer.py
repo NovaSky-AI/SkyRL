@@ -24,10 +24,8 @@ import functools
 import json
 import multiprocessing as mp
 import os
-import random
 import tempfile
 from dataclasses import asdict
-from math import ceil
 from typing import Any, Optional
 
 import ray
@@ -35,6 +33,7 @@ import torch
 from datasets import Dataset, load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
+from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import (
@@ -667,6 +666,17 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     return batch
 
 
+def collate_sft_examples(examples: list, collator, batch_size: int) -> TrainingInputBatch:
+    """Top-level collate function for the SFT ``StatefulDataLoader``.
+
+    Defined at module scope (not a lambda/closure) so it is picklable when the
+    dataloader uses worker processes with the ``spawn`` start method. Delegates
+    to the trainer's configured ``collator`` (``DefaultCollator`` or
+    ``PackedDataCollator``).
+    """
+    return collator(examples, batch_size=batch_size)
+
+
 # ---------------------------------------------------------------------------
 # SFTTrainer
 # ---------------------------------------------------------------------------
@@ -700,6 +710,9 @@ class SFTTrainer:
         self.tokenizer = None
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
+        # Stateful dataloaders, built in train() once data is tokenized.
+        self.train_dataloader: StatefulDataLoader | None = None
+        self.eval_dataloader: StatefulDataLoader | None = None
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
@@ -1127,6 +1140,111 @@ class SFTTrainer:
         return self.collator(examples, batch_size=batch_size)
 
     # ------------------------------------------------------------------ #
+    # Dataloaders & samplers
+    # ------------------------------------------------------------------ #
+
+    def build_train_sampler(self, tokenized: list) -> Optional[torch.utils.data.Sampler]:
+        """Build the training sampler from ``sft_cfg.sampler``.
+
+        Returns ``None`` for the default ``"random"`` strategy, signalling
+        :meth:`build_train_dataloader` to use the dataloader's built-in
+        ``shuffle=True`` path (which is statefully checkpointed by
+        ``StatefulDataLoader``). For ``"sequential"`` and ``"custom"`` it
+        returns an explicit stateful sampler.
+
+        Custom samplers are imported from ``sft_cfg.sampler_class_path`` and
+        instantiated as ``ClassName(tokenized, **sft_cfg.sampler_kwargs)``.
+        """
+        from skyrl.train.dataset.samplers import (
+            StatefulSequentialSampler,
+            import_sampler_class,
+        )
+
+        sampler_type = self.sft_cfg.sampler
+        if sampler_type == "random":
+            return None
+        if sampler_type == "sequential":
+            return StatefulSequentialSampler(tokenized)
+        if sampler_type == "custom":
+            if not self.sft_cfg.sampler_class_path:
+                raise ValueError("sampler='custom' requires sampler_class_path to be set.")
+            sampler_cls = import_sampler_class(self.sft_cfg.sampler_class_path)
+            return sampler_cls(tokenized, **self.sft_cfg.sampler_kwargs)
+        raise ValueError(f"Unknown sampler '{sampler_type}'. Must be one of 'random', 'sequential', 'custom'.")
+
+    def build_train_dataloader(self, tokenized: list) -> StatefulDataLoader:
+        """Build the training ``StatefulDataLoader``.
+
+        Replaces the previous manual list shuffling/slicing. Sampling order is
+        seeded for reproducibility and captured in the dataloader's
+        ``state_dict`` for checkpoint/resume. Uses ``drop_last=True`` so every
+        step sees a full ``batch_size`` mini-batch.
+
+        Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
+        bit-exactly (the common case). For the built-in ``"random"`` sampler,
+        epochs *after* the resumed one are re-shuffled into a valid but not
+        byte-identical order (the generator advances differently after a
+        partially-replayed epoch) -- this matches the RL trainer's dataloader.
+        Custom samplers that span the whole run in a single pass (e.g. the
+        ``CurriculumLearningSampler`` example under ``examples/train/sft/`` with
+        ``num_samples=num_steps*batch_size``) resume bit-exactly across the
+        entire schedule, since the iterator is never re-created.
+        """
+        collate_fn = functools.partial(
+            collate_sft_examples,
+            collator=self.collator,
+            batch_size=self.sft_cfg.batch_size,
+        )
+
+        seeded_generator = torch.Generator()
+        seeded_generator.manual_seed(self.sft_cfg.seed)
+
+        sampler = self.build_train_sampler(tokenized)
+        num_workers = self.sft_cfg.dataloader_num_workers
+
+        return StatefulDataLoader(
+            tokenized,
+            batch_size=self.sft_cfg.batch_size,
+            sampler=sampler,
+            # ``shuffle`` and an explicit ``sampler`` are mutually exclusive;
+            # only enable the built-in random sampler when none was provided.
+            shuffle=sampler is None,
+            collate_fn=collate_fn,
+            drop_last=True,
+            generator=seeded_generator,
+            num_workers=num_workers,
+            persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
+            # Ray uses the spawn start method; forking inside Ray is unsafe.
+            multiprocessing_context="spawn" if num_workers > 0 else None,
+        )
+
+    def build_eval_dataloader(self, eval_tokenized: list) -> StatefulDataLoader:
+        """Build the eval ``StatefulDataLoader``.
+
+        Eval runs in chunks of ``micro_train_batch_size_per_gpu * dp_size`` (one
+        micro-batch per DP rank per dispatch). Order is sequential and the final
+        short chunk is kept (``drop_last=False``); :meth:`run_eval` pads it.
+        """
+        dp_size = self.dispatch.dp_size("policy")
+        eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
+        collate_fn = functools.partial(
+            collate_sft_examples,
+            collator=self.collator,
+            batch_size=eval_chunk_size,
+        )
+        num_workers = self.sft_cfg.dataloader_num_workers
+        return StatefulDataLoader(
+            eval_tokenized,
+            batch_size=eval_chunk_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            drop_last=False,
+            num_workers=num_workers,
+            persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
+            multiprocessing_context="spawn" if num_workers > 0 else None,
+        )
+
+    # ------------------------------------------------------------------ #
     # Checkpoint resume
     # ------------------------------------------------------------------ #
 
@@ -1202,6 +1320,25 @@ class SFTTrainer:
             load_optimizer_states=True,
             load_lr_scheduler_states=True,
         )
+
+        # Restore train dataloader / sampler position so sampling resumes from
+        # the exact next example (mirrors the RL trainer's data.pt handling).
+        if self.train_dataloader is not None:
+            dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
+            if io.exists(dataloader_state_path):
+                try:
+                    with io.open_file(dataloader_state_path, "rb") as f:
+                        dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+                    self.train_dataloader.load_state_dict(dataloader_state)
+                    logger.info("Restored train dataloader state")
+                except Exception as e:
+                    logger.warning(f"Failed to restore dataloader state: {e}")
+            else:
+                logger.warning(
+                    f"No data.pt found at {dataloader_state_path}; dataloader will start from the "
+                    "beginning of its sampling order (older checkpoint or RNG-only resume)."
+                )
+
         logger.info(f"Successfully resumed from global_step_{global_step}")
         return global_step
 
@@ -1209,11 +1346,11 @@ class SFTTrainer:
     # Training
     # ------------------------------------------------------------------ #
 
-    def run_eval(self, eval_tokenized: list) -> tuple[dict, int]:
+    def run_eval(self) -> tuple[dict, int]:
         """Compute eval loss over the full eval dataset.
 
-        Iterates the eval dataset in chunks of ``micro_train_batch_size_per_gpu * dp_size``
-        (i.e. exactly one micro-batch per DP rank per dispatch call), calls
+        Iterates :attr:`eval_dataloader` (chunks of ``micro_train_batch_size_per_gpu * dp_size``,
+        i.e. exactly one micro-batch per DP rank per dispatch call), calls
         :meth:`WorkerDispatch.forward` with ``loss_fn="cross_entropy"`` (which
         runs the model in ``eval()`` mode under ``no_grad``), and aggregates the
         per-batch losses into a token-weighted mean.
@@ -1222,26 +1359,26 @@ class SFTTrainer:
         which are themselves per-non-pad-token means within each batch. This
         yields the true per-non-pad-token mean across the eval dataset.
 
-        Args:
-            eval_tokenized: Pre-tokenized eval dataset (output of
-                :meth:`load_eval_dataset`).
-
         Returns:
             ``(metrics, num_eval_batches)`` where ``metrics`` contains
             ``eval_loss`` and ``num_eval_batches`` is bookkeeping for
             stdout logging (not a wandb metric).
         """
-        num_eval = len(eval_tokenized)
+        if self.eval_dataloader is None:
+            raise ValueError(
+                "run_eval called without an eval dataloader. Provide a non-empty eval split or "
+                "disable eval by setting eval_dataset_name=None."
+            )
+        num_eval = len(self.eval_dataloader.dataset)
         if num_eval == 0:
             raise ValueError(
                 "Eval dataset is empty. Provide a non-empty eval split or disable eval "
                 "by setting eval_dataset_name=None."
             )
 
-        # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
-        # and removes the need for a separate `eval_batch_size` knob.
-        dp_size = self.dispatch.dp_size("policy")
-        eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
+        # The dataloader yields one chunk per DP rank's micro-batch; the final
+        # (possibly short) chunk is padded below up to the full chunk size.
+        eval_chunk_size = self.eval_dataloader.batch_size
 
         # Pad a trailing partial batch up to ``eval_chunk_size`` via
         # ``pad_training_input_batch`` (which zeros ``loss_mask`` on padded rows).
@@ -1249,23 +1386,20 @@ class SFTTrainer:
         # pre-padding ``total_nonpad`` scaling in ``collate_batch`` excludes
         # them from the denominator, so the reported ``eval_loss`` is the
         # per-real-token mean over the full (non-padded) eval set.
-        num_eval_batches = ceil(num_eval / eval_chunk_size)
-
         total_loss_weighted = 0.0
         total_tokens = 0
-        for batch_idx in range(num_eval_batches):
-            start = batch_idx * eval_chunk_size
-            end = min(start + eval_chunk_size, num_eval)
-            batch_examples = eval_tokenized[start:end]
-            batch = self.collator(batch_examples, batch_size=eval_chunk_size)
+        num_eval_batches = 0
+        for batch in self.eval_dataloader:
+            num_eval_batches += 1
             # Pad the last (possibly-short) chunk so every dispatch sees exactly
             # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
             # ``loss_mask`` for padding rows; with ``pad_size=0`` it is a no-op.
-            pad_rows = eval_chunk_size - len(batch_examples)
+            num_rows = batch["sequences"].shape[0]
+            pad_rows = eval_chunk_size - num_rows
             if pad_rows > 0:
                 logger.info(
                     f"Padding final eval batch by {pad_rows} rows "
-                    f"({len(batch_examples)} real -> {eval_chunk_size} total); "
+                    f"({num_rows} real -> {eval_chunk_size} total); "
                     f"padded rows are masked out of the loss."
                 )
                 batch = pad_training_input_batch(batch, pad_rows)
@@ -1464,13 +1598,30 @@ class SFTTrainer:
 
         batch_size = self.sft_cfg.batch_size
 
-        # steps_per_epoch is always derived from the data; callbacks rely on it.
-        steps_per_epoch = max(1, ceil(len(tokenized) / batch_size))
+        # Early validation: dataset must have at least batch_size examples
+        if len(tokenized) < batch_size:
+            raise ValueError(
+                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
+                f"Reduce batch_size or use more data."
+            )
+
+        self._validate_batch_parallelism()
+
+        # Build stateful dataloaders (replaces manual list shuffling/slicing).
+        # The training sampler is selected by ``sft_cfg.sampler`` and its
+        # position is captured in the checkpoint for resume.
+        self.train_dataloader = self.build_train_dataloader(tokenized)
+        if eval_tokenized is not None:
+            self.eval_dataloader = self.build_eval_dataloader(eval_tokenized)
+
+        # steps_per_epoch is derived from the dataloader (which honors
+        # drop_last=True); callbacks rely on it.
+        steps_per_epoch = max(1, len(self.train_dataloader))
 
         if self.sft_cfg.num_steps is None:
             logger.info(
                 f"num_steps not set; deriving from num_epochs={self.sft_cfg.num_epochs}: "
-                f"ceil({len(tokenized)} / {batch_size}) * {self.sft_cfg.num_epochs} = "
+                f"{steps_per_epoch} steps/epoch * {self.sft_cfg.num_epochs} = "
                 f"{self.sft_cfg.num_epochs * steps_per_epoch} steps"
             )
 
@@ -1484,30 +1635,14 @@ class SFTTrainer:
         if self.sft_cfg.max_training_steps is not None:
             logger.info(f"Capping training at max_training_steps={self.sft_cfg.max_training_steps}")
 
-        # Early validation: dataset must have at least batch_size examples
-        if len(tokenized) < batch_size:
-            raise ValueError(
-                f"Dataset has {len(tokenized)} examples after tokenization, but batch_size={batch_size}. "
-                f"Reduce batch_size or use more data."
-            )
-
-        self._validate_batch_parallelism()
-
-        # Resume from checkpoint if configured
+        # Resume from checkpoint if configured. This also restores the train
+        # dataloader's sampling position (when a data.pt is present), so the
+        # first pass over ``self.train_dataloader`` below continues mid-epoch.
+        # start_step is the last *completed* step (checkpoint is saved AFTER the
+        # optimizer update), so we begin at start_step + 1 to avoid replaying it.
         start_step = self.load_checkpoint()
 
-        # Shuffle data before training
-        rng = random.Random(self.sft_cfg.seed)
-        rng.shuffle(tokenized)
-
-        # When resuming, start_step is the last *completed* step (checkpoint is
-        # saved AFTER the optimizer update), so we begin at start_step + 1 to
-        # avoid replaying that step.
-
-        # Replay epoch shuffles for reproducibility on resume
-        start_epoch = (start_step * batch_size) // len(tokenized)
-        for _ in range(start_epoch):
-            rng.shuffle(tokenized)
+        start_epoch = start_step // steps_per_epoch
         current_epoch = start_epoch
 
         # Initialize `global_step`
@@ -1537,7 +1672,7 @@ class SFTTrainer:
         # advances it to >=1, so step=0 here does not conflict with later steps.
         if self.sft_cfg.eval_before_train and eval_tokenized is not None:
             self._fire("on_eval_start")
-            eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+            eval_metrics, num_eval_batches = self.run_eval()
             self._fire("on_eval_end", metrics=eval_metrics)
             baseline_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
             self._fire("on_log", logs=baseline_log)
@@ -1553,20 +1688,30 @@ class SFTTrainer:
         self._fire("on_epoch_start")
         epoch_in_progress = True
 
+        # Iterate once on global_step rather than looping epoch-by-epoch: a
+        # single iterator is advanced across steps, and only re-created at an
+        # epoch boundary (StopIteration). Custom samplers that span the whole
+        # run in one pass therefore never re-create the iterator, preserving
+        # their state across the (conceptual) epoch boundaries.
+        data_iter = iter(self.train_dataloader)
+
         while self.global_step <= num_steps:
             all_timings: dict[str, float] = {}
 
             with Timer("step", all_timings):
 
-                # Data loading with wrap-around
+                # Fetch the next batch; on epoch exhaustion, close the epoch and
+                # restart the iterator (reshuffles the random/sequential samplers).
                 with Timer("data_loading", all_timings):
-                    start_idx = (self.global_step * batch_size) % len(tokenized)
-                    end_idx = start_idx + batch_size
-                    if end_idx > len(tokenized):
-                        batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
-                    else:
-                        batch_examples = tokenized[start_idx:end_idx]
-                    batch = self.collator(batch_examples, batch_size=batch_size)
+                    batch = next(data_iter, None)
+                if batch is None:
+                    self._fire("on_epoch_end")
+                    current_epoch += 1
+                    self._current_epoch = current_epoch
+                    self._fire("on_epoch_start")
+                    data_iter = iter(self.train_dataloader)
+                    with Timer("data_loading", all_timings):
+                        batch = next(data_iter)
 
                 self._fire("on_step_start", batch=batch)
 
@@ -1629,7 +1774,7 @@ class SFTTrainer:
             if eval_tokenized is not None and (force_eval or interval_eval):
                 self._fire("on_eval_start")
                 with Timer("eval", all_timings):
-                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                    eval_metrics, num_eval_batches = self.run_eval()
                 self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
@@ -1651,18 +1796,8 @@ class SFTTrainer:
                     f"over {num_eval_batches} batches"
                 )
 
-            # Check for epoch boundary and reshuffle
-            epoch = (self.global_step * batch_size) // len(tokenized)
-            if epoch > current_epoch:
-                self._fire("on_epoch_end")
-                epoch_in_progress = False
-                for _ in range(epoch - current_epoch):
-                    rng.shuffle(tokenized)
-                current_epoch = epoch
-                self._current_epoch = epoch
-                if self.global_step + 1 <= num_steps:
-                    self._fire("on_epoch_start")
-                    epoch_in_progress = True
+            # Epoch boundaries are detected at the top of the loop when the
+            # dataloader iterator is exhausted (StopIteration), not here.
 
             self.global_step += 1
         self.global_step = min(self.global_step, num_steps)
@@ -1708,7 +1843,7 @@ class SFTTrainer:
                 eval_timings: dict[str, float] = {}
                 self._fire("on_eval_start")
                 with Timer("eval", eval_timings):
-                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                    eval_metrics, num_eval_batches = self.run_eval()
                 self._fire("on_eval_end", metrics=eval_metrics)
                 if eval_metrics:
                     eval_log = {f"eval/{k}": v for k, v in eval_metrics.items()}
@@ -1732,6 +1867,16 @@ class SFTTrainer:
         io.makedirs(global_step_folder, exist_ok=True)
         logger.info(f"Saving checkpoint at step {step} to {global_step_folder}")
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
+
+        # Save train dataloader state (sampler position) for resume.
+        if self.train_dataloader is not None:
+            dataloader_save_path = os.path.join(global_step_folder, "data.pt")
+            try:
+                with io.open_file(dataloader_save_path, "wb") as f:
+                    torch.save(self.train_dataloader.state_dict(), f)
+                logger.info(f"Saved dataloader state to {dataloader_save_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save dataloader state: {e}")
 
         # Save trainer state for cross-validation on resume (mirrors PPO's trainer_state.pt)
         trainer_state = {
