@@ -71,32 +71,27 @@ RESPONSE_LEN=4096
 TP_SIZE=4
 NUM_ENGINES=$((NUM_GPUS / TP_SIZE))
 
-# Inference knobs forwarded to ArcticAsyncEngineArgs via
-# trainer.arctic_rl.arctic_inference_config (raw passthrough). See
-# run_bird_grpo_32b_32gpu.sh for the fuse_allreduce_rms rationale.
+# Inference-engine performance knobs (FCA + Arctic speculative decoding +
+# the FlashInfer-safe compilation_config). Routed raw to vLLM via
+# trainer.arctic_rl.vllm_config. See run_bird_grpo_32b_32gpu.sh for the
+# full rationale.
 USE_FCA=${USE_FCA:-True}
 SPEC_MODEL=${SPEC_MODEL:-}
 NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS:-3}
 
-AI_CFG_PARTS=()
+VLLM_CFG_PARTS=()
 if [[ "${USE_FCA}" == "True" ]]; then
-    AI_CFG_PARTS+=('forest_cascade_attn_configs: "{}"')
-    # Pin vLLM optimization to O1 (belt-and-suspenders alongside the explicit
-    # compilation_config below): O1 hard-codes fuse_allreduce_rms=false and
-    # cudagraph_mode=PIECEWISE, so the recipe stays on a known-good config
-    # even if a future vLLM tweaks O2's defaults. See run_bird_grpo_32b_32gpu.sh
-    # for the fuse_allreduce_rms / FlashInfer-workspace rationale.
-    AI_CFG_PARTS+=('optimization_level: 1')
-    AI_CFG_PARTS+=('compilation_config: {cudagraph_mode: PIECEWISE, pass_config: {fuse_allreduce_rms: false}}')
+    VLLM_CFG_PARTS+=('forest_cascade_attn_configs: "{}"')
+    VLLM_CFG_PARTS+=('compilation_config: {cudagraph_mode: PIECEWISE, pass_config: {fuse_allreduce_rms: false}}')
 fi
 if [[ -n "${SPEC_MODEL}" && -d "${SPEC_MODEL}" ]]; then
-    AI_CFG_PARTS+=("speculative_config: {method: arctic, model: ${SPEC_MODEL}, num_speculative_tokens: ${NUM_SPEC_TOKENS}}")
+    VLLM_CFG_PARTS+=("speculative_config: {method: arctic, model: ${SPEC_MODEL}, num_speculative_tokens: ${NUM_SPEC_TOKENS}}")
 fi
 
-AI_CFG_OVERRIDE=()
-if (( ${#AI_CFG_PARTS[@]} > 0 )); then
-    IFS=, AI_CFG_BODY="${AI_CFG_PARTS[*]}" ; unset IFS
-    AI_CFG_OVERRIDE+=("trainer.arctic_rl.arctic_inference_config={${AI_CFG_BODY}}")
+VLLM_CFG_OVERRIDE=()
+if (( ${#VLLM_CFG_PARTS[@]} > 0 )); then
+    IFS=, VLLM_CFG_BODY="${VLLM_CFG_PARTS[*]}" ; unset IFS
+    VLLM_CFG_OVERRIDE+=("trainer.arctic_rl.vllm_config={${VLLM_CFG_BODY}}")
 fi
 
 cd "${SKYRL_DIR}"
@@ -125,7 +120,7 @@ cd "${SKYRL_DIR}"
     trainer.arctic_rl.use_arctic_inference=true \
     trainer.arctic_rl.server_logs=true \
     trainer.arctic_rl.startup_timeout=1800 \
-    "${AI_CFG_OVERRIDE[@]}" \
+    "${VLLM_CFG_OVERRIDE[@]}" \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/val.parquet']" \
     trainer.algorithm.advantage_estimator=grpo \

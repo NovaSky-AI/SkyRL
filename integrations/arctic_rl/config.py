@@ -194,9 +194,39 @@ class ArcticRLTrainerConfig(BaseConfig):
     Requires ``arctic_inference`` to be installed.
     """
     arctic_inference_config: Optional[dict] = None
-    """Optional per-key overrides for ArcticInference (e.g. speculative
-    decoding model). When None and ``use_arctic_inference=True``, sends
-    an empty dict (= enable with defaults).
+    """Optional ArcticInference high-level schema (e.g. ``zorro_inference:
+    {enable: true}``, ``speculative_decoding: {model: ...}``). Forwarded
+    as-is to ``ArcticRLClientConfig.arctic_inference_config``, where
+    arctic-platform's ``parse_arctic_inference_rollout`` translates the
+    recognised keys (``use_fca``, ``spec_model``) into ``ModelConfig``
+    fields. Unknown keys are dropped by that helper -- pass raw vLLM
+    kwargs (e.g. ``compilation_config``, ``speculative_config``,
+    ``forest_cascade_attn_configs``) via ``vllm_config`` below instead.
+    """
+    vllm_config: Optional[dict] = None
+    """Optional raw ``vllm.AsyncEngineArgs`` overrides for the sampling +
+    log-prob engines. Merged on top of the integration's built-in defaults
+    (TP, ``max_num_seqs``, etc.), user keys win on conflict. Mirrors
+    arctic-platform's own ``ArcticRLClientConfig.vllm_config`` field name
+    and semantics: every key is forwarded into vLLM (those matching
+    ``ModelConfig`` fields become typed fields, the rest land in
+    ``extra_engine_kwargs``).
+
+    Use this for performance knobs the high-level
+    ``arctic_inference_config`` schema doesn't model, e.g.::
+
+        trainer.arctic_rl.vllm_config={
+            compilation_config: {
+                cudagraph_mode: PIECEWISE,
+                pass_config: {fuse_allreduce_rms: false},
+            },
+            speculative_config: {
+                method: arctic,
+                model: "<path-or-hf-id>",
+                num_speculative_tokens: 3,
+            },
+            forest_cascade_attn_configs: "{}",
+        }
     """
 
     host: str = "localhost"
@@ -345,6 +375,22 @@ def build_rl_config(cfg: SkyRLTrainConfig) -> ArcticRLClientConfig:
     }
     if arl.vllm_max_num_batched_tokens is not None:
         vllm_cfg["max_num_batched_tokens"] = int(arl.vllm_max_num_batched_tokens)
+
+    # Layer user-supplied raw vLLM kwargs on top of the integration's
+    # defaults. arctic-platform forwards this dict to vLLM verbatim (any
+    # key not on ``ModelConfig`` lands in ``extra_engine_kwargs``), so this
+    # is where performance knobs like ``compilation_config``,
+    # ``speculative_config``, and ``forest_cascade_attn_configs`` belong.
+    if arl.vllm_config is not None:
+        user_vllm = OmegaConf.to_container(
+            OmegaConf.create(arl.vllm_config), resolve=True,
+        )
+        if not isinstance(user_vllm, dict):
+            raise TypeError(
+                f"trainer.arctic_rl.vllm_config must be a dict, got "
+                f"{type(user_vllm).__name__}"
+            )
+        vllm_cfg.update(user_vllm)
 
     # -- DeepSpeed engine config (training) ---------------------------------
     # Mirrors ``_create_ds_config`` in verl's arctic_rl.py. ``sequence_parallel_size``
