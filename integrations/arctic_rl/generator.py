@@ -22,8 +22,27 @@ _DEFAULT_SCORING_WORKERS = int(os.environ.get("ARCTIC_RL_SCORING_WORKERS", "8"))
 
 
 def _score_one(payload: Dict[str, Any]) -> float:
-    """Picklable env.init/step/close used by the scoring ProcessPoolExecutor."""
+    """Picklable env.init/step/close used by the scoring ProcessPoolExecutor.
+
+    The pool uses ``spawn`` (forced by ``ProcessPoolExecutor`` on macOS/Linux
+    in Ray actors), so the child only auto-imports ``skyrl_gym`` (via its own
+    ``envs/__init__.py``). Our Arctic-RL-shipped envs (``bird``, ``bird_sql``)
+    register themselves when ``integrations.arctic_rl.envs`` is imported, so
+    we must trigger that import here so the registry is populated in the
+    child before ``make`` is called.
+    """
     import skyrl_gym as _sg
+
+    # Trigger registration of Arctic-RL-shipped envs in this child process.
+    # Works under both import paths (the integration dir on PYTHONPATH or
+    # dispatched from core via ``integrations.arctic_rl``).
+    try:
+        from . import envs as _arctic_envs  # noqa: F401
+    except ImportError:
+        try:
+            import arctic_rl.envs as _arctic_envs  # noqa: F401
+        except ImportError:
+            import integrations.arctic_rl.envs as _arctic_envs  # noqa: F401
 
     env = _sg.make(
         payload["env_class"],

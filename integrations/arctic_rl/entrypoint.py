@@ -128,7 +128,14 @@ def main() -> None:
     user only needs the one ``override_entrypoint`` flag to opt into Arctic.
     """
     from .config import ArcticRLTrainerConfig, ArcticSkyRLConfig
-    cfg = ArcticSkyRLConfig.from_cli_overrides(sys.argv[1:])
+    # Register Arctic-RL-shipped envs (bird / bird_sql) with skyrl-gym before
+    # any code path tries to ``make()`` them. Side-effect import.
+    from . import envs  # noqa: F401
+    # Strip the dispatch flag itself: it was consumed by main_base.py's peek-
+    # ahead and is not a real ArcticTrainerConfig field, so a strict parse
+    # would reject it.
+    argv = [a for a in sys.argv[1:] if not a.startswith("trainer.override_entrypoint=")]
+    cfg = ArcticSkyRLConfig.from_cli_overrides(argv)
     if cfg.trainer.arctic_rl is None:
         cfg.trainer.arctic_rl = ArcticRLTrainerConfig()
     validate_cfg(cfg)
