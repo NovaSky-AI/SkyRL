@@ -121,7 +121,6 @@ Optional FA3 on Hopper (recommended for the largest speedups):
 uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-Skip and set `trainer.arctic_rl.attn_implementation=flash_attention_2` if you don't want FA3.
 
 ## File layout
 
