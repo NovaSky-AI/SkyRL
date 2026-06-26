@@ -97,26 +97,18 @@ NUM_ENGINES=$((NUM_GPUS / TP_SIZE))
 #        still call into the workspace -> assert during CUDA-graph warmup
 #        (`Flashinfer workspace must be initialized when using flashinfer`).
 #        Disabling the fuse pass avoids the contested port entirely.
-#        Tunji's verl recipe doesn't trip this because it co-locates one
-#        sampling replica per node.
 #   Spec-dec: speculative_config={method: arctic, model: <path>, ...}.
+#   optimization_level=1: belt-and-suspenders alongside the explicit
+#        compilation_config override -- vLLM's O1 also hard-codes
+#        fuse_allreduce_rms=false + cudagraph_mode=PIECEWISE, so even if
+#        a future vLLM version changes O2's defaults the recipe stays
+#        pinned to a known-good configuration.
 #
 # These nested dicts are routed to vLLM by integrations.arctic_rl.config,
 # which round-trips them through OmegaConf.to_container so AsyncEngineArgs
 # sees plain dicts (the nested-override hook uses `isinstance(_, dict)`,
 # which is False for omegaconf.DictConfig and silently drops the value).
 # Same idiom as arctic-verl/verl/workers/remote_client/arctic_rl.py.
-#
-# KNOWN ISSUE (open, see follow-up): the OmegaConf round-trip alone is
-# *not* sufficient end-to-end in this checkout — the nested
-# compilation_config is still being dropped somewhere between
-# ArcticRLClientConfig and AsyncEngineArgs.__post_init__ (vLLM resolves
-# cudagraph_mode=FULL_AND_PIECEWISE and fuse_allreduce_rms=True at engine
-# init, even with this override set). Until that plumbing is traced and
-# fixed end-to-end, we pin optimization_level=1 below — that hard-codes
-# fuse_allreduce_rms=false inside vLLM, which empirically reproduced the
-# Jun 24 (skyrl_v1) 2x speedup baseline and is what unblocks TP>1 + Hopper
-# from the FlashInfer-workspace assertion.
 #
 # Flow-style dict values need a space after every `:` — OmegaConf.from_cli
 # runs yaml.load on each rhs (Hydra's CLI parser is more lenient).

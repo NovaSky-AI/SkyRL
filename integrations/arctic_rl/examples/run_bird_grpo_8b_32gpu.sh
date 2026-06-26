@@ -81,15 +81,11 @@ NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS:-3}
 AI_CFG_PARTS=()
 if [[ "${USE_FCA}" == "True" ]]; then
     AI_CFG_PARTS+=('forest_cascade_attn_configs: "{}"')
-    # Pin vLLM optimization to O1 so its compile pipeline hardcodes
-    # fuse_allreduce_rms=false. We *also* request it explicitly via
-    # compilation_config below, but in this environment the nested override
-    # from arctic_rl -> arctic_platform -> AsyncEngineArgs is being dropped
-    # before vLLM sees it (cudagraph_mode resolves to the default
-    # FULL_AND_PIECEWISE and fuse_allreduce_rms to True at engine init).
-    # Until that plumbing is fixed end-to-end, O1 is the reliable knob that
-    # avoids the FlashInfer-workspace assertion on TP>1 + Hopper. See
-    # docs/arctic_rl_speedup_investigation.md (TODO) for the open thread.
+    # Pin vLLM optimization to O1 (belt-and-suspenders alongside the explicit
+    # compilation_config below): O1 hard-codes fuse_allreduce_rms=false and
+    # cudagraph_mode=PIECEWISE, so the recipe stays on a known-good config
+    # even if a future vLLM tweaks O2's defaults. See run_bird_grpo_32b_32gpu.sh
+    # for the fuse_allreduce_rms / FlashInfer-workspace rationale.
     AI_CFG_PARTS+=('optimization_level: 1')
     AI_CFG_PARTS+=('compilation_config: {cudagraph_mode: PIECEWISE, pass_config: {fuse_allreduce_rms: false}}')
 fi
