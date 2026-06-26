@@ -2114,6 +2114,10 @@ class SFTTrainer:
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
 
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
+
         # Final eval pass (skip if the last step already ran eval).
         # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
         # advanced wandb's internal step counter to num_steps+1. Logging the
