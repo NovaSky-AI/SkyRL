@@ -143,7 +143,7 @@ integrations/arctic_rl/
 
 ## BIRD-SQL: 32B Qwen3 on 32 × H200
 
-`examples/run_bird_grpo_32b_32gpu.sh` reproduces the 32B Arctic-Text2SQL-R2 setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). End-to-end from a clean machine:
+`examples/run_bird_grpo_32b_32gpu.sh` reproduces the 32B Text2SQL setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). End-to-end from a clean machine:
 
 ```bash
 # 1. Clone + install
