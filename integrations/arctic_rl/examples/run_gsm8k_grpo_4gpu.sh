@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # GSM8K GRPO training via Arctic RL server.
 #
-# Invoked from the SkyRL repo root via core dispatch:
-#   python -m skyrl.train.entrypoints.main_base \
-#       trainer.override_entrypoint=integrations.arctic_rl.entrypoint <flags>
+# Invoked from the SkyRL repo root:
+#   bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
 #
 # Non-colocated (4 GPUs: 2 training + 2 sampling):
 #   bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh \
@@ -27,14 +26,35 @@ export PYTHONUNBUFFERED=1
 : "${MODEL:="Qwen/Qwen3-0.6B"}"
 : "${LOGGER:="console"}"
 
+SKYRL_DIR="$(cd "$(dirname "$0")"/../../.. && pwd)"
+cd "${SKYRL_DIR}"
+
 # Auto-prep GSM8K parquets if missing (uses SkyRL's bundled prep script).
 if [[ ! -f "${DATA_DIR}/train.parquet" || ! -f "${DATA_DIR}/validation.parquet" ]]; then
-    REPO_ROOT="$(cd "$(dirname "$0")"/../../.. && pwd)"
     echo "GSM8K parquets not found in ${DATA_DIR} — running SkyRL prep script..."
-    python "${REPO_ROOT}/examples/train/gsm8k/gsm8k_dataset.py" --output_dir "${DATA_DIR}"
+    uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir "${DATA_DIR}"
 fi
 
-python -m skyrl.train.entrypoints.main_base \
+# Driver (same shape as examples/train/flash_rl + examples/train_integrations/harbor):
+#   - `--isolated` gets a fresh resolution that ignores the project lock /
+#     vllm-cu129 source pin (arctic-inference needs vLLM 0.18, not 0.23).
+#   - `--with flash-attn@URL` swaps the torch-2.11 wheel in tool.uv.sources for
+#     the torch-2.10 ABI wheel that arctic-inference[vllm]'s torch pin needs.
+#   - `--with 'transformers==4.57.6'` overrides SkyRL's transformers>=5.6.1
+#     pin (vLLM 0.18 requires transformers<5). Exact-pinned (not `<5`) so the
+#     spec string survives Ray's worker-spawn shell parsing — `<5` would be
+#     re-interpreted as an input redirect from fd 5.
+#   - SkyRL's uv+ray plugin replicates this exact `uv run` invocation on every
+#     Ray worker via `py_executable`, so workers get the same env automatically.
+FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+
+uv run --isolated --extra skyrl-train \
+    --with arctic-platform \
+    --with 'arctic-inference[vllm]' \
+    --with liger-kernel \
+    --with 'transformers==4.57.6' \
+    --with "flash-attn@${FLASH_ATTN_WHL}" \
+    -- python -m skyrl.train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.override_entrypoint=integrations.arctic_rl.entrypoint \

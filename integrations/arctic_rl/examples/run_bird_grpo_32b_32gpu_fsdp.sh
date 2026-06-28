@@ -17,7 +17,16 @@ set -euxo pipefail
 
 SKYRL_DIR=${SKYRL_DIR:-$(cd "$(dirname "$0")"/../../.. && pwd)}
 DATA_DIR=${DATA_DIR:-"$HOME/data/bird"}
-PYBIN=${PYBIN:-python}
+
+# Driver (same shape as flash_rl/harbor; see run_gsm8k_grpo_4gpu.sh for details).
+FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+DRIVER=(uv run --isolated --extra skyrl-train
+    --with arctic-platform
+    --with 'arctic-inference[vllm]'
+    --with liger-kernel
+    --with 'transformers==4.57.6'
+    --with "flash-attn@${FLASH_ATTN_WHL}"
+    -- python)
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
@@ -68,7 +77,7 @@ cd "${SKYRL_DIR}"
 
 FSDP_BIRD_ENTRY="${SKYRL_DIR}/integrations/arctic_rl/examples/fsdp_bird_entry.py"
 
-"${PYBIN}" "${FSDP_BIRD_ENTRY}" \
+"${DRIVER[@]}" "${FSDP_BIRD_ENTRY}" \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/val.parquet']" \
     trainer.algorithm.advantage_estimator=grpo \

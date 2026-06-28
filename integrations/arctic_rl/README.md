@@ -8,23 +8,21 @@ This integration routes SkyRL's GRPO loop through the open-source [Arctic RL](ht
 
 ## Install
 
-Arctic RL's deps (`arctic-platform`, `arctic-inference[vllm]`, `liger-kernel`) are **not** SkyRL extras — `arctic-inference[vllm]` pins `vllm<=0.18`, which conflicts with SkyRL's `vllm==0.23.0` pin in `fsdp` / `megatron`. Install them on top of a stock SkyRL venv:
-
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
-uv sync
-uv pip install arctic-platform 'arctic-inference[vllm]' liger-kernel
-uv pip install --upgrade 'transformers>=4.57,<5'   # vllm 0.18 pin
 ```
 
-The launchers below call `python -m skyrl.train.entrypoints.main_base` against the active venv, so the install above is one-time. (Alternatively use `uv run --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel python -m ...` for an ephemeral run.)
+That's it. No `uv sync --extra`, no `uv pip install`. Every launcher in `examples/` uses `uv run --isolated --extra skyrl-train --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel --with 'transformers==4.57.6' --with flash-attn@<wheel>` — the same pattern as `examples/train/flash_rl` and `examples/train_integrations/harbor`. uv resolves the env on first launch (~5 min, cached after) and SkyRL's uv+Ray plugin replicates the exact invocation on every worker.
+
+Why the `--with` overrides: `arctic-inference[vllm]` pulls vLLM 0.18, which requires `transformers<5` and a torch-2.10 ABI flash-attn wheel. SkyRL's `pyproject.toml` pins `transformers>=5.6.1` and ships a torch-2.11 flash-attn (both needed by the fsdp/megatron backends). `--isolated` + `--with` overrides resolve to vLLM 0.18's stack for this run only, leaving the project `.venv` untouched.
 
 ## 30-second smoke test (GSM8K, 4 GPUs)
 
 ```bash
-uv run ray start --head --num-gpus=4
 bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
 ```
+
+(Single-node — the launcher's `python -m skyrl.train.entrypoints.main_base` auto-starts a local Ray cluster.)
 
 Auto-downloads `Qwen/Qwen3-0.6B`, auto-preps GSM8K parquets. First reward signal lands in ~3 min from a cold start. On a clean public-mains run we see:
 
@@ -39,12 +37,20 @@ sync_weights steady state: <0.1s
 
 ## Drop into your own recipe
 
-Any stock SkyRL recipe becomes an Arctic RL recipe by appending **one flag**:
+Any stock SkyRL recipe becomes an Arctic RL recipe by appending **one flag** and running through the same `uv run --isolated` driver the launchers use:
 
 ```bash
-uv run -m skyrl.train.entrypoints.main_base \
-    trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
-    <... your existing recipe overrides ...>
+FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+
+uv run --isolated --extra skyrl-train \
+    --with arctic-platform \
+    --with 'arctic-inference[vllm]' \
+    --with liger-kernel \
+    --with 'transformers==4.57.6' \
+    --with "flash-attn@${FLASH_ATTN_WHL}" \
+    -- python -m skyrl.train.entrypoints.main_base \
+        trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
+        <... your existing recipe overrides ...>
 ```
 
 That's it. ZoRRo (training-side dedup + memory-chunked logits), Forest Cascade Attention (rollout), Liger fused kernels, and the multi-replica FlashInfer workaround are all **on by default**. Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to also turn on Arctic speculative decoding.
@@ -106,13 +112,17 @@ The integration pins `comm_protocol="ray"` — the SkyRL driver and Arctic serve
 
 ## Multi-node and FA3
 
+Same `ray start` pattern as every other SkyRL recipe — `uv run --isolated --extra skyrl-train ray start ...` on each node:
+
 ```bash
 # Head node:
-uv run ray start --head --port=6379 --num-gpus=8
-# Each worker (same SkyRL checkout, same env):
-uv run ray start --address=<HEAD_IP>:6379 --num-gpus=8
-uv run ray status   # confirms total GPUs
+uv run --isolated --extra skyrl-train ray start --head --port=6379 --num-gpus=8
+# Each worker (same SkyRL checkout):
+uv run --isolated --extra skyrl-train ray start --address=<HEAD_IP>:6379 --num-gpus=8
+uv run --isolated --extra skyrl-train ray status   # confirms total GPUs
 ```
+
+The launcher's `uv run --isolated --extra skyrl-train --with arctic-platform ...` invocation is replicated on every Ray worker via the uv+Ray `py_executable` integration, so workers automatically get the same arctic stack.
 
 GPU layout follows standard SkyRL knobs:
 - Training: `trainer.placement.policy_num_gpus_per_node * policy_num_nodes`
@@ -149,16 +159,13 @@ integrations/arctic_rl/
 `examples/run_bird_grpo_32b_32gpu.sh` reproduces the 32B Text2SQL setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). End-to-end from a clean machine:
 
 ```bash
-# 1. Clone + install
+# 1. Clone (first launcher invocation resolves the env in ~5 min, cached after)
 git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
-uv sync
-uv pip install arctic-platform 'arctic-inference[vllm]' liger-kernel
-uv pip install --upgrade 'transformers>=4.57,<5'   # vllm 0.18 pin
 
 # 2. Ray up (4-node example; repeat on each worker)
-uv run ray start --head --port=6379 --num-gpus=8
+uv run --isolated --extra skyrl-train ray start --head --port=6379 --num-gpus=8
 # on each worker:
-#   uv run ray start --address=<head>:6379 --num-gpus=8
+#   uv run --isolated --extra skyrl-train ray start --address=<head>:6379 --num-gpus=8
 
 # 3. (Hopper) FA3 wheel
 uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
