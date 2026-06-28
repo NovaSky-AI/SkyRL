@@ -66,8 +66,9 @@ class ArcticRLTrainerConfig(BaseConfig):
     """Enable Liger fused MLP/RMSNorm kernels on the training engine.
 
     Defaults to ``True`` — Liger is a pure fused-kernel speedup with no
-    behavioral effect. ``liger-kernel`` ships with the ``arctic-rl`` extra
-    so it is always available. Server reads from ``ds_worker_config.use_liger``
+    behavioral effect. ``liger-kernel`` is one of the three packages
+    installed alongside SkyRL (see ``integrations/arctic_rl/README.md``).
+    Server reads from ``ds_worker_config.use_liger``
     (``arctic_platform/rl/deepspeed_worker.py:155``).
     """
     attn_implementation: str = "flash_attention_2"
@@ -206,8 +207,8 @@ class ArcticRLTrainerConfig(BaseConfig):
     rollout vLLM engine; ``ARCTIC_INFERENCE_ENABLED=1`` is set on every
     sampling Ray worker. Matches verl's ``rollout.name=arctic`` converged
     path; typical 2-3x rollout speedup on long-context prompts. Requires
-    ``arctic_inference`` to be installed (ships with the ``arctic-rl``
-    extra).
+    ``arctic-inference[vllm]`` to be installed (see
+    ``integrations/arctic_rl/README.md`` for the install command).
     """
     speculative_model: Optional[str] = None
     """HF id or local path of an Arctic draft-head checkpoint. When set

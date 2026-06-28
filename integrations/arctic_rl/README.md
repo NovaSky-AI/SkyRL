@@ -6,12 +6,22 @@
 
 This integration routes SkyRL's GRPO loop through the open-source [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) server — the same backend that produced those numbers — so you get all of ZoRRo's optimizations on your existing recipes, untouched.
 
-## 30-second smoke test (GSM8K, 4 GPUs)
+## Install
+
+Arctic RL's deps (`arctic-platform`, `arctic-inference[vllm]`, `liger-kernel`) are **not** SkyRL extras — `arctic-inference[vllm]` pins `vllm<=0.18`, which conflicts with SkyRL's `vllm==0.23.0` pin in `fsdp` / `megatron`. Install them on top of a stock SkyRL venv:
 
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
-uv sync --extra arctic-rl
+uv sync
+uv pip install arctic-platform 'arctic-inference[vllm]' liger-kernel
 uv pip install --upgrade 'transformers>=4.57,<5'   # vllm 0.18 pin
+```
+
+The launchers below call `python -m skyrl.train.entrypoints.main_base` against the active venv, so the install above is one-time. (Alternatively use `uv run --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel python -m ...` for an ephemeral run.)
+
+## 30-second smoke test (GSM8K, 4 GPUs)
+
+```bash
 uv run ray start --head --num-gpus=4
 bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
 ```
@@ -140,8 +150,9 @@ integrations/arctic_rl/
 
 ```bash
 # 1. Clone + install
-git clone https://github.com/Snowflake-AI-Research/SkyRL.git && cd SkyRL
-uv sync --extra arctic-rl
+git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
+uv sync
+uv pip install arctic-platform 'arctic-inference[vllm]' liger-kernel
 uv pip install --upgrade 'transformers>=4.57,<5'   # vllm 0.18 pin
 
 # 2. Ray up (4-node example; repeat on each worker)
