@@ -41,6 +41,7 @@ Any stock SkyRL recipe becomes an Arctic RL recipe by appending **one flag** and
 
 ```bash
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+FLASH_ATTN3_WHL="https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"
 
 uv run --isolated --extra skyrl-train \
     --with arctic-platform \
@@ -48,8 +49,10 @@ uv run --isolated --extra skyrl-train \
     --with liger-kernel \
     --with 'transformers==4.57.6' \
     --with "flash-attn@${FLASH_ATTN_WHL}" \
+    --with "flash-attn-3@${FLASH_ATTN3_WHL}" \
     -- python -m skyrl.train.entrypoints.main_base \
         trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
+        trainer.arctic_rl.attn_implementation=flash_attention_3 \
         <... your existing recipe overrides ...>
 ```
 
@@ -73,7 +76,7 @@ Defaults assume you came here to use Arctic RL; opt **out** of optimizations exp
 | `offload_optimizer` | `false` | CPU offload optimizer state (`zero_stage≥2`). |
 | `offload_param` | `false` | CPU offload ZeRO-3 param shards. |
 | `colocate` | `false` | Share GPUs between training and sampling. |
-| `attn_implementation` | `flash_attention_2` | `flash_attention_2` or `flash_attention_3` (Hopper, optional wheel). |
+| `attn_implementation` | `flash_attention_3` (BIRD) / `flash_attention_2` (GSM8K) | FA3 is the default on the BIRD launchers (Hopper-targeted, matches the 2.38× recipe). Use FA2 on A100/L40S. The FA3 wheel ships in the launcher's `--with` chain. |
 | `cuda_ipc_weight_sync` | `false` | Zero-copy IPC weight sync (colocate-only). |
 | `vllm_max_num_seqs` | `256` | vLLM batching cap. |
 | `vllm_config` | `None` | Escape hatch for raw `vllm.AsyncEngineArgs` keys not covered above (see below). |
@@ -129,10 +132,12 @@ GPU layout follows standard SkyRL knobs:
 - Sampling: `generator.inference_engine.num_engines * tensor_parallel_size`
 - Log-prob: `trainer.arctic_rl.log_prob_gpus` (0 = colocate with sampling)
 
-Optional FA3 on Hopper (recommended for the largest speedups):
+**FlashAttention 3** is the default on the BIRD recipes (Hopper-targeted — this is the attention backend that produced the 2.38× speedup). The launchers ship the FA3 wheel from PyTorch's cu128 index as one of the `--with` overrides, so no extra install step is needed; just run the launcher on H100/H200 and `ATTN_IMPL=flash_attention_3` kicks in. On A100/L40S, set `ATTN_IMPL=flash_attention_2` before invoking the launcher.
+
+For your own launcher, add this `--with` line to ship FA3:
 
 ```bash
-uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
+--with "flash-attn-3@https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"
 ```
 
 
@@ -167,8 +172,7 @@ uv run --isolated --extra skyrl-train ray start --head --port=6379 --num-gpus=8
 # on each worker:
 #   uv run --isolated --extra skyrl-train ray start --address=<head>:6379 --num-gpus=8
 
-# 3. (Hopper) FA3 wheel
-uv pip install flash-attn-3 --index-url https://download.pytorch.org/whl/cu128
+# 3. (FA3 ships in the launcher's --with chain — no extra install step on Hopper.)
 
 # 4. BIRD data — raw download + preprocess (a one-command HF bundle is on the roadmap)
 mkdir -p /data/bird && cd /data/bird
