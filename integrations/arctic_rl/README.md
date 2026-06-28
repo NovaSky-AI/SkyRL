@@ -1,97 +1,116 @@
 # Arctic RL Integration for SkyRL
 
-**Bring [ZoRRo](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/)'s 3.5× RL speedup to any SkyRL recipe with a single CLI flag.**
-
-[ZoRRo (Zero Redundancy Rollouts)](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/) is Snowflake AI Research's RL acceleration stack — prompt-deduplicated split attention for training, Forest Cascade Attention for inference, and Arctic speculative decoding for generation. On Arctic-Text2SQL-R2 it delivers **3.5× faster end-to-end training**, **6× faster actor update**, **5× faster log-prob**, **1.7× faster rollout generation**, and **3.2× longer context**.
-
-This integration routes SkyRL's GRPO loop through the open-source [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) server — the same backend that produced those numbers — so you get all of ZoRRo's optimizations on your existing recipes, untouched.
+Routes SkyRL's GRPO loop through the [Arctic RL](https://github.com/Snowflake-AI-Research/Arctic-Platform) server. Adds the ZoRRo / Forest Cascade Attention / Arctic speculative-decoding stack ([ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/)) under SkyRL's existing trainer / Hydra / Ray plumbing.
 
 ## Install
+
+Clone SkyRL:
 
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
 ```
 
-That's it. No `uv sync --extra`, no `uv pip install`. Every launcher in `examples/` uses `uv run --isolated --extra skyrl-train --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel --with 'transformers==4.57.6' --with flash-attn@<wheel>` — the same pattern as `examples/train/flash_rl` and `examples/train_integrations/harbor`. uv resolves the env on first launch (~5 min, cached after) and SkyRL's uv+Ray plugin replicates the exact invocation on every worker.
+There is no `uv sync` step. Each launcher in `integrations/arctic_rl/examples/` invokes:
 
-Why the `--with` overrides: `arctic-inference[vllm]` pulls vLLM 0.18, which requires `transformers<5` and a torch-2.10 ABI flash-attn wheel. SkyRL's `pyproject.toml` pins `transformers>=5.6.1` and ships a torch-2.11 flash-attn (both needed by the fsdp/megatron backends). `--isolated` + `--with` overrides resolve to vLLM 0.18's stack for this run only, leaving the project `.venv` untouched.
+```
+uv run --isolated --extra skyrl-train \
+    --with arctic-platform \
+    --with 'arctic-inference[vllm]' \
+    --with liger-kernel \
+    --with 'transformers==4.57.6' \
+    --with "flash-attn@<torch-2.10 cu128 wheel URL>" \
+    --with "flash-attn-3@<cu128 wheel URL>" \
+    -- python -m ...
+```
 
-## 30-second smoke test (GSM8K, 4 GPUs)
+What each flag does:
+
+- `--isolated` — resolves a fresh env from scratch instead of using SkyRL's lockfile. Required because `tool.uv.sources` in `pyproject.toml` pins vLLM to the cu129 index (vLLM 0.23 only), but `arctic-inference[vllm]` needs vLLM 0.18.
+- `--extra skyrl-train` — pulls SkyRL's training deps (`ray`, `deepspeed`, `hydra-core`, …).
+- `--with arctic-platform`, `--with 'arctic-inference[vllm]'`, `--with liger-kernel` — the three Arctic packages.
+- `--with 'transformers==4.57.6'` — vLLM 0.18 needs transformers `<5`; pinned exact (not `<5`) because Ray's worker-spawn shell parses `<5` as a redirect from fd 5. Same reason `examples/train/flash_rl` exact-pins `transformers==4.53.3`.
+- `--with "flash-attn@<URL>"` — overrides the torch-2.11 flash-attn wheel that `tool.uv.sources` selects, replacing it with a torch-2.10 ABI wheel that matches vLLM 0.18's torch pin.
+- `--with "flash-attn-3@<URL>"` — FA3 wheel from PyTorch's cu128 index (`cp39-abi3`). Default attention backend on the BIRD recipes; this is what produced the 2.38× number on H200.
+
+Ray workers replay the same `uv run --isolated --with ...` via the [uv+Ray `py_executable`](https://www.anyscale.com/blog/uv-ray-pain-free-python-dependencies-in-clusters) integration, so the Arctic stack lands on every worker without a separate install.
+
+First launch resolves and downloads the wheels (~5 min). Subsequent launches hit the uv cache.
+
+## Smoke test — GSM8K, 4 GPUs
 
 ```bash
 bash integrations/arctic_rl/examples/run_gsm8k_grpo_4gpu.sh
 ```
 
-(Single-node — the launcher's `python -m skyrl.train.entrypoints.main_base` auto-starts a local Ray cluster.)
+Downloads `Qwen/Qwen3-0.6B`, preps GSM8K parquets, starts a local Ray cluster. First reward in ~3 min from a cold uv cache.
 
-Auto-downloads `Qwen/Qwen3-0.6B`, auto-preps GSM8K parquets. First reward signal lands in ~3 min from a cold start. On a clean public-mains run we see:
+Recent run (public mains, 4 GPUs):
 
 ```
 step 0  avg_final_rewards: 0.229
 step 1  avg_final_rewards: 0.247
 step 2  avg_final_rewards: 0.280
 step 3  avg_final_rewards: 0.337    loss=0.104  grad_norm=0.22
-step 1 wall clock: 56s  (generate + train + sync_weights)
 sync_weights steady state: <0.1s
 ```
 
-## Drop into your own recipe
+## Use Arctic RL in a recipe
 
-Any stock SkyRL recipe becomes an Arctic RL recipe by appending **one flag** and running through the same `uv run --isolated` driver the launchers use:
+Add one flag to the SkyRL `main_base` invocation:
+
+```
+trainer.override_entrypoint=integrations.arctic_rl.entrypoint
+```
+
+This dispatches into `integrations/arctic_rl/entrypoint.py` after Hydra parsing. ZoRRo, FCA, Liger, and the multi-replica FlashInfer workaround are on by default; opt out via the `trainer.arctic_rl.*` knobs below.
+
+Wrapped in the launcher driver:
 
 ```bash
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 FLASH_ATTN3_WHL="https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"
 
 uv run --isolated --extra skyrl-train \
-    --with arctic-platform \
-    --with 'arctic-inference[vllm]' \
-    --with liger-kernel \
+    --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel \
     --with 'transformers==4.57.6' \
     --with "flash-attn@${FLASH_ATTN_WHL}" \
     --with "flash-attn-3@${FLASH_ATTN3_WHL}" \
     -- python -m skyrl.train.entrypoints.main_base \
         trainer.override_entrypoint=integrations.arctic_rl.entrypoint \
         trainer.arctic_rl.attn_implementation=flash_attention_3 \
-        <... your existing recipe overrides ...>
+        <existing recipe overrides>
 ```
 
-That's it. ZoRRo (training-side dedup + memory-chunked logits), Forest Cascade Attention (rollout), Liger fused kernels, and the multi-replica FlashInfer workaround are all **on by default**. Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to also turn on Arctic speculative decoding.
-
-`trainer.override_entrypoint` tells `main_base` to dispatch into the Arctic entrypoint after Hydra parsing. No `PYTHONPATH` setup, no edits to `main_base.py`.
+Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to enable Arctic speculative decoding.
 
 ### `trainer.arctic_rl.*` knobs
 
-Defaults assume you came here to use Arctic RL; opt **out** of optimizations explicitly if you need a baseline comparison.
-
-| Knob | Default | Purpose |
+| Knob | Default | Effect |
 | --- | --- | --- |
-| `use_arctic_inference` | **`true`** | Forest Cascade Attention in the rollout (auto-injects the multi-replica `fuse_allreduce_rms` workaround when needed). |
-| `use_zorro` | **`true`** | ZoRRo split-attention + prompt dedup in the trainer. |
-| `logits_optimization` | **`"memory"`** | Chunked logits compute on the server (ZoRRo only). |
-| `use_liger` | **`true`** | Liger fused MLP/RMSNorm kernels. |
-| `speculative_model` | `None` | HF id / local path of an Arctic draft head — set this to enable Arctic speculative decoding. |
-| `num_speculative_tokens` | `3` | Draft tokens per target-model step (only when `speculative_model` is set). |
-| `zero_stage` | `0` | DeepSpeed ZeRO (use `2` for ~1B, `3` for ≥7B; required for bf16 + fp32 grad). |
-| `offload_optimizer` | `false` | CPU offload optimizer state (`zero_stage≥2`). |
-| `offload_param` | `false` | CPU offload ZeRO-3 param shards. |
+| `use_arctic_inference` | `true` | Forest Cascade Attention in the rollout; auto-injects the multi-replica `fuse_allreduce_rms` workaround when `num_engines > 1`. |
+| `use_zorro` | `true` | ZoRRo split-attention + prompt dedup on the trainer side. |
+| `logits_optimization` | `"memory"` | Chunked logits compute on the server (ZoRRo only). |
+| `use_liger` | `true` | Liger fused MLP/RMSNorm kernels. |
+| `speculative_model` | `None` | HF id or local path of an Arctic draft head. Enables Arctic speculative decoding when set. |
+| `num_speculative_tokens` | `3` | Draft tokens per target-model step. Only used when `speculative_model` is set. |
+| `zero_stage` | `0` | DeepSpeed ZeRO stage. `2` for ~1B models, `3` for ≥7B. Required to be ≥1 for bf16 model + fp32 grad. |
+| `offload_optimizer` | `false` | CPU offload optimizer state. Needs `zero_stage ≥ 2`. |
+| `offload_param` | `false` | CPU offload ZeRO-3 parameter shards. |
 | `colocate` | `false` | Share GPUs between training and sampling. |
-| `attn_implementation` | `flash_attention_3` (BIRD) / `flash_attention_2` (GSM8K) | FA3 is the default on the BIRD launchers (Hopper-targeted, matches the 2.38× recipe). Use FA2 on A100/L40S. The FA3 wheel ships in the launcher's `--with` chain. |
-| `cuda_ipc_weight_sync` | `false` | Zero-copy IPC weight sync (colocate-only). |
+| `attn_implementation` | `flash_attention_3` on BIRD launchers, `flash_attention_2` on GSM8K | Set to `flash_attention_2` on A100 / L40S. |
+| `cuda_ipc_weight_sync` | `false` | Zero-copy IPC weight sync. Requires `colocate=true`. |
 | `vllm_max_num_seqs` | `256` | vLLM batching cap. |
-| `vllm_config` | `None` | Escape hatch for raw `vllm.AsyncEngineArgs` keys not covered above (see below). |
+| `vllm_config` | `None` | Raw `vllm.AsyncEngineArgs` dict, forwarded verbatim. See below. |
 
-### Escape hatch — `trainer.arctic_rl.vllm_config`
+### `trainer.arctic_rl.vllm_config`
 
-The integration translates `arctic_rl.*` knobs into the corresponding `vllm.AsyncEngineArgs` keys for you — FCA, the multi-replica FlashInfer workaround, and Arctic speculative decoding are all auto-injected when their typed flag is on.
-
-`vllm_config` is the escape hatch for vLLM knobs the typed fields don't yet cover — e.g. a non-default `cudagraph_mode`, a custom `compilation_config` pass, or any future vLLM field arctic-inference doesn't model. The dict is forwarded verbatim to `vllm.AsyncEngineArgs` via arctic-platform's `ArcticRLClientConfig.vllm_config` (public main, unmodified), and **user keys win on conflict** with the auto-injected defaults:
+`trainer.arctic_rl.*` covers the vLLM knobs Arctic RL needs. `vllm_config` is for raw vLLM fields the typed knobs don't model:
 
 ```bash
 trainer.arctic_rl.vllm_config="{compilation_config: {cudagraph_mode: FULL}}"
 ```
 
-You should not need this in the happy path. If you reach for it, the typed-knob layer probably should grow a new field — file a follow-up.
+The dict is shallow-merged after auto-injected defaults, so user keys win on conflict.
 
 ## Architecture
 
@@ -111,35 +130,27 @@ You should not need this in the happy path. If you reach for it, the typed-knob 
  +----------------------------------------------------------------+
 ```
 
-The integration pins `comm_protocol="ray"` — the SkyRL driver and Arctic server actors share one Ray cluster. arctic-platform's HTTP transport is for remote dss-platform deployments and isn't used here.
+`comm_protocol="ray"` is pinned in the integration. arctic-platform's HTTP transport is for remote dss-platform deployments and is not used here.
 
-## Multi-node and FA3
+## Multi-node
 
-Same `ray start` pattern as every other SkyRL recipe — `uv run --isolated --extra skyrl-train ray start ...` on each node:
+`ray start` on each node, same pattern as every other SkyRL recipe:
 
 ```bash
-# Head node:
+# Head node
 uv run --isolated --extra skyrl-train ray start --head --port=6379 --num-gpus=8
-# Each worker (same SkyRL checkout):
+
+# Each worker
 uv run --isolated --extra skyrl-train ray start --address=<HEAD_IP>:6379 --num-gpus=8
-uv run --isolated --extra skyrl-train ray status   # confirms total GPUs
+
+uv run --isolated --extra skyrl-train ray status
 ```
 
-The launcher's `uv run --isolated --extra skyrl-train --with arctic-platform ...` invocation is replicated on every Ray worker via the uv+Ray `py_executable` integration, so workers automatically get the same arctic stack.
+GPU layout:
 
-GPU layout follows standard SkyRL knobs:
 - Training: `trainer.placement.policy_num_gpus_per_node * policy_num_nodes`
 - Sampling: `generator.inference_engine.num_engines * tensor_parallel_size`
-- Log-prob: `trainer.arctic_rl.log_prob_gpus` (0 = colocate with sampling)
-
-**FlashAttention 3** is the default on the BIRD recipes (Hopper-targeted — this is the attention backend that produced the 2.38× speedup). The launchers ship the FA3 wheel from PyTorch's cu128 index as one of the `--with` overrides, so no extra install step is needed; just run the launcher on H100/H200 and `ATTN_IMPL=flash_attention_3` kicks in. On A100/L40S, set `ATTN_IMPL=flash_attention_2` before invoking the launcher.
-
-For your own launcher, add this `--with` line to ship FA3:
-
-```bash
---with "flash-attn-3@https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"
-```
-
+- Log-prob: `trainer.arctic_rl.log_prob_gpus` (`0` colocates with sampling)
 
 ## File layout
 
@@ -161,20 +172,18 @@ integrations/arctic_rl/
 
 ## BIRD-SQL: 32B Qwen3 on 32 × H200
 
-`examples/run_bird_grpo_32b_32gpu.sh` reproduces the 32B Text2SQL setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/). End-to-end from a clean machine:
+`examples/run_bird_grpo_32b_32gpu.sh` runs the 32B Text2SQL setup from the [ZoRRo blog](https://www.snowflake.com/en/blog/engineering/zorro-enterprise-rl-training/).
 
 ```bash
-# 1. Clone (first launcher invocation resolves the env in ~5 min, cached after)
+# 1. Clone
 git clone https://github.com/NovaSky-AI/SkyRL.git && cd SkyRL
 
-# 2. Ray up (4-node example; repeat on each worker)
+# 2. Ray cluster (4-node example; repeat on each worker)
 uv run --isolated --extra skyrl-train ray start --head --port=6379 --num-gpus=8
-# on each worker:
+# worker:
 #   uv run --isolated --extra skyrl-train ray start --address=<head>:6379 --num-gpus=8
 
-# 3. (FA3 ships in the launcher's --with chain — no extra install step on Hopper.)
-
-# 4. BIRD data — raw download + preprocess (a one-command HF bundle is on the roadmap)
+# 3. BIRD raw data + preprocess
 mkdir -p /data/bird && cd /data/bird
 wget https://bird-bench.oss-cn-beijing.aliyuncs.com/train.zip && unzip train.zip
 wget https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip   && unzip dev.zip
@@ -185,14 +194,14 @@ python integrations/arctic_rl/envs/preprocess_bird.py \
     --max_tokens 32768 \
     --tokenizer  Qwen/Qwen3-1.7B
 
-# 5. Run
+# 4. Launch
 DATA_DIR=$HOME/data/bird WANDB_API_KEY=<key> \
     bash integrations/arctic_rl/examples/run_bird_grpo_32b_32gpu.sh
 ```
 
 Notes:
 
-- BIRD raw data is gated behind <https://bird-bench.github.io>; the `wget` URLs above are the public mirrors arctic-platform's txt2sql README uses.
-- `--max_tokens 32768` matches the recipe's `trainer.max_prompt_length=32768`. Drop this lower only if you also lower the recipe's prompt length.
-- `preprocess_bird.py` writes verl-format parquets whose `extra_info.db_path` is absolute. The SQLite files at those paths must be readable on every node at training time — either a shared filesystem, or mirror `/data/bird/` to each worker.
-- An 8B variant `run_bird_grpo_8b_32gpu.sh` ships for quick smoke tests on the same cluster.
+- BIRD raw data is gated behind <https://bird-bench.github.io>; the `wget` URLs above are the mirrors arctic-platform's txt2sql README uses.
+- `--max_tokens 32768` matches the recipe's `trainer.max_prompt_length=32768`.
+- `preprocess_bird.py` emits verl-format parquets with absolute `extra_info.db_path`. The SQLite files at those paths must be readable on every Ray node — shared filesystem, or mirror `/data/bird/` to each worker.
+- `run_bird_grpo_8b_32gpu.sh` ships an 8B variant on the same cluster shape for faster iteration.
