@@ -18,6 +18,31 @@ if TYPE_CHECKING:
     from skyrl.tinker.api import SampleRequest
 
 
+_MAX_SAMPLE_RETRIES = 6
+_RETRY_BASE_DELAY_SEC = 0.25
+_RETRY_MAX_DELAY_SEC = 2.0
+
+
+def _is_retriable_sample_error(exc: Exception) -> bool:
+    """Return whether a failed sample request should be retried after a proactive adapter load.
+
+    The engine loads LoRA adapters lazily, so a freshly extracted adapter can be sampled before it is
+    registered. Retry transient transport errors and the engine's "adapter not loaded yet" responses
+    (a 404, or a 400 whose body reports the model does not exist). Malformed requests and server
+    errors are not retried.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code == 404:
+            return True
+        if status_code == 400:
+            body = exc.response.text.lower()
+            return "does not exist" in body or "not found" in body
+    return False
+
+
 def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None:
     """Extract a LoRA checkpoint to disk for vLLM to load.
 
@@ -80,6 +105,38 @@ class ExternalInferenceClient:
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
+    async def _request_adapter_load(self, http_client: httpx.AsyncClient, model_name: str) -> None:
+        """Ask the engine to load the adapter for ``model_name`` from its extracted directory."""
+        try:
+            await http_client.post(
+                "/load_lora_adapter",
+                json={"lora_name": model_name, "lora_path": str(self.lora_base_dir / model_name)},
+            )
+        except Exception:
+            logger.debug("Proactive load_lora_adapter call failed; retrying sample request")
+
+    async def _post_completion(
+        self,
+        http_client: httpx.AsyncClient,
+        payload: dict,
+        headers: dict,
+        model_name: str,
+        *,
+        base_model: str | None,
+    ) -> dict:
+        """Send the completion request, retrying through the engine's lazy adapter-load race."""
+        for attempt in range(_MAX_SAMPLE_RETRIES):
+            try:
+                response = await http_client.post("/completions", json=payload, headers=headers)
+                response.raise_for_status()
+                return response.json()
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                if attempt == _MAX_SAMPLE_RETRIES - 1 or not _is_retriable_sample_error(exc):
+                    raise
+                if base_model is None:
+                    await self._request_adapter_load(http_client, model_name)
+                await asyncio.sleep(min(_RETRY_MAX_DELAY_SEC, _RETRY_BASE_DELAY_SEC * (2**attempt)))
+
     async def _forward_to_engine(
         self,
         request: "SampleRequest",
@@ -130,9 +187,7 @@ class ExternalInferenceClient:
         if session_id is not None:
             headers["X-Session-ID"] = session_id
 
-        response = await http_client.post("/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        result = response.json()
+        result = await self._post_completion(http_client, payload, headers, model_name, base_model=base_model)
 
         sequences = []
         for choice in result["choices"]:
