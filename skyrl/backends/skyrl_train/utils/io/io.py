@@ -248,4 +248,6 @@ def local_read_files(input_dir, filenames):
                     download_file(src, os.path.join(temp_dir, name))
             yield temp_dir
     else:
+        if not exists(input_dir):
+            raise FileNotFoundError(f"Path does not exist: {input_dir}")
         yield input_dir
