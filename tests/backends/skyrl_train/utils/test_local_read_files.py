@@ -28,12 +28,14 @@ def test_cloud_downloads_only_requested_files(mock_is_cloud_path, mock_exists, m
 
 
 @patch("skyrl.backends.skyrl_train.utils.io.io.download_file")
+@patch("skyrl.backends.skyrl_train.utils.io.io.exists")
 @patch("skyrl.backends.skyrl_train.utils.io.io.is_cloud_path")
-def test_local_path_does_not_download(mock_is_cloud_path, mock_download_file):
+def test_local_path_does_not_download(mock_is_cloud_path, mock_exists, mock_download_file):
     """
     Test that when a local path is provided, no download occurs and the path is returned directly
     """
     mock_is_cloud_path.return_value = False
+    mock_exists.return_value = True
 
     with local_read_files("/some/local/dir", ["a.pt", "b.pt"]) as read_dir:
         assert read_dir == "/some/local/dir"
