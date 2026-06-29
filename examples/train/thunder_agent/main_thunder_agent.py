@@ -48,10 +48,6 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
-    def run(self):
-        trainer = self._setup_trainer()
-        asyncio.run(trainer.train())
-
     def get_inference_client(self) -> InferenceEngineInterface:
         return self._get_new_inference_client()
 

@@ -456,6 +456,11 @@ class PolicyLossType(StrEnum):
     DPPO = "dppo"
 
 
+# Losses that optimize against rollout logprobs, so the "old" logprobs forward pass can be
+# skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
+LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
+
+
 class PolicyLossRegistry(BaseFunctionRegistry):
     """
     Registry for policy loss functions.

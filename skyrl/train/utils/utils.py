@@ -441,8 +441,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not ie_cfg.run_engines_locally:
-            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
@@ -487,9 +485,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             ie_cfg.num_prefill < ie_cfg.num_engines
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
-
-    if not ie_cfg.run_engines_locally:
-        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
 
     if ie_cfg.override_existing_update_group == "auto":
         if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
@@ -738,6 +733,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
+    # sees the override.
+    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
+        logger.info(
+            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
+        )
+        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
     return env_vars
 

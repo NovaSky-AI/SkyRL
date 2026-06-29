@@ -1027,6 +1027,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    "is_padding_batch": (
+                        experience.metadata.get("is_padding_batch", False) if experience.metadata else False
+                    ),
                 }
             )
 
@@ -1092,7 +1095,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
             # excluding them here keeps both reductions correct.
-            if m_batch["loss_mask"].sum().item() == 0:
+            if m_batch["is_padding_batch"]:
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
@@ -1272,13 +1275,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
+
+        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
         if (
             use_prefix_cache
             and torch.distributed.get_rank() == 0
-            and self.cfg.fully_async.clear_kv_cache_on_weight_sync
+            and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
         ):
             # clear prefix cache
-            cache_reset_task = inference_engine_client.reset_prefix_cache()
+            cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
         torch.cuda.empty_cache()
 

@@ -281,8 +281,19 @@ class BasePPOExp:
         # during `build_models` (which happens before _setup_trainer returns).
         self.trainer = trainer
 
-        # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+        # Build the models — skipped in simulated-trainer mode (no policy/critic/ref components).
+        # See FullyAsyncConfig.simulate_training / FullyAsyncTrainerSim: steps are simulated
+        # (sleep + pause/resume, no broadcast), typically against external served endpoints.
+        # TODO: we should make a top level TrainerConfig.simulate_training flag to provide a consistent way
+        # for simulating training steps
+        simulate_training = self.cfg.trainer.fully_async.simulate_training
+        if simulate_training:
+            logger.info(
+                "fully_async.simulate_training=True: skipping build_models() — no policy/critic/ref "
+                "models instantiated. Trainer steps will be simulated (sleep + pause/resume, no broadcast)."
+            )
+        else:
+            trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
@@ -315,7 +326,20 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 
 def main() -> None:
-    # Parse CLI args and build typed config
+    # Peek at trainer.override_entrypoint BEFORE strict config parse: integrations
+    # may add their own config fields that core SkyRLTrainConfig doesn't know
+    # about, so the strict parse would fail. If override is set, dispatch to the
+    # named entrypoint and let it parse with its own extended config.
+    override_entrypoint = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("trainer.override_entrypoint="):
+            override_entrypoint = arg.split("=", 1)[1]
+            break
+    if override_entrypoint:
+        from importlib import import_module
+
+        return import_module(override_entrypoint).main()
+
     cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
 
     # validate the arguments

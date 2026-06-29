@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from collections import defaultdict
 from enum import Enum
@@ -15,6 +16,11 @@ from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY,
+)
 from skyrl.train.config import SkyRLTrainConfig, TrainerConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.generators.base import GeneratorOutput
@@ -26,6 +32,24 @@ from skyrl.train.generators.utils import (
 BasicType = Union[int, float, str, bool, type(None)]
 
 GLOBAL_STEP_PREFIX = "global_step_"
+
+
+def finalize_minibatch_rollout_logprob_diff_std(metrics: Dict[str, float]) -> None:
+    """Reconstruct the logprob-diff std from its reduced first/second moments, in place.
+
+    Std can't be mean-reduced across micro-batches/DP/mini-batches, so the workers emit the
+    moments and we derive ``std = sqrt(E[x^2] - E[x]^2)`` here. Replaces the second-moment key
+    with the std; no-op when the moments are absent (e.g. critic training, or no rollout logprobs).
+    """
+    if (
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY not in metrics
+        or MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY not in metrics
+    ):
+        return
+    mean = metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY]
+    sq_mean = metrics.pop(MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY)
+    # max(0, ...) guards tiny negatives from float round-off.
+    metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY] = math.sqrt(max(0.0, sq_mean - mean**2))
 
 
 class ResumeMode(Enum):
@@ -237,6 +261,63 @@ def calculate_per_dataset_metrics(
         eval_metrics[f"eval/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
 
     return eval_metrics
+
+
+def get_intra_group_completion_time_std_cv(
+    generator_output: GeneratorOutput,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Intra-group spread of per-trajectory completion times for a single group.
+
+    Returns ``(std, cv)`` where ``std`` is the population standard deviation (seconds) and ``cv``
+    is the coefficient of variation (``std / mean``). Both are ``None`` when the group recorded no
+    completion times or has fewer than two trajectories.
+    """
+    traj_times = generator_output.get("trajectory_generation_times")
+    group_std = None
+    group_cv = None
+    if traj_times and len(traj_times) > 1:
+        # For step wise training, each turn /step contributes one entry.
+        # Only take the metrics from the last step
+        is_last_step = generator_output.get("is_last_step")
+        if is_last_step:
+            traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
+        traj_times_arr = np.array(traj_times, dtype=np.float64)
+        # Population std of per-trajectory completion times within this group (seconds).
+        group_std = float(traj_times_arr.std())
+        # Coefficient of variation = std / mean. Guard against div-by-zero.
+        mean_traj_time = float(traj_times_arr.mean())
+        if mean_traj_time > 0:
+            group_cv = group_std / mean_traj_time
+    return group_std, group_cv
+
+
+def get_group_completion_metrics(
+    group_completion_times: Optional[List[float]],
+    intra_group_stds: Optional[List[float]],
+    intra_group_cvs: Optional[List[float]],
+) -> Dict[str, float]:
+    """Per-group completion-time statistics for the groups consumed in a step.
+
+    These surface generation load-balancing behavior (e.g. across vllm-router routing policies):
+    tail group latency (p90/max) and how unevenly trajectories within a group finish (intra-group
+    coefficient of variation). Each input may be empty/None, in which case the corresponding metrics
+    are omitted.
+    """
+    metrics = {}
+    if group_completion_times:
+        group_times_arr = np.array(group_completion_times, dtype=np.float64)
+        metrics.update(
+            {
+                "generate/group_completion_time_mean": float(group_times_arr.mean()),
+                "generate/group_completion_time_p90": float(np.percentile(group_times_arr, 90)),
+                "generate/group_completion_time_max": float(group_times_arr.max()),
+            }
+        )
+    if intra_group_stds:
+        metrics.update({"generate/intra_group_completion_time_std_mean": float(np.mean(intra_group_stds))})
+    if intra_group_cvs:
+        metrics.update({"generate/intra_group_completion_time_cv_mean": float(np.mean(intra_group_cvs))})
+    return metrics
 
 
 def dump_per_dataset_eval_results(

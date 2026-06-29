@@ -1,13 +1,52 @@
 import math
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Optional
 
 import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
+
+# Per-micro-batch abs diff between train-step and rollout logprobs. The moments (`_mean`,
+# `_sq_mean`) and `_max`/`_min` reduce correctly across micro-batches, DP ranks, and
+# mini-batches; the std is reconstructed from the moments downstream.
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX = "minibatch_rollout_logprobs_abs_diff"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_mean"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_sq_mean"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_max"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_min"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
+
+
+@torch.no_grad()
+def compute_minibatch_rollout_logprob_diff_metrics(
+    action_log_probs: torch.Tensor,
+    rollout_logprobs: Optional[torch.Tensor],
+    loss_mask: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    """Per-micro-batch abs diff between the train-step and rollout logprobs.
+
+    Unlike the trainer's forward-pass `rollout_train_logprobs_abs_diff` metric, this uses the
+    logprobs the loss actually optimizes against, so it reflects mini-batch drift when
+    ``train_batch_size > mini_batch_size``. Masked-out tokens are excluded via the same
+    ``masked_mean`` / ``* loss_mask`` pattern as the off-policy `is_ratio_*` metrics, so the keys
+    are emitted for every micro-batch (a fully-masked one contributes 0) -- keeping them present
+    on every DP rank. Returns ``{}`` only when rollout logprobs are unavailable, which is uniform
+    across DP ranks.
+    """
+    if rollout_logprobs is None:
+        return {}
+    abs_diff = (action_log_probs - rollout_logprobs).abs()
+    masked_abs_diff = abs_diff if loss_mask is None else abs_diff * loss_mask
+    return {
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY: masked_mean(abs_diff, loss_mask).item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY: masked_mean(abs_diff.square(), loss_mask).item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY: masked_abs_diff.max().item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY: masked_abs_diff.min().item(),
+    }
 
 
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
@@ -264,7 +303,19 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
-        data.metadata = self.data.metadata
+        # Add optional fields such as `rollout_logprobs` and `rollout_expert_indices` to padding batch
+        if self.data.get("rollout_logprobs") is not None:
+            ref_tensor = self.data["rollout_logprobs"]
+            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
+        if self.data.get("rollout_expert_indices") is not None:
+            ref_tensor = self.data["rollout_expert_indices"]
+            data["rollout_expert_indices"] = torch.zeros(
+                (batch_size, *ref_tensor.shape[1:]), dtype=ref_tensor.dtype, device=device
+            )
+        data.metadata = {}
+        if self.data.metadata:
+            data.metadata.update(self.data.metadata)
+        data.metadata["is_padding_batch"] = True
         return data
 
     def _sync_num_microbatches(self) -> int:

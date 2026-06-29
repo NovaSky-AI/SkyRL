@@ -118,7 +118,7 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def reset_prefix_cache(self):
+    async def reset_prefix_cache(self, reset_running_requests: bool = False):
         raise NotImplementedError
 
     @abstractmethod

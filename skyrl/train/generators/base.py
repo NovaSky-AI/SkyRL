@@ -42,6 +42,10 @@ class GeneratorOutput(TypedDict):
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     trajectory_ids: Optional[List[TrajectoryID]]
+    # Wall-clock generation time (seconds) for each trajectory, with one entry per
+    # trajectory in the input batch (i.e. per ``agent_loop`` call). Used by the fully
+    # async trainer to compute per-group / intra-group completion-time metrics.
+    trajectory_generation_times: Optional[List[float]]
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]

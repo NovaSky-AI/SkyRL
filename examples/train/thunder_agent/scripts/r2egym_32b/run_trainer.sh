@@ -288,6 +288,7 @@ fi
   trainer.algorithm.use_kl_loss="$USE_KL_LOSS" \
   trainer.algorithm.kl_loss_coef="$KL_LOSS_COEF" \
   trainer.algorithm.max_seq_len="$TRAIN_MAX_SEQ_LEN" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps="$FULL_MAX_STALENESS_STEPS" \
   trainer.fully_async.num_parallel_generation_workers="$NUM_PARALLEL_GENERATION_WORKERS" \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \

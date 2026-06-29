@@ -31,12 +31,14 @@ LR=1e-5
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
 GEO_MASK_LOW=0.99
+ENFORCE_EAGER=false
 
 RUN_NAME=gsm8k-fully-async-qwen3-0.6B_lora_${LORA_RANK}_${LORA_ALPHA}
 
 uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \
@@ -82,5 +84,5 @@ uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_asyn
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   $@

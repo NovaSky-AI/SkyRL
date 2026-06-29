@@ -82,6 +82,7 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.log_path=$LOG_DIR \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=$MAX_STALENESS_STEPS \
   trainer.fully_async.num_parallel_generation_workers=$NUM_PARALLEL_GENERATION_WORKERS \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \

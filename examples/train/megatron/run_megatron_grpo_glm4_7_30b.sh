@@ -57,6 +57,8 @@ MOE_ROUTER_EXPERT_BIAS=true
 OPTIMIZER_CPU_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
+ENFORCE_EAGER=false
+
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -68,7 +70,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.inference_engine.engine_init_kwargs.max_model_len=$INFERENCE_ENGINE_MAX_MODEL_LEN \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \

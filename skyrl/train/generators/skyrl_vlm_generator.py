@@ -3,6 +3,7 @@ SkyRLVLMGymGenerator: VLM (vision-language model) multi-turn RL generator.
 """
 
 import copy
+import time
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 from uuid import uuid4
@@ -82,6 +83,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         completion, error, or cancellation so session-aware routing policies can
         free the replica capacity held by the trajectory.
         """
+        agent_loop_start_time = time.monotonic()
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -219,6 +221,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 env_metrics=env_metrics,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                e2e_time=time.monotonic() - agent_loop_start_time,
             )
 
         finally:
