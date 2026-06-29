@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 import ray
 from packaging import version
 from ray.actor import ActorHandle
+from ray.exceptions import ActorDiedError
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -340,6 +341,13 @@ def create_ray_wrapped_inference_engines(
         # NOTE(shu): set to 1 for LoRA
         sleep_level = 1 if enable_lora else sleep_level
         sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
-        ray.get(sleep_refs)
+        try:
+            ray.get(sleep_refs)
+        except ActorDiedError as e:
+            from skyrl.train.utils.ray_logging import reraise_with_actor_diagnostics
+
+            reraise_with_actor_diagnostics(
+                e, inference_engine_actors, "Inference engine actor(s) died during engine initialization."
+            )
 
     return engines
