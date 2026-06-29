@@ -209,8 +209,7 @@ class HarborGenerator(GeneratorInterface):
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
         ie_cfg = generator_cfg.inference_engine
-        assert isinstance(inference_engine_client, RemoteInferenceClient)
-        self.base_url = inference_engine_client.proxy_url
+        self.base_url = inference_engine_client.get_endpoint_url()
         # Kept so we can notify the router when a session (trial attempt) ends,
         # which lets session-aware routing policies rebalance new trajectories.
         self.inference_engine_client = inference_engine_client

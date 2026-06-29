@@ -165,7 +165,9 @@ LOG_DIR="${LOG_DIR:-$TMP_LOG_ROOT/$RUN_NAME/rollout}"
 SCRATCH_ROOT="$(resolve_writable_runtime_root "${SCRATCH_ROOT:-/scratch/$USER/skyrl_runtime/${RUN_NAME}-rollout}")"
 PYTHON_BIN="$(resolve_python_bin)"
 ROLLOUT_NOFILE_SOFT="${ROLLOUT_NOFILE_SOFT:-131072}"
-VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-vllm.entrypoints.openai.api_server}"
+# SkyRL's vLLM server entrypoint: a vLLM OpenAI-compatible server plus SkyRL's
+# custom endpoints (weight sync via /collective_rpc, /reset_prefix_cache, etc.).
+VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_servers.vllm_server_actor}"
 
 mkdir -p "$LOG_DIR" "$SCRATCH_ROOT"
 

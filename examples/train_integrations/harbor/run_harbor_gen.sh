@@ -35,8 +35,6 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.enable_http_endpoint=true \
-  generator.inference_engine.http_endpoint_host="127.0.0.1" \
-  generator.inference_engine.http_endpoint_port=8000 \
   generator.sampling_params.max_generate_length=4096 \
   trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
   generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \

@@ -55,8 +55,6 @@ uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_sw
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=True \
   generator.inference_engine.enable_http_endpoint=True \
-  generator.inference_engine.http_endpoint_host='127.0.0.1' \
-  generator.inference_engine.http_endpoint_port=8001 \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
   generator.batched=true \

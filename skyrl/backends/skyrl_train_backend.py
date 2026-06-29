@@ -360,6 +360,15 @@ class SkyRLTrainBackend(AbstractBackend):
         # (only meaningful in non-colocated mode; the API gates on this).
         self._publish_inference_state(server_setup.proxy_url)
 
+        # In the new (HTTP) inference path the engines stay resident on the GPUs
+        # after init. Under colocate_all those GPUs are shared with training, so
+        # match the legacy behaviour and sleep the engines immediately; they are
+        # woken before sampling. sleep() is async with no running loop here, hence
+        # asyncio.run. Defaulting to level 2 (the client clamps to level 1 when
+        # LoRA weight sync is in use, since level 2 would discard the base model).
+        if is_colocated:
+            asyncio.run(client.sleep())
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:

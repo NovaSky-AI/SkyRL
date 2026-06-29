@@ -22,12 +22,6 @@ engine reports its stats through `ray.util.metrics`, and Ray's per-node
 metrics agent exposes them at `http://<node-ip>:<MetricsExportPort>/metrics`
 in Prometheus text format. 
 
-## Inference path support
-
-The inference servers ([vllm_server_actor.py:329-339](skyrl/backends/skyrl_train/inference_servers/vllm_server_actor.py#L329-L339))
-always use `AsyncLLMEngine` and wire the stat logger unconditionally, so engine
-metrics are always available.
-
 ## Metrics logged to wandb
 
 When the flag is on, the trainer constructs a `VLLMMetricsScraper`

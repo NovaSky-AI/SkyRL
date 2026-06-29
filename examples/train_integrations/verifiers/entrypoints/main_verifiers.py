@@ -20,6 +20,7 @@ class VerifiersEntrypoint(BasePPOExp):
     ):
         return VerifiersGenerator(
             generator_cfg=cfg.generator,
+            inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_name=cfg.trainer.policy.model.path,
         )

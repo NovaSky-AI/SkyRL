@@ -1,4 +1,5 @@
 import asyncio
+import os
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,8 +69,11 @@ def init_and_run(
     trajectory_id: TrajectoryID,
     global_step: int,
     training_phase: TrainingPhase,
+    base_url: str,
 ):
     from loguru import logger
+
+    os.environ["OPENAI_BASE_URL"] = base_url
 
     model_config = sweagent_config.get("model", {})
     # Use new sampling parameters
@@ -133,13 +137,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
 
-        self.http_server_inference_engine_client_host = generator_cfg.inference_engine.http_endpoint_host
-
-        self.http_server_inference_engine_client_port = generator_cfg.inference_engine.http_endpoint_port
-
-        self.base_url = (
-            f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
-        )
+        self.base_url = inference_engine_client.get_endpoint_url()
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -171,6 +169,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             trajectory_id,
             batch_metadata.global_step,
             batch_metadata.training_phase,
+            self.base_url,
         )
         if not len(messages):
             return None, None, None, None, None, None

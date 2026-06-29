@@ -57,69 +57,15 @@ class InferenceEngineInterface(ABC):
     ) -> InferenceEngineOutput:
         raise NotImplementedError
 
-    async def sample(
-        self,
-        prompt_token_ids: List[int],
-        num_samples: int,
-        sampling_params: Dict[str, Any],
-        prompt_logprobs: bool = False,
-    ) -> InferenceEngineOutput:
-        """Generate multiple independent samples from a single prompt.
+    @abstractmethod
+    def get_endpoint_url(self) -> str:
+        """Return the base URL of the data-plane (OpenAI-compatible) endpoint.
 
-        This method provides Tinker-compatible token-in/token-out sampling semantics.
-
-        Args:
-            prompt_token_ids: Token IDs for a single prompt.
-            num_samples: Number of independent samples to generate.
-            sampling_params: Sampling parameters.
-            prompt_logprobs: If True, return per-token logprobs over the prompt.
-
-        Returns:
-            InferenceEngineOutput containing num_samples results:
-                - response_ids: List of num_samples token ID lists
-                - responses: List of num_samples decoded strings
-                - stop_reasons: List of num_samples stop reasons
-                - response_logprobs: Optional list of num_samples logprob lists
-                - prompt_logprobs: Optional list of num_samples prompt logprob lists
+        Generators point external clients at the inference server/router through
+        this URL (e.g. LiteLLM via ``OPENAI_BASE_URL``) without depending on the
+        concrete client type or how the URL is derived.
         """
-        if prompt_logprobs:
-            sampling_params = {**sampling_params, "prompt_logprobs": 1}
-
-        all_response_ids = []
-        all_responses = []
-        all_stop_reasons = []
-        all_response_logprobs = []
-        all_prompt_logprobs = []
-        all_rollout_expert_indices = []
-
-        for _ in range(num_samples):
-            input_batch: InferenceEngineInput = {
-                "prompts": None,
-                "prompt_token_ids": [prompt_token_ids],  # Wrap in list for batch of 1
-                "sampling_params": sampling_params,
-                "session_ids": None,
-            }
-            output = await self.generate(input_batch)
-
-            # Extract single result from batch of 1
-            all_response_ids.append(output["response_ids"][0])
-            all_responses.append(output["responses"][0])
-            all_stop_reasons.append(output["stop_reasons"][0])
-            if output.get("response_logprobs") is not None:
-                all_response_logprobs.append(output["response_logprobs"][0])
-            if output.get("prompt_logprobs") is not None:
-                all_prompt_logprobs.append(output["prompt_logprobs"][0])
-            if output.get("rollout_expert_indices") is not None:
-                all_rollout_expert_indices.append(output["rollout_expert_indices"][0])
-
-        return {
-            "response_ids": all_response_ids,
-            "responses": all_responses,
-            "stop_reasons": all_stop_reasons,
-            "response_logprobs": all_response_logprobs if all_response_logprobs else None,
-            "prompt_logprobs": all_prompt_logprobs if all_prompt_logprobs else None,
-            "rollout_expert_indices": all_rollout_expert_indices if all_rollout_expert_indices else None,
-        }
+        raise NotImplementedError
 
     @abstractmethod
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,19 +129,4 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def resume_generation(self) -> None:
         """Resume generation after a pause, continuing any frozen in-flight requests."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def tp_size(self) -> int:
-        """Return the tensor parallel size of this inference engine."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def pp_size(self) -> int:
-        """Return the pipeline parallel size of this inference engine."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def dp_size(self) -> int:
-        """Return the data parallel size of this inference engine."""
         raise NotImplementedError

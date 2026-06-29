@@ -2,8 +2,8 @@
 RemoteInferenceClient - Serializable HTTP client for inference.
 
 This is a lightweight, fully serializable HTTP client that wraps the inference
-server HTTP API. It replaces the old InferenceEngineInterface for HTTP-based
-inference servers.
+server HTTP API. It is the concrete ``InferenceEngineInterface`` implementation
+used for HTTP-based inference servers.
 
 Architecture:
 -------------
@@ -39,10 +39,9 @@ Usage:
         data_parallel_size=1,
     )
 
-Comparison with existing code:
-- Replaces: InferenceEngineClient + RemoteInferenceEngine (for remote-only usage)
-- Key difference: Talks directly to router via HTTP, no Ray actor wrapping
-- The router handles session-aware routing; this client handles control plane fan-out
+Design notes:
+- Talks directly to the router via HTTP, no Ray actor wrapping.
+- The router handles session-aware routing; this client handles control plane fan-out.
 """
 
 from __future__ import annotations
@@ -68,6 +67,7 @@ import aiohttp
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
@@ -163,9 +163,9 @@ class SampleResponse(TypedDict):
 
 
 @dataclass
-class RemoteInferenceClient:
+class RemoteInferenceClient(InferenceEngineInterface):
     """
-    Serializable HTTP client for inference. Replaces InferenceEngineInterface.
+    Serializable HTTP client for inference. The concrete InferenceEngineInterface.
 
     This class maintains two URL types:
     - proxy_url: Single URL for data plane operations (routed requests)
@@ -233,6 +233,10 @@ class RemoteInferenceClient:
             raise ValueError(
                 f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
             )
+
+    def get_endpoint_url(self) -> str:
+        """Data-plane endpoint base URL (the router/proxy that load-balances requests)."""
+        return self.proxy_url
 
     # ---------------------------
     # Session Management
@@ -994,11 +998,11 @@ class RemoteInferenceClient:
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode - compatibility with InferenceEngineClient interface."""
+        """Pause using keep mode (InferenceEngineInterface method)."""
         return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Resume after pause - compatibility with InferenceEngineClient interface."""
+        """Resume after pause (InferenceEngineInterface method)."""
         return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:

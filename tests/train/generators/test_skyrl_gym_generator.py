@@ -68,7 +68,7 @@ def mock_tokenizer():
 @pytest.fixture
 def mock_llm():
     """
-    This replaces InferenceEngineClient, where `.generate()` always returns MOCK_LLM_OUTPUT_IDS
+    Mock inference engine client whose `.generate()` always returns MOCK_LLM_OUTPUT_IDS
     for each prompt, with corresponding string output "mocked output".
     """
     mock = MagicMock()

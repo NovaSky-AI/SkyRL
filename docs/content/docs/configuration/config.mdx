@@ -689,9 +689,7 @@ For more details on how different placement options work, please refer to the [p
 
 ### HTTP Endpoint Configuration
 
-- `generator.inference_engine.enable_http_endpoint`: When `true`, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using `.generate()` Python calls. When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`.
-- `generator.inference_engine.http_endpoint_host`: Host for the inference HTTP endpoint.
-- `generator.inference_engine.http_endpoint_port`: Port for the inference HTTP endpoint.
+- `generator.inference_engine.enable_http_endpoint`: When `true`, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using `.generate()` Python calls. When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`. The endpoint URL is assigned at runtime and surfaced to generators via the inference engine client's `get_endpoint_url()` — there is no fixed host/port to configure.
 - `generator.inference_engine.served_model_name`: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path. This is useful when:
   - The model path differs from the desired API model name (e.g., local paths vs API names)
   - Using LiteLLM or other clients that expect a specific model name format

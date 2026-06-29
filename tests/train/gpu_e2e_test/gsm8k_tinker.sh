@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_NAME="run_$(date +%Y%m%d%H)"
+# Unique per invocation (seconds + PID): the shared wandb project means an hour-granular
+# name can collide with a concurrent run on another host, and get_summary.py would then
+# read the wrong run.
+RUN_NAME="run_$(date +%Y%m%d%H%M%S)_$$"
 PROJECT_NAME="gsm8k_tinker_ci"
 SCRIPT_DIR=$(dirname $(realpath $0))
 SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")

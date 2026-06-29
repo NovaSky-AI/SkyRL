@@ -56,8 +56,6 @@ def get_test_config(
     cfg.generator.apply_overlong_filtering = False
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.enable_http_endpoint = False
-    cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
-    cfg.generator.inference_engine.http_endpoint_port = 8000
     cfg.generator.step_wise_trajectories = is_step_wise
     cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
     cfg.environment.skyrl_gym.search.log_requests = True

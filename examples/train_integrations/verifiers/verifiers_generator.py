@@ -6,6 +6,7 @@ from verifiers import load_environment
 from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
 from skyrl.train.generators.utils import get_rollout_metrics
 
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.config import GeneratorConfig
 
 
@@ -13,12 +14,14 @@ class VerifiersGenerator(GeneratorInterface):
     def __init__(
         self,
         generator_cfg: GeneratorConfig,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         model_name: str,
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
+            inference_engine_client: inference engine client used to resolve the OpenAI-compatible endpoint URL
             tokenizer: tokenizer object for encoding and decoding text
         """
         self.generator_cfg = generator_cfg
@@ -27,7 +30,7 @@ class VerifiersGenerator(GeneratorInterface):
 
         ie_cfg = generator_cfg.inference_engine
         assert ie_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
-        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}/v1"
+        self.base_url = f"{inference_engine_client.get_endpoint_url()}/v1"
         self.client = self._setup_client(connection_limit=None)  # None means unlimited connections
 
     def _setup_client(self, connection_limit: Optional[int]) -> AsyncOpenAI:

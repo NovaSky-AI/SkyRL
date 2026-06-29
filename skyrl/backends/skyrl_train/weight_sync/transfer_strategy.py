@@ -60,6 +60,10 @@ class WeightTransferSender(ABC):
         ...
 
 
+# NOTE (sumanthrh): WeightTransferStrategy is assymetric - only dictates sender send APIs
+# because we rely on the native vLLM WeightTransferEngine for the receive logic.
+# For CUDA IPC, we use a custom send implementation and for NCCL, we rely on
+# vLLM's NCCLWeightTransferEngine for the send logic.
 class WeightTransferStrategy(ABC):
     """Stateless factory for creating init info and senders.
 

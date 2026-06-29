@@ -583,8 +583,6 @@ class InferenceEngineConfig(BaseConfig):
     
     NOTE: When using HTTP endpoints directly, make sure to set ``trainer.algorithm.temperature`` to the temperature used during generation
     """
-    http_endpoint_host: str = "127.0.0.1"
-    http_endpoint_port: int = 8000
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""

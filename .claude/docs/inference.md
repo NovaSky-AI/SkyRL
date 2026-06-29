@@ -8,7 +8,7 @@ For training-to-inference weight transfer (`NewInferenceWorkerWrap`, broadcast v
 - `RemoteInferenceClient` interacts with HTTP endpoints: 
     - **Data plane**: Interact with router for completions requests.
     - **Control plane**: Fan-out to individual server URLs for weight sync, pause/resume.
-- Shared inference interfaces and types live in `inference_servers/base.py` (`InferenceEngineInterface`, `InferenceEngineInput`/`Output`, `ConversationType`); shared helpers (`build_engine_runtime_env`, `route_prompts_to_engines`, `get_sampling_params_for_backend`) live in `inference_servers/engine_utils.py`.
+- Shared inference interfaces and types live in `inference_servers/base.py` (`InferenceEngineInterface`, `InferenceEngineInput`/`Output`, `ConversationType`); shared helpers (`build_engine_runtime_env`, `get_sampling_params_for_backend`) live in `inference_servers/engine_utils.py`.
 
 ## vLLM Router
 

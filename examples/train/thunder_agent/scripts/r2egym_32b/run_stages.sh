@@ -52,7 +52,8 @@ ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-2}"
 ROLLOUT_ENGINES="${ROLLOUT_ENGINES:-4}"
 ROLLOUT_GPU_GROUPS_SPEC="${ROLLOUT_GPU_GROUPS_SPEC:-}"
 ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
-VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-vllm.entrypoints.openai.api_server}"
+# SkyRL's vLLM server entrypoint (vLLM OpenAI server + SkyRL custom/weight-sync endpoints).
+VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_servers.vllm_server_actor}"
 SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-18080}"
 
 DOCKER_MODE="${DOCKER_MODE:-rootful}"
