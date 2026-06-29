@@ -41,6 +41,8 @@ from skyrl.train.utils import get_ray_pg_ready_with_timeout
 # those globals with vLLM/transformers lazy `GenericModule` objects (e.g. `torch.backends`)
 # that cloudpickle cannot serialize. Keeping vLLM imports local mirrors `test_weight_sync.py`.
 
+pytestmark = pytest.mark.h100
+
 MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
 MOE_PROMPT = "The capital of France is"
 MOE_MAX_TOKENS = 64
