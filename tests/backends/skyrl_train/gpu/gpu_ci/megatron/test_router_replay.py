@@ -21,6 +21,7 @@ from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_te
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -32,6 +33,25 @@ MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 4
 MAX_GENERATE_LENGTH = 128
+
+
+def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
+    """Per-model Ray env-var overrides for the router-replay tests.
+
+    The gpu_ci conftest globally sets ``NVTE_FUSED_ATTN=0``; MLA models such as
+    Moonlight need cuDNN fused attention for the Megatron forward with sample
+    packing, so re-enable it here.
+
+    ``VLLM_USE_FLASHINFER_MOE_FP16=0`` forces vLLM's unquantized MoE oracle off
+    the FlashInfer TRTLLM block-layout kernel. That kernel is auto-selected on
+    Blackwell (sm100) and asserts ``K % blockK == 0`` (which Moonlight's sharded
+    intermediate size violates), crashing engine-core init. Disabling it falls
+    back to the Triton MoE kernel -- the same path H100 (sm90) already uses, so
+    this is a no-op there.
+    """
+    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
+        return {"NVTE_FUSED_ATTN": "1", "VLLM_USE_FLASHINFER_MOE_FP16": "0"}
+    return None
 
 
 def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
@@ -107,23 +127,23 @@ def build_training_input_from_text_samples(
 
 
 @pytest.mark.asyncio
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.h100
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
-        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
     ],
 )
-async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
+async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
-    Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
+    Check that logprob diff is lower when using router replay. Runs on 4xH100.
     """
-    try:
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
         cfg.trainer.strategy = "megatron"
         cfg.generator.inference_engine.enable_return_routed_experts = True
-        cfg.generator.inference_engine.tensor_parallel_size = 8
+        cfg.generator.inference_engine.tensor_parallel_size = 4
+        cfg.generator.inference_engine.num_engines = 1
         cfg.generator.sampling_params = SamplingParams(
             max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,
@@ -188,7 +208,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
             rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-        (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor) = (
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor = (
             convert_prompts_responses_to_batch_tensors(
                 tokenizer=tokenizer,
                 prompts=generator_output["prompt_token_ids"],
@@ -224,7 +244,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         )
         training_input.metadata = {"response_length": num_actions}
 
-        cfg.trainer.placement.policy_num_gpus_per_node = 8
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
         if extra_tf_kwargs is not None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -241,7 +261,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "policy",
                 shared_pg=pg,
                 colocate_all=True,
-                num_gpus_per_node=8,
+                num_gpus_per_node=4,
                 cfg=cfg,
             )
 
@@ -274,25 +294,22 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
             f"Router replay should reduce logprob diff vs rollout, "
             f"but with_replay={r3_diff.mean().item():.6f} >= without_replay={no_r3_diff.mean().item():.6f}"
         )
-    finally:
-        ray.shutdown()
 
 
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.h100
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
-        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
     ],
 )
-def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
+def test_forward_backward(tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that forward_backward with router replay completes without error.
-    Uses dummy expert routing indices (no vLLM engine needed).
+    Uses dummy expert routing indices (no vLLM engine needed). Runs on 4xH100.
     Non-zero advantages / action_log_probs verify the loss is actually computed.
     """
-    try:
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
         cfg.trainer.strategy = "megatron"
 
@@ -356,7 +373,7 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
         )
         training_input.metadata = {"response_length": num_actions}
 
-        cfg.trainer.placement.policy_num_gpus_per_node = 8
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
         if extra_tf_kwargs is not None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -370,7 +387,7 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
 
         actor_group = init_worker_with_type(
             "policy",
-            num_gpus_per_node=8,
+            num_gpus_per_node=4,
             cfg=cfg,
         )
 
@@ -378,13 +395,12 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))
 
-        metrics = results[0]
-        loss = metrics["policy_loss"]
+        # `forward_backward` returns a WorkerOutput; metrics are already
+        # all-reduced across DP ranks, so any rank's dict is representative.
+        loss = results[0].metrics["policy_loss"]
         print(f"Router replay forward_backward - loss: {loss:.6f}")
         assert loss is not None and not torch.isnan(torch.tensor(loss)), "Loss should be valid (not NaN)"
         assert loss != 0.0, "Loss should be non-zero with non-zero advantages"
 
         for actor in actor_group._actor_handlers:
             ray.kill(actor)
-    finally:
-        ray.shutdown()
