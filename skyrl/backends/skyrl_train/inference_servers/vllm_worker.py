@@ -96,6 +96,10 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         # Unpickle request to restore the original object type
         assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
         request = pickle.loads(request)
@@ -110,6 +114,9 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
                 self.model_runner.model.load_weights(weights=weight_list)
             else:
                 self.model_runner.reload_weights(weights_iterator=iter(weight_list))
+            # Re-sync the spec-decode (MTP/Eagle) drafter from the same weights after the main load;
+            # the main-model load never touches the separate drafter module.
+            _reload_spec_decode_drafter(self.model_runner, weight_list)
 
         if weight_update_bracketed:
             # Finish consuming IPC-backed tensors before the sender drops them on

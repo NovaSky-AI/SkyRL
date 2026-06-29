@@ -133,6 +133,9 @@ class RayPPOTrainer:
         self.all_metrics = {}
         self.all_timings = {}
         self.global_step = 0
+        # Previous-step cumulative vLLM spec-decode (MTP draft) counters, used to report a per-step
+        # acceptance rate. See _record_spec_decode_metrics.
+        self._prev_spec_decode = None
 
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
@@ -468,6 +471,9 @@ class RayPPOTrainer:
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval(vllm_metrics_scraper=self._vllm_metrics_scraper)
                         self.all_metrics.update(eval_metrics)
+                    # Attribute the eval rollout's draft acceptance to vllm/eval/* and advance the
+                    # spec-decode baseline so eval counts don't leak into the next train step.
+                    await self._record_spec_decode_metrics(prefix="vllm/eval/")
                     self._fire("on_eval_end", metrics=eval_metrics)
                     if self._vllm_metrics_scraper is not None:
                         vllm_metrics.update(await self._vllm_metrics_scraper.stop())
@@ -915,6 +921,33 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
+    async def _record_spec_decode_metrics(self, prefix: str = "vllm/") -> None:
+        """Record the vLLM speculative-decoding (MTP draft) acceptance rate for this rollout.
+
+        Reads the engines' cumulative draft/accept counters and logs the per-step delta as
+        ``{prefix}draft_acceptance_rate`` (+ raw counts), plus one ``{prefix}draft_acceptance_rate_pos_k``
+        per draft position when num_speculative_tokens > 1 (per-depth acceptance decay). No-op when
+        speculative decoding is disabled or the backend doesn't expose the stats. Best-effort:
+        never fails the training step.
+
+        ``prefix`` is ``"vllm/"`` for the train rollout. Because the cumulative counters keep
+        ``self._prev_spec_decode`` at the post-train-rollout value (nothing generates between the
+        train rollout and eval), calling this again with ``prefix="vllm/eval/"`` right after the
+        eval rollout reports the eval delta under ``vllm/eval/*`` AND advances the baseline so the
+        eval counts don't leak into the next train step's acceptance rate.
+        """
+        from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
+            acceptance_rate_metrics,
+        )
+
+        try:
+            cumulative = await self.inference_engine_client.get_spec_decode_metrics()
+        except Exception as e:
+            logger.warning(f"Failed to read vLLM spec-decode metrics: {e}")
+            return
+        metrics, self._prev_spec_decode = acceptance_rate_metrics(cumulative, self._prev_spec_decode, prefix=prefix)
+        self.all_metrics.update(metrics)
+
     async def generate(
         self,
         input_batch: GeneratorInput,
@@ -934,6 +967,9 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
         generator_output.pop("rollout_metrics", None)
+
+        # vLLM speculative-decoding (MTP draft) acceptance rate for this rollout step.
+        await self._record_spec_decode_metrics()
 
         validate_generator_output(
             len(input_batch["prompts"]),
@@ -1308,18 +1344,22 @@ class RayPPOTrainer:
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
 
-            logprobs_diff_max = logprobs_diff.max().item()
-            logprobs_diff_min = logprobs_diff.min().item()
-            logprobs_diff_mean = logprobs_diff.mean().item()
-            logprobs_diff_std = logprobs_diff.std().item()
-            self.all_metrics.update(
-                {
-                    "policy/rollout_train_logprobs_abs_diff_max": logprobs_diff_max,
-                    "policy/rollout_train_logprobs_abs_diff_min": logprobs_diff_min,
-                    "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
-                    "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
-                }
-            )
+            # Guard: a batch with no trainable response tokens (loss_mask all zero, e.g. every
+            # response dropped by overlong filtering) leaves logprobs_diff empty, and .max()/.min()
+            # on a 0-element tensor raises. Skip the diagnostic metrics in that case.
+            if logprobs_diff.numel() > 0:
+                logprobs_diff_max = logprobs_diff.max().item()
+                logprobs_diff_min = logprobs_diff.min().item()
+                logprobs_diff_mean = logprobs_diff.mean().item()
+                logprobs_diff_std = logprobs_diff.std().item()
+                self.all_metrics.update(
+                    {
+                        "policy/rollout_train_logprobs_abs_diff_max": logprobs_diff_max,
+                        "policy/rollout_train_logprobs_abs_diff_min": logprobs_diff_min,
+                        "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
+                        "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
+                    }
+                )
         return training_input
 
     def apply_reward_kl_penalty(

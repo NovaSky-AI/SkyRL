@@ -81,6 +81,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
         "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
         "distributed_executor_backend": ie_cfg.distributed_executor_backend,
+        "speculative_config": ie_cfg.speculative_config,
         "use_expandable_segments": ie_cfg.use_expandable_segments,
     }
 

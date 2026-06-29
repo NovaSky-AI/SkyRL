@@ -111,11 +111,41 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
 
+        # Speculative-decoding (MTP draft) stat loggers, populated by the async engine. See
+        # spec_decode_metrics.py and get_spec_decode_metrics().
+        self._spec_decode_loggers: list = []
+
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
 
         # Weight loader is created by subclass after engine initialization
         self._weight_loader = None
+
+    async def get_spec_decode_metrics(self) -> Optional[Dict[str, int]]:
+        """Return cumulative spec-decode counters for this engine, or None if unavailable.
+
+        Keys: ``num_drafts``, ``num_draft_tokens``, ``num_accepted_tokens``. The generator turns the
+        per-step delta of draft/accepted tokens into an acceptance rate.
+        """
+        from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
+            sum_spec_decode_loggers,
+        )
+
+        if self._spec_decode_loggers:
+            return sum_spec_decode_loggers(self._spec_decode_loggers)
+        # Sync engine fallback: vllm.LLM exposes get_metrics().
+        get_metrics = getattr(self.llm, "get_metrics", None)
+        if get_metrics is None:
+            return None
+        draft = accepted = None
+        for metric in get_metrics():
+            if metric.name == "vllm:spec_decode_num_draft_tokens":
+                draft = int(metric.value)
+            elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+                accepted = int(metric.value)
+        if draft is None and accepted is None:
+            return None
+        return {"num_drafts": 0, "num_draft_tokens": draft or 0, "num_accepted_tokens": accepted or 0}
 
     def tp_size(self):
         return self._tp_size
@@ -405,9 +435,25 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, kv_cache_metrics=True, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
-        stat_loggers = None
+        stat_loggers = []
         if enable_ray_prometheus_stats:
-            stat_loggers = self._create_ray_prometheus_stat_loggers()
+            stat_loggers = list(self._create_ray_prometheus_stat_loggers())
+
+        # Always attach a lightweight spec-decode stat logger. It runs in this (frontend) process and
+        # accumulates draft/accept counts so the generator can report a per-step acceptance rate.
+        # No-op when speculative decoding is disabled (counts stay 0).
+        from skyrl.backends.skyrl_train.inference_engines.vllm.spec_decode_metrics import (
+            make_spec_decode_stat_logger_class,
+        )
+
+        spec_logger_cls = make_spec_decode_stat_logger_class()
+
+        def _spec_decode_logger_factory(vllm_config, engine_index: int = 0):
+            logger_instance = spec_logger_cls(vllm_config, engine_index)
+            self._spec_decode_loggers.append(logger_instance)
+            return logger_instance
+
+        stat_loggers.append(_spec_decode_logger_factory)
 
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 

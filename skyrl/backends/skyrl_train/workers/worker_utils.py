@@ -10,6 +10,14 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
 
+# Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
+# The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are
+# pre-scaled (by num_microbatches * dp_size) so that summing recovers the correct minibatch
+# loss. The decoupled MTP/draft loss is NOT pre-scaled -- it is a masked per-token mean, like
+# KL/entropy (which dodge the sum only because they are named `policy_kl`/`policy_entropy`).
+# Summing it would multiply the reported value by the microbatch (and DP) count -- e.g. a true
+# ~0.5 nats reads as ~44. Keep these averaged regardless of `sum_loss_metrics`.
+MEAN_LOSS_METRICS = frozenset({"mtp_loss", "draft_loss"})
 # Per-micro-batch abs diff between train-step and rollout logprobs. The moments (`_mean`,
 # `_sq_mean`) and `_max`/`_min` reduce correctly across micro-batches, DP ranks, and
 # mini-batches; the std is reconstructed from the moments downstream.
@@ -54,7 +62,8 @@ def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = Fal
 
     Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
 
-    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged.
+    If sum_loss_metrics is True, metrics ending in `_loss` are summed instead of averaged
+    (except those in `MEAN_LOSS_METRICS`, which are always averaged).
     This should be used if the scaling is already done at the advantage level.
     See `apply_loss_reduction_to_advantages_minibatch` for more details.
 
@@ -73,7 +82,7 @@ def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = Fal
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
-        elif sum_loss_metrics and k.endswith("_loss"):
+        elif sum_loss_metrics and k.endswith("_loss") and k not in MEAN_LOSS_METRICS:
             reduced_metrics[k] = sum(v)
         else:
             reduced_metrics[k] = sum(v) / len(v)
@@ -99,7 +108,9 @@ def all_reduce_metrics(
     """
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
-    sum_metrics = {k: v for k, v in metrics.items() if sum_loss_metrics and k.endswith("_loss")}
+    sum_metrics = {
+        k: v for k, v in metrics.items() if sum_loss_metrics and k.endswith("_loss") and k not in MEAN_LOSS_METRICS
+    }
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
     }

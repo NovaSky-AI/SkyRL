@@ -26,3 +26,6 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     assert args.model == cfg.trainer.policy.model.path
     assert args.tensor_parallel_size == cfg.generator.inference_engine.tensor_parallel_size
     assert vllm.platforms.current_platform.device_type == "cuda"
+
+    # NOTE: the MTP speculative_config wiring test lives in
+    # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py

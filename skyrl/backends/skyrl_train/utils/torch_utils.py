@@ -184,6 +184,29 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor | None, dim: int | None
     return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
+def build_mtp_next_token_labels(sequences: torch.Tensor) -> torch.Tensor:
+    """Build pre-shifted next-token labels for Multi-Token Prediction (MTP).
+
+    Megatron's MTP path (``process_mtp_loss``) expects ``labels`` in the same convention as
+    the main language-model loss: ``labels[t]`` is the token the model should predict at
+    position ``t`` (i.e. ``sequences[t + 1]``). Megatron then rolls these labels once more per
+    MTP layer so MTP layer ``k`` is supervised against token ``t + k + 2``.
+
+    The last position has no next token, so it is zeroed here; the corresponding loss-mask
+    entry is dropped by Megatron's own boundary handling (``roll_tensor`` zeros the wrapped
+    position), so it never contributes to the loss.
+
+    Args:
+        sequences: ``[batch, seq_len]`` token ids (per-row a single, contiguous sequence).
+
+    Returns:
+        ``[batch, seq_len]`` next-token labels (same dtype as ``sequences``).
+    """
+    labels = torch.roll(sequences, shifts=-1, dims=1)
+    labels[:, -1] = 0
+    return labels
+
+
 def safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
     """
     Clamp the delta before exponentiating to avoid potential overflow.

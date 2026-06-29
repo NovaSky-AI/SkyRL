@@ -143,7 +143,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     else:
         args.enable_lora = False
 
-    # Add any extra engine_init_kwargs
+    # Speculative decoding (e.g. MTP): passed straight through to vLLM's speculative_config.
+    if ie_cfg.speculative_config is not None:
+        spec_cfg = get_config_as_dict(ie_cfg.speculative_config)
+        args.speculative_config = spec_cfg
+        logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
+
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)

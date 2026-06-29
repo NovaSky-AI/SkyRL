@@ -1,3 +1,4 @@
+import os
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
@@ -23,6 +24,16 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
     vocab_parallel_entropy_packed_sequences,
 )
+from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
+from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
+from skyrl.backends.skyrl_train.mtp.soft_ce import (
+    build_teacher_logits,
+    draft_hard_ce,
+    draft_soft_ce,
+    draft_soft_ce_topk,
+    shift_mask_for_mtp,
+    unpadded_vocab_shard_width,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -31,11 +42,17 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.utils.torch_utils import (
+    build_mtp_next_token_labels,
+    masked_mean,
+)
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
+
+# One-shot guard for the MTP_PROFILE diagnostic capture (see forward_backward_mini_batch).
+_MTP_PROFILE_DONE = False
 
 
 def _build_packed_targets(
@@ -74,6 +91,40 @@ def _build_packed_targets(
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     targets[packed_indices[attention_mask]] = sequences[attention_mask]
     return targets.unsqueeze(0)
+
+
+def _build_packed_valid_mask(
+    attention_mask: torch.Tensor,
+    packed_seq_params,
+    sub_seq_lengths: Optional[list[list[int]]] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
+
+    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
+    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
+    ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
+    index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
+    """
+    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=attention_mask.device, dtype=torch.long)
+    total_padded_tokens = int(cu_padded[-1].item())
+    mask = torch.zeros((total_padded_tokens,), dtype=dtype, device=attention_mask.device)
+    if sub_seq_lengths is not None:
+        cu_padded_cpu = cu_padded.detach().cpu().tolist()
+        seg_idx = 0
+        for row_lens in sub_seq_lengths:
+            for seq_len in row_lens:
+                seq_len = int(seq_len)
+                packed_start = cu_padded_cpu[seg_idx]
+                mask[packed_start : packed_start + seq_len] = 1.0
+                seg_idx += 1
+        return mask.unsqueeze(0)
+
+    attn = attention_mask.to(device=cu_padded.device, dtype=torch.bool)
+    token_offsets = attn.to(torch.long).cumsum(dim=1) - 1
+    packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
+    mask[packed_indices[attn]] = 1.0
+    return mask.unsqueeze(0)
 
 
 class MegatronModelWrapper:
@@ -298,6 +349,51 @@ class MegatronModelWrapper:
         """
         forward_backward_func = get_forward_backward_func()
 
+        # Multi-Token Prediction (MTP): if the model was built with native MTP heads, train them with
+        # an explicit decoupled loss instead of Megatron's in-forward process_mtp_loss path. The heads
+        # still run inside the forward (so we reuse their rotary embeddings); the native process_mtp_loss
+        # is disabled at its call sites (see mtp/native_loss_patch.py, applied at config time) so no
+        # native MTP gradient couples onto the trunk. A forward hook captures the heads' hidden states
+        # (trunk input optionally detached) for us to score. Training only.
+        model_config = get_model_config(self.actor_module[0])
+        mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
+        mcfg = self.cfg.policy.megatron_config
+        mtp_loss_type = getattr(mcfg, "mtp_loss_type", "soft_ce")
+        mtp_loss_weight = float(getattr(mcfg, "mtp_loss_weight", 0.1))
+        mtp_detach_trunk = bool(getattr(mcfg, "mtp_detach_trunk", True))
+        mtp_detach_shared_output = bool(getattr(mcfg, "mtp_detach_shared_output", True))
+        mtp_loss_chunk_size = getattr(mcfg, "mtp_loss_chunk_size", 1024)
+        mtp_loss_topk = getattr(mcfg, "mtp_loss_topk", None)
+
+        if mtp_enabled:
+            # The decoupled draft training records the MTP block's inputs with a forward pre-hook
+            # and replays the block afterwards; module hooks do not fire inside CUDA-graph replay,
+            # so the capture would silently see nothing and the draft loss would vanish.
+            assert (
+                not getattr(model_config, "enable_cuda_graph", False)
+                and not getattr(model_config, "external_cuda_graph", False)
+                and getattr(model_config, "cuda_graph_impl", "none") in (None, "none")
+            ), "MTP draft training uses forward hooks and cannot be combined with Megatron CUDA graphs"
+
+        if os.environ.get("MTP_DEBUG"):
+            from megatron.core.utils import unwrap_model as _uw
+
+            from skyrl.backends.skyrl_train.mtp.hidden_capture import _resolve_mtp_host
+
+            _gm = _uw(self.actor_module[0])
+            _host = _resolve_mtp_host(_gm)
+            _lm = getattr(_gm, "language_model", None)
+            print(
+                f"[MTP_DEBUG] forward_only={forward_only} mtp_enabled={mtp_enabled} "
+                f"model_config.mtp_num_layers={getattr(model_config, 'mtp_num_layers', 'MISSING')} "
+                f"unwrapped_type={type(_gm).__name__} top_has_mtp={getattr(_gm, 'mtp', None) is not None} "
+                f"has_language_model={_lm is not None} "
+                f"lm_has_mtp={getattr(_lm, 'mtp', None) is not None if _lm is not None else 'NA'} "
+                f"resolved_host={type(_host).__name__} host_mtp_is_none={getattr(_host, 'mtp', None) is None} "
+                f"host_mtp_process={getattr(_host, 'mtp_process', 'MISSING')}",
+                flush=True,
+            )
+
         # Resolve loss function
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
         if loss_fn is not None:
@@ -378,9 +474,94 @@ class MegatronModelWrapper:
                 rollout_logprobs=rollout_action_logprobs,
             )
 
+            # Decoupled MTP / draft loss: score the detached-input MTP head against the policy's own
+            # next-token distribution (soft CE) or the ground-truth future tokens (hard CE). The local
+            # masked-mean scalar is folded into the loss below like the KL/entropy aux terms.
+            draft_loss = None
+            student_logits_list = data.get("mtp_student_logits")
+            if mtp_enabled and student_logits_list:
+                # Under THD sample packing the teacher (logits) and student logits are packed
+                # ([1, T, vocab]); use the matching packed real-token mask + segment boundaries so the
+                # MTP roll/mask respect sub-sequence boundaries (see shift_mask_for_mtp). Otherwise the
+                # [batch, seq] attention mask aligns with the de-padded logits.
+                packed = packed_seq_params is not None
+                draft_mask = (data["mtp_packed_mask"] if packed else data["attention_mask"]).to(logits.dtype)
+                mtp_cu_seqlens = packed_seq_params.cu_seqlens_q_padded if packed else None
+                vocab_size_tp = logits.shape[-1]
+                # Undo the in-place temperature scaling so the teacher is the true policy distribution.
+                teacher_src = logits if temperature == 1.0 else logits * temperature
+                # Megatron may pad the vocab to divide across TP; padded rows are never trained, so slice
+                # this rank's shard to its true width to keep them out of the teacher (a view; autograd
+                # zero-fills the tail). hard CE's vocab_start_index keeps the padded (global) stride.
+                true_shard_width = unpadded_vocab_shard_width(
+                    getattr(model_config, "vocab_size", None), vocab_size_tp, tp_rank
+                )
+                if true_shard_width != vocab_size_tp:
+                    teacher_src = teacher_src[..., :true_shard_width]
+                # Packed: build labels from packed_targets ([1, T]) so they align with the packed
+                # student/teacher; the global roll's cross-segment entries are zeroed by layer_mask.
+                hard_label_src = data["packed_targets"] if packed else sequences
+                hard_labels = build_mtp_next_token_labels(hard_label_src) if mtp_loss_type == "hard_ce" else None
+
+                per_layer_losses = []
+                for layer_idx, student_logits in enumerate(student_logits_list):
+                    if true_shard_width != vocab_size_tp:
+                        student_logits = student_logits[..., :true_shard_width]
+                    # Hard CE's target (token seq[t+k+2]) is one position past the soft-CE teacher
+                    # (a distribution at t+k+1), so its validity mask needs one extra shift.
+                    mask_shift = layer_idx + 1 if mtp_loss_type == "hard_ce" else layer_idx
+                    layer_mask = shift_mask_for_mtp(draft_mask, mask_shift, cu_seqlens=mtp_cu_seqlens)
+                    if mtp_loss_type == "hard_ce":
+                        layer_labels = torch.roll(hard_labels, shifts=-(layer_idx + 1), dims=1)
+                        per_layer_losses.append(
+                            draft_hard_ce(
+                                student_logits,
+                                layer_labels,
+                                layer_mask,
+                                vocab_parallel_group=tp_grp,
+                                vocab_start_index=tp_rank * vocab_size_tp,
+                                chunk_size=mtp_loss_chunk_size,
+                            )
+                        )
+                    else:
+                        if mtp_loss_topk:
+                            # Top-k draft loss: O(seq*k) memory, no full-vocab softmax. Pass the un-rolled
+                            # policy logits + roll_shift so top-k runs on them directly and only the small
+                            # [B, S, k] result is rolled (avoids a full rolled-teacher copy).
+                            per_layer_losses.append(
+                                draft_soft_ce_topk(
+                                    student_logits,
+                                    teacher_src,
+                                    layer_mask,
+                                    k=mtp_loss_topk,
+                                    vocab_parallel_group=tp_grp,
+                                    roll_shift=layer_idx + 1,
+                                )
+                            )
+                        else:
+                            teacher_logits = build_teacher_logits(teacher_src, layer_idx, detach=True)
+                            per_layer_losses.append(
+                                draft_soft_ce(
+                                    student_logits,
+                                    teacher_logits,
+                                    layer_mask,
+                                    vocab_parallel_group=tp_grp,
+                                    chunk_size=mtp_loss_chunk_size,
+                                )
+                            )
+                draft_loss = torch.stack(per_layer_losses).mean()
+                # Drop the dict's reference so the tensor is freed after this microbatch's backward
+                # (the autograd graph still holds it until then) instead of lingering.
+                del data["mtp_student_logits"]
+                student_logits_list = None
+
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
                 loss = policy_loss
+                if draft_loss is not None:
+                    # Both terms are per-token means here; Megatron's /num_microbatches and the DDP
+                    # DP+CP averaging reduce them consistently.
+                    loss = loss + mtp_loss_weight * draft_loss
 
                 # Compute elementwise loss for Tinker API (per-token NLL)
                 with torch.no_grad():
@@ -423,6 +604,8 @@ class MegatronModelWrapper:
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
+                if draft_loss is not None:
+                    metrics["mtp_loss"] = draft_loss.detach().item()
                 return loss, metrics
 
             # RL path: add optional KL/entropy terms
@@ -485,6 +668,12 @@ class MegatronModelWrapper:
                 policy_loss * grad_sum_correction_factor
                 + (kl_loss_term - entropy_loss_term) * kl_entropy_microbatch_scale
             )
+            # The decoupled MTP/draft loss is a per-token mean (like KL/entropy), so fold it in with
+            # the same micro-batch correction. Its gradient only reaches the MTP-head parameters (and
+            # the shared output/embedding unless mtp_detach_shared_output) because both the trunk
+            # hidden states and the teacher distribution are detached.
+            if draft_loss is not None:
+                loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
             unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -514,6 +703,8 @@ class MegatronModelWrapper:
                 "policy_kl": kl_loss.detach().item(),
                 "loss_fn_outputs": loss_fn_outputs,
             }
+            if draft_loss is not None:
+                metrics["mtp_loss"] = draft_loss.detach().item()
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
             metrics.update(
@@ -522,6 +713,8 @@ class MegatronModelWrapper:
             return loss, metrics
 
         def forward_step(batch_iter, model):
+            if prof is not None:
+                prof.step()
             # NOTE(Charlie): despite the name, methods like `remove_left_padding()` are padding-agnostic
             # (can be left, or right) as it uses attention_mask to locate real tokens. Same thing
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
@@ -564,7 +757,18 @@ class MegatronModelWrapper:
                     sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None
-                new_position_ids = None
+                # The trunk ignores position_ids for RoPE + THD packing (rotary comes from
+                # packed_seq_params), so SkyRL normally passes None. But the native MTP block rolls
+                # and re-embeds position_ids per depth, so when MTP is active we must supply them in
+                # the packed layout. This is harmless to the main logits.
+                if mtp_enabled:
+                    new_position_ids = preprocess_packed_seqs(
+                        position_ids,
+                        attention_mask,
+                        pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    )[0]
+                else:
+                    new_position_ids = None
             else:
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,
@@ -574,21 +778,73 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
-            outputs = model(
-                new_sequences,
-                new_position_ids,
-                new_attention_mask,
-                packed_seq_params=packed_seq_params,
-            )
+            is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
 
-            if not self.remove_microbatch_padding:
-                outputs = recover_left_padding(
-                    outputs,
+            # Recover [batch, seq_len, ...] from Megatron's internal (left-removed) layout. Only used
+            # on the non-packed path: with sample packing (remove_microbatch_padding) the logits stay
+            # packed ([1, T, vocab]) and loss_func consumes packed_targets instead. MTP draft training
+            # keeps the student logits in whichever layout the teacher (main logits) uses — de-padded
+            # [batch, seq, vocab] without packing, packed [1, T, vocab] with it — so the two always
+            # align (see the packed-aware mask in loss_func / mtp/soft_ce.py).
+            def depad(tensor):
+                return recover_left_padding(
+                    tensor,
                     new_attention_mask,
                     attention_mask,
                     seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                    post_process=is_last_stage,
                 )
+
+            # The decoupled MTP teacher/label rolls are context-parallel-unaware (a plain global
+            # torch.roll, both here and in the packed path), so MTP draft training requires CP=1.
+            # CP>1 would need the cross-rank boundary exchange that megatron's roll_tensor implements.
+            if mtp_enabled:
+                assert mpu.get_context_parallel_world_size() == 1, (
+                    "MTP/draft training does not support context parallelism "
+                    "(context_parallel_size > 1): the teacher/label roll is CP-unaware."
+                )
+
+            # Run the policy forward; when MTP is active a pre-hook records the MTP block's arguments.
+            student_hidden = None
+            student_model = None
+            with maybe_capture_mtp_hidden(
+                model,
+                mtp_enabled,
+                detach_trunk=mtp_detach_trunk,
+                # Full shared-weight isolation also detaches the MTP block's re-embedding of the rolled
+                # input ids (the second gradient path into the tied embedding/lm_head).
+                detach_shared_embedding=mtp_detach_shared_output,
+            ) as capture:
+                outputs = model(
+                    new_sequences,
+                    new_position_ids,
+                    new_attention_mask,
+                    packed_seq_params=packed_seq_params,
+                )
+                # Replay the MTP block on *detached* trunk hidden states (decoupled draft forward)
+                # while still inside the capture context (so the MTP block stays in eval mode).
+                if mtp_enabled and capture is not None:
+                    student_hidden = capture.compute_student_hidden_states()
+                    student_model = capture.model
+
+            if not self.remove_microbatch_padding:
+                outputs = depad(outputs)
+
+            # Project the MTP hidden states through the shared output layer so loss_func can score the
+            # draft loss. Match the teacher's layout: keep them packed ([1, T, vocab/tp]) under sample
+            # packing, or de-pad to [batch, seq_len, vocab/tp] otherwise. When packed, also hand
+            # loss_func the packed real-token mask so it can mask cross-segment MTP targets.
+            if student_hidden is not None:
+                student_logits = project_mtp_hidden_to_logits(
+                    student_hidden, student_model, detach_output_weight=mtp_detach_shared_output
+                )
+                if self.remove_microbatch_padding:
+                    batch["mtp_student_logits"] = student_logits
+                    batch["mtp_packed_mask"] = _build_packed_valid_mask(
+                        attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                    )
+                else:
+                    batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
 
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_backward()
@@ -598,15 +854,55 @@ class MegatronModelWrapper:
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        metrics_list = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=forward_only,
-        )
+        # MTP_PROFILE=1: one-shot torch.profiler capture of steady-state microbatches (~9-13) of
+        # the first training mini-batch, for diagnosing the draft-path slowdown. Writes a per-rank
+        # kernel table to /tmp/mtp_prof_rank<R>.txt (+ a chrome trace from rank 0).
+        prof = None
+        global _MTP_PROFILE_DONE
+        if os.environ.get("MTP_PROFILE") and not forward_only and not _MTP_PROFILE_DONE and len(micro_batches) >= 14:
+            _MTP_PROFILE_DONE = True
+            from torch.profiler import ProfilerActivity, profile, schedule
+
+            _rank = torch.distributed.get_rank()
+
+            def _dump_profile(p):
+                path = f"/tmp/mtp_prof_rank{_rank}.txt"
+                with open(path, "w") as f:
+                    f.write(
+                        p.key_averages(group_by_input_shape=True).table(sort_by="self_cuda_time_total", row_limit=40)
+                    )
+                    f.write("\n\n===== by stack =====\n")
+                    f.write(p.key_averages(group_by_stack_n=12).table(sort_by="self_cuda_time_total", row_limit=10))
+                if _rank == 0:
+                    p.export_chrome_trace("/tmp/mtp_prof_rank0_trace.json")
+                print(f"[MTP_PROFILE] wrote {path}", flush=True)
+
+            prof = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=schedule(wait=8, warmup=2, active=3, repeat=1),
+                record_shapes=True,
+                with_stack=True,
+                on_trace_ready=_dump_profile,
+            )
+
+        if prof is not None:
+            prof.start()
+        try:
+            metrics_list = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=forward_only,
+            )
+        finally:
+            if prof is not None:
+                prof.stop()
+
+        # The decoupled MTP/draft loss is computed and logged per-microbatch inside loss_func
+        # (metric key "mtp_loss"); no MTPLossLoggingHelper plumbing is needed.
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):

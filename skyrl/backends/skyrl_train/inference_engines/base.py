@@ -185,6 +185,14 @@ class InferenceEngineInterface(ABC):
         """Resume generation after a pause, continuing any frozen in-flight requests."""
         raise NotImplementedError
 
+    async def get_spec_decode_metrics(self) -> Optional[Dict[str, int]]:
+        """Return cumulative speculative-decoding counters, or None if unsupported.
+
+        Non-abstract so backends without speculative decoding (or that can't expose the stats) work
+        unchanged. Keys when available: ``num_drafts``, ``num_draft_tokens``, ``num_accepted_tokens``.
+        """
+        return None
+
     @abstractmethod
     def tp_size(self) -> int:
         """Return the tensor parallel size of this inference engine."""

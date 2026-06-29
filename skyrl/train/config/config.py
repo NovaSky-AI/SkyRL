@@ -222,6 +222,43 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    mtp_num_layers: Optional[int] = None
+    """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
+    (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
+    trained with the decoupled draft loss and synced to vLLM for speculative decoding."""
+    mtp_loss_weight: float = 0.1
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss trains the
+    MTP heads on *detached* trunk hidden states, so it never pulls on the policy backbone. Only used
+    when MTP heads are active."""
+    mtp_loss_type: str = "soft_ce"
+    """Draft-head supervision: ``"soft_ce"`` distills against the policy's own detached, rolled
+    next-token distribution; ``"hard_ce"`` is standard next-token cross-entropy."""
+    mtp_detach_trunk: bool = True
+    """Detach the trunk hidden states feeding the MTP head so only the head's parameters get the draft
+    gradient. If False, the gradient flows back into the policy backbone (Megatron's coupled MTP)."""
+    mtp_detach_shared_output: bool = True
+    """Also isolate the shared embedding/output weights from the draft loss (detach both the output
+    projection and the MTP block's re-embedding), so only the ``.mtp.`` head params train. Matters for
+    tied-embedding models (e.g. Qwen3.5), where a trainable shared head lets the draft loss nudge the
+    policy's own logits. Set False to train the shared embedding/head with the draft loss too."""
+    mtp_separate_optimizer: bool = True
+    """Give the MTP/draft head its OWN grad buffer + DistributedOptimizer, fully isolated from
+    the policy's. The decoupled draft loss is autograd-clean, but when the head shares the policy's
+    Megatron DDP grad buffer its mere presence changes the layout — and thus the floating-point result —
+    of the policy gradient's distributed reduction (DP reduce-scatter + TP all-reduce of layernorm
+    grads). That perturbation is deterministic and the RL feedback loop amplifies it into policy-entropy
+    collapse. With this on, the policy's grad buffer and reduction are byte-identical to a model built
+    with no MTP head, while the head still co-trains at full strength. Only used when MTP heads are
+    active. See skyrl/backends/skyrl_train/mtp/mtp_optim.py."""
+    mtp_loss_chunk_size: Optional[int] = 1024
+    """Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory at
+    large vocab (e.g. Qwen3.5's 248K, where the full-sequence softmax OOMs). Numerically identical to
+    no chunking. ``None`` disables it; ignored when ``mtp_loss_topk`` is set."""
+    mtp_loss_topk: Optional[int] = None
+    """If set, use a top-k approximation of the soft-CE draft loss: distill only the teacher's top-k
+    tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
+    without fragmentation. Reconciled across the TP group, so it scales to any parallel size. Soft-CE
+    only; ``None`` uses the exact full-vocab loss. Typical: 64-128."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -617,6 +654,11 @@ class InferenceEngineConfig(BaseConfig):
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
+    speculative_config: Optional[Dict[str, Any]] = None
+    """Speculative-decoding config passed through to vLLM (``AsyncEngineArgs.speculative_config``),
+    e.g. ``{"method": "mtp", "num_speculative_tokens": 1}`` for MTP draft decoding. With
+    ``method="mtp"`` vLLM loads the MTP heads from the policy checkpoint, kept in sync by weight sync
+    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train them). ``None`` disables it."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None
@@ -711,6 +753,27 @@ class EnvironmentConfig(BaseConfig):
     skyrl_gym: SkyRLGymConfig = field(default_factory=SkyRLGymConfig)
 
 
+@dataclass
+class MTPConfig(BaseConfig):
+    """High-level, single user-facing knob for Multi-Token Prediction (MTP).
+
+    When ``enabled``, ``validate_cfg`` propagates it to the training side
+    (``policy.megatron_config.mtp_*``) and the inference side
+    (``generator.inference_engine.speculative_config``), and weight sync keeps the heads tracking the
+    policy. The trunk hidden states feeding the heads are always detached, so it is not a tunable."""
+
+    enabled: bool = False
+    """Whether to train MTP draft heads and use them for speculative decoding."""
+    num_speculative_tokens: int = 1
+    """Draft depth vLLM speculates per step, independent of the trained head count. Single-head
+    checkpoints (Qwen3.5/Qwen3-Next/DeepSeek-V3) reuse the one head autoregressively at depths > 1;
+    expect acceptance to decay with depth (the head is trained at depth 1)."""
+    loss_type: str = "soft_ce"
+    """``"soft_ce"`` (distill against the policy's own next-token distribution) or ``"hard_ce"``."""
+    loss_weight: float = 0.1
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``."""
+
+
 # ---------------------------------------------------------------------------
 # Trainer (top-level)
 # ---------------------------------------------------------------------------
@@ -730,6 +793,7 @@ class TrainerConfig(BaseConfig):
     ref: RefConfig = field(default_factory=RefConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
+    mtp: MTPConfig = field(default_factory=MTPConfig)
     fully_async: FullyAsyncConfig = field(default_factory=FullyAsyncConfig)
     gradient_checkpointing: bool = True
     gradient_checkpointing_use_reentrant: bool = False

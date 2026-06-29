@@ -354,6 +354,10 @@ async def test_generate_batched_routing_and_order_preservation(num_prompts, with
         assert out["stop_reasons"][i] == "stop"
 
 
+# NOTE: tests for InferenceEngineClient.get_spec_decode_metrics (MTP draft) live in
+# tests/backends/skyrl_train/mtp/test_spec_decode_client.py
+
+
 # -----------------------------
 # Test for route_prompts_to_engines function that routes prompts to inference engines
 # in inference engine client.

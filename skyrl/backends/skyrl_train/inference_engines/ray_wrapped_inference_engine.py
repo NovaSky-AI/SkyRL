@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import ray
 from packaging import version
@@ -95,6 +95,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
+    async def get_spec_decode_metrics(self):
+        return await self.inference_engine_actor.get_spec_decode_metrics.remote()
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
@@ -129,6 +132,7 @@ def create_ray_wrapped_inference_engines(
     enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",
+    speculative_config: Optional[Dict[str, Any]] = None,
     use_expandable_segments: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
@@ -255,6 +259,12 @@ def create_ray_wrapped_inference_engines(
             # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
             if served_model_name is not None:
                 other_kwargs["served_model_name"] = served_model_name
+
+            # Speculative decoding (e.g. MTP draft). Passed straight through to vLLM's
+            # AsyncEngineArgs.speculative_config so the colocated local engine path enables spec
+            # decode too (the standalone HTTP-server path handles this in build_vllm_cli_args).
+            if speculative_config is not None:
+                other_kwargs["speculative_config"] = speculative_config
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
