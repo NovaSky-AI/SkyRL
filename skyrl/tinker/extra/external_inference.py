@@ -21,19 +21,22 @@ if TYPE_CHECKING:
 _MAX_SAMPLE_RETRIES = 6
 _RETRY_BASE_DELAY_SEC = 0.25
 _RETRY_MAX_DELAY_SEC = 2.0
+_ADAPTER_LOAD_TIMEOUT_SEC = 30.0
 
 
-def _is_retriable_sample_error(exc: Exception) -> bool:
+def _is_retriable_sample_error(exc: Exception, is_lora: bool) -> bool:
     """Return whether a failed sample request should be retried after a proactive adapter load.
 
-    The engine loads LoRA adapters lazily, so a freshly extracted adapter can be sampled before it is
-    registered. Retry transient transport errors and the engine's "adapter not loaded yet" responses
-    (a 404, or a 400 whose body reports the model does not exist). Malformed requests and server
-    errors are not retried.
+    Transient transport errors are always retried. For LoRA sampling the engine loads the adapter
+    lazily, so a freshly extracted adapter can be sampled before it is registered; the engine's
+    "adapter not loaded yet" responses (a 404, or a 400 whose body reports the model does not exist)
+    are retried too. For base-model sampling those same responses are a permanent configuration error
+    (e.g. an unknown base-model name), so they are not retried. Malformed requests and server errors
+    are never retried.
     """
     if isinstance(exc, httpx.TransportError):
         return True
-    if isinstance(exc, httpx.HTTPStatusError):
+    if is_lora and isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
         if status_code == 404:
             return True
@@ -111,6 +114,7 @@ class ExternalInferenceClient:
             await http_client.post(
                 "/load_lora_adapter",
                 json={"lora_name": model_name, "lora_path": str(self.lora_base_dir / model_name)},
+                timeout=_ADAPTER_LOAD_TIMEOUT_SEC,
             )
         except Exception:
             logger.debug("Proactive load_lora_adapter call failed; retrying sample request")
@@ -125,15 +129,16 @@ class ExternalInferenceClient:
         base_model: str | None,
     ) -> dict:
         """Send the completion request, retrying through the engine's lazy adapter-load race."""
+        is_lora = base_model is None
         for attempt in range(_MAX_SAMPLE_RETRIES):
             try:
                 response = await http_client.post("/completions", json=payload, headers=headers)
                 response.raise_for_status()
                 return response.json()
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
-                if attempt == _MAX_SAMPLE_RETRIES - 1 or not _is_retriable_sample_error(exc):
+                if attempt == _MAX_SAMPLE_RETRIES - 1 or not _is_retriable_sample_error(exc, is_lora):
                     raise
-                if base_model is None:
+                if is_lora:
                     await self._request_adapter_load(http_client, model_name)
                 await asyncio.sleep(min(_RETRY_MAX_DELAY_SEC, _RETRY_BASE_DELAY_SEC * (2**attempt)))
 
