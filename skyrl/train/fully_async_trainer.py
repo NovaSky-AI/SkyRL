@@ -370,9 +370,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
-        assert (
-            self.cfg.trainer.algorithm.policy_loss_type not in LOSSES_WITH_OLD_LOGPROBS
-        ), (
+        assert self.cfg.trainer.algorithm.policy_loss_type not in LOSSES_WITH_OLD_LOGPROBS, (
             f"Found trainer.algorithm.policy_loss_type={self.cfg.trainer.algorithm.policy_loss_type} in "
             f"{sorted([loss.value for loss in LOSSES_WITH_OLD_LOGPROBS])}. Fully async training should use "
             "rollout logprobs (i.e. rollout_is or dppo) instead of recomputing logprobs, since stale "
