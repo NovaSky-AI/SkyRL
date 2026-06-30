@@ -59,6 +59,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.engines = engines
         self.tokenizer = tokenizer
         self.inference_engine_cfg = inference_engine_cfg
+        # Monotonic counter of weight syncs to the engines (see `increment_weight_version`). Used as the
+        # prefix-cache salt source so cache blocks are only shared within a single policy version.
+        self._weight_version = 0
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
         # than the actual model path. See InferenceEngineConfig.served_model_name in skyrl/train/config/config.py.
@@ -80,6 +83,19 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
+    @property
+    def weight_version(self) -> int:
+        """Number of weight syncs broadcast to the engines so far (0 before the first sync).
+
+        Acts as the policy version: it advances by one each time fresh weights are pushed to the
+        inference engines, so it uniquely identifies the weights currently loaded.
+        """
+        return self._weight_version
+
+    def increment_weight_version(self) -> None:
+        """Advance the weight version. Called once per completed weight sync to the engines."""
+        self._weight_version += 1
+
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """
         Call a method on all engines concurrently and gather the results.
@@ -100,6 +116,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
+        cache_salt = input_batch.get("cache_salt")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
@@ -130,6 +147,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
+                cache_salt=cache_salt,
             )
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)

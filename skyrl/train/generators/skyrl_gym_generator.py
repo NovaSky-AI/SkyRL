@@ -265,6 +265,29 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         return agent_loop_output
 
+    def _compute_cache_salt(self) -> Optional[str]:
+        """Derive a prefix-cache salt from the current policy version.
+
+        When ``generator.use_cache_salt`` is enabled, returns a string keyed on the inference engine's
+        current weight version (``inference_engine_client.weight_version``), which advances by one each
+        time fresh weights are synced to the engines. Captured once per ``generate`` batch, so all
+        trajectories in the batch share one salt (the policy version at the start of the batch) -- vLLM's
+        prefix cache is then shared within a version and isolated across weight updates. The policy model
+        name is included so distinct LoRA adapters / tenants do not collide. Returns ``None`` (no
+        salting) when disabled or when the client does not expose a weight version.
+
+        We key on the engine weight version rather than the trainer's ``global_step`` because in
+        fully-async training the two are not in lock-step: weights are broadcast to the engines (and this
+        counter advances) before ``global_step`` increments, and generation overlaps that gap.
+        """
+        if not self.generator_cfg.use_cache_salt:
+            return None
+        weight_version = getattr(self.inference_engine_client, "weight_version", None)
+        if weight_version is None:
+            return None
+        version = f"{self.policy_model_name}@" if self.policy_model_name is not None else ""
+        return f"{version}{weight_version}"
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -274,6 +297,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        cache_salt: Optional[str] = None,
     ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -391,6 +415,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_token_ids=[agent_loop_state.input_ids],
                     session_ids=[session_id],
                     sampling_params=sampling_params,
+                    cache_salt=cache_salt,
                 )
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
                 output = engine_output["responses"][0]
@@ -707,6 +732,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_extras: List[Dict[str, Any]],
         max_tokens: int,
         sampling_params: Optional[Dict[str, Any]] = None,
+        cache_salt: Optional[str] = None,
     ) -> GeneratorOutput:
         """
         Single-turn batched generation (can use the synchronous offline engine)
@@ -738,7 +764,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             tokenize=True,
             return_dict=False,
         )
-        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
+        engine_input = InferenceEngineInput(
+            prompt_token_ids=prompt_token_ids, sampling_params=sampling_params, cache_salt=cache_salt
+        )
         engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
@@ -816,8 +844,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
 
+        # Prefix-cache salt derived from the engine weight version. Captured once per `generate` call so
+        # every trajectory in this batch shares one salt (the policy version at the start of the batch).
+        cache_salt = self._compute_cache_salt()
+
         if self.batched:
-            return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
+            return await self.generate_batched(
+                prompts, env_classes, env_extras, max_tokens, sampling_params, cache_salt=cache_salt
+            )
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []
@@ -831,6 +865,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_input_length,
                     sampling_params=sampling_params,
                     trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+                    cache_salt=cache_salt,
                 )
             )
 

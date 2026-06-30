@@ -74,6 +74,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        cache_salt: Optional[str] = None,
     ) -> TrajectoryOutput:
         """Multi-turn VLM generation loop for a single trajectory.
         The conversation is treated as the source of truth and re-tokenized each step.
@@ -155,6 +156,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                     session_ids=[session_id],
                     sampling_params=current_sampling_params,
                     mm_features=[latest_features] if latest_features is not None else None,
+                    cache_salt=cache_salt,
                 )
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
 

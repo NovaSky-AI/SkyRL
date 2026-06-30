@@ -180,6 +180,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 payload = sampling_params.copy()
                 payload["model"] = self.model_name
                 payload["prompt"] = prompt_token_ids
+                # `cache_salt` is a top-level field on vLLM's CompletionRequest (not a sampling param),
+                # so we set it directly on the request body rather than inside `sampling_params`.
+                if (cache_salt := input_batch.get("cache_salt")) is not None:
+                    payload["cache_salt"] = cache_salt
                 request_url = f"{self.url}/v1/completions"
             else:
                 raise ValueError(f"Invalid engine backend: {self.engine_backend}")

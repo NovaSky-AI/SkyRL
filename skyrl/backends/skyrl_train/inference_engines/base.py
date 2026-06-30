@@ -29,6 +29,11 @@ class InferenceEngineInput(TypedDict):
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
     mm_features: Optional[List[MultiModalFeatures]]
+    # Optional prefix-cache salt applied to every prompt in this input. When set, it is forwarded to
+    # vLLM as the request ``cache_salt`` so that prefix-cache blocks are only shared between requests
+    # carrying the same salt. Typically the policy version (e.g. ``global_step``) -- see
+    # ``GeneratorConfig.use_cache_salt``.
+    cache_salt: Optional[str]
 
 
 class InferenceEngineOutput(TypedDict):

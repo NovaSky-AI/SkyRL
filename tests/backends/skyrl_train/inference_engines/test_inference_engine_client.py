@@ -169,6 +169,30 @@ def _make_min_cfg():
     )
 
 
+def test_weight_version_counter():
+    """`weight_version` starts at 0 and advances by one per `increment_weight_version` (one per sync)."""
+
+    class MockEngine:
+        def dp_size(self):
+            return 1
+
+    cfg = _make_min_cfg()
+    client = InferenceEngineClient(
+        engines=[MockEngine()],
+        tokenizer=object(),
+        model_path=cfg.trainer.policy.model.path,
+        lora_cfg=cfg.trainer.policy.model.lora,
+        inference_engine_cfg=cfg.generator.inference_engine,
+    )
+
+    assert client.weight_version == 0
+    client.increment_weight_version()
+    assert client.weight_version == 1
+    client.increment_weight_version()
+    client.increment_weight_version()
+    assert client.weight_version == 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])
 @pytest.mark.parametrize("with_session_id", [True, False])

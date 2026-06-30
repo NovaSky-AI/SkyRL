@@ -144,7 +144,21 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             SamplingParams(**request_sampling_params) if request_sampling_params is not None else SamplingParams()
         )
 
-        return prompt_token_ids, sampling_params
+        # `cache_salt` is a per-prompt field on vLLM's TokensPrompt (not a SamplingParams field), and is
+        # applied uniformly to every prompt in this input. Only effective when prefix caching is enabled.
+        cache_salt = input_batch.get("cache_salt")
+
+        return prompt_token_ids, sampling_params, cache_salt
+
+    @staticmethod
+    def _make_tokens_prompt(prompt_token_ids: List[int], cache_salt: Optional[str]) -> "TokensPrompt":
+        """Build a ``TokensPrompt``, attaching ``cache_salt`` only when it is set.
+
+        vLLM rejects an empty/``None`` ``cache_salt``, so we omit the field entirely when unset.
+        """
+        if cache_salt is not None:
+            return TokensPrompt(prompt_token_ids=prompt_token_ids, cache_salt=cache_salt)
+        return TokensPrompt(prompt_token_ids=prompt_token_ids)
 
     def _postprocess_outputs(self, outputs):
         """Common output processing logic."""
@@ -275,7 +289,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
+        prompt_token_ids, sampling_params, cache_salt = self._preprocess_prompts(input_batch)
 
         # Check if LoRA is enabled and create LoRA requests
         lora_requests = None
@@ -291,7 +305,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         outputs = await asyncio.to_thread(
             self.llm.generate,
-            prompts=[TokensPrompt(prompt_token_ids=r) for r in prompt_token_ids],
+            prompts=[self._make_tokens_prompt(r, cache_salt) for r in prompt_token_ids],
             sampling_params=sampling_params,
             lora_request=lora_requests,
         )
@@ -507,7 +521,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = await self.llm.add_lora(lora_request)
         return result
 
-    async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
+    async def _collect_outputs(
+        self, prompt_token_ids, request_id: str, sampling_params: SamplingParams, cache_salt: Optional[str] = None
+    ):
         """Collect outputs for a single prompt."""
         # Check if LoRA is enabled and create LoRA request
         final_output = None
@@ -523,7 +539,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
 
         async for request_output in self.llm.generate(
-            prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+            prompt=self._make_tokens_prompt(prompt_token_ids, cache_salt),
             sampling_params=sampling_params,
             request_id=request_id,
             lora_request=lora_request,
@@ -534,14 +550,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine."""
-        prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
+        prompt_token_ids, sampling_params, cache_salt = self._preprocess_prompts(input_batch)
 
         tasks = []
         for prompt in prompt_token_ids:
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
+            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params, cache_salt))
             tasks.append(task)
         outputs = await asyncio.gather(*tasks)
 
