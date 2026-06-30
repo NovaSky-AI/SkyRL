@@ -116,12 +116,14 @@ class MegatronModelWrapper:
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
+        is_vlm: bool = False,
     ):
         self.cfg = config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
+        self.is_vlm = is_vlm
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
@@ -158,6 +160,18 @@ class MegatronModelWrapper:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
+    def _assert_vlm_supported(self):
+        """Guard the VLM parallelism constraints carried over from the FSDP path.
+
+        3D RoPE and multimodal token positions make sample/microbatch packing,
+        context parallelism, and sequence parallelism unsafe for VLMs today.
+        """
+        assert not self.remove_microbatch_padding, "VLM + microbatch padding removal unsupported"
+        assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
+        assert (
+            mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
+        ), "VLM + sequence parallelism unsupported"
+
     def forward(
         self,
         micro_batches: List[dict],
@@ -178,6 +192,8 @@ class MegatronModelWrapper:
         Returns:
             torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data):
@@ -278,11 +294,17 @@ class MegatronModelWrapper:
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+            if batch.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
@@ -296,7 +318,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
 
@@ -315,6 +337,7 @@ class MegatronModelWrapper:
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
+                    **vlm_inputs,
                 )
                 batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
             else:
@@ -323,6 +346,7 @@ class MegatronModelWrapper:
                     new_position_ids,
                     new_attention_mask,
                     packed_seq_params=packed_seq_params,
+                    **vlm_inputs,
                 )
 
             if not self.remove_microbatch_padding:
@@ -392,6 +416,8 @@ class MegatronModelWrapper:
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         # Resolve loss function
@@ -719,11 +745,17 @@ class MegatronModelWrapper:
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+            if batch.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
@@ -737,7 +769,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
 
@@ -752,6 +784,7 @@ class MegatronModelWrapper:
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
+                    **vlm_inputs,
                 )
                 batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
             else:
@@ -760,6 +793,7 @@ class MegatronModelWrapper:
                     new_position_ids,
                     new_attention_mask,
                     packed_seq_params=packed_seq_params,
+                    **vlm_inputs,
                 )
 
             if not self.remove_microbatch_padding:
