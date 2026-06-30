@@ -805,6 +805,14 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    fused_lm_head_logprob: bool = False
+    """Megatron only. Fuse the LM-head projection into the chunked log-prob / entropy
+    computation via the GPTModel ``output_processor`` hook, so the full
+    ``[B, S, vocab//TP]`` logits tensor (and its float32 gradient) is never
+    materialized. Cuts LM-head activation memory from O(S·vocab//TP) to
+    O(chunk·vocab//TP)+O(S·H) — required to fit very long contexts (e.g. 262k).
+    Numerically matches the default path; see
+    ``model_utils.FusedLinearChunkedDistributedLogprob``."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
