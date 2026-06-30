@@ -170,3 +170,12 @@ class AbstractBackend(ABC):
             model_id: The model identifier
         """
         pass
+
+    def max_sample_batch_size(self) -> int:
+        """Maximum number of sample sequences to batch together; 0 means unlimited.
+
+        Intentionally a concrete default (not @abstractmethod): backends without a
+        sampling cap (e.g. the FSDP/Megatron backend, which samples via vLLM) need no
+        boilerplate and rely on this default. Backends that cap sampling override it.
+        """
+        return 0

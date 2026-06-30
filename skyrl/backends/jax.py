@@ -829,6 +829,9 @@ class JaxBackendImpl(AbstractBackend):
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
         return types.OptimStepOutput(metrics=output_metrics)
 
+    def max_sample_batch_size(self) -> int:
+        return self.config.sample_max_num_sequences
+
     def sample(
         self,
         prepared_batch: types.PreparedSampleBatch,
