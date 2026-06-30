@@ -24,7 +24,9 @@ SkyRLAgentConfig = make_config(generator_cls=SkyRLAgentGeneratorConfig)
 
 
 class SkyRLAgentGenerator(GeneratorInterface):
-    def __init__(self, generator_cfg: SkyRLAgentGeneratorConfig, llm_endpoint_client: InferenceEngineInterface, tokenizer):
+    def __init__(
+        self, generator_cfg: SkyRLAgentGeneratorConfig, llm_endpoint_client: InferenceEngineInterface, tokenizer
+    ):
         # read the skyagent task yaml
         skyagent_task_yaml_path = generator_cfg.task
         if not os.path.exists(skyagent_task_yaml_path):
