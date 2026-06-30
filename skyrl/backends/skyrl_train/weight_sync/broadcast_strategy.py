@@ -34,9 +34,6 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     master_port: int
     rank_offset: int
     world_size: int
-    group_name: str
-    backend: str
-    model_dtype_str: str
 
     def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["BroadcastInitInfo"]:
         """Return one BroadcastInitInfo per server with rank_offset for each.
@@ -203,23 +200,17 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
-    ) -> BroadcastInitInfo:
+    def create_init_info(ie_cfg: "InferenceEngineConfig", inference_world_size: int) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:
             ie_cfg: InferenceEngineConfig containing inference engine settings.
             inference_world_size: Total number of inference workers (from client.get_world_size()).
-                If provided, uses this instead of calculating from config.
-                This is the preferred approach for HTTP inference path.
 
         Returns:
             BroadcastInitInfo containing all args needed for sender/receiver creation.
         """
         # Use world_size reported by the inference servers (+1 for trainer rank 0).
-        if inference_world_size is None:
-            raise ValueError("inference_world_size must be provided")
         world_size = inference_world_size + 1
 
         master_addr = ray._private.services.get_node_ip_address()
@@ -232,9 +223,6 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             master_port=master_port,
             rank_offset=1,
             world_size=world_size,
-            group_name="skyrl",
-            backend=ie_cfg.weight_sync_backend,
-            model_dtype_str=ie_cfg.model_dtype,
             override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
         )
 
@@ -273,3 +261,17 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             model_update_group=model_update_group,
             inference_client=inference_client,
         )
+
+    @staticmethod
+    def get_vllm_transfer_engine() -> type:
+        """Return the vLLM weight-transfer engine class for this strategy (NCCL).
+
+        Reference for the receive side: the inference servers drive this engine
+        natively. Currently unused on the sender side (we route through the
+        SkyRL ``/collective_rpc`` wrap), kept as the canonical mapping.
+        """
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
+
+        return NCCLWeightTransferEngine

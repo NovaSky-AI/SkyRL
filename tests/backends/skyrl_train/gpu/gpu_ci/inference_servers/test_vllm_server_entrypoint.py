@@ -12,11 +12,13 @@ Run:
         tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_vllm_server_entrypoint.py -v -s
 """
 
+import contextlib
 import subprocess
 import sys
 import time
 
 import httpx
+import psutil
 import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
@@ -74,12 +76,18 @@ def standalone_server():
         _wait_for_health(base_url, proc)
         yield base_url
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        # The server spawns a vLLM EngineCore subprocess (and TP/PP workers) that
+        # a plain terminate() of the launched process leaves orphaned, holding the
+        # GPU. Tear down the whole process tree so the test never leaks a GPU.
+        with contextlib.suppress(psutil.NoSuchProcess):
+            tree = psutil.Process(proc.pid).children(recursive=True) + [psutil.Process(proc.pid)]
+            for p in tree:
+                with contextlib.suppress(psutil.Error):
+                    p.terminate()
+            _, alive = psutil.wait_procs(tree, timeout=30)
+            for p in alive:
+                with contextlib.suppress(psutil.Error):
+                    p.kill()
 
 
 @pytest.mark.vllm
@@ -107,8 +115,23 @@ def test_entrypoint_chat_completion(standalone_server):
 
 
 @pytest.mark.vllm
-def test_entrypoint_custom_reset_prefix_cache(standalone_server):
-    """The SkyRL custom endpoints (absent from a vanilla vLLM OpenAI server) are present."""
-    resp = httpx.post(f"{standalone_server}/reset_prefix_cache", timeout=30.0)
+def test_entrypoint_skyrl_generate(standalone_server):
+    """`/skyrl/v1/generate` is a SkyRL-specific endpoint (token-in/token-out) that a
+    vanilla vLLM OpenAI server does not expose — confirms the entrypoint wired up
+    SkyRL's custom routes, not just vLLM's built-ins."""
+    tok = httpx.post(
+        f"{standalone_server}/tokenize",
+        json={"model": MODEL, "prompt": "The capital of France is"},
+        timeout=30.0,
+    )
+    assert tok.status_code == 200, tok.text
+    token_ids = tok.json()["tokens"]
+
+    resp = httpx.post(
+        f"{standalone_server}/skyrl/v1/generate",
+        json={"token_ids": token_ids, "sampling_params": {"max_tokens": 8, "temperature": 0.0}},
+        timeout=60.0,
+    )
     assert resp.status_code == 200, resp.text
-    assert resp.json().get("status") == "ok"
+    choice = resp.json()["choices"][0]
+    assert isinstance(choice["token_ids"], list) and len(choice["token_ids"]) > 0, resp.text

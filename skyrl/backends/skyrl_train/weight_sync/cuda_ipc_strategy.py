@@ -298,3 +298,15 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
             init_info=init_info,
             inference_client=inference_client,
         )
+
+    @staticmethod
+    def get_vllm_transfer_engine() -> type:
+        """Return the vLLM weight-transfer engine class for this strategy (CUDA IPC).
+
+        Reference for the receive side: the inference servers drive this engine
+        natively. Currently unused on the sender side (we route through the
+        SkyRL ``/collective_rpc`` wrap), kept as the canonical mapping.
+        """
+        from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
+
+        return IPCWeightTransferEngine

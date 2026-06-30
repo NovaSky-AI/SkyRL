@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, Tuple, TypedDict
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
@@ -49,6 +49,16 @@ class InferenceEngineOutput(TypedDict):
 
 class InferenceEngineInterface(ABC):
 
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        """The base model identifier the inference server was started with.
+
+        Generators pass this as the ``model`` field on requests (e.g. when
+        rendering a chat completion) when they don't otherwise specify one.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     async def generate(
         self,
@@ -76,6 +86,16 @@ class InferenceEngineInterface(ABC):
         Returns a plain dict, either a ChatCompletionResponse or an ErrorResponse.
         The specific fields of the response/request depend on the engine's backend (e.g. for vllm
         these are defined in vllm.entrypoints.openai.protocol).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def render_chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply the chat template and tokenize without generating.
+
+        Accepts the same ``{"json": <request-body>}`` payload as
+        ``chat_completion`` and returns the rendered prompt / token IDs. Used by
+        generators that need token-in/token-out rendering (e.g. multi-modal).
         """
         raise NotImplementedError
 
@@ -129,4 +149,18 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def resume_generation(self) -> None:
         """Resume generation after a pause, continuing any frozen in-flight requests."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def finish_session(self, session_id: str) -> None:
+        """Notify the inference server that a session (trajectory) is complete.
+
+        Best-effort: lets session-aware routing release the replica capacity the
+        session held. Generators call this in trajectory-cleanup paths.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_world_size(self) -> Tuple[int, int]:
+        """Return ``(total_world_size, world_size_per_server)`` across all inference workers."""
         raise NotImplementedError

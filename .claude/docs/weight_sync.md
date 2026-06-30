@@ -9,12 +9,11 @@ Two-sided protocol with sender (training) / receiver (inference):
 ```
 skyrl/backends/skyrl_train/weight_sync/
 ├── base.py                 # WeightUpdateRequest, LoraLoadRequest, WeightChunk
-├── transfer_strategy.py    # WeightSyncInitInfo / Sender / Receiver / Strategy ABCs
+├── transfer_strategy.py    # WeightSyncInitInfo / Sender / Strategy ABCs (sender-side only; receive is vLLM-native)
 ├── broadcast_strategy.py   # NCCL broadcast (non-colocated)
 ├── cuda_ipc_strategy.py    # CUDA IPC (colocated)
 ├── weight_extractor.py     # Sharded-param -> dense tensor extraction
-├── weight_extractor_utils.py
-└── weight_loader.py        # WeightLoader ABC (sender-side driver)
+└── weight_extractor_utils.py
 ```
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):

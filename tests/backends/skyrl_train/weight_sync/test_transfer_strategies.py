@@ -84,11 +84,8 @@ class TestCreateInitInfo:
         assert init_info.master_addr == "192.168.1.1"
         assert isinstance(init_info.master_port, int)
         assert init_info.rank_offset == 1
-        # world_size = num_engines * tp * pp * dp + 1 = 2 * 2 * 1 * 1 + 1 = 5
+        # world_size = inference_world_size + 1 = 4 + 1 = 5
         assert init_info.world_size == 5
-        assert init_info.group_name == "skyrl"
-        assert init_info.backend == "gloo"
-        assert init_info.model_dtype_str == "torch.bfloat16"
         assert init_info.override_existing_receiver is True
 
     def test_broadcast_create_init_info_override_existing_receiver_disabled(self, monkeypatch):

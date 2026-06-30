@@ -7,17 +7,15 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Optional
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
-
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
-    from skyrl.train.config import SkyRLTrainConfig
+    from skyrl.train.config import InferenceEngineConfig
 
 
 @dataclass
@@ -72,7 +70,7 @@ class WeightTransferStrategy(ABC):
     - sender: Uses init_info + inference_client
 
     Usage on sender side:
-        init_info = Strategy.create_init_info(cfg)
+        init_info = Strategy.create_init_info(ie_cfg, inference_world_size)
         sender = Strategy.create_sender(init_info, inference_client)
 
     The receiver side lives inside the inference servers (vLLM's native weight
@@ -82,17 +80,31 @@ class WeightTransferStrategy(ABC):
     @staticmethod
     @abstractmethod
     def create_init_info(
-        cfg: "Union[SkyRLTrainConfig, DictConfig]", inference_world_size: Optional[int] = None
+        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
     ) -> WeightSyncInitInfo:
         """Create init info with all config-derived args.
 
         Args:
-            cfg: Configuration object containing generator settings.
-            inference_world_size: Total number of inference workers (from client.get_world_size()).
-                Used by HTTP inference path. Strategies that don't need world_size can ignore this.
+            ie_cfg: Inference engine configuration.
+            inference_world_size: Total number of inference workers (from
+                ``client.get_world_size()``). Required by strategies that use it
+                (broadcast); strategies that don't (CUDA IPC) ignore it.
 
         Returns:
             WeightSyncInitInfo containing all args needed for sender/receiver creation.
+        """
+        ...
+
+    @staticmethod
+    @abstractmethod
+    def get_vllm_transfer_engine() -> type:
+        """Return the vLLM weight-transfer engine class for this strategy.
+
+        Broadcast -> ``NCCLWeightTransferEngine``; CUDA IPC ->
+        ``IPCWeightTransferEngine``. This is the receive-side engine the
+        inference servers drive natively. Currently unused on the sender side
+        (we route through the SkyRL ``/collective_rpc`` wrap); kept as the
+        canonical strategy->engine mapping.
         """
         ...
 

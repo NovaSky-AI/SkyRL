@@ -252,12 +252,33 @@ if [ "${#SERVER_GPU_GROUPS[@]}" -ne "${#SERVER_PORTS[@]}" ]; then
   exit 1
 fi
 
+# Kill a process and all of its descendants (depth-first: children before
+# parent). A vLLM server spawns an EngineCore subprocess (and, with the mp
+# backend, TP/PP worker processes); a plain `kill` on the launched server PID
+# leaves those orphaned and still holding the GPU, so we walk the whole tree.
+kill_tree() {
+  local pid="$1" sig="$2" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child" "$sig"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
 SERVER_PIDS=()
 cleanup() {
-  if [ "${#SERVER_PIDS[@]}" -gt 0 ]; then
-    kill "${SERVER_PIDS[@]}" 2>/dev/null || true
-    wait "${SERVER_PIDS[@]}" 2>/dev/null || true
+  if [ "${#SERVER_PIDS[@]}" -eq 0 ]; then
+    return
   fi
+  # Graceful stop of each server's whole process tree, then SIGKILL stragglers.
+  local pid
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" TERM
+  done
+  sleep 5
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" KILL
+  done
+  wait "${SERVER_PIDS[@]}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
