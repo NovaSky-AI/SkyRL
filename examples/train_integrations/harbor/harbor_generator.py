@@ -15,10 +15,7 @@ from tqdm import tqdm
 from harbor.models.agent.rollout_detail import RolloutDetail
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
-from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    RemoteInferenceClient,
-)
+from skyrl.backends.skyrl_train.inference_servers.base import ConversationType, InferenceEngineInterface
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -223,7 +220,7 @@ class HarborGenerator(GeneratorInterface):
         self,
         generator_cfg: DictConfig,
         harbor_cfg: DictConfig,
-        inference_engine_client: RemoteInferenceClient,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         max_seq_len: int,
     ):
@@ -231,7 +228,7 @@ class HarborGenerator(GeneratorInterface):
         Args:
             generator_cfg: DictConfig object containing the generator configuration
             harbor_cfg: DictConfig object containing the Harbor configuration
-            inference_engine_client: RemoteInferenceClient object for interacting with the inference engines
+            inference_engine_client: inference engine client for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """

@@ -246,9 +246,6 @@ class TestWeightUpdateFlow:
                 master_port=master_port,
                 rank_offset=1,
                 world_size=world_size,
-                group_name=group_name,
-                backend="nccl",
-                model_dtype_str="bfloat16",
                 override_existing_receiver=True,
             )
 

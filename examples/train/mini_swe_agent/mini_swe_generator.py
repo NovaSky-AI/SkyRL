@@ -73,7 +73,10 @@ def init_and_run(
 ):
     from loguru import logger
 
-    os.environ["OPENAI_BASE_URL"] = base_url
+    # mini-swe-agent talks to the inference router through LiteLLM's ``openai/``
+    # provider, which POSTs to ``{OPENAI_BASE_URL}/chat/completions``; the router
+    # serves the OpenAI routes under ``/v1``.
+    os.environ["OPENAI_BASE_URL"] = f"{base_url}/v1"
 
     model_config = sweagent_config.get("model", {})
     # Use new sampling parameters
