@@ -57,6 +57,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \

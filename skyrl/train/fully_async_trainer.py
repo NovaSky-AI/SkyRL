@@ -372,7 +372,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
         assert (
             self.cfg.trainer.algorithm.policy_loss_type not in LOSSES_WITH_OLD_LOGPROBS
-        ), "policy loss type must use rollout logprobs (i.e. rollout_is or dppo) instead of recomputing logprobs for fully async RL, since stale policies are not kept for logprob computation."
+        ), f"Found trainer.algorithm.policy_loss_type={self.cfg.trainer.algorithm.policy_loss_type} in {set(LOSSES_WITH_OLD_LOGPROBS)}. Fully async training should use rollout logprobs (i.e. rollout_is or dppo) instead of recomputing logprobs, since stale policies are not kept for logprob computation."
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
