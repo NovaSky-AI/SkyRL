@@ -281,6 +281,7 @@ fi
   trainer.ckpt_path="$CKPTS_DIR" \
   trainer.log_path="$LOG_DIR" \
   trainer.strategy=fsdp2 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.off_policy_correction.tis_ratio_type="$TIS_TYPE" \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high="$TIS_IMP_RATIO_CAP" \
@@ -289,6 +290,7 @@ fi
   trainer.algorithm.use_kl_loss="$USE_KL_LOSS" \
   trainer.algorithm.kl_loss_coef="$KL_LOSS_COEF" \
   trainer.algorithm.max_seq_len="$TRAIN_MAX_SEQ_LEN" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps="$FULL_MAX_STALENESS_STEPS" \
   trainer.fully_async.num_parallel_generation_workers="$NUM_PARALLEL_GENERATION_WORKERS" \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \

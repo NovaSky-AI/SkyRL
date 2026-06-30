@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.ppo_utils import LOSSES_WITH_OLD_LOGPROBS
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
@@ -350,6 +351,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Some async-specific validations
         assert (
+            self.cfg.trainer.fully_async.enabled
+        ), "trainer.fully_async.enabled must be True when using the fully async trainer."
+        assert (
             self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
         ), "train_batch_size must equal policy_mini_batch_size for fully async training"
         assert (
@@ -366,6 +370,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
+        assert self.cfg.trainer.algorithm.policy_loss_type not in LOSSES_WITH_OLD_LOGPROBS, (
+            f"Found trainer.algorithm.policy_loss_type={self.cfg.trainer.algorithm.policy_loss_type} in "
+            f"{sorted([loss.value for loss in LOSSES_WITH_OLD_LOGPROBS])}. Fully async training should use "
+            "rollout logprobs (i.e. rollout_is or dppo) instead of recomputing logprobs, since stale "
+            "policies are not kept for logprob computation."
+        )
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
@@ -445,7 +455,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step)
+                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -545,7 +555,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 5. Set logs for this training step.
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step)
+                self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
                 self.all_metrics = {}
                 pbar.update(1)
 
@@ -573,7 +583,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                 if self._vllm_metrics_scraper is not None:
                     timing_payload.update(await self._vllm_metrics_scraper.sample())
-                self.tracker.log(timing_payload, step=self.global_step)
+                self.tracker.log(timing_payload, step=self.global_step, commit=True)
                 self.all_timings = {}
                 self.global_step += 1
 

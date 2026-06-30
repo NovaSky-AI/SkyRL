@@ -438,7 +438,20 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 
 def main() -> None:
-    # Parse CLI args and build typed config
+    # Peek at trainer.override_entrypoint BEFORE strict config parse: integrations
+    # may add their own config fields that core SkyRLTrainConfig doesn't know
+    # about, so the strict parse would fail. If override is set, dispatch to the
+    # named entrypoint and let it parse with its own extended config.
+    override_entrypoint = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("trainer.override_entrypoint="):
+            override_entrypoint = arg.split("=", 1)[1]
+            break
+    if override_entrypoint:
+        from importlib import import_module
+
+        return import_module(override_entrypoint).main()
+
     cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
 
     # validate the arguments

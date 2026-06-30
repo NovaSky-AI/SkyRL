@@ -29,6 +29,7 @@ TOP_P=1.0
 EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
 MAX_RESPONSE_LENGTH=1024
+ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability with vLLM then. TODO: reproduce DAPO with enforce eager `False`
 
 uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -75,6 +76,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

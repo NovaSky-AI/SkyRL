@@ -491,6 +491,8 @@ class FullyAsyncConfig(BaseConfig):
     """Knobs for fully async training.
     See https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training."""
 
+    enabled: bool = False
+    """Indicates whether fully async training is enabled"""
     max_staleness_steps: int = 4
     """Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*,
     then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
@@ -503,10 +505,11 @@ class FullyAsyncConfig(BaseConfig):
     Dropped groups are marked consumed (not regenerated on resume), so the per-epoch step count becomes
     an upper bound: if the epoch's prompts run out mid mini-batch, the partial batch is discarded and
     the epoch ends."""
-    clear_kv_cache_on_weight_sync: bool = True
-    """Whether or not to clear the KV cache on weight sync. Defaults to True, matching synchronous RL.
-    Set to False for fully async training to reuse KV cache from stale policies during generation
-    (avoids recomputation at the cost of using slightly stale KV cache)."""
+    clear_kv_cache_on_weight_sync: bool = False
+    """Whether or not to clear the KV cache on weight sync. Defaults to False.
+    If False, we reuse KV cache from stale policies during generation
+    (avoids recomputation at the cost of using slightly stale KV cache).
+    """
 
     # --- Trainer simulation (no real trainer components) ---
     simulate_training: bool = False
@@ -579,7 +582,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_chunked_prefill: bool = True
     enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
     but this may affect convergence for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
@@ -802,6 +805,14 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    fused_lm_head_logprob: bool = False
+    """Megatron only. Fuse the LM-head projection into the chunked log-prob / entropy
+    computation via the GPTModel ``output_processor`` hook, so the full
+    ``[B, S, vocab//TP]`` logits tensor (and its float32 gradient) is never
+    materialized. Cuts LM-head activation memory from O(S·vocab//TP) to
+    O(chunk·vocab//TP)+O(S·H) — required to fit very long contexts (e.g. 262k).
+    Numerically matches the default path; see
+    ``model_utils.FusedLinearChunkedDistributedLogprob``."""
 
     def __post_init__(self):
         # ref model defaults to the policy model

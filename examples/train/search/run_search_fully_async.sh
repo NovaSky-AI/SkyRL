@@ -49,6 +49,7 @@ RUN_NAME=skyrl-search_4turns_maxgeneratelen_500-fully-async-geoMask${GEO_MASK_LO
 uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \
@@ -56,6 +57,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \

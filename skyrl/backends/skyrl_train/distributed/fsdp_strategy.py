@@ -476,10 +476,13 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+        model_file = f"model_world_size_{world_size}_rank_{rank}.pt"
+        optim_file = f"optim_world_size_{world_size}_rank_{rank}.pt"
+        extra_file = f"extra_state_world_size_{world_size}_rank_{rank}.pt"
+        with io.local_read_files(ckpt_dir, [model_file, optim_file, extra_file]) as read_dir:
+            model_path = os.path.join(read_dir, model_file)
+            optim_path = os.path.join(read_dir, optim_file)
+            extra_path = os.path.join(read_dir, extra_file)
 
             # Check if checkpoint files exist
             if not io.exists(model_path):

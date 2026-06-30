@@ -41,6 +41,8 @@ from skyrl.train.utils import get_ray_pg_ready_with_timeout
 # those globals with vLLM/transformers lazy `GenericModule` objects (e.g. `torch.backends`)
 # that cloudpickle cannot serialize. Keeping vLLM imports local mirrors `test_weight_sync.py`.
 
+pytestmark = pytest.mark.h100
+
 MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
 MOE_PROMPT = "The capital of France is"
 MOE_MAX_TOKENS = 64
@@ -192,13 +194,15 @@ class MoeEngineActor:
         await self.engine.collective_rpc("init_weight_update_communicator", args=(init_info,))
 
     async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        await self.engine.collective_rpc("start_weight_update", args=(is_checkpoint_format,))
+        # Call SkyRL's worker method, not vLLM's native Worker.start_weight_update
+        # (added in vLLM 0.22.0+) which an unprefixed name now resolves to.
+        await self.engine.collective_rpc("skyrl_start_weight_update", args=(is_checkpoint_format,))
 
     async def load_weights(self, request: bytes) -> None:
         await self.engine.collective_rpc("load_weights", args=(request,))
 
     async def finish_weight_update(self) -> None:
-        await self.engine.collective_rpc("finish_weight_update")
+        await self.engine.collective_rpc("skyrl_finish_weight_update")
 
 
 async def _run_legacy_ipc_send(engine_actor, snapshot_path: str, init_info) -> None:

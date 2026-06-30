@@ -140,9 +140,21 @@ def discover_ray_metrics_urls() -> List[str]:
 class VLLMMetricsScraper:
     """Per-step snapshot of selected vLLM metrics from Ray's metrics agents.
 
-    The first ``sample()`` call establishes a baseline; rate-style metrics
-    (throughput, hit rate, average latency) are reported starting from the
-    second call.
+    Two ways to derive a window:
+
+    * ``sample()`` reports deltas vs. the previous call against a wall-clock (or
+      caller-supplied generation) interval — used by the fully-async trainer.
+    * ``start(label)`` / ``pause()`` / ``resume()`` / ``stop()`` measure an
+      explicit window and own its timing. The scraper accumulates only the
+      un-paused time between ``start`` and ``stop``, so the caller never has to
+      thread a generation-time value back in or mark boundaries by ordering.
+      ``stop()`` returns the metrics nested under ``{label}/`` (e.g.
+      ``vllm/train/generation_throughput_tok_s``). The sync trainer uses this to
+      report the train rollout under ``vllm/train/*`` and the eval rollout under
+      ``vllm/eval/*`` instead of blending them.
+
+    The two paths keep independent state, so a process may use either (the sync
+    trainer uses windows; the fully-async trainer uses ``sample()``).
     """
 
     def __init__(
@@ -156,6 +168,13 @@ class VLLMMetricsScraper:
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
+        # Explicit-window state (start/pause/resume/stop). ``_label is None``
+        # means no window is open.
+        self._label: Optional[str] = None
+        self._window_prev: Optional[Dict[str, float]] = None
+        self._window_time_s: float = 0.0
+        self._active_since: Optional[float] = None  # start of the current un-paused span
+        self._paused: bool = False
         if not self._urls:
             logger.warning(
                 "VLLMMetricsScraper: ray.nodes() returned no metrics endpoints; "
@@ -194,14 +213,13 @@ class VLLMMetricsScraper:
                 merged[key] = value
         return merged
 
-    async def sample(self) -> Dict[str, float]:
-        """Return a dict of ``vllm/...`` scalars for the current step.
+    async def _read_snapshot(self) -> Optional[Dict[str, float]]:
+        """Scrape every agent and reduce to one cumulative value per metric.
 
-        Empty if no agents are reachable or if no vLLM samples are present
-        yet (e.g. before any inference has run).
+        Returns ``None`` when no endpoints are configured.
         """
         if not self._urls:
-            return {}
+            return None
 
         parsed = await self._fetch_all()
         if not parsed and not self._warned_empty:
@@ -212,32 +230,115 @@ class VLLMMetricsScraper:
             )
             self._warned_empty = True
 
-        now = time.monotonic()
-
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
-        snapshot = {**sums, **means}
+        return {**sums, **means}
 
-        out: Dict[str, float] = {}
-        # Instantaneous gauges expose directly.
-        if _GAUGE_NUM_RUNNING in snapshot:
-            out["vllm/num_requests_running"] = snapshot[_GAUGE_NUM_RUNNING]
-        if _GAUGE_NUM_WAITING in snapshot:
-            out["vllm/num_requests_waiting"] = snapshot[_GAUGE_NUM_WAITING]
-        if _GAUGE_KV_CACHE_USAGE in snapshot:
-            out["vllm/kv_cache_usage_perc"] = snapshot[_GAUGE_KV_CACHE_USAGE]
+    async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
+        """Return ``vllm/...`` scalars for the current step (empty if unavailable).
 
-        # Derived metrics need a previous snapshot to take deltas.
+        ``generation_time_s`` is the throughput denominator (engine generation
+        time since the previous call); ``None`` falls back to the wall-clock
+        interval (fully-async overlap).
+        """
+        snapshot = await self._read_snapshot()
+        if snapshot is None:
+            return {}
+
+        now = time.monotonic()
         if self._prev_aggregated is not None and self._prev_timestamp is not None:
             dt = max(now - self._prev_timestamp, 1e-9)
-            out.update(self._derive(snapshot, self._prev_aggregated, dt))
+            window = generation_time_s if (generation_time_s is not None and generation_time_s > 0) else dt
+            out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
+        else:
+            out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
 
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
 
+    async def start(self, label: str) -> None:
+        """Open a metrics window labelled ``label`` (e.g. ``"vllm/train"``).
+
+        Snapshots the counters and starts the active-time clock. The window is
+        un-paused, so time accumulates immediately; call :meth:`pause` right
+        after if the work between ``start`` and the first generation should be
+        excluded from the throughput denominator.
+        """
+        if self._label is not None:
+            raise ValueError(f"`start({label!r})` called while window {self._label!r} is still open")
+        self._window_prev = await self._read_snapshot()
+        self._label = label
+        self._window_time_s = 0.0
+        self._active_since = time.monotonic()
+        self._paused = False
+
+    def pause(self) -> None:
+        """Stop accumulating active time until the next :meth:`resume`."""
+        if self._label is None:
+            raise ValueError("`pause` called without an open window")
+        if self._paused:
+            raise ValueError("`pause` called without `resume`")
+        self._window_time_s += time.monotonic() - self._active_since
+        self._active_since = None
+        self._paused = True
+
+    def resume(self) -> None:
+        """Resume accumulating active time after a :meth:`pause`."""
+        if self._label is None:
+            raise ValueError("`resume` called without an open window")
+        if not self._paused:
+            raise ValueError("`resume` called without `pause`")
+        self._active_since = time.monotonic()
+        self._paused = False
+
+    async def stop(self) -> Dict[str, float]:
+        """Close the window and return its metrics nested under ``{label}/``.
+
+        The throughput denominator is the active (un-paused) time accumulated
+        between :meth:`start` and now. Returns ``{}`` when no endpoints are
+        configured.
+        """
+        if self._label is None:
+            raise ValueError("`stop` called without an open window")
+        new_snapshot = await self._read_snapshot()
+        if not self._paused:
+            self._window_time_s += time.monotonic() - self._active_since
+        label, prev, window = self._label, self._window_prev, self._window_time_s
+        self._label = None
+        self._window_prev = None
+        self._active_since = None
+        self._paused = False
+        if new_snapshot is None:
+            return {}
+        return self._window_metrics(prev, new_snapshot, window, f"{label}/")
+
+    @classmethod
+    def _window_metrics(
+        cls,
+        prev: Optional[Dict[str, float]],
+        cur: Optional[Dict[str, float]],
+        throughput_window_s: Optional[float],
+        prefix: str,
+    ) -> Dict[str, float]:
+        """Gauges from ``cur`` plus derived rates over ``cur - prev``."""
+        if cur is None:
+            return {}
+        out: Dict[str, float] = {}
+        if _GAUGE_NUM_RUNNING in cur:
+            out[f"{prefix}num_requests_running"] = cur[_GAUGE_NUM_RUNNING]
+        if _GAUGE_NUM_WAITING in cur:
+            out[f"{prefix}num_requests_waiting"] = cur[_GAUGE_NUM_WAITING]
+        if _GAUGE_KV_CACHE_USAGE in cur:
+            out[f"{prefix}kv_cache_usage_perc"] = cur[_GAUGE_KV_CACHE_USAGE]
+        if prev is not None:
+            out.update(cls._derive(cur, prev, throughput_window_s, prefix))
+        return out
+
     @staticmethod
-    def _derive(cur: Dict[str, float], prev: Dict[str, float], dt: float) -> Dict[str, float]:
+    def _derive(
+        cur: Dict[str, float], prev: Dict[str, float], throughput_window_s: Optional[float], prefix: str
+    ) -> Dict[str, float]:
         out: Dict[str, float] = {}
 
         def delta(name: str) -> Optional[float]:
@@ -247,27 +348,30 @@ class VLLMMetricsScraper:
             # Counter resets (engine restart) shouldn't crash; just skip.
             return d if d >= 0 else None
 
+        # Throughput needs a positive window; the rate/latency metrics don't.
+        has_window = throughput_window_s is not None and throughput_window_s > 0
+
         gen_d = delta(_COUNTER_GENERATION_TOKENS)
-        if gen_d is not None:
-            out["vllm/generation_throughput_tok_s"] = gen_d / dt
+        if gen_d is not None and has_window:
+            out[f"{prefix}generation_throughput_tok_s"] = gen_d / throughput_window_s
 
         prompt_d = delta(_COUNTER_PROMPT_TOKENS)
-        if prompt_d is not None:
-            out["vllm/prompt_throughput_tok_s"] = prompt_d / dt
+        if prompt_d is not None and has_window:
+            out[f"{prefix}prompt_throughput_tok_s"] = prompt_d / throughput_window_s
 
         q_d = delta(_COUNTER_PREFIX_QUERIES)
         h_d = delta(_COUNTER_PREFIX_HITS)
         if q_d is not None and h_d is not None and q_d > 0:
-            out["vllm/prefix_cache_hit_rate"] = h_d / q_d
+            out[f"{prefix}prefix_cache_hit_rate"] = h_d / q_d
 
         ttft_sum_d = delta(_HIST_TTFT_SUM)
         ttft_count_d = delta(_HIST_TTFT_COUNT)
         if ttft_sum_d is not None and ttft_count_d is not None and ttft_count_d > 0:
-            out["vllm/ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
+            out[f"{prefix}ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
 
         itl_sum_d = delta(_HIST_ITL_SUM)
         itl_count_d = delta(_HIST_ITL_COUNT)
         if itl_sum_d is not None and itl_count_d is not None and itl_count_d > 0:
-            out["vllm/tpot_seconds_avg"] = itl_sum_d / itl_count_d
+            out[f"{prefix}tpot_seconds_avg"] = itl_sum_d / itl_count_d
 
         return out
