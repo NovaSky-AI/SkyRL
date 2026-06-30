@@ -280,6 +280,7 @@ fi
   trainer.ckpt_path="$CKPTS_DIR" \
   trainer.log_path="$LOG_DIR" \
   trainer.strategy=fsdp2 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.off_policy_correction.tis_ratio_type="$TIS_TYPE" \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high="$TIS_IMP_RATIO_CAP" \
