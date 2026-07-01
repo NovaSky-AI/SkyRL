@@ -40,12 +40,16 @@ until curl -sSf http://localhost:8000/docs >/dev/null 2>&1; do
 done
 
 COOKBOOK_DIR="$HOME/tinker-cookbook"
+# Pin to commit https://github.com/thinking-machines-lab/tinker-cookbook/commit/016468b0f214f30492f9f8eb001f9094970b3ad5
+COOKBOOK_COMMIT="016468b0f214f30492f9f8eb001f9094970b3ad5"
 [ -d "$COOKBOOK_DIR" ] || git clone --depth 1 https://github.com/thinking-machines-lab/tinker-cookbook.git "$COOKBOOK_DIR"
 
 # math_rl.train builds on tinker_cookbook/rl/train.py and exposes wandb_project /
 # wandb_name natively, so we get the same wandb-driven flow as the other E2E
 # nightlies (no client-side metrics publisher needed).
 cd "$COOKBOOK_DIR"
+git fetch --depth 1 origin "$COOKBOOK_COMMIT"
+git checkout --detach "$COOKBOOK_COMMIT"
 TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --with datasets --with torch \
   python -m tinker_cookbook.recipes.math_rl.train \
   base_url=http://localhost:8000 \
