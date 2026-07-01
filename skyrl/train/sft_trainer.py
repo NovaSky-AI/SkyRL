@@ -55,6 +55,7 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -1553,118 +1554,160 @@ class SFTTrainer:
         self._fire("on_epoch_start")
         epoch_in_progress = True
 
-        while self.global_step <= num_steps:
-            all_timings: dict[str, float] = {}
+        # Collate step N+1 on a background thread while step N runs on GPU.
+        # Do not collate ahead across reshuffles; the tokenized order changes.
+        n_examples = len(tokenized)
 
-            with Timer("step", all_timings):
+        def _epoch_of(step: int) -> int:
+            return (step * batch_size) // n_examples
 
-                # Data loading with wrap-around
-                with Timer("data_loading", all_timings):
-                    start_idx = (self.global_step * batch_size) % len(tokenized)
-                    end_idx = start_idx + batch_size
-                    if end_idx > len(tokenized):
-                        batch_examples = tokenized[start_idx:] + tokenized[: end_idx - len(tokenized)]
-                    else:
-                        batch_examples = tokenized[start_idx:end_idx]
-                    batch = self.collator(batch_examples, batch_size=batch_size)
+        def _slice_examples(step: int) -> list:
+            start_idx = (step * batch_size) % n_examples
+            end_idx = start_idx + batch_size
+            if end_idx > n_examples:
+                return tokenized[start_idx:] + tokenized[: end_idx - n_examples]
+            return tokenized[start_idx:end_idx]
 
-                self._fire("on_step_start", batch=batch)
+        def _collate_batch(step: int):
+            return self.collator(_slice_examples(step), batch_size=batch_size)
 
-                # Training step
-                step_result = self.train_step(batch, self.global_step)
-                all_timings.update(step_result["timings"])
+        collate_ahead_enabled = self.sft_cfg.async_batch_collation
+        async_collator: Optional[AsyncBatchCollator] = (
+            AsyncBatchCollator(_collate_batch, thread_name_prefix="sft-batch-collate")
+            if collate_ahead_enabled
+            else None
+        )
+        logger.info(
+            f"SFT async batch collation (double-buffering): {'ENABLED' if collate_ahead_enabled else 'disabled'}"
+        )
 
-            # Compute throughput using actual (non-padding) tokens
-            batch_padded_seq_len = batch["sequences"].shape[1]
-            actual_num_tokens = batch["attention_mask"].sum().item()
-            self._total_tokens_processed += actual_num_tokens
-            tokens_per_second = actual_num_tokens / all_timings["step"]
+        def _can_collate_ahead(step: int, cur_epoch: int) -> bool:
+            if async_collator is None or step + 1 > num_steps:
+                return False
+            reshuffle_after_step = _epoch_of(step) > cur_epoch
+            return not reshuffle_after_step
 
-            # Build log dict
-            log_dict = {
-                "train/loss": step_result["loss"],
-                "train/grad_norm": step_result["grad_norm"],
-                "train/tokens_per_second": tokens_per_second,
-                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
-                "train/actual_num_tokens": actual_num_tokens,
-                "train/batch_padded_seq_len": batch_padded_seq_len,
-                "train/total_tokens_processed": self._total_tokens_processed,
-            }
-            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
-            if self._ray_gpu_monitor is not None:
-                log_dict.update(self._ray_gpu_monitor.flush())
+        try:
+            while self.global_step <= num_steps:
+                all_timings: dict[str, float] = {}
 
-            self._fire("on_step_end", batch=batch, metrics=step_result)
+                with Timer("step", all_timings):
 
-            # Capture callback-driven triggers, then reset so they only fire once.
-            force_save = self._training_control.should_save
-            force_eval = self._training_control.should_evaluate
-            self._training_control.should_save = False
-            self._training_control.should_evaluate = False
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate; otherwise it is the full collate.
+                    with Timer("data_loading", all_timings):
+                        if async_collator is not None and async_collator.pending_step() == self.global_step:
+                            batch = async_collator.get(self.global_step)
+                        else:
+                            batch = _collate_batch(self.global_step)
 
-            # Checkpoint: interval-driven or callback-requested.
-            interval_save = (
-                self.sft_cfg.ckpt_interval > 0
-                and self.global_step > 0
-                and self.global_step % self.sft_cfg.ckpt_interval == 0
-            )
-            did_save_last_step = force_save or interval_save
-            if did_save_last_step:
-                with Timer("save_checkpoint", all_timings):
-                    ckpt_path = self.save_checkpoint()
-                log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
-                self._fire("on_save", ckpt_path=ckpt_path)
+                        if _can_collate_ahead(self.global_step, current_epoch):
+                            async_collator.submit(self.global_step + 1)
 
-            # HF export at regular intervals
-            if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
-                with Timer("save_hf_model", all_timings):
-                    self.save_hf_model()
-                log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+                    self._fire("on_step_start", batch=batch)
 
-            eval_metrics = None
-            num_eval_batches: int | None = None
-            # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
-            # whenever a callback set ``control.should_evaluate``.
-            interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
-            if eval_tokenized is not None and (force_eval or interval_eval):
-                self._fire("on_eval_start")
-                with Timer("eval", all_timings):
-                    eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
-                self._fire("on_eval_end", metrics=eval_metrics)
+                    # Training step
+                    step_result = self.train_step(batch, self.global_step)
+                    all_timings.update(step_result["timings"])
+
+                # Compute throughput using actual (non-padding) tokens
+                batch_padded_seq_len = batch["sequences"].shape[1]
+                actual_num_tokens = batch["attention_mask"].sum().item()
+                self._total_tokens_processed += actual_num_tokens
+                tokens_per_second = actual_num_tokens / all_timings["step"]
+
+                # Build log dict
+                log_dict = {
+                    "train/loss": step_result["loss"],
+                    "train/grad_norm": step_result["grad_norm"],
+                    "train/tokens_per_second": tokens_per_second,
+                    "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
+                    "train/actual_num_tokens": actual_num_tokens,
+                    "train/batch_padded_seq_len": batch_padded_seq_len,
+                    "train/total_tokens_processed": self._total_tokens_processed,
+                }
+                log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                if self._ray_gpu_monitor is not None:
+                    log_dict.update(self._ray_gpu_monitor.flush())
+
+                self._fire("on_step_end", batch=batch, metrics=step_result)
+
+                # Capture callback-driven triggers, then reset so they only fire once.
+                force_save = self._training_control.should_save
+                force_eval = self._training_control.should_evaluate
+                self._training_control.should_save = False
+                self._training_control.should_evaluate = False
+
+                # Checkpoint: interval-driven or callback-requested.
+                interval_save = (
+                    self.sft_cfg.ckpt_interval > 0
+                    and self.global_step > 0
+                    and self.global_step % self.sft_cfg.ckpt_interval == 0
+                )
+                did_save_last_step = force_save or interval_save
+                if did_save_last_step:
+                    with Timer("save_checkpoint", all_timings):
+                        ckpt_path = self.save_checkpoint()
+                    log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+                    self._fire("on_save", ckpt_path=ckpt_path)
+
+                # HF export at regular intervals
+                if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
+                    with Timer("save_hf_model", all_timings):
+                        self.save_hf_model()
+                    log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+
+                eval_metrics = None
+                num_eval_batches: int | None = None
+                # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
+                # whenever a callback set ``control.should_evaluate``.
+                interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
+                if eval_tokenized is not None and (force_eval or interval_eval):
+                    self._fire("on_eval_start")
+                    with Timer("eval", all_timings):
+                        eval_metrics, num_eval_batches = self.run_eval(eval_tokenized)
+                    self._fire("on_eval_end", metrics=eval_metrics)
+                    if eval_metrics:
+                        log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                        log_dict["timing/eval"] = all_timings["eval"]
+
+                log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
+                # Callbacks may mutate log_dict in place via on_log.
+                self._fire("on_log", logs=log_dict)
+                self.tracker.log(log_dict, step=self.global_step, commit=True)
+
+                if self.global_step % 5 == 0:
+                    logger.info(
+                        f"Step {self.global_step}: loss={step_result['loss']:.4f}, "
+                        f"grad_norm={step_result['grad_norm']}"
+                    )
+
                 if eval_metrics:
-                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
-                    log_dict["timing/eval"] = all_timings["eval"]
+                    logger.info(
+                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {num_eval_batches} batches"
+                    )
 
-            log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
-            # Callbacks may mutate log_dict in place via on_log.
-            self._fire("on_log", logs=log_dict)
-            self.tracker.log(log_dict, step=self.global_step, commit=True)
+                # Check for epoch boundary and reshuffle
+                epoch = (self.global_step * batch_size) // len(tokenized)
+                if epoch > current_epoch:
+                    self._fire("on_epoch_end")
+                    epoch_in_progress = False
+                    # Drain before mutating tokenized order.
+                    if async_collator is not None:
+                        async_collator.clear()
+                    for _ in range(epoch - current_epoch):
+                        rng.shuffle(tokenized)
+                    current_epoch = epoch
+                    self._current_epoch = epoch
+                    if self.global_step + 1 <= num_steps:
+                        self._fire("on_epoch_start")
+                        epoch_in_progress = True
 
-            if self.global_step % 5 == 0:
-                logger.info(
-                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
-                )
-
-            if eval_metrics:
-                logger.info(
-                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                    f"over {num_eval_batches} batches"
-                )
-
-            # Check for epoch boundary and reshuffle
-            epoch = (self.global_step * batch_size) // len(tokenized)
-            if epoch > current_epoch:
-                self._fire("on_epoch_end")
-                epoch_in_progress = False
-                for _ in range(epoch - current_epoch):
-                    rng.shuffle(tokenized)
-                current_epoch = epoch
-                self._current_epoch = epoch
-                if self.global_step + 1 <= num_steps:
-                    self._fire("on_epoch_start")
-                    epoch_in_progress = True
-
-            self.global_step += 1
+                self.global_step += 1
+        finally:
+            if async_collator is not None:
+                async_collator.shutdown()
         self.global_step = min(self.global_step, num_steps)
 
         # Pair the leading on_epoch_start: fire on_epoch_end if we exited the

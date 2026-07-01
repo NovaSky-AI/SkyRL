@@ -199,6 +199,11 @@ class SFTConfig(BaseConfig):
     # ---- Data loading ----
     num_workers: int = 8
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+    async_batch_collation: bool = True
+    """Overlap the next step's CPU collate with the current GPU step.
+
+    Collate-ahead is skipped across epoch reshuffles. Set to False for the
+    serial data-loading path."""
 
     # ---- Tokenized dataset caching ----
     cache_dir: str = os.path.join(
