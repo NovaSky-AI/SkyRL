@@ -16,7 +16,7 @@ from skyrl.train.config.config import (
     _resolve_class_type,
     build_nested_dataclass,
 )
-from skyrl.train.utils.utils import validate_cfg
+from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
 from tests.train.util import example_dummy_config
 
 
@@ -138,6 +138,182 @@ def test_cli_overrides_invalid_field():
         SkyRLTrainConfig.from_cli_overrides(["trainer.nonexistent_field=value"])
 
 
+def test_remote_urls_override_rejected():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "`remote_urls` is no longer supported, external inference servers can be used with "
+            "`external_proxy_url` and `external_server_urls` instead"
+        ),
+    ):
+        SkyRLTrainConfig.from_cli_overrides(["generator.inference_engine.remote_urls=['http://127.0.0.1:8001']"])
+
+
+def test_async_engine_true_override_is_ignored():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["generator.inference_engine.async_engine=true"])
+
+    assert not hasattr(cfg.generator.inference_engine, "async_engine")
+
+
+def test_async_engine_false_override_rejected():
+    with pytest.raises(ValueError, match="`async_engine=False` is no longer supported"):
+        SkyRLTrainConfig.from_cli_overrides(["generator.inference_engine.async_engine=false"])
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        (
+            "generator.inference_engine.enable_http_endpoint=true",
+            "`enable_http_endpoint` is no longer supported",
+        ),
+        (
+            "generator.inference_engine.enable_http_endpoint=false",
+            "`enable_http_endpoint` is no longer supported",
+        ),
+        (
+            "generator.inference_engine.override_existing_update_group=enable",
+            "`override_existing_update_group` is no longer supported",
+        ),
+        (
+            "generator.inference_engine.override_existing_update_group=auto",
+            "`override_existing_update_group` is no longer supported",
+        ),
+    ],
+)
+def test_removed_inference_engine_overrides_rejected(override: str, match: str):
+    with pytest.raises(ValueError, match=match):
+        SkyRLTrainConfig.from_cli_overrides([override])
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "trainer.rope_scaling={'type': 'linear'}",
+        "trainer.rope_theta=10000",
+        "trainer.rope_parameters={'rope_type': 'linear'}",
+        "generator.rope_scaling={'type': 'linear'}",
+        "generator.rope_theta=10000",
+        "generator.rope_parameters={'rope_type': 'linear'}",
+        "generator.inference_engine.rope_scaling={'type': 'linear'}",
+        "generator.inference_engine.rope_theta=10000",
+        "generator.inference_engine.rope_parameters={'rope_type': 'linear'}",
+        "generator.inference_engine.engine_init_kwargs.rope_scaling={'type': 'linear'}",
+        "generator.inference_engine.engine_init_kwargs.rope_theta=10000",
+        "generator.inference_engine.engine_init_kwargs.rope_parameters={'rope_type': 'linear'}",
+        "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_scaling={'type': 'linear'}",
+        "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_theta=10000",
+    ],
+)
+def test_native_rope_overrides_rejected(override):
+    with pytest.raises(
+        ValueError,
+        match="engine_init_kwargs\\.hf_overrides\\.rope_parameters",
+    ):
+        SkyRLTrainConfig.from_cli_overrides([override])
+
+
+def test_hf_overrides_rope_parameters_requires_trainer_side_override():
+    with pytest.raises(
+        ValueError,
+        match="trainer\\.policy\\.model_config_kwargs\\.rope_parameters",
+    ):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_type=linear",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.factor=2.0",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_theta=10000",
+            ]
+        )
+
+
+def test_hf_overrides_rope_parameters_allowed_with_policy_model_config_kwargs():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_type=linear",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.factor=2.0",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_theta=10000",
+            "trainer.policy.model_config_kwargs.rope_parameters.rope_type=linear",
+            "trainer.policy.model_config_kwargs.rope_parameters.factor=2.0",
+            "trainer.policy.model_config_kwargs.rope_parameters.rope_theta=10000",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.engine_init_kwargs["hf_overrides"]["rope_parameters"] == {
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 10000,
+    }
+    assert cfg.trainer.policy.model_config_kwargs["rope_parameters"] == {
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 10000,
+    }
+
+
+def test_hf_overrides_rope_parameters_allowed_with_megatron_transformer_config_kwargs():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_type=linear",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.factor=2.0",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_theta=10000",
+            "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters.rope_type=linear",
+            "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters.factor=2.0",
+            "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters.rope_theta=10000",
+        ]
+    )
+
+    assert cfg.trainer.policy.megatron_config.transformer_config_kwargs["rope_parameters"] == {
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 10000,
+    }
+
+
+def test_hf_overrides_rope_parameters_must_match_fsdp_trainer_side_override():
+    with pytest.raises(
+        ValueError,
+        match="trainer\\.policy\\.model_config_kwargs\\.rope_parameters",
+    ):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_type=linear",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.factor=2.0",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_theta=10000",
+                "trainer.policy.model_config_kwargs.rope_parameters.rope_type=linear",
+                "trainer.policy.model_config_kwargs.rope_parameters.factor=4.0",
+                "trainer.policy.model_config_kwargs.rope_parameters.rope_theta=10000",
+            ]
+        )
+
+
+def test_hf_overrides_rope_parameters_must_match_megatron_trainer_side_override():
+    with pytest.raises(
+        ValueError,
+        match="trainer\\.policy\\.megatron_config\\.transformer_config_kwargs\\.rope_parameters",
+    ):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_type=linear",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.factor=2.0",
+                "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters.rope_theta=10000",
+                "trainer.policy.model_config_kwargs.rope_parameters.rope_type=linear",
+                "trainer.policy.model_config_kwargs.rope_parameters.factor=2.0",
+                "trainer.policy.model_config_kwargs.rope_parameters.rope_theta=10000",
+            ]
+        )
+
+
+def test_run_engines_locally_false_requires_external_endpoint():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.run_engines_locally = False
+
+    with pytest.raises(ValueError, match="run_engines_locally=false requires"):
+        validate_inference_engine_cfg(cfg)
+
+
 def test_temperature_propagation():
     """Test that temperature is copied from generator to algorithm config in __post_init__."""
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
@@ -151,8 +327,6 @@ def test_cross_field_defaults():
         [
             "trainer.max_prompt_length=1024",
             "trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct",
-            "trainer.rope_scaling={'type': 'linear'}",
-            "trainer.rope_theta=10000",
         ]
     )
 
@@ -161,8 +335,6 @@ def test_cross_field_defaults():
     assert (
         cfg.generator.eval_sampling_params.max_generate_length == cfg.generator.sampling_params.max_generate_length
     )  # same as `generator.sampling_params.max_generate_length`
-    assert cfg.generator.rope_scaling == cfg.trainer.rope_scaling
-    assert cfg.generator.rope_theta == cfg.trainer.rope_theta
 
 
 class TestTrainerUseSamplePackingAlias:
@@ -192,13 +364,6 @@ class TestSkyRLTrainConfig:
         ("overrides", "expected_num_workers", "expected_persistent"),
         [
             pytest.param([], 8, False, id="default-no-http"),
-            pytest.param(["generator.inference_engine.enable_http_endpoint=true"], 0, False, id="http-endpoint"),
-            pytest.param(
-                ["generator.inference_engine.enable_http_endpoint=true", "data.dataloader.num_workers=4"],
-                4,
-                False,
-                id="explicit-overrides-http",
-            ),
             pytest.param(["data.dataloader.num_workers=0"], 0, False, id="explicit-zero"),
             pytest.param(["data.dataloader.persistent_workers=true"], 8, True, id="persistent-keeps-default-workers"),
         ],

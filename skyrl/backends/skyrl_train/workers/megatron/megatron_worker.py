@@ -75,7 +75,7 @@ from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import (
+    from skyrl.backends.skyrl_train.inference_servers.base import (
         InferenceEngineInterface,
     )
     from skyrl.train.config.config import InferenceEngineConfig
@@ -1034,11 +1034,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
 
         # Count microbatches that carry real (non-padding) samples. Token-based batching
-        # appends fully-padding microbatches (loss_mask all zero) so every DP rank runs the
-        # same number of forward passes; those contribute 0 to KL/entropy and to mean metrics
-        # but would otherwise inflate the denominators. `num_real_microbatches` lets the loss
-        # normalize KL/entropy over real microbatches only.
-        num_real_microbatches = sum(1 for m in micro_buffer if m["loss_mask"].sum().item() > 0)
+        # appends fully-padding microbatches so every DP rank runs the same number of
+        # forward passes; those contribute 0 to KL/entropy and to mean metrics but would
+        # otherwise inflate the denominators. A real microbatch can still have an all-zero
+        # loss_mask (for example, DAPO overlong filtering), so use the iterator's padding
+        # count rather than inferring from loss_mask.
+        num_padding_microbatches = (
+            getattr(microbatch_iterator, "num_padding_microbatches", 0) if microbatch_iterator is not None else 0
+        )
+        num_real_microbatches = len(micro_buffer) - num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
             m_batch["num_real_microbatches"] = num_real_microbatches
@@ -1118,7 +1122,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # identical on every rank; num_padding_microbatches reports the per-rank average).
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
-            status["num_padding_microbatches"] = float(len(micro_buffer) - num_real_microbatches)
+            status["num_padding_microbatches"] = float(num_padding_microbatches)
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)

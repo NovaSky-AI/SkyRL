@@ -3,7 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from typing import Any, Dict, Optional, Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -75,8 +75,6 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         remove_microbatch_padding: bool = False,
         use_torch_compile: bool = False,
-        rope_scaling: Dict[str, Any] = {},
-        rope_theta: float | None = None,
         model_config_kwargs: dict = {},
         meta_init: bool = False,
         language_model_only: bool = False,
@@ -129,10 +127,6 @@ class HFModelWrapper(nn.Module):
                     # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
                     model_class = AutoModelForImageTextToText
 
-            if rope_scaling:
-                model_config.rope_scaling = rope_scaling
-            if rope_theta:
-                model_config.rope_theta = rope_theta
             model_config._attn_implementation = self.attn_implementation
 
             if meta_init:

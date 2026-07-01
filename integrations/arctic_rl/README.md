@@ -28,7 +28,7 @@ What each flag does:
 - `--isolated` — resolves a fresh env from scratch instead of using SkyRL's lockfile. Required because `tool.uv.sources` in `pyproject.toml` pins vLLM to the cu129 index (vLLM 0.23 only), but `arctic-inference[vllm]` needs vLLM 0.18.
 - `--extra skyrl-train` — pulls SkyRL's training deps (`ray`, `deepspeed`, `hydra-core`, …).
 - `--with arctic-platform`, `--with 'arctic-inference[vllm]'`, `--with liger-kernel` — the three Arctic packages.
-- `--with 'transformers==4.57.6'` — vLLM 0.18 needs transformers `<5`; pinned exact (not `<5`) because Ray's worker-spawn shell parses `<5` as a redirect from fd 5. Same reason `examples/train/flash_rl` exact-pins `transformers==4.53.3`.
+- `--with 'transformers==4.57.6'` — vLLM 0.18 needs transformers `<5`; pinned exact (not `<5`) because Ray's worker-spawn shell parses `<5` as a redirect from fd 5.
 - `--with "flash-attn@<URL>"` — overrides the torch-2.11 flash-attn wheel that `tool.uv.sources` selects, replacing it with a torch-2.10 ABI wheel that matches vLLM 0.18's torch pin.
 - `--with "flash-attn-3@<URL>"` — FA3 wheel from PyTorch's cu128 index (`cp39-abi3`). Default attention backend on the BIRD recipes; this is what produced the 2.38× number on H200.
 

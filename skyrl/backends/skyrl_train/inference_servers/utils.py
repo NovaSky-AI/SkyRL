@@ -43,7 +43,7 @@ def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
     ``SKYRL_LORA_ADAPTER_NAME`` as ``model`` on data-plane calls. Otherwise
     — including Megatron + LoRA with ``merge_lora=True``, where merged
     weights are pushed as a full weight update — the policy is the base
-    model itself.
+    model itself, or its configured served alias.
 
     This is the single source of truth for "which name does the inference
     server know the policy by?" and should be used wherever a caller needs
@@ -52,7 +52,7 @@ def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
     """
     if _uses_lora_weight_sync(cfg):
         return SKYRL_LORA_ADAPTER_NAME
-    return cfg.trainer.policy.model.path
+    return cfg.generator.inference_engine.served_model_name or cfg.trainer.policy.model.path
 
 
 # TODO: Add a test for validation

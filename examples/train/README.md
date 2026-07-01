@@ -26,7 +26,6 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 
 ## Integrations
 
-- `flash_rl/`: Integration with [FlashRL’s](https://fengyao.notion.site/flash-rl) patched vLLM inference engine for high-throughput RL training.
 - `harbor/`: Custom [Harbor](https://harborframework.com/) Generator for training agents to solve TerminalBench tasks.
 - `mini_swe_agent/`: Integration with [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) to train coding agents on SWE-Bench via SkyRL.
 - `thunder_agent/`: ThunderAgent-accelerated Harbor/R2EGym training recipe with program-aware inference scheduling.
@@ -40,5 +39,5 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 
 ## Features and More
 - `lora/`: LoRA RL fine-tuning recipes.
-- `remote_inference_engine/`: Scripts for running remote vLLM inference servers and connecting them to SkyRL.
+- `remote_inference_server/`: Scripts for running remote vLLM inference servers and connecting them to SkyRL.
 - `training_backends/`: Runner scripts demonstrating how to use different training backends on SkyRL.
