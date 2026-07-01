@@ -1,28 +1,8 @@
-"""CPU test: async batch collation (double-buffering) is byte-identical to serial.
+"""CPU tests for async SFT batch collation.
 
-The SFT training loop optionally collates the NEXT step's batch on a background
-thread while the current step's forward/backward runs on the GPU
-(``SFTConfig.async_batch_collation``). The collated-ahead batch MUST be
-byte-identical to what the synchronous path would have produced for that same
-step — including across epoch boundaries, where the data reshuffles in place.
-
-Strategy: run the real ``SFTTrainer.train()`` loop twice over the same dummy
-dataset/seed — once with async batch collation OFF (the baseline) and once ON —
-capturing a deep snapshot of every ``batch`` handed to ``train_step``. Then
-assert the two batch sequences are tensor-equal step-for-step over a run that
-spans TWO epoch boundaries. The examples have distinct token ids so a stale
-pre-shuffle batch would differ from the baseline and fail the comparison.
-
-Both collator paths are covered:
-  * ``DefaultCollator`` (FSDP default left-pad path).
-  * ``PackedDataCollator`` (Megatron FFD packing) — constructed directly,
-    CPU-only, no Megatron runtime needed since the collate is pure numpy/torch.
-
-Also unit-tests the ``AsyncBatchCollator`` invariants (mismatch assertion,
-exception propagation, single-slot guard).
-
-Run:
-  uv run --isolated --extra dev --extra fsdp pytest tests/train/test_async_batch_collation.py -v
+The integration tests compare serial and collate-ahead batches across epoch
+reshuffles for both default padding and packed collation. Unit tests cover the
+single-slot ordering and error-propagation invariants.
 """
 
 import copy
@@ -36,9 +16,7 @@ from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 from skyrl.train.sft_trainer import SFTTrainer
 from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 
-# ---------------------------------------------------------------------------
-# Helpers: dummy config, dataset, and a trainer wired for a CPU-only train()
-# ---------------------------------------------------------------------------
+# Helpers: dummy config, dataset, and a CPU-only trainer.
 
 
 def _build_test_sft_config(num_steps: int, batch_size: int) -> SFTConfig:
@@ -67,15 +45,10 @@ def _build_test_sft_config(num_steps: int, batch_size: int) -> SFTConfig:
 
 
 def _distinct_tokenized(n: int) -> list[dict]:
-    """``n`` examples with DISTINCT token ids and varying lengths.
-
-    Distinct ids + varying lengths mean different orderings produce different
-    collated batches, so a stale-shuffle collate-ahead bug cannot accidentally match
-    the synchronous baseline.
-    """
+    """Examples whose order changes are visible in collated tensors."""
     examples = []
     for i in range(n):
-        length = 6 + (i % 4)  # vary length 6..9 so packing/padding differs by order
+        length = 6 + (i % 4)
         base = (i + 1) * 1000
         input_ids = [base + j for j in range(length)]
         num_actions = 1 + (i % 3)  # 1..3 response tokens
@@ -91,9 +64,7 @@ def _distinct_tokenized(n: int) -> list[dict]:
 
 
 def _make_trainer(cfg: SFTConfig, collator) -> SFTTrainer:
-    # Pass a mock bridge config so we don't call ``build_skyrl_config_for_sft``,
-    # which (via ``SkyRLTrainConfig.__post_init__``) eagerly imports the vllm
-    # inference-server stack — unneeded for a CPU-only collate test.
+    # Avoid importing the vLLM inference-server stack for a CPU-only collate test.
     skyrl_cfg = MagicMock()
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
 
@@ -103,8 +74,7 @@ def _make_trainer(cfg: SFTConfig, collator) -> SFTTrainer:
     trainer.collator = collator
     trainer.tracker = MagicMock()
 
-    # Mock the worker dispatch: forward_backward / optim_step are the only GPU
-    # touch points in train_step.
+    # Mock the GPU touch points in train_step.
     step_output = MagicMock()
     step_output.metrics = {"loss": 0.5, "final_loss": 0.5}
     dispatch_mock = MagicMock()
@@ -116,12 +86,11 @@ def _make_trainer(cfg: SFTConfig, collator) -> SFTTrainer:
 
 
 def _snapshot_batch(batch) -> dict:
-    """Deep, order-preserving snapshot of the tensor payload of a batch."""
+    """Snapshot the tensor payload needed for step-by-step comparison."""
     snap = {}
     for key in ("sequences", "attention_mask", "loss_mask"):
         if key in batch:
             snap[key] = batch[key].clone()
-    # PackedDataCollator carries sub_seq_lengths (a TensorList of 1-D tensors).
     if "sub_seq_lengths" in batch:
         snap["sub_seq_lengths"] = [t.clone() for t in batch["sub_seq_lengths"]]
     return snap
@@ -159,17 +128,11 @@ def _assert_batch_sequences_equal(serial: list[dict], collated: list[dict]):
                 assert torch.equal(sv, pv), f"step {s['step']} {key} not byte-identical"
 
 
-# ---------------------------------------------------------------------------
-# Integration: collate-ahead ON == serial baseline across epoch boundaries
-# ---------------------------------------------------------------------------
+# Integration: collate-ahead ON == serial baseline across epoch boundaries.
 
 
 def _run_pair(monkeypatch, collator_factory, n_examples, batch_size, num_steps):
-    """Run the loop serially then with collate-ahead; return (serial, collated) captures.
-
-    Each run gets its OWN tokenized list (the loop shuffles in place) and its
-    OWN collator so there is no cross-run state bleed.
-    """
+    """Run serial and collate-ahead loops with isolated mutable state."""
     base = _distinct_tokenized(n_examples)
 
     def _run(collate_ahead_on: bool):
@@ -187,11 +150,7 @@ def _run_pair(monkeypatch, collator_factory, n_examples, batch_size, num_steps):
 
 
 def test_async_collation_matches_serial_default_collator(monkeypatch):
-    """DefaultCollator: collated-ahead batches are byte-identical across 2 epoch boundaries.
-
-    n_examples=6, batch_size=2 -> steps_per_epoch=3; num_steps=7 spans the
-    boundaries after step 3 and step 6 (3 epochs touched).
-    """
+    """DefaultCollator matches serial across two epoch boundaries."""
     n_examples, batch_size, num_steps = 6, 2, 7
 
     def factory(cfg):
@@ -199,17 +158,12 @@ def test_async_collation_matches_serial_default_collator(monkeypatch):
 
     serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps, f"expected {num_steps} steps, got {len(serial)}"
-    # Confirm the run actually crossed >=2 epoch boundaries (steps_per_epoch=3).
     assert num_steps // (n_examples // batch_size) >= 2
     _assert_batch_sequences_equal(serial, collated)
 
 
 def test_async_collation_matches_serial_packed_collator(monkeypatch):
-    """PackedDataCollator (FFD packing): collated-ahead batches byte-identical across boundaries.
-
-    Constructed CPU-only (dp_size=1, tp/pp/cp=1) — the collate is pure
-    numpy/torch and needs no Megatron runtime.
-    """
+    """PackedDataCollator matches serial across epoch boundaries."""
     n_examples, batch_size, num_steps = 6, 2, 7
 
     def factory(cfg):
@@ -226,18 +180,12 @@ def test_async_collation_matches_serial_packed_collator(monkeypatch):
 
     serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps
-    # sub_seq_lengths must be present on the packed path (proves packing fired).
     assert all("sub_seq_lengths" in c["snap"] for c in collated)
     _assert_batch_sequences_equal(serial, collated)
 
 
 def test_async_collation_matches_serial_uneven_wraparound(monkeypatch):
-    """Wrap-around + uneven epoch: dataset not divisible by batch_size.
-
-    n_examples=5, batch_size=2 -> the slice wraps around the dataset end inside
-    an epoch and epoch boundaries land mid-list. Exercises the
-    ``end_idx > len(tokenized)`` branch under collate-ahead.
-    """
+    """Collate-ahead matches serial when batch slicing wraps unevenly."""
     n_examples, batch_size, num_steps = 5, 2, 9
 
     def factory(cfg):
@@ -248,9 +196,7 @@ def test_async_collation_matches_serial_uneven_wraparound(monkeypatch):
     _assert_batch_sequences_equal(serial, collated)
 
 
-# ---------------------------------------------------------------------------
-# Unit tests for the AsyncBatchCollator invariants
-# ---------------------------------------------------------------------------
+# Unit tests for the AsyncBatchCollator invariants.
 
 
 def test_async_collator_basic_submit_get():
@@ -271,7 +217,7 @@ def test_async_collator_step_mismatch_raises():
     try:
         ac.submit(3)
         with pytest.raises(AssertionError, match="!= expected step"):
-            ac.get(4)  # asking for a different step than was submitted
+            ac.get(4)
     finally:
         ac.shutdown()
 
@@ -281,7 +227,7 @@ def test_async_collator_double_submit_raises():
     try:
         ac.submit(1)
         with pytest.raises(AssertionError, match="slot already occupied"):
-            ac.submit(2)  # single-slot invariant
+            ac.submit(2)
     finally:
         ac.shutdown()
 
@@ -306,7 +252,6 @@ def test_async_collator_clear_drains_in_flight():
         ac.clear()
         assert not ac.has_pending()
         assert ac.pending_step() is None
-        # A fresh submit after clear works normally.
         ac.submit(8)
         assert ac.get(8) == 8
     finally:

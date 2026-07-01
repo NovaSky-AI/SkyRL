@@ -1554,15 +1554,8 @@ class SFTTrainer:
         self._fire("on_epoch_start")
         epoch_in_progress = True
 
-        # ------------------------------------------------------------------
-        # Async batch collation (double-buffering) setup
-        # ------------------------------------------------------------------
-        # Two consecutive steps in the same epoch see the SAME ``tokenized``
-        # order (it only changes at an epoch boundary reshuffle), so step N+1's
-        # slice is knowable while step N runs. ``_slice_examples`` reproduces the
-        # loop's deterministic wrap-around slice against the *current* order, and
-        # ``_collate_batch`` is the producer run on the background thread (the
-        # heavy collate releases the GIL, so it overlaps the GPU step).
+        # Collate step N+1 on a background thread while step N runs on GPU.
+        # Do not collate ahead across reshuffles; the tokenized order changes.
         n_examples = len(tokenized)
 
         def _epoch_of(step: int) -> int:
@@ -1588,13 +1581,6 @@ class SFTTrainer:
             f"SFT async batch collation (double-buffering): {'ENABLED' if collate_ahead_enabled else 'disabled'}"
         )
 
-        # Whether the step about to run can collate its successor ahead. The loop
-        # reshuffles ``tokenized`` after step N iff ``_epoch_of(N) > cur_epoch``
-        # (the same predicate the epoch-boundary block below uses). When a
-        # reshuffle would occur, step N+1 reads a DIFFERENT order than step N, so
-        # it must not be collated ahead against the pre-shuffle order. Mirroring the
-        # loop's reshuffle decision via ``cur_epoch`` (the authoritative loop
-        # state) keeps the predicate exact regardless of wrap-around alignment.
         def _can_collate_ahead(step: int, cur_epoch: int) -> bool:
             if async_collator is None or step + 1 > num_steps:
                 return False
@@ -1607,24 +1593,14 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Data loading with wrap-around. With async batch collation
-                    # enabled this measures only the (ideally ~0) wait for the
-                    # already-running background collate; otherwise the full serial collate.
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate; otherwise it is the full collate.
                     with Timer("data_loading", all_timings):
                         if async_collator is not None and async_collator.pending_step() == self.global_step:
-                            # Consume the batch collated ahead during the previous step.
-                            # ``get`` asserts the in-flight step matches, so a
-                            # stale/mismatched batch fails loudly.
                             batch = async_collator.get(self.global_step)
                         else:
-                            # No valid in-flight batch (first step, or the first
-                            # step after an epoch reshuffle): collate synchronously
-                            # against the live order.
                             batch = _collate_batch(self.global_step)
 
-                        # Kick off the NEXT step's collate on the background thread so
-                        # it overlaps this step's GPU work — only when the successor
-                        # is in the same epoch (no reshuffle between them).
                         if _can_collate_ahead(self.global_step, current_epoch):
                             async_collator.submit(self.global_step + 1)
 
@@ -1717,12 +1693,7 @@ class SFTTrainer:
                 if epoch > current_epoch:
                     self._fire("on_epoch_end")
                     epoch_in_progress = False
-                    # Drain any in-flight batch BEFORE reshuffling so a background
-                    # collate can never read ``tokenized`` while it is being
-                    # shuffled, and so the next epoch's first step is collated
-                    # synchronously against the post-shuffle order. ``_can_collate_ahead``
-                    # already withholds cross-epoch submits, so this is normally a
-                    # no-op — it's defense in depth against the reshuffle/collate-ahead race.
+                    # Drain before mutating tokenized order.
                     if async_collator is not None:
                         async_collator.clear()
                     for _ in range(epoch - current_epoch):
@@ -1735,10 +1706,6 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
-            # Always tear down the async batch collation thread (drains any
-            # in-flight batch and joins the worker) so neither the background
-            # thread nor the dataset reference is leaked, even on exception.
-            # No-op when async batch collation is disabled.
             if async_collator is not None:
                 async_collator.shutdown()
         self.global_step = min(self.global_step, num_steps)
