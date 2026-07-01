@@ -21,7 +21,7 @@
 # limitations under the License.
 
 import gc
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -160,6 +160,49 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                     layer.mlp.router.bias.requires_grad = False
     # modified in-place
     return model_or_models
+
+
+def _convert_moe_experts_lora_to_vllm(
+    adapter_state: Dict[str, "torch.Tensor"],
+) -> Dict[str, "torch.Tensor"]:
+    """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
+
+    Megatron-Bridge exports the fused experts as 3D (num_experts-leading)
+    tensors under two keys per layer::
+
+        ...mlp.experts.gate_up_proj.lora_{A,B}.weight   # w13
+        ...mlp.experts.down_proj.lora_{A,B}.weight       # w2
+
+    with shapes ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``.
+
+    vLLM's fused-MoE LoRA loader for a 3D-MoE model
+    (``FusedMoE3DWithLoRA`` / ``LoRAModelManager._stack_moe_lora_weights``)
+    instead consumes the flat PEFT layout, keyed by the FusedMoE module name
+    itself for ``down_proj`` (w2) and ``<module>.base_layer`` for the packed
+    ``gate_up_proj`` (w13), with shapes ``lora_A=(rank*E, in)`` and
+    ``lora_B=(out, rank*E)``.  It then reconstructs the per-expert tensors via
+    ``reshape(E, -1, in)`` (lora_A) and ``reshape(out, -1, E).permute(2,0,1)``
+    (lora_B); this transform is the exact inverse, verified to round-trip.
+
+    Non-expert tensors (attention, shared_expert) are passed through unchanged.
+    """
+    converted: Dict[str, "torch.Tensor"] = {}
+    for key, tensor in adapter_state.items():
+        is_gate_up = ".mlp.experts.gate_up_proj." in key
+        is_down = ".mlp.experts.down_proj." in key
+        if (is_gate_up or is_down) and tensor.ndim == 3:
+            if key.endswith(".lora_A.weight"):
+                # (E, rank, in) -> (rank*E [expert-major], in)
+                tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
+            elif key.endswith(".lora_B.weight"):
+                # (E, out, rank) -> (out, rank*E [expert-minor])
+                tensor = tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
+            if is_gate_up:
+                key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
+            else:
+                key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+        converted[key] = tensor
+    return converted
 
 
 @torch.no_grad()
