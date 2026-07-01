@@ -116,14 +116,14 @@ Endpoint summary:
 | Endpoint | Plane | Purpose |
 |----------|-------|---------|
 | `/init_weight_transfer_engine` | fan-out | One-time communicator setup |
-| `/skyrl_start_weight_update` * | fan-out | Begin a chunked update |
+| `/start_weight_update` * | fan-out | Begin a chunked update |
 | `/update_weights` * | fan-out | Send a tensor chunk |
-| `/skyrl_finish_weight_update` * | fan-out | Commit the update |
+| `/finish_weight_update` * | fan-out | Commit the update |
 | `/pause`, `/resume` | fan-out | Generation control |
 | `/sleep`, `/wake_up` | fan-out | Colocated memory management |
 | `/v1/completions`, `/v1/chat/completions`, generate | routed | Generation |
 
-\* Currently we use custom `/skyrl_start_weight_update` and `/skyrl_finish_weight_update` endpoints that mimick the native APIs because SkyRL makes some vLLM fixes for Qwen 3.6 model loading. We will migrate to the native `/start_weight_update` and `/finish_weight_update` soon.
+\* Currently we use custom `/collective_rpc` + worker methods that mimick the native APIs because SkyRL makes some vLLM fixes for Qwen 3.6 model loading. We will migrate to the native `/start_weight_update` and `/finish_weight_update` soon.
 
 ## End-to-end Weight Sync Flow
 
@@ -155,14 +155,14 @@ trainer step done
 client.wake_up(tags=["weights"]) ──►  inference loads weight buffers
        │
        ▼
-POST /skyrl_start_weight_update
+POST /start_weight_update
        │
        ▼
 for each chunk:
    pack tensors → CUDA IPC handle → POST /update_weights
        │
        ▼
-POST /skyrl_finish_weight_update
+POST /finish_weight_update
        │
        ▼
 client.wake_up(tags=["kv_cache"]) ──►  KV cache restored, ready to serve
