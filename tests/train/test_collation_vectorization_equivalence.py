@@ -1,19 +1,11 @@
-"""Bit-identical equivalence tests for the vectorized controller-side collation.
+"""Equivalence tests for vectorized controller-side collation.
 
-The controller builds every training batch on the main process before dispatch.
-This module replaces the per-token / per-sample Python loops that did so with
-NumPy slice-assignments and broadcast comparisons, for all three collation
-paths:
+These tests compare the new NumPy-backed paths against the original loop
+layouts for:
 
 * RL: :func:`convert_prompts_responses_to_batch_tensors`
 * SFT (unpacked): :func:`collate_sft_batch` / ``DefaultCollator``
 * SFT (Megatron FFD packing): ``PackedDataCollator``
-
-The vectorization must change no outputs. Each test below pins a faithful
-reference implementation of the *original* loop and asserts the production
-(vectorized) output is ``torch.equal`` to it over randomized inputs spanning
-the relevant shapes (varying lengths, wrap-around, TP/PP/CP alignment, the
-empty-logprobs branch, etc.).
 
 Run with:
   uv run --isolated --extra dev --extra megatron -- \
@@ -44,7 +36,7 @@ def _rng(seed: int) -> random.Random:
 
 
 def _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, logprobs, pad_token_id):
-    """Original per-sample Python-loop layout, kept as the equivalence oracle."""
+    """Original per-sample loop layout."""
     prompt_token_lens = [len(p) for p in prompts]
     response_token_lens = [len(r) for r in responses]
     max_response = max(response_token_lens)
@@ -85,7 +77,7 @@ def _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, logp
 
 
 def _ref_collate_sft_batch(examples, pad_token_id):
-    """Original per-example Python-loop SFT collate, kept as the equivalence oracle."""
+    """Original per-example SFT collate loop."""
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
 
@@ -177,8 +169,7 @@ def test_rl_preprocess_bit_identical(seed, with_logprobs):
         assert torch.equal(lp, r_lp)
     else:
         assert lp is None and r_lp is None
-    # dtypes preserved (torch.equal is dtype-insensitive on matching values,
-    # so pin the integer/float dtypes explicitly).
+    # torch.equal allows dtype-compatible matches, so pin dtypes explicitly.
     assert seq.dtype == r_seq.dtype
     assert attn.dtype == r_attn.dtype == torch.int64
     assert action.dtype == r_action.dtype == torch.int64
@@ -286,7 +277,7 @@ def _make_packed_collator(*, batch_size, tp, pp, cp, dp, bin_capacity):
 
 
 def _ref_packed_rows(collator: PackedDataCollator, examples, max_packed_len, flat_bins, seq_lengths):
-    """Original per-token loop building the packed rows + total_nonpad."""
+    """Original packed-row loop."""
 
     def _round_up(x, m):
         return ((x + m - 1) // m) * m
@@ -320,7 +311,7 @@ def _ref_packed_rows(collator: PackedDataCollator, examples, max_packed_len, fla
             row_offset += _round_up(s, align_size)
     if total_nonpad != int(loss_mask.sum().item()):
         total_nonpad = int(loss_mask.sum().item())
-    # Loss normalization: same scalar and same in-place mul as production.
+    # Same normalization as production.
     scale = num_bins / max(total_nonpad, 1)
     loss_mask.mul_(scale)
     return sequences, attention_mask, loss_mask
@@ -329,18 +320,12 @@ def _ref_packed_rows(collator: PackedDataCollator, examples, max_packed_len, fla
 @pytest.mark.parametrize("tp,pp,cp,dp", [(1, 1, 1, 1), (2, 1, 1, 2), (1, 2, 1, 2), (2, 1, 2, 1), (4, 1, 1, 4)])
 @pytest.mark.parametrize("seed", range(8))
 def test_packed_collator_bit_identical(seed, tp, pp, cp, dp):
-    """Vectorized PackedDataCollator output matches the per-token reference.
-
-    We cross-check the production collator against a from-scratch re-derivation
-    of ``(flat_bins, max_packed_len)`` followed by the *original* per-token row
-    loop, asserting sequences / attention_mask / scaled loss_mask are equal.
-    """
+    """PackedDataCollator matches the loop reference."""
     rng = _rng(seed)
     batch_size = dp * rng.randint(2, 4)
     bin_capacity = 64
     collator = _make_packed_collator(batch_size=batch_size, tp=tp, pp=pp, cp=cp, dp=dp, bin_capacity=bin_capacity)
 
-    # Build a batch of examples whose packed rows fit the capacity comfortably.
     examples: List[dict] = []
     base = 100
     for _ in range(batch_size):
@@ -358,11 +343,7 @@ def test_packed_collator_bit_identical(seed, tp, pp, cp, dp):
 
     batch = collator(examples, batch_size=batch_size)
 
-    # Re-derive the packing decision the collator made (deterministic FFD), then
-    # run the original per-token row loop as the reference. This inline
-    # re-derivation IS the equivalence oracle: any production drift in the
-    # FFD/DP-shard/max_packed_len logic surfaces as a ``torch.equal`` mismatch
-    # below rather than silently agreeing with a shared helper.
+    # Re-derive FFD rows independently before running the loop reference.
     from skyrl.train.dataset.bin_packing import make_seq_packer
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
