@@ -85,7 +85,7 @@ empty_cuda_cache: true
 
 These default values can be overridden by passing in the corresponding arguments to `trainer.policy.megatron_config` in the launch script.
 
-`optimizer_config_kwargs` accepts dtype-name strings for its `*_dtype` fields (`main_params_dtype`, `exp_avg_dtype`, `exp_avg_sq_dtype`, `params_dtype`), which are coerced to `torch.dtype` before constructing `OptimizerConfig`. This lets you configure low-precision optimizer state from YAML:
+`optimizer_config_kwargs` can set optimizer-state dtypes from YAML:
 
 ```yaml
 optimizer_config_kwargs:
@@ -95,7 +95,7 @@ optimizer_config_kwargs:
   main_params_dtype: fp32
 ```
 
-The accepted short forms are `fp32` (aliases `float32`/`float`), `fp16` (`float16`/`half`), `bf16` (`bfloat16`), and `fp8` (`float8`/`uint8`); `fp8` maps to `torch.uint8` since TransformerEngine represents FP8 optimizer state as `uint8`. `main_params_dtype` is restricted to `fp32`/`fp16`, while `exp_avg_dtype`/`exp_avg_sq_dtype` additionally allow `bf16`/`fp8`; illegal values fail fast with a `ValueError`. See the [Megatron configuration guide](../configuration/config#megatron-configuration) for the full table.
+See the [Megatron configuration guide](../configuration/config#megatron-configuration) for accepted aliases and per-field checks.
 
 ## Parallelism Resources
 

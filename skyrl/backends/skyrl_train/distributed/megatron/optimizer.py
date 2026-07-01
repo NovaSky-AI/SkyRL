@@ -48,8 +48,7 @@ def init_megatron_optim_config(
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
     }
-    # Coerce any ``*_dtype`` string (e.g. "bf16" from YAML) into a real torch.dtype
-    # before it reaches Megatron's OptimizerConfig / FusedAdam, which require dtypes.
+    # YAML dtype overrides arrive as strings; Megatron expects torch.dtype.
     optim_args.update(coerce_optimizer_dtype_kwargs(optimizer_config_kwargs))
 
     config = OptimizerConfig(**optim_args)
