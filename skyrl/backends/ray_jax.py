@@ -178,6 +178,9 @@ class RayJaxBackend(AbstractBackend):
         results = ray.get([w.optim_step.remote(model_id, request_data) for w in self.workers])
         return results[0]
 
+    def max_sample_batch_size(self) -> int:
+        return self.config.sample_max_num_sequences
+
     def sample(self, prepared_batch: types.PreparedSampleBatch) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         results = ray.get([w.sample.remote(prepared_batch) for w in self.workers])
         return results[0]
