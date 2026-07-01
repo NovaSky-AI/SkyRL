@@ -1,27 +1,11 @@
-"""GPU correctness tests for the Triton fused LM-head log-prob backend.
+"""GPU parity tests for ``FusedLinearLogprobTriton``.
 
-Exercises the VENDORED Triton kernel adapter ``FusedLinearLogprobTriton`` on CUDA and asserts it
-matches the STOCK materialized-logits path (``ChunkedDistributedLogprob`` / ``DistributedLogprob``
-over ``hidden @ W_shard.T``) for:
-  * forward log-prob (full-vocab, post TP all-reduce),
-  * grad w.r.t. hidden (this rank's PARTIAL — neither side all-reduces it), and
-  * grad w.r.t. weight (per-shard).
-across TP=1 and TP=2, with and without out-of-vocab targets, multiple chunk sizes, and BOTH
-bf16 and fp32 inputs.
+The tests drive the autograd Function directly and compare it with the
+materialized-logits reference for log-probs, entropy, and both grads across TP1/2,
+OOV targets, fp32, and bf16.
 
-This is the ``fused_backend="triton"`` selector's kernel-level correctness check. The reconciled
-integration (on top of upstream #1841) dispatches to this same kernel from
-``model_utils.from_parallel_hidden_to_logprobs(..., fused_backend="triton")``; here we drive the
-autograd Function directly so the test is independent of the wrapper/dispatch plumbing.
-
-Precision: the fp32 parametrizations flip the kernel into bitwise-faithful IEEE fp32 (via
-``FORCE_FP32_IEEE_PRECISION = True``) and assert the kernel math is EXACT at a tight 1e-4
-tolerance — a committed, reproducible "the kernel is mathematically correct" sanity check. The
-bf16 parametrizations run at PRODUCTION precision (the flag stays False => the fast TF32 Hopper
-path that ``apply()`` uses in production) and check the looser ~2e-2 bf16 tolerance. The flag is
-set/reset inside each spawned worker and is reliably reset in a finally block so it never leaks.
-
-Requires a CUDA device AND triton (the kernel is GPU-only); skipped otherwise.
+fp32 cases force IEEE precision for tight tolerances; bf16 uses the production
+TF32 path with looser tolerances.
 
     uv run --isolated --extra dev --extra megatron -- pytest -s \
         tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_fused_linear_logprob_triton.py
@@ -40,8 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton
     FusedLinearLogprobTriton,
 )
 
-# Module-level markers: this is a megatron-backend GPU test (selected by the megatron GPU CI job
-# via ``-m megatron``), and the whole file additionally needs a GPU and triton.
+# Selected by the megatron GPU CI job; skip when the Triton kernel cannot run.
 pytestmark = [
     pytest.mark.megatron,
     pytest.mark.skipif(
@@ -52,12 +35,7 @@ pytestmark = [
 
 
 def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_seed):
-    """Drive FusedLinearLogprobTriton.apply directly (bypasses the model_utils dispatcher).
-
-    The public entry point shifts targets internally; here we pass an ALREADY-shifted target and
-    compare against a directly-driven stock reference, so the Triton kernel is exercised in
-    isolation from the ``_fused_lm_head_logprob_apply`` backend selection.
-    """
+    """Run the Triton Function on already-shifted targets."""
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
     lp = FusedLinearLogprobTriton.apply(
@@ -68,10 +46,7 @@ def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, c
 
 
 def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_size):
-    """Stock logprob over materialized logits, given ALREADY-shifted targets.
-
-    Replicates from_parallel_logits_to_logprobs' DistributedLogprob/ChunkedDistributedLogprob math
-    on pre-shifted targets (no internal roll), to compare against _direct_fused_logprobs."""
+    """Materialized-logits reference on already-shifted targets."""
     from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
         ChunkedDistributedLogprob,
         DistributedLogprob,
@@ -91,7 +66,7 @@ def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_siz
 
 
 def _tol_for_dtype(dtype):
-    # bf16 inputs: ~2e-2 (production-precision path); fp32 inputs: tight ~1e-4 (IEEE sanity check).
+    # bf16 uses production TF32; fp32 forces IEEE precision.
     if dtype == torch.bfloat16:
         return dict(atol=2e-2, rtol=2e-2)
     return dict(atol=1e-4, rtol=1e-4)
@@ -102,18 +77,9 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
     os.environ["MASTER_PORT"] = str(port)
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
-    # gloo is fine for the tiny TP all-reduces (verl's kernel itself runs on CUDA tensors; only
-    # the all-reduce of label-logit / softmax-stats crosses ranks, and those are small).
+    # Only tiny label-logit / softmax-stat tensors cross ranks, so gloo is enough.
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    # PRECISION CONTRACT (deliberate, see fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION):
-    #   * fp32 parametrizations flip the kernel into bitwise-faithful IEEE fp32 so we can assert the
-    #     kernel MATH IS EXACT against the IEEE-fp32 PyTorch reference at the tight 1e-4 tolerance.
-    #     This is the committed, reproducible "kernel is mathematically correct" sanity check.
-    #   * bf16 parametrizations run the kernel at PRODUCTION precision (flag False => TF32 fast path),
-    #     i.e. exactly what apply() does in production, checked at the looser ~2e-2 bf16 tolerance.
-    # We set/reset the module-level flag here (inside the spawned worker) because mp spawn starts a
-    # fresh interpreter — a parent-process monkeypatch would not propagate to the child. The
-    # try/finally guarantees we never leak True out of an fp32 case.
+    # mp.spawn starts a fresh interpreter, so set precision in each worker.
     _prev_force_ieee = fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION
     fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = dtype_str == "fp32"
     try:
@@ -122,7 +88,7 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
         dtype = torch.bfloat16 if dtype_str == "bf16" else torch.float32
         torch.manual_seed(0)  # identical across ranks => identical hidden/weight/target
 
-        # hidden_size must be a multiple of 128 for verl's kernel (assert hidden_size % 128 == 0).
+        # verl requires hidden_size % 128 == 0.
         batch_size, seq_len, hidden_size, vocab_size = 3, 24, 128, 256
         hidden = (torch.randn(batch_size, seq_len, hidden_size, device=device) * 0.5).to(dtype)
         weight_full = (torch.randn(vocab_size, hidden_size, device=device) * 0.1).to(dtype)
@@ -134,7 +100,7 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
         vstart, vend = rank * shard, (rank + 1) * shard
         weight_shard = weight_full[vstart:vend].contiguous()
 
-        # Compare on ALREADY-shifted targets to be independent of model_utils dispatch wiring.
+        # Keep target shifting out of the kernel-under-test.
         target_shifted = target.roll(shifts=-1, dims=-1)
 
         lp_ref, gh_ref, gw_ref, grad_seed = _stock_shifted(
@@ -190,11 +156,8 @@ def _run(world_size, chunk_size, with_oov, dtype_str):
 def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_size, with_oov):
     """Triton fused hidden->logprob matches the stock materialized-logits path (fwd + both grads).
 
-    world_size=1 checks the kernel math in isolation; world_size=2 checks the vocab-parallel
-    online-softmax all-reduce (label-logit + softmax denom), the out-of-shard / fully-OOV target
-    masking, and that the per-shard hidden/weight grads match the stock shard reference. fp32 is
-    the tight-tolerance IEEE sanity check (kernel flipped to FORCE_FP32_IEEE_PRECISION=True);
-    bf16 exercises the PRODUCTION default (fast TF32) precision path at the looser bf16 tolerance.
+    TP2 covers vocab-parallel reductions and shard/OOV masking; fp32 uses tight
+    IEEE tolerances, bf16 uses production precision.
     """
     if world_size > 1 and torch.cuda.device_count() < world_size:
         pytest.skip(
@@ -213,20 +176,12 @@ def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_siz
 
 
 # ======================================================================================
-# Entropy dual-output parity (verl's (log_probs, entropy) pattern) for the Triton backend.
-#
-# The adapter surfaces verl's already-computed per-token entropy when return_entropy=True. We
-# assert it matches the STOCK ``vocab_parallel_entropy`` over the same materialized logit shard
-# (entropy is target-INDEPENDENT, so out-of-vocab targets must not change it), and that the
-# entropy backward (verl's dentropy term, wired into efficient_entropy_backward) produces
-# grad-hidden / grad-weight matching the stock entropy path. This is what lets the fused path
-# serve RL losses (which need entropy), not just SFT cross_entropy.
+# Entropy dual-output parity for the Triton backend.
 # ======================================================================================
 
 
 def _direct_fused_entropy(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_ent):
-    """Drive FusedLinearLogprobTriton.apply(..., return_entropy=True); backward only the entropy
-    output (seed its grad, leave logprob grad unused) and return (entropy, grad_hidden, grad_weight)."""
+    """Run return_entropy=True and backprop only through entropy."""
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
     lp, ent = FusedLinearLogprobTriton.apply(
@@ -237,7 +192,7 @@ def _direct_fused_entropy(hidden, weight_shard, target_shifted, vstart, vend, ch
 
 
 def _stock_entropy(hidden, weight_shard, chunk_size, grad_ent):
-    """Stock per-token entropy over the materialized logit shard via vocab_parallel_entropy."""
+    """Materialized-logits entropy reference."""
     from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
         vocab_parallel_entropy,
     )
@@ -258,11 +213,7 @@ def _entropy_worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    # The stock entropy reference (vocab_parallel_entropy) all-reduces over
-    # mpu.get_tensor_model_parallel_group(), so we must initialize Megatron's model-parallel
-    # state. With tensor_model_parallel_size=world_size the TP group spans all ranks — the same
-    # membership as the WORLD group the fused path uses as its tp_group — so both sides reduce
-    # over identical ranks. (The logprob test sidesteps this by referencing dist.group.WORLD.)
+    # Match the stock entropy TP group to the fused path's WORLD group.
     mpu.initialize_model_parallel(tensor_model_parallel_size=world_size)
     _prev_force_ieee = fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION
     fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = dtype_str == "fp32"
@@ -333,9 +284,8 @@ def _run_entropy(world_size, chunk_size, with_oov, dtype_str):
 def test_fused_triton_entropy_matches_stock(dtype_str, world_size, with_oov):
     """Triton fused per-token entropy (return_entropy=True) matches stock vocab_parallel_entropy.
 
-    Covers the forward entropy value AND the entropy backward (grad-hidden + grad-weight via verl's
-    dentropy term). Entropy is target-independent, so out-of-vocab targets must leave it unchanged.
-    fp32 = tight IEEE sanity check; bf16 = production TF32 path at bf16 tolerance.
+    Covers entropy values and entropy-only backward grads. OOV targets should not
+    affect entropy.
     """
     if world_size > 1 and torch.cuda.device_count() < world_size:
         pytest.skip(f"need >= {world_size} CUDA devices for TP={world_size}")

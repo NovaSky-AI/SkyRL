@@ -148,10 +148,8 @@ megatron = [
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
-# Optional Triton backend for the fused linear log-prob (trainer.fused_linear_logprob_backend=
-# "triton"). Triton already ships transitively with the CUDA torch in the megatron extra; this
-# extra makes the opt-in explicit. The fused-logprob module degrades gracefully (TRITON_AVAILABLE
-# = False, torch backend fallback) when Triton is absent, so this is not required for the default.
+# Optional backend for trainer.fused_lm_head_logprob_backend="triton".
+# The default torch backend does not require this extra.
 triton = [
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
@@ -388,4 +386,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

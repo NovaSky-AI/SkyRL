@@ -789,23 +789,13 @@ class TrainerConfig(BaseConfig):
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
     fused_lm_head_logprob: bool = False
-    """Megatron only. Fuse the LM-head projection into the chunked log-prob / entropy
-    computation via the GPTModel ``output_processor`` hook, so the full
-    ``[B, S, vocab//TP]`` logits tensor (and its float32 gradient) is never
-    materialized. Cuts LM-head activation memory from O(S·vocab//TP) to
-    O(chunk·vocab//TP)+O(S·H) — required to fit very long contexts (e.g. 262k).
-    Numerically matches the default path; see
-    ``model_utils.FusedLinearChunkedDistributedLogprob``."""
+    """Megatron only. Fuse the LM-head projection into log-prob / entropy
+    computation so the full ``[B, S, vocab//TP]`` logits tensor is never
+    materialized. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
-    """Implementation for the fused LM-head path (ignored when ``fused_lm_head_logprob`` is
-    ``False``). This is a *backend selector*, NOT a second on/off switch:
-    ``"torch"`` — the default pure-PyTorch chunked kernel
-    (``model_utils.FusedLinearChunkedDistributedLogprob``); runs anywhere (CPU/GPU), no extra deps.
-    ``"triton"`` — vendored flash-style Triton kernel (ported from verl,
-    ``fused_linear_logprob_triton.FusedLinearLogprobTriton``); tiles over vocab so the per-chunk
-    logits never materialize (lower memory floor + faster on GPU). Requires GPU + ``triton``; falls
-    back to ``"torch"`` with a warning if Triton is unavailable. Numerically equivalent to the torch
-    backend (verified in ``tests/.../megatron/test_fused_linear_logprob*.py``)."""
+    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
+    The Triton backend requires CUDA + triton and falls back to ``"torch"``
+    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
 
     def __post_init__(self):
         # ref model defaults to the policy model

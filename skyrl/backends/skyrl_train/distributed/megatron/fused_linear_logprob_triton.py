@@ -1,39 +1,22 @@
 # ==============================================================================
 # Vendored Triton fused linear-cross-entropy / log-prob kernel.
 #
-# The Triton kernels and the thin LinearCrossEntropy autograd wrapper below are
-# PORTED (vendored) from:
+# Triton kernels and the LinearCrossEntropy wrapper are vendored from:
 #
 #     volcengine/verl  @ commit 29ffe75
 #       verl/utils/kernel/kernels.py
 #       verl/utils/kernel/linear_cross_entropy.py
 #       verl/utils/kernel/__init__.py
 #
-# The original code is licensed under the Apache License, Version 2.0. The
-# original copyright/attribution notices (NVIDIA CORPORATION & AFFILIATES;
-# Bytedance Ltd. and/or its affiliates) are reproduced below. A copy of the
-# Apache-2.0 license text is available at http://www.apache.org/licenses/LICENSE-2.0.
+# Original Apache-2.0 attribution is reproduced below.
 #
-# Changes from upstream (per Apache-2.0 §4(b) — "carry prominent notices stating
-# that You changed the files"):
-#   * Self-contained: dropped the dependency on ``verl.utils.device`` (vendored
-#     small torch.cuda-based equivalents of ``get_torch_device`` /
-#     ``get_device_name`` / ``get_device_capability`` / ``is_cuda_available``).
-#   * Triton is an OPTIONAL import: the module imports cleanly with no triton
-#     installed (``TRITON_AVAILABLE = False``); the adapter raises a clear
-#     RuntimeError if invoked in that state. (Upstream already had a MagicMock
-#     fallback; we additionally surface a module-level flag and a hard guard.)
-#   * Added ``FusedLinearLogprobTriton`` autograd Function — a SkyRL-shaped
-#     adapter around verl's ``LinearCrossEntropy``/kernels that matches the
-#     pure-torch ``FusedLinearChunkedDistributedLogprob`` contract in
-#     ``model_utils.py`` exactly (see that class for the contract). This is NEW
-#     code, not from verl.
+# Changes from upstream:
+#   * Replaced ``verl.utils.device`` with local torch.cuda helpers.
+#   * Made triton optional at import time via ``TRITON_AVAILABLE``.
+#   * Added SkyRL's ``FusedLinearLogprobTriton`` adapter.
 #
-# NOTE on the #2656 out-of-bounds-vocab fix: verl's forward mainloop masks
-# out-of-bounds vocab columns to -inf for the LSE max/exp/denominator while
-# keeping the unmasked logits for the entropy accumulator and the label-logit.
-# Those lines are preserved verbatim below (search for ``vocab_bound`` /
-# ``logits_for_lse``) and are load-bearing for correctness.
+# Preserve verl's #2656 OOB-vocab masking lines (search ``vocab_bound`` /
+# ``logits_for_lse``); they are required for TP correctness.
 # ==============================================================================
 #
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -64,16 +47,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Self-contained Triton fused LM-head log-prob backend for SkyRL.
+"""Triton fused LM-head log-prob backend for SkyRL.
 
-This module vendors verl's online-softmax fused linear-cross-entropy Triton
-kernels (with the #2656 TP all-reduce / OOB-vocab masking scheme) and exposes
-:class:`FusedLinearLogprobTriton`, an autograd Function that matches the exact
-interface of the pure-torch ``FusedLinearChunkedDistributedLogprob`` in ``model_utils.py``.
-
-Triton/CUDA is required to actually *run* the kernel, but the module is import-safe
-without triton (``TRITON_AVAILABLE`` will be ``False`` and the adapter raises a
-clear RuntimeError if applied).
+The module is import-safe without triton; applying the adapter still requires
+CUDA + triton.
 """
 
 import typing
@@ -83,9 +60,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-# --------------------------------------------------------------------------------------
-# Vendored, self-contained device helpers (replace verl.utils.device imports).
-# --------------------------------------------------------------------------------------
+# Local replacements for verl.utils.device.
 is_cuda_available = torch.cuda.is_available()
 
 
@@ -103,11 +78,7 @@ def get_device_capability(device_id: int = 0):
     return (None, None)
 
 
-# --------------------------------------------------------------------------------------
-# OPTIONAL triton import. The module must import cleanly with no triton installed so the
-# rest of SkyRL and the CPU test suite are unaffected; we mirror verl's MagicMock fallback
-# for the @triton.jit / @triton.autotune decorators and also surface TRITON_AVAILABLE.
-# --------------------------------------------------------------------------------------
+# Keep imports working without triton; decorated kernels become no-ops until called.
 try:
     import triton
     import triton.language as tl
@@ -281,9 +252,7 @@ def efficient_entropy_kernel_general_mainloop(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     USE_TMA: tl.constexpr,
-    # fp32 matmul precision. PRODUCTION default is "tf32" (the fast Hopper tensor-core path,
-    # chosen for speed via _dot_input_precision); the FORCE_FP32_IEEE_PRECISION flag can flip
-    # this to "ieee" for fp32 inputs so tests can assert bitwise-fp32 equivalence to PyTorch.
+    # Tests can force IEEE fp32; production uses Triton's fast default precision.
     INPUT_PRECISION: tl.constexpr,
 ):
     """forward mainloop"""
@@ -631,40 +600,12 @@ def efficient_entropy_triton_epilogue_tp_update(
 _dedicated_stream, _dedicated_events = None, None
 
 
-# --------------------------------------------------------------------------------------
-# fp32 matmul precision toggle.
-#
-# PRODUCTION default is the FAST path: ``tl.dot`` uses Triton/torch's default matmul
-# precision (TF32 on Hopper). TF32 truncates the fp32 mantissa (~1e-3 error vs an IEEE
-# fp32 reference) but is empirically fine for bf16 training (the production dtype is bf16
-# anyway) and is meaningfully faster, so we deliberately do NOT force IEEE in production.
-#
-# The flag below exists ONLY so tests can flip the kernel into bitwise-faithful IEEE fp32
-# and assert the kernel math is exact (max-abs error ~1e-6 instead of TF32's ~1e-3). It
-# defaults to False (= production/fast). Set it to True around an fp32 sanity-check run and
-# reset it afterwards. It has no effect on bf16/fp16 inputs (those always take the fast path,
-# since they are already lower precision than TF32's accumulation).
+# Tests set this for tight fp32 parity; production keeps the fast path.
 FORCE_FP32_IEEE_PRECISION = False
 
 
 def _dot_input_precision(hidden: torch.Tensor):
-    """Choose the ``tl.dot`` input precision for the kernel's matmuls.
-
-    PRODUCTION (``FORCE_FP32_IEEE_PRECISION = False``, the default) returns the fast default
-    precision (``"tf32"`` on Hopper) for ALL dtypes. This is Triton/torch's default tensor-core
-    path: for fp32 it truncates the mantissa (~1e-3 rounding) but is faster, and for bf16/fp16 it
-    is the natural (lossless-vs-input) fast path. We use this in production for speed — bf16
-    training tolerates it (bf16 tolerance is ~2e-2) and the production dtype is bf16 anyway.
-
-    SANITY-CHECK (``FORCE_FP32_IEEE_PRECISION = True``) returns ``"ieee"`` for fp32 inputs so the
-    kernel's fp32 matmuls reproduce the IEEE fp32 PyTorch reference to ~fp32 rounding (~1e-6). The
-    GPU test flips this flag on for its fp32 parametrizations to prove the kernel is mathematically
-    exact, then resets it. bf16/fp16 inputs always keep the fast path regardless of the flag.
-
-    The kernel always accumulates in fp32; this knob only controls the per-multiply input precision.
-    Returns ``None`` for the fast path on non-Hopper hardware, letting Triton pick its hardware
-    default; ``"tf32"`` is requested explicitly on Hopper to make the default behavior unambiguous.
-    """
+    """Choose ``tl.dot`` input precision; accumulation remains fp32."""
     if FORCE_FP32_IEEE_PRECISION and hidden.dtype == torch.float32:
         return "ieee"
     return "tf32"
@@ -1611,12 +1552,7 @@ def efficient_entropy_backward(
     temperature: typing.Optional[float] = 1.0,
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
 ) -> list:
-    """backward host function.
-
-    NOTE: this function does NOT all-reduce ``d_hidden`` across the TP group; the returned
-    ``d_hidden`` is this rank's contribution from its own vocab shard only. (Verified against
-    upstream verl @ 29ffe75 — there is no ``dist.all_reduce(d_hidden, ...)`` anywhere here.)
-    """
+    """Backward host function; returns shard-local ``d_hidden`` without TP all-reduce."""
     assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
@@ -1860,7 +1796,7 @@ class LinearCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list:
-        (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
+        hidden, weight, labels, _maximum, _accumulate, _entropy_b = ctx.saved_tensors
         REDUCTION = ctx.REDUCTION
         dist_process_group = ctx.dist_process_group
         should_return_fp32_grad = ctx.should_return_fp32_grad
@@ -1889,14 +1825,10 @@ linear_cross_entropy = LinearCrossEntropy.apply
 
 
 # ======================================================================================
-# SkyRL adapter (NEW code — not from verl). Matches the pure-torch
-# FusedLinearChunkedDistributedLogprob contract in model_utils.py exactly so the two
-# backends are interchangeable.
+# SkyRL adapter. Matches FusedLinearChunkedDistributedLogprob's contract.
 # ======================================================================================
 
-# A label sentinel guaranteed to fall in NO shard's column range after re-keying. verl
-# fires its label_mask when ``local_col + rank*local_vocab == label``; the maximum value
-# the kernel ever compares against is ``world_size * local_vocab`` so int64 max is safe.
+# Guaranteed not to match ``local_col + rank * local_vocab``.
 _OOV_LABEL_SENTINEL = torch.iinfo(torch.int64).max
 
 
@@ -1907,50 +1839,14 @@ def _verl_logprob_kernel_available() -> bool:
 class FusedLinearLogprobTriton(torch.autograd.Function):
     """Triton fused LM-head + vocab-parallel log-prob of the target token.
 
-    Drop-in, interface-identical replacement for the pure-torch
-    ``FusedLinearChunkedDistributedLogprob`` in ``model_utils.py`` (same ``apply`` signature, same
-    return/grad contract), backed by verl's online-softmax fused linear-cross-entropy Triton
-    kernels (vendored above). Selected via ``fused_lm_head_logprob_backend="triton"`` and dispatched
-    from ``model_utils._fused_lm_head_logprob_apply``.
+    Uses the same ``apply`` signature and grad contract as
+    ``FusedLinearChunkedDistributedLogprob``. Targets are already shifted by the
+    caller; outputs are TP-combined fp32 ``[B, S]`` log-probs.
 
-    Contract (must match ``FusedLinearChunkedDistributedLogprob`` exactly):
-      * ``apply(hidden, weight, target, vocab_start_index, vocab_end_index, chunk_size,
-        tp_group, inference_only=False) -> log_probs``.
-      * ``hidden``: ``[B, S, H]`` (TP-replicated / SP-already-gathered by the caller).
-      * ``weight``: this rank's LM-head shard ``[V // TP, H]``.
-      * ``target``: ``[B, S]`` ALREADY shifted by the caller (we do NOT roll).
-      * Returns ``log_probs`` ``[B, S]`` (fp32) = full-vocab log-prob of ``target[b, s]``;
-        verl's kernel already all-reduces the label logit + softmax denom over ``tp_group``.
-      * FULLY-OUT-OF-VOCAB targets (owned by NO shard, e.g. a pad id ``>= global_vocab``) yield
-        ``log_prob = 0.0`` (forced in forward). Their gradient is whatever the reference produces:
-        ``-softmax * grad_output`` projected back through the head (the chosen-position ``onehot``
-        term is absent because no shard owns the column) — i.e. they are NOT zeroed in backward,
-        exactly matching the pure-torch path / stock ``DistributedLogprob``.
-      * grad w.r.t. ``hidden``: this rank's PARTIAL (verl does NOT all-reduce ``d_hidden``;
-        the caller's SP-gather backward reduce-scatter performs the TP reduction).
-      * grad w.r.t. ``weight``: per-shard, no reduction.
-      * temperature: the SkyRL caller bakes temperature into ``hidden`` BEFORE calling, so we
-        pass ``temperature=1.0`` to the verl kernel (and take no temperature arg).
-
-    Adaptations over raw verl (see provenance header):
-      1. Coordinate re-keying. verl's kernel fires its label match when
-         ``local_col + rank * local_vocab == label`` (it assumes equal, contiguous shards laid
-         out at ``rank * local_vocab``). SkyRL passes ``vocab_start_index`` explicitly, which need
-         not equal ``rank * local_vocab``. We re-key targets owned by THIS shard to
-         ``(target - vocab_start_index) + rank * local_vocab`` so the kernel's column-match
-         lands on the correct local column, and we set targets not owned here to a huge sentinel
-         (lands in no column). This makes the per-shard label-logit contribution correct for any
-         shard layout. (verl's TP all-reduce(SUM) of the label logit then assembles the full value.)
-      2. OOV post-mask (#2656 family) — FORWARD ONLY. A target owned by NO shard (e.g. a pad id
-         ``>= global_vocab``) is the sentinel on every rank, so every rank contributes 0 to the
-         label-logit all-reduce. verl's epilogue would then return ``max + log(accu) - 0`` = the
-         LSE (garbage, not 0). We therefore force ``log_prob = 0`` for fully-OOV positions in
-         forward. We do NOT touch the backward gradient at those positions: the references (stock
-         ``DistributedLogprob`` and the pure-torch ``FusedLinearChunkedDistributedLogprob``) still emit
-         ``-softmax * grad_output`` there (the chosen-position term is absent because no shard owns
-         the column), and verl's kernel already reproduces that exact value for sentinel-keyed
-         labels. Zeroing the backward gradient at those positions would drop that term and diverge
-         from the references, so the backward is left untouched.
+    SkyRL re-keys shard-local targets into verl's ``rank * local_vocab`` frame.
+    Targets outside this shard get a sentinel that matches no column. Fully OOV
+    targets are forced to log-prob 0 in forward, but their backward path is left
+    unchanged to match the stock and torch fused references.
     """
 
     @staticmethod
@@ -1976,29 +1872,18 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         local_vocab = int(weight.shape[0])
         rank = 0 if tp_group is None else dist.get_rank(tp_group)
 
-        # Mask of targets NOT owned by THIS shard.
+        # Targets not owned by this shard receive a no-match sentinel.
         target_mask = (target < vocab_start_index) | (target >= vocab_end_index)
-        # Re-key owned targets into verl's coordinate frame: local_col + rank*local_vocab.
-        # (target - vocab_start_index) is the local column; add rank*local_vocab so the kernel's
-        # `local_col + rank*local_vocab == label` test matches the owned column. Not-owned
-        # targets get a sentinel that lands in no column on this rank.
         labels_verl = (target - vocab_start_index) + rank * local_vocab
         labels_verl = torch.where(target_mask, _OOV_LABEL_SENTINEL, labels_verl).to(torch.int64).contiguous()
 
-        # hidden must be contiguous & 2D for the kernel. The kernel's ``tl.dot(hidden, weight.T)``
-        # requires BOTH operands to share a dtype, so cast hidden to the LM-head weight dtype here
-        # — exactly what the pure-torch ``FusedLinearChunkedDistributedLogprob`` does (``hidden.to(weight.dtype) @
-        # weight.t()``) and what ``ColumnParallelLinear`` does before its bf16 GEMM. On a real
-        # hybrid model the pre-head hidden is fp32 (final norm) while the head is bf16, so without
-        # this the kernel asserts "Both operands must be same dtype. Got fp32 and bf16". When the
-        # dtypes already match (e.g. the fp32/fp32 and bf16/bf16 test cases) this is a no-op.
-        # The saved hidden_2d is therefore in weight dtype, so the backward GEMMs match too; we
-        # restore the original hidden dtype on the returned grad (see backward).
+        # The kernel needs 2D contiguous operands with matching dtypes; restore
+        # the original hidden dtype on the returned grad.
         ctx_hidden_dtype = hidden.dtype
         hidden_2d = hidden.reshape(B * S, H).to(weight.dtype).contiguous()
         weight_c = weight.contiguous()
 
-        # temperature is pre-baked into `hidden` by the caller -> pass 1.0 here.
+        # The caller folds temperature in before dispatch.
         logprobs_flat, _entropy, _maximum, _accumulate, _entropy_b = efficient_entropy_forward(
             hidden_2d,
             weight_c,
@@ -2007,13 +1892,11 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             1.0,
             tp_group,
         )
-        # verl returns the NEGATIVE log-prob path internally negated back to logprob; reduction
-        # "none" yields per-token logprob already. Reshape to [B, S] and force fp32.
+        # reduction="none" yields per-token log-probs.
         log_probs = logprobs_flat.reshape(B, S).to(torch.float32)
 
-        # Fully-OOV positions: target owned by no shard. After the TP all-reduce(MAX/SUM) the
-        # label-logit contribution is 0 on every rank, so verl returns the LSE there, not 0.
-        # Detect "owned by no shard" by all-reducing the per-rank ownership mask over tp_group.
+        # Fully-OOV targets have no label-logit contribution, so verl returns
+        # LSE; match the stock path by forcing those log-probs to 0.
         owned_here = (~target_mask).to(torch.int32)
         owned_anywhere = owned_here.clone()
         if tp_group is not None and dist.get_world_size(tp_group) > 1:
@@ -2022,8 +1905,6 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         log_probs = log_probs.masked_fill(fully_oov, 0.0)
 
         if not inference_only:
-            # NB: ``fully_oov`` is intentionally NOT saved — the backward gradient is left untouched
-            # at fully-OOV positions (see backward), so there is nothing for it to gate.
             ctx.save_for_backward(
                 hidden_2d,
                 weight_c,
@@ -2041,40 +1922,19 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple:
         grad_output = grad_outputs[0]  # [B, S], grad of full-vocab logprob
-        (hidden_2d, weight_c, labels_verl, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
+        hidden_2d, weight_c, labels_verl, _maximum, _accumulate, _entropy_b = ctx.saved_tensors
         B, S, H = ctx.B, ctx.S, ctx.H
         tp_group = ctx.tp_group
 
-        # IMPORTANT: do NOT zero grad_output at fully-OOV positions.
-        #
-        # The forward forces ``log_prob = 0`` at fully-OOV positions because verl's epilogue
-        # would otherwise return the LSE there (no shard contributes the label logit). But the
-        # GRADIENT contract is set by the references this backend must match exactly — stock
-        # ``DistributedLogprob`` / ``ChunkedDistributedLogprob`` and the pure-torch
-        # ``FusedLinearChunkedDistributedLogprob`` in model_utils.py. Those compute, for every position
-        # (in-shard, out-of-shard, or fully-OOV alike):
-        #     d_logits = grad_output * (onehot(target) - softmax)
-        # and only ADD the ``onehot`` (chosen-position) term where the target is owned by this
-        # shard (``valid_mask``). At a fully-OOV position no shard owns the target, so the
-        # ``onehot`` term is absent on every rank, leaving ``d_logits = -softmax * grad_output``
-        # — a NON-ZERO gradient that still flows back through the (recomputed) head GEMM.
-        #
-        # verl's kernel already reproduces exactly this: ``mask`` (the column==label test) is all
-        # False for a sentinel-keyed OOV target, so its d_logits term is ``d_logprobs * (exp_logits
-        # * accu_rcp - 0) = -softmax * grad_output`` — identical to the references. So we must pass
-        # grad_output THROUGH unchanged at fully-OOV positions; zeroing ``dlogprobs`` here would drop
-        # the ``-softmax * grad_output`` term and make grad-hidden / grad-weight diverge from the
-        # reference at every OOV row.
-        #
-        # With set_materialize_grads(False) (return_entropy path), grad_output may be None if the
-        # log-prob output is unused downstream; treat it as zeros (logprobs are always used in
-        # practice, but stay robust to match the torch Function's contract).
+        # Do not zero fully-OOV rows in backward: the reference still emits
+        # -softmax * grad_output because no shard owns the one-hot column.
+        # If log-probs are unused downstream, treat a missing grad as zero.
         if grad_output is None:
             dlogprobs = torch.zeros(B * S, dtype=torch.float32, device=hidden_2d.device)
         else:
             dlogprobs = grad_output.reshape(-1).to(torch.float32).contiguous()
 
-        # verl's reduction="none" backward needs a dentropy buffer; we discard entropy so pass 0.
+        # reduction="none" backward requires a dentropy buffer.
         dentropy = torch.zeros_like(dlogprobs)
 
         d_hidden_2d, d_weight = efficient_entropy_backward(
@@ -2092,10 +1952,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             tp_group,
         )
 
-        # d_hidden is this rank's PARTIAL (verl does not all-reduce it); reshape back to [B, S, H]
-        # and restore the original hidden dtype (forward cast hidden to the weight dtype for the
-        # kernel; autograd needs the grad in the leaf's dtype — mirrors the pure-torch path's
-        # ``.to(grad_hidden.dtype)``).
+        # d_hidden is this rank's partial; SP gather backward performs TP reduction.
         d_hidden = d_hidden_2d.reshape(B, S, H).to(ctx.hidden_dtype)
 
         # (hidden, weight, target, vstart, vend, chunk, tp_group, inference_only)
