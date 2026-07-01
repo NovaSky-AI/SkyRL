@@ -427,6 +427,7 @@ class MegatronWorker:
 
         self.provider = provider
         self.bridge = bridge
+        self.megatron_config = megatron_config
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
@@ -685,11 +686,14 @@ class MegatronWorker:
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
+        hf_export = self.megatron_config.hf_export_config
         self.strategy.save_hf_model(
             self.bridge,
             self.model,
             export_dir,
             tokenizer=tokenizer,
+            distributed_save=hf_export.distributed_save,
+            save_every_n_ranks=hf_export.save_every_n_ranks,
         )
 
     def _get_module_for_offload(self):

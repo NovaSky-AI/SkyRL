@@ -164,6 +164,24 @@ class MegatronTorchProfilerConfig(BaseConfig):
 
 
 @dataclass
+class MegatronHFExportConfig(BaseConfig):
+    distributed_save: bool = False
+    """Fan the Megatron->HF safetensors export across ranks instead of writing the
+    whole checkpoint from rank 0. The on-disk result is the standard HF sharded
+    format either way; this only parallelizes the write, which is decisive for
+    multi-hundred-GB checkpoints whose serial rank-0 write stalls every rank."""
+    save_every_n_ranks: int = 1
+    """In distributed save, only ranks 0, N, 2N, ... write shards (e.g. 8 = one
+    writer per 8-GPU node). Ignored when ``distributed_save`` is False."""
+
+    def __post_init__(self) -> None:
+        # save_every_n_ranks indexes ranks via modulo/floor-div in the bridge's
+        # distributed save; < 1 raises ZeroDivisionError there. Fail fast instead.
+        if self.save_every_n_ranks < 1:
+            raise ValueError(f"save_every_n_ranks must be >= 1, got {self.save_every_n_ranks}")
+
+
+@dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
     merge_lora: bool = True
@@ -208,6 +226,7 @@ class MegatronConfig(BaseConfig):
     """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
+    hf_export_config: MegatronHFExportConfig = field(default_factory=MegatronHFExportConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
