@@ -370,6 +370,18 @@ class CISPOConfig(BaseConfig):
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
     cispo_eps_clip_high: float = 5.0
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
+    cispo_anchor: str = "old"
+    """Behavior policy the IS ratio is anchored on: ``"old"`` (default) uses the recomputed
+    old log-probs (``ratio = pi_theta / pi_old``), matching the original CISPO paper. ``"rollout"``
+    uses the rollout/sampler log-probs (``ratio = pi_theta / pi_rollout``), which makes the clamped
+    objective engage under fully-async training where the sampler lags the trainer (with ``"old"``
+    the ratio is ~1 at a single gradient step and the clamp never bites). With ``"rollout"`` the
+    ratio is the full off-policy correction, so ``off_policy_correction.tis_ratio_type`` must be
+    ``None`` (else the off-policy gap is double-counted)."""
+
+    def __post_init__(self):
+        if self.cispo_anchor not in ("old", "rollout"):
+            raise ValueError(f"cispo_anchor must be 'old' or 'rollout', got {self.cispo_anchor!r}")
 
 
 # DPPO parameters (only used when policy_loss_type="dppo")
