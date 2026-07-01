@@ -1275,8 +1275,7 @@ class SFTTrainer:
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
-            # Eval reads only ``output.metrics["loss"]``; skip the per-token
-            # loss_fn_outputs build (see ``train_step``). Same loss + metrics.
+            # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
                 batch,
@@ -1302,10 +1301,7 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            # The SFT trainer reads only ``output.metrics`` (loss / response_length),
-            # never ``output.loss_fn_outputs``. Opt out of the per-token loss_fn_outputs
-            # build (per-sequence logprob + NLL ``.tolist()`` loops + detached D2H copies)
-            # which is dead work here. RL / Tinker callers keep the default (True).
+            # SFT consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward_backward(
                 "policy",
                 batch,

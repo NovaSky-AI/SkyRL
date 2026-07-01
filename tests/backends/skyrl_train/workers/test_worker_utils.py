@@ -202,8 +202,7 @@ class TestAllReduceMetrics:
 
 
 class TestPopReturnPerTokenOutputs:
-    """Shared helper used at all three worker loss-build call sites to extract the
-    per-request ``return_per_token_outputs`` flag from a copy of ``loss_fn_config``."""
+    """Tests for the reserved loss_fn_config gate."""
 
     def test_none_defaults_to_true(self):
         cfg, flag = pop_return_per_token_outputs(None)
@@ -213,13 +212,11 @@ class TestPopReturnPerTokenOutputs:
     def test_absent_flag_defaults_to_true(self):
         cfg, flag = pop_return_per_token_outputs({"eps_clip_low": 0.1})
         assert flag is True
-        # flag was absent, so the (copied) config is otherwise unchanged
         assert cfg == {"eps_clip_low": 0.1}
 
     def test_pops_explicit_false(self):
         cfg, flag = pop_return_per_token_outputs({RETURN_PER_TOKEN_OUTPUTS_KEY: False, "eps_clip_low": 0.1})
         assert flag is False
-        # the non-AlgorithmConfig flag is removed; legitimate overrides survive
         assert cfg == {"eps_clip_low": 0.1}
 
     def test_pops_explicit_true(self):

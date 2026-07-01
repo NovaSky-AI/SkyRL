@@ -815,9 +815,8 @@ class PolicyWorkerBase(Worker):
                 Public Tinker aliases such as ``ppo`` should be normalized by the backend
                 before reaching the worker.
             loss_fn_config: Optional config overrides for the resolved train loss function.
-                May also carry the reserved key ``return_per_token_outputs`` (bool, default
-                ``True``); set ``False`` to skip the per-token ``loss_fn_outputs`` build when
-                the caller reads only ``metrics``. See :func:`pop_return_per_token_outputs`.
+                May include reserved key ``return_per_token_outputs`` to skip
+                per-token ``loss_fn_outputs`` when callers read only ``metrics``.
 
         Returns:
             Metrics dict for the worker's local micro batch
@@ -847,7 +846,7 @@ class PolicyWorkerBase(Worker):
             # Fall back to config default
             current_loss_fn = self.policy_loss_fn
 
-        # Pop the per-request flag that gates the per-token loss_fn_outputs build.
+        # Consume the reserved gate before merging AlgorithmConfig overrides.
         loss_fn_config, return_per_token_outputs = pop_return_per_token_outputs(loss_fn_config)
 
         # Build config for loss function, applying any overrides
@@ -892,20 +891,15 @@ class PolicyWorkerBase(Worker):
             loss = unscaled_loss * microbatch_weight
             self.strategy.backward(loss, self.model, self.optimizer)
 
-            # Build per-token loss_fn_outputs unless the caller opted out (see
-            # pop_return_per_token_outputs); skipping returns one empty dict per sequence.
+            # Only build per-token outputs for callers that consume them.
             if return_per_token_outputs:
-                # Compute elementwise loss for Tinker API (per-token NLL)
+                # Tinker consumes per-token NLL.
                 with torch.no_grad():
                     elementwise_loss = -action_log_probs
                     if loss_mask is not None:
                         elementwise_loss = elementwise_loss * loss_mask
 
-                # Build per-sequence loss_fn_outputs (matches Tinker's ForwardBackwardOutput structure)
-                # Trim to actual response length per sample (Tinker expects variable-length arrays
-                # that align with the input weights, not padded to batch max).
-                # Compute valid_lens vectorized on GPU, then move tensors to CPU exactly
-                # once before iterating in Python — avoids ~3N GPU->CPU syncs per micro-batch.
+                # Trim each sample with one CPU transfer per tensor.
                 batch_size = action_log_probs.shape[0]
                 seq_len = action_log_probs.shape[1]
                 if action_mask is not None:
@@ -915,7 +909,6 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
-                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
                 action_log_probs_cpu = action_log_probs.detach().cpu()
                 elementwise_loss_cpu = elementwise_loss.detach().cpu()
                 valid_lens = valid_lens_t.cpu().tolist()
@@ -1103,9 +1096,8 @@ class PolicyWorkerBase(Worker):
             experience: Experience object for one micro batch.
             loss_fn: Eval loss function name (e.g., "cross_entropy").
             loss_fn_config: Optional config overrides for the resolved loss function.
-                May also carry the reserved key ``return_per_token_outputs`` (bool, default
-                ``True``); set ``False`` to skip the per-token ``loss_fn_outputs`` build when
-                the caller reads only ``metrics``. See :func:`pop_return_per_token_outputs`.
+                May include reserved key ``return_per_token_outputs`` to skip
+                per-token ``loss_fn_outputs`` when callers read only ``metrics``.
         """
         self.model.eval()
         experience.to_device(torch.cuda.current_device())
@@ -1121,7 +1113,7 @@ class PolicyWorkerBase(Worker):
 
         current_loss_fn = PolicyLossRegistry.get(loss_fn)
 
-        # Pop the per-request flag that gates the per-token loss_fn_outputs build.
+        # Consume the reserved gate before merging AlgorithmConfig overrides.
         loss_fn_config, return_per_token_outputs = pop_return_per_token_outputs(loss_fn_config)
 
         # Build config for loss function, applying any overrides
@@ -1153,16 +1145,13 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-            # Build per-token loss_fn_outputs unless the caller opted out (see
-            # pop_return_per_token_outputs); skipping returns one empty dict per sequence.
+            # Only build per-token outputs for callers that consume them.
             if return_per_token_outputs:
                 elementwise_loss = -action_log_probs
                 if loss_mask is not None:
                     elementwise_loss = elementwise_loss * loss_mask
 
-                # Compute valid_lens vectorized on GPU, then move tensors to CPU
-                # exactly once before iterating in Python. Avoids ~3N GPU->CPU syncs
-                # per micro-batch (item()/cpu()/tolist() inside the per-sample loop).
+                # Trim each sample with one CPU transfer per tensor.
                 batch_size = action_log_probs.shape[0]
                 seq_len = action_log_probs.shape[1]
                 if action_mask is not None:
@@ -1172,7 +1161,6 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
-                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
                 action_log_probs_cpu = action_log_probs.detach().cpu()
                 elementwise_loss_cpu = elementwise_loss.detach().cpu()
                 valid_lens = valid_lens_t.cpu().tolist()

@@ -343,15 +343,7 @@ async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     ids=["fsdp", "megatron"],
 )
 async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixture, cfg, strategy):
-    """forward_backward(cross_entropy): the ``return_per_token_outputs`` flag gates
-    only the per-token loss_fn_outputs build; loss + consumed metrics are identical.
-
-    Runs the real Megatron / FSDP worker forward_backward (where the loss_fn_outputs
-    build lives) twice on the SAME batch: flag default-True vs explicit-False. Asserts
-    (a) loss + response_length match exactly and (b) per-token outputs are populated
-    when True and empty dicts (no logprobs / elementwise_loss keys) when False, while
-    ``loss_fn_output_type`` stays "scalar" in both cases.
-    """
+    """The gate affects per-token outputs, not loss or consumed metrics."""
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = strategy
     if strategy == "megatron":
@@ -374,7 +366,6 @@ async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixtu
         num_actions = 4
 
         def _run(loss_fn_config):
-            # Fresh batch each call: forward_backward moves data to GPU in place.
             batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
             refs = actor_group.async_run_ray_method(
                 "mesh",
@@ -385,21 +376,19 @@ async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixtu
             )
             return ray.get(refs)
 
-        kept_results = _run(None)  # default == keep (byte-identical to today)
+        kept_results = _run(None)
         skipped_results = _run({RETURN_PER_TOKEN_OUTPUTS_KEY: False})
 
         kept_outputs = []
         skipped_outputs = []
         for kept, skipped in zip(kept_results, skipped_results):
-            # Loss + consumed metrics are unaffected by the gate.
+            # Consumed metrics are unaffected by the gate.
             assert kept.metrics["loss"] == skipped.metrics["loss"]
             assert kept.metrics["response_length"] == skipped.metrics["response_length"]
-            # The per-token schema tag survives the skip.
             assert kept.loss_fn_output_type == skipped.loss_fn_output_type == "scalar"
             kept_outputs.extend(kept.loss_fn_outputs)
             skipped_outputs.extend(skipped.loss_fn_outputs)
 
-        # Populated when kept; one empty dict per sequence when skipped.
         assert len(kept_outputs) == batch_size
         assert len(skipped_outputs) == batch_size
         for out in kept_outputs:
@@ -419,8 +408,7 @@ async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixtu
     ids=["fsdp", "megatron"],
 )
 async def test_sft_forward_return_per_token_outputs_gate(ray_init_fixture, cfg, strategy):
-    """forward(cross_entropy) eval path: same gate, no-grad. loss matches; outputs
-    populated when kept vs empty when skipped (mirrors the SFTTrainer eval call)."""
+    """Eval uses the same per-token-output gate."""
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = strategy
     if strategy == "megatron":
