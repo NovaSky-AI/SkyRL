@@ -105,7 +105,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm==0.24.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -129,7 +129,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm==0.24.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -236,7 +236,7 @@ override-dependencies = [
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.12 pin (the version vLLM 0.23.0 requires). Override it to our version.
+    # our exact 0.6.12 pin (the version vLLM 0.24.0 requires). Override it to our version.
     "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -281,14 +281,14 @@ explicit = true
 
 [[tool.uv.index]]
 name = "vllm-cu129"
-url = "https://wheels.vllm.ai/0.23.0/cu129"
+url = "https://wheels.vllm.ai/0.24.0/cu129"
 explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.23.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
+# vllm 0.24.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
 # links libcudart.so.12, which torch+cu128 supplies.
 vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
