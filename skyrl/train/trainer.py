@@ -190,36 +190,21 @@ class RayPPOTrainer:
 
     @property
     def _torch_profiler_enabled(self) -> bool:
-        """Whether the trainer should drive the torch profiler on policy workers.
-        Gates all profiler RPC dispatch so non-profiling runs pay nothing."""
+        """Whether to dispatch policy profiler RPCs."""
         return self.cfg.trainer.policy.torch_profiler_config.enable
 
     def _profiler_start(self) -> None:
-        """Arm the torch profiler on the policy workers before the training loop.
-
-        No-op unless profiling is enabled. Shared by every trainer flavor
-        (sync / fully-async / one-step async) so the driving logic lives in one
-        place; subclasses that override ``train()`` call this at loop start.
-        """
+        """Start policy profiling when enabled."""
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
 
     def _profiler_step(self) -> None:
-        """Advance the torch profiler schedule once per global step.
-
-        No-op unless profiling is enabled. One call == one full global step
-        (not per minibatch); the torch schedule decides which steps are
-        recorded. Call exactly once per global step from every ``train()``.
-        """
+        """Advance policy profiling by one global step."""
         if self._torch_profiler_enabled:
             self.dispatch.profile_step("policy")
 
     def _profiler_stop(self) -> None:
-        """Stop/flush the torch profiler after the training loop.
-
-        No-op unless profiling is enabled. Call from a ``finally`` so an open
-        kineto trace window isn't leaked when the loop raises.
-        """
+        """Stop policy profiling when enabled."""
         if self._torch_profiler_enabled:
             self.dispatch.stop_profile("policy")
 
@@ -433,16 +418,16 @@ class RayPPOTrainer:
                         if self.cfg.trainer.dump_data_batch:
                             # dump data to file
                             with Timer("dump_data_batch"):
-                                self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+                                self.dump_data(
+                                    training_input, file_name=f"global_step_{self.global_step}_training_input"
+                                )
 
                         # 7. train policy/critic model
                         # Policy model is backloaded to GPU during training
                         with Timer("train_critic_and_policy", self.all_timings):
                             status = self.train_critic_and_policy(training_input)
 
-                            # Advance the torch profiler schedule once per global step
-                            # (no-op unless profiling is enabled). One schedule step ==
-                            # one full RL global step; the schedule decides which are recorded.
+                            # One profiler step per RL global step.
                             self._profiler_step()
 
                         self._fire("on_step_end", batch=training_input, metrics=status)
@@ -540,7 +525,9 @@ class RayPPOTrainer:
                         self.cfg.trainer.max_training_steps is not None
                         and self.global_step > self.cfg.trainer.max_training_steps
                     ):
-                        logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                        logger.info(
+                            f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
+                        )
                         stop_training = True
                         break
 
@@ -551,9 +538,6 @@ class RayPPOTrainer:
                 if stop_training:
                     break
         finally:
-            # Always stop/flush the profiler when the training loop exits --
-            # including via an exception -- so the open kineto trace window
-            # isn't leaked. No-op when profiling is disabled.
             self._profiler_stop()
 
         pbar.close()

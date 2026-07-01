@@ -17,9 +17,7 @@ MEGATRON_TP=2
 MEGATRON_PP=2
 MEGATRON_CP=1
 
-# torch profiler config. Profiles ONLY the policy model's training step
-# (forward/backward + optim) -- not the critic or ref models, and not generation/
-# inference. See trainer.policy.torch_profiler_config for schedule/capture knobs.
+# torch.profiler for policy training steps.
 ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"

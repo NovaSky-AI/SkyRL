@@ -1,10 +1,4 @@
-"""CPU unit tests for the config-driven torch.profiler wrapper.
-
-These run without a GPU or torch.distributed: ``torch.profiler`` works on CPU,
-and ``Profiler`` falls back to rank 0 when distributed is not initialized.
-
-uv run --isolated --extra dev pytest tests/backends/skyrl_train/utils/test_profiler.py -v
-"""
+"""CPU tests for the config-driven torch.profiler wrapper."""
 
 import glob
 import os
@@ -17,7 +11,7 @@ from skyrl.backends.skyrl_train.utils.profiler import Profiler
 
 @dataclass
 class _ProfCfg:
-    """Minimal stand-in for TorchProfilerConfig (avoids importing skyrl_gym)."""
+    """TorchProfilerConfig stand-in."""
 
     enable: bool = True
     ranks: List[int] = field(default_factory=lambda: [0])
@@ -52,8 +46,7 @@ def test_disabled_is_noop(tmp_path):
 
 
 def test_rank_not_selected_is_noop(tmp_path):
-    # is_initialized() is False in this process -> rank resolves to 0, which is
-    # not in ranks=[1], so the profiler must not arm.
+    # Local tests resolve to rank 0.
     prof = Profiler(_ProfCfg(ranks=[1], save_path=str(tmp_path)))
     assert prof.prof is None
     _run_loop(prof, 3)
@@ -72,7 +65,7 @@ def test_single_window_writes_one_trace(tmp_path):
 
 
 def test_repeat_writes_multiple_windows(tmp_path):
-    # Two cycles of (warmup=1 + active=1); needs >= 2*(1+1) steps to fire twice.
+    # Two warmup+active cycles.
     prof = Profiler(
         _ProfCfg(skip_first=0, wait=0, warmup=1, active=1, repeat=2, save_path=str(tmp_path)),
     )
@@ -91,9 +84,7 @@ def test_skip_first_defers_recording(tmp_path):
 
 
 def test_save_path_is_taken_verbatim(tmp_path):
-    # `save_path` is an explicit, required local path -- the wrapper uses it as-is
-    # (no implicit default, no rewriting). Cloud-URI/empty rejection lives in
-    # TorchProfilerConfig.validate(), exercised in tests/train/test_config.py.
+    # Path validation lives in TorchProfilerConfig.
     explicit = str(tmp_path / "explicit")
     prof = Profiler(_ProfCfg(save_path=explicit))
     assert prof.save_path == explicit
@@ -127,7 +118,6 @@ def test_kernel_summary_populated_after_window(tmp_path):
     assert summary is not None
     assert summary["window_count"] == 1
     assert isinstance(summary["pairs"], list)
-    # Each pair is (name:str, self_us:float); summary is pickle-safe.
     import pickle
 
     pickle.dumps(summary)
@@ -140,7 +130,6 @@ def test_activities_threaded_to_torch(tmp_path):
     import torch
 
     prof = Profiler(_ProfCfg(activities=["cpu"], save_path=str(tmp_path)))
-    # The underlying torch profiler was constructed with the CPU activity only.
     assert torch.profiler.ProfilerActivity.CPU in prof.prof.activities
     assert torch.profiler.ProfilerActivity.CUDA not in prof.prof.activities
 
@@ -149,11 +138,7 @@ def test_step_failure_disables_without_raising(tmp_path):
     prof = Profiler(_ProfCfg(save_path=str(tmp_path)))
 
     class _Boom:
-        """Stands in for a live torch profiler whose ``step`` faults. ``start``/
-        ``stop`` are no-ops: we must NOT start the real kineto profiler here, or
-        the wrapper's fault path nulls ``self.prof`` while that session is still
-        running, leaving it unstopped -> libkineto segfaults at interpreter exit
-        (process-wide, surfaces as a teardown crash long after this test passes)."""
+        """Faulting profiler stub; avoids opening a real kineto session."""
 
         def start(self):
             pass
@@ -164,12 +149,10 @@ def test_step_failure_disables_without_raising(tmp_path):
         def stop(self):
             pass
 
-    # Swap in the faulting stub BEFORE start() so no real profiler session is ever
-    # opened; this still exercises the wrapper's swallow-and-disable path.
+    # Swap before start() so no real profiler session opens.
     prof.prof = _Boom()
     prof.start()
 
-    # Simulate an internal profiler fault mid-loop; the wrapper must swallow it.
     prof.step()
     assert prof.enable is False
     assert prof.prof is None
@@ -179,9 +162,7 @@ def test_step_failure_disables_without_raising(tmp_path):
 
 
 class TestWorkerProfilerRPCs:
-    """The Worker base exposes the profiler-control RPCs and they no-op when
-    ``self.profiler`` is None (so the trainer can dispatch them unconditionally,
-    and so they're on the snapshotted Ray actor method table without a subclass)."""
+    """Worker profiler RPC coverage."""
 
     def test_methods_exist_on_worker_base(self):
         from skyrl.backends.skyrl_train.workers.worker import Worker
@@ -211,8 +192,6 @@ class TestWorkerProfilerRPCs:
 
         from skyrl.backends.skyrl_train.workers.worker import Worker
 
-        # Call the unbound methods against a stub whose profiler is None; they
-        # must early-return without touching anything.
         stub = SimpleNamespace(profiler=None)
         Worker.start_profile(stub)
         Worker.profile_step(stub)
@@ -237,9 +216,7 @@ class TestWorkerProfilerRPCs:
 
 
 class TestBuildProfilerFromPolicyCfg:
-    """``build_profiler_from_policy_cfg`` is the production entry both worker
-    backends call in ``init_model``. It gates on ``enable`` and passes the
-    explicit, validated ``save_path`` straight through (no implicit default)."""
+    """Coverage for the worker profiler factory."""
 
     @staticmethod
     def _trainer_cfg(prof_cfg):
@@ -269,10 +246,7 @@ class TestBuildProfilerFromPolicyCfg:
 
 
 class TestWorkerDispatchProfilerRPCs:
-    """The WorkerDispatch profiler wrappers dispatch via ``pass_through`` to the
-    named model's actor group, no-op for an unknown model, and swallow dispatch
-    faults so a profiler error can never abort the training loop. Tested against
-    the unbound methods with a stub ``self`` (no live Ray actors required)."""
+    """WorkerDispatch profiler RPC coverage."""
 
     @staticmethod
     def _stub(actor_groups):
@@ -295,7 +269,6 @@ class TestWorkerDispatchProfilerRPCs:
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
         stub = self._stub({})  # no "policy" group
-        # None of these should raise or dispatch.
         WorkerDispatch.start_profile(stub, "policy")
         WorkerDispatch.profile_step(stub, "policy")
         WorkerDispatch.stop_profile(stub, "policy")
@@ -337,7 +310,6 @@ class TestWorkerDispatchProfilerRPCs:
             raise RuntimeError("ray.get boom")
 
         with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=boom):
-            # Must not propagate -- a profiler fault cannot abort training.
             WorkerDispatch.start_profile(stub, "policy")
             WorkerDispatch.profile_step(stub, "policy")
             WorkerDispatch.stop_profile(stub, "policy")
@@ -345,10 +317,7 @@ class TestWorkerDispatchProfilerRPCs:
 
 
 class TestTrainerProfilerHelpers:
-    """``RayPPOTrainer`` exposes gated ``_profiler_{start,step,stop}`` helpers so
-    every trainer flavor (sync / fully-async / one-step async) drives the
-    profiler through one code path. The helpers dispatch only when
-    ``_torch_profiler_enabled`` is True, and always target the policy model."""
+    """RayPPOTrainer profiler helper coverage."""
 
     @staticmethod
     def _trainer(enable):
@@ -356,7 +325,6 @@ class TestTrainerProfilerHelpers:
 
         from skyrl.train.trainer import RayPPOTrainer
 
-        # Build a bare instance without running __init__ (which needs Ray/cfg).
         trainer = object.__new__(RayPPOTrainer)
         calls = []
         trainer.dispatch = SimpleNamespace(

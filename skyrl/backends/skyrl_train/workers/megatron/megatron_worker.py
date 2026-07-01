@@ -704,7 +704,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
-        # self.profiler is initialized on the Worker base; populated in init_model.
+        # Worker base owns self.profiler; init_model may populate it.
         self._is_lora = self.cfg.policy.model.lora.rank > 0
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.
@@ -806,7 +806,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # create profiler (driven by the trainer via start/profile_step/stop RPCs)
+        # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
         # create optimizer (skipped for inference-only flows; Megatron's

@@ -135,7 +135,7 @@ class TestLoraConfigOverrides:
 
 
 class TestTorchProfilerConfigOverrides:
-    """torch_profiler_config bridges to policy.torch_profiler_config."""
+    """SFT profiler config bridge coverage."""
 
     def test_disabled_by_default(self):
         cfg = _sft_cfg_from_overrides([])
@@ -177,8 +177,6 @@ class TestTorchProfilerConfigOverrides:
         assert list(prof.activities) == ["cuda"]
 
     def test_invalid_profiler_config_rejected_by_sft_validation(self):
-        # validate_sft_cfg (run by build_skyrl_config_for_sft) must surface
-        # profiler config errors on the SFT path, not just the RL path.
         cfg = _sft_cfg_from_overrides(
             [
                 "model.path=test/my-model",

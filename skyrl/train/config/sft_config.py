@@ -143,9 +143,7 @@ class SFTConfig(BaseConfig):
     """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
     torch_profiler_config: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
-    """torch.profiler config (FSDP + Megatron). Set ``enable=true`` to capture
-    traces of the policy training step around the training loop; see
-    :class:`TorchProfilerConfig`."""
+    """torch.profiler config for policy training steps."""
 
     # ---- SFT-specific flat fields ----
     strategy: str = "megatron"  # "megatron" or "fsdp"

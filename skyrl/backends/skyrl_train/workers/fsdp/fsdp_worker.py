@@ -196,7 +196,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # standard CUDA memory; only subsequent activations use expandable segments.
         self._set_expandable_segments(True)
 
-        # create profiler (driven by the trainer via start/profile_step/stop RPCs)
+        # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):

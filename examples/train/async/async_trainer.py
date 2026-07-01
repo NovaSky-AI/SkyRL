@@ -79,8 +79,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                         self.sync_finished.set()
                         self.generation_ack.clear()
 
-                    # Advance the torch profiler schedule once per global step
-                    # (no-op unless profiling is enabled).
+                    # One profiler step per global step.
                     self._profiler_step()
 
                     # 5. set logs
@@ -118,8 +117,6 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 # cancel generation task for this epoch
                 generator_task.cancel()
         finally:
-            # Always stop/flush the profiler when the loop exits (incl. on error)
-            # so the open kineto trace window isn't leaked. No-op when disabled.
             self._profiler_stop()
 
         pbar.close()

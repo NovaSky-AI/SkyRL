@@ -503,7 +503,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             cur_generation_group_mini_batch,
                             cur_dropped_groups,
                             epoch_exhausted,
-                        ) = await self._collect_generation_mini_batch(generation_output_group_buffer, all_generators_done)
+                        ) = await self._collect_generation_mini_batch(
+                            generation_output_group_buffer, all_generators_done
+                        )
 
                         if epoch_exhausted:
                             # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
@@ -553,9 +555,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # A training step completed: count it for this epoch's bookkeeping.
                     trained_steps_this_epoch += 1
 
-                    # Advance the torch profiler schedule once per global step
-                    # (no-op unless profiling is enabled). One schedule step ==
-                    # one full async global step; the schedule decides which are recorded.
+                    # One profiler step per async global step.
                     self._profiler_step()
 
                     # 5. Set logs for this training step.
@@ -597,7 +597,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self.cfg.trainer.max_training_steps is not None
                         and self.global_step > self.cfg.trainer.max_training_steps
                     ):
-                        logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+                        logger.info(
+                            f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
+                        )
                         for t in generator_tasks:
                             t.cancel()
                         await asyncio.gather(*generator_tasks, return_exceptions=True)
@@ -648,9 +650,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # End of an epoch.
         finally:
-            # Always stop/flush the profiler when the loop exits -- including
-            # via an exception -- so the open kineto trace window isn't leaked.
-            # No-op when profiling is disabled.
             self._profiler_stop()
 
         pbar.close()

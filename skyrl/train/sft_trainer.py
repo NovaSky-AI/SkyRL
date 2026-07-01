@@ -717,8 +717,7 @@ class SFTTrainer:
 
     @property
     def _torch_profiler_enabled(self) -> bool:
-        """Whether the trainer should drive the torch profiler. Gates all
-        profiler RPC dispatch so non-profiling runs pay zero extra round-trips."""
+        """Whether to dispatch policy profiler RPCs."""
         return self.cfg.trainer.policy.torch_profiler_config.enable
 
     def _build_collator(self, tokenizer):
@@ -1311,8 +1310,7 @@ class SFTTrainer:
 
         metrics = output.metrics
 
-        # Advance the torch profiler schedule once per global step (no-op unless
-        # profiling is enabled; the schedule decides which steps are recorded).
+        # One profiler step per SFT global step.
         if self._torch_profiler_enabled:
             self.dispatch.profile_step("policy")
 
@@ -1439,8 +1437,6 @@ class SFTTrainer:
                     f"tokens_per_second={tokens_per_second:.0f}"
                 )
         finally:
-            # Always stop/flush the profiler when the loop exits (including via
-            # an exception) so the open trace window isn't leaked. No-op when off.
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
 
@@ -1690,8 +1686,6 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
-            # Always stop/flush the profiler when the loop exits (including via
-            # an exception) so the open trace window isn't leaked. No-op when off.
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)

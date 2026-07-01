@@ -421,14 +421,12 @@ class WorkerDispatch:
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
 
     # ------------------------------------------------------------------
-    # torch.profiler control. Dispatched via "pass_through" to every worker.
-    # Deliberately do NOT call _ensure_on_gpu so they don't perturb the
-    # colocation offload state machine. Each is best-effort: a profiler fault
-    # must never abort the training loop.
+    # torch.profiler control. Avoid _ensure_on_gpu so profiling does not perturb
+    # the colocation offload state.
     # ------------------------------------------------------------------
 
     def start_profile(self, model: str) -> None:
-        """Arm the torch profiler on ``model``'s workers (before the loop)."""
+        """Start profiling on ``model`` workers."""
         if model not in self._actor_groups:
             return
         try:
@@ -437,7 +435,7 @@ class WorkerDispatch:
             logger.warning(f"[profiler] start_profile dispatch for {model} failed: {e}")
 
     def profile_step(self, model: str) -> None:
-        """Advance the torch profiler schedule by one global step on ``model``."""
+        """Advance profiling by one global step."""
         if model not in self._actor_groups:
             return
         try:
@@ -446,7 +444,7 @@ class WorkerDispatch:
             logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
 
     def stop_profile(self, model: str) -> None:
-        """Stop the torch profiler on ``model``'s workers (after the loop)."""
+        """Stop profiling on ``model`` workers."""
         if model not in self._actor_groups:
             return
         try:
@@ -455,17 +453,7 @@ class WorkerDispatch:
             logger.warning(f"[profiler] stop_profile dispatch for {model} failed: {e}")
 
     def dump_profiler_summary(self, model: str) -> Optional[List]:
-        """Collect the per-rank last-window kernel self-time summaries for ``model``.
-
-        Returns a per-actor list (one entry per worker): profiled ranks return a
-        dict ``{"window_count", "pairs"}``; other ranks return None. Returns None
-        when the model is unknown or dispatch fails.
-
-        NOTE: not invoked by SkyRL's own trainers (which rely on the high-level
-        trace files). This is the dispatch-side entry of a forward-looking
-        low-level API for downstream consumers that want per-kernel self-time
-        attribution without re-parsing traces -- see ``Worker.dump_profiler_summary``.
-        """
+        """Collect per-rank last-window kernel summaries for ``model``."""
         if model not in self._actor_groups:
             return None
         try:

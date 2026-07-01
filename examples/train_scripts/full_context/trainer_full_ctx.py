@@ -1,6 +1,8 @@
-from skyrl.train.trainer import RayPPOTrainer
-from loguru import logger
 import random
+
+from loguru import logger
+
+from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import Timer
 
 
@@ -86,8 +88,7 @@ class FullCtxTrainer(RayPPOTrainer):
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
-                    # Advance the torch profiler schedule once per global step
-                    # (no-op unless profiling is enabled).
+                    # One profiler step per global step.
                     self._profiler_step()
 
                     self.tracker.log(self.all_metrics, step=self.global_step)
@@ -101,9 +102,6 @@ class FullCtxTrainer(RayPPOTrainer):
 
                     logger.info(f"Step {step + 1} completed. Status: {status}")
         finally:
-            # Always stop/flush the profiler when the loop exits -- including via
-            # an exception -- so the open kineto trace window isn't leaked. No-op
-            # when profiling is disabled.
             self._profiler_stop()
 
         self.tracker.finish()

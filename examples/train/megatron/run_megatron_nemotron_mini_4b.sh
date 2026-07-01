@@ -37,7 +37,7 @@ MEGATRON_CP=1
 NUM_INFERENCE_ENGINES=8
 INFERENCE_TP=1
 
-# torch profiler config
+# torch.profiler config
 ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
