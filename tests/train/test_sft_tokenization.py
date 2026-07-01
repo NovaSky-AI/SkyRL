@@ -921,3 +921,99 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
         assert a["attention_mask"] == b["attention_mask"]
         assert a["num_actions"] == b["num_actions"]
         assert a["loss_mask"] == b["loss_mask"]
+
+
+# ---------------------------------------------------------------------------
+# Slice workers read from the parent's on-disk arrow dataset: each ``select``s
+# only its ``[start, end)`` range. These tests pin that workers honor their
+# bounds and tile ``[0, n)`` with no gaps or overlaps.
+# ---------------------------------------------------------------------------
+
+
+def _save_chat_dataset_to_disk(arrow_dir, n):
+    """Write an n-row chat dataset to ``arrow_dir`` via ``save_to_disk``."""
+    from datasets import Dataset
+
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": f"Q{i}: what is {i} + {i}?"},
+                {"role": "assistant", "content": f"{2 * i}"},
+            ]
+        }
+        for i in range(n)
+    ]
+    Dataset.from_list(rows).save_to_disk(arrow_dir)
+
+
+def _chat_worker_args(arrow_dir, start, end, tokenizer_dir):
+    return (
+        arrow_dir,
+        start,
+        end,
+        tokenizer_dir,
+        1024,
+        "messages",
+        TrainOnWhat.LAST_ASSISTANT_MESSAGE.value,
+        None,
+        None,
+    )
+
+
+def test_chat_slice_worker_reads_only_its_range(tokenizer, tmp_path):
+    """``_tokenize_chat_slice_worker`` tokenizes exactly the rows in ``[start, end)``."""
+    from skyrl.train.sft_trainer import _tokenize_chat_slice_worker
+
+    arrow_dir = str(tmp_path / "arrow")
+    _save_chat_dataset_to_disk(arrow_dir, 10)
+    tokenizer_dir = str(tmp_path / "tok")
+    tokenizer.save_pretrained(tokenizer_dir)
+
+    out = _tokenize_chat_slice_worker(_chat_worker_args(arrow_dir, 3, 7, tokenizer_dir))
+    assert len(out) == 4
+
+
+def test_chat_slice_workers_tile_the_dataset(tokenizer, tmp_path):
+    """Disjoint ``[start, end)`` slices reconstruct the full dataset -- the
+    invariant the parent relies on when partitioning rows across workers."""
+    from skyrl.train.sft_trainer import _tokenize_chat_slice_worker
+
+    n, num_workers = 10, 3
+    arrow_dir = str(tmp_path / "arrow")
+    _save_chat_dataset_to_disk(arrow_dir, n)
+    tokenizer_dir = str(tmp_path / "tok")
+    tokenizer.save_pretrained(tokenizer_dir)
+
+    # Whole-dataset reference.
+    reference = _tokenize_chat_slice_worker(_chat_worker_args(arrow_dir, 0, n, tokenizer_dir))
+
+    # Same boundaries the parent computes.
+    chunk = max(1, n // num_workers)
+    tiled = []
+    for i in range(num_workers):
+        start = i * chunk
+        end = n if i == num_workers - 1 else min((i + 1) * chunk, n)
+        if start >= end:
+            continue
+        tiled.extend(_tokenize_chat_slice_worker(_chat_worker_args(arrow_dir, start, end, tokenizer_dir)))
+
+    assert len(tiled) == len(reference) == n
+    for a, b in zip(tiled, reference):
+        assert a["input_ids"] == b["input_ids"]
+        assert a["loss_mask"] == b["loss_mask"]
+
+
+def test_alpaca_slice_worker_reads_only_its_range(tokenizer, tmp_path):
+    """``_tokenize_alpaca_slice_worker`` tokenizes exactly the rows in ``[start, end)``."""
+    from datasets import Dataset
+
+    from skyrl.train.sft_trainer import _tokenize_alpaca_slice_worker
+
+    arrow_dir = str(tmp_path / "arrow")
+    rows = [{"instruction": f"instr {i}", "input": "", "output": f"out {i}"} for i in range(10)]
+    Dataset.from_list(rows).save_to_disk(arrow_dir)
+    tokenizer_dir = str(tmp_path / "tok")
+    tokenizer.save_pretrained(tokenizer_dir)
+
+    out = _tokenize_alpaca_slice_worker((arrow_dir, 2, 8, tokenizer_dir, 1024))
+    assert len(out) == 6
