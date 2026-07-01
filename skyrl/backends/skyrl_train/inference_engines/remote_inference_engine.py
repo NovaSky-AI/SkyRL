@@ -180,6 +180,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 payload = sampling_params.copy()
                 payload["model"] = self.model_name
                 payload["prompt"] = prompt_token_ids
+                # Ask vLLM to return the sampled token IDs directly (added in
+                # vLLM 0.23.0 via https://github.com/vllm-project/vllm/pull/22587)
+                # so generation is token-in-token-out rather than re-tokenized.
+                payload["return_token_ids"] = True
                 request_url = f"{self.url}/v1/completions"
             else:
                 raise ValueError(f"Invalid engine backend: {self.engine_backend}")
@@ -198,10 +202,14 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 text = choice["text"]
                 outputs.append(text)
                 finish_reasons.append(choice["finish_reason"])
-                # TODO(Charlie): this is not token-in-token-out because vLLM does not support
-                # returning token IDs via HTTP requests. Fix after this vLLM PR is merged:
-                # https://github.com/vllm-project/vllm/pull/22587
-                output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
+                # Token-in-token-out: vLLM returns the sampled token IDs when
+                # `return_token_ids=True` is set on the request (see payload
+                # above). Fall back to re-tokenizing only if the field is
+                # absent (older server), which is lossy.
+                token_ids = choice.get("token_ids")
+                if token_ids is None:
+                    token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                output_ids.append(token_ids)
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 

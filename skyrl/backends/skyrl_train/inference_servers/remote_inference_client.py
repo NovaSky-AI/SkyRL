@@ -1106,21 +1106,16 @@ class RemoteInferenceClient:
             {"update_info": update_info},
         )
 
-    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
-    # these three methods from /collective_rpc to the native vLLM endpoints
-    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
-    # the NewInferenceWorkerWrap worker extension.
-
     async def start_weight_update(
         self,
         is_checkpoint_format: bool = True,
     ) -> Dict[str, Any]:
         """
-        Start a new chunked weight update via /collective_rpc.
+        Start a new chunked weight update via vLLM's native /start_weight_update.
 
-        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on all
-        workers. For checkpoint-format weights this initializes layerwise
-        reload. Must be called before any update_weights_ipc calls.
+        For checkpoint-format weights this initializes layerwise reload on each
+        worker. Must be called before any update_named_weights calls. Pair with
+        finish_weight_update.
 
         Args:
             is_checkpoint_format: True if weights are in checkpoint format
@@ -1130,81 +1125,22 @@ class RemoteInferenceClient:
             Dict mapping server_url to response.
         """
         return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "skyrl_start_weight_update",
-                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
-            },
-        )
-
-    async def update_weights_ipc(
-        self,
-        update_info: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Send a single weight chunk via /collective_rpc.
-
-        Calls NewInferenceWorkerWrap.update_weights_ipc on all workers.
-        Can be called multiple times between skyrl_start_weight_update and
-        skyrl_finish_weight_update.
-
-        Args:
-            update_info: Dict with backend-specific update info (names,
-                dtype_names, shapes, ipc_handles_pickled or packed flag).
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "update_weights_ipc",
-                "kwargs": {"update_info": update_info},
-            },
-        )
-
-    async def update_weights_nccl(
-        self,
-        update_info: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Send batched weight update via /collective_rpc to the broadcast receiver.
-
-        Calls NewInferenceWorkerWrap.update_weights_nccl on all workers,
-        which routes weight_transfer_engine.receive_weights through the
-        set_current_vllm_config wrap. Used by the broadcast (NCCL) sender as
-        a temporary substitute for vLLM's native /update_weights endpoint
-        until the upstream patch (vllm-project/vllm weight-sync-fix) lands.
-
-        Args:
-            update_info: Dict with backend-specific update info (names,
-                dtype_names, shapes, packed flag, etc.) — same shape vLLM's
-                native /update_weights expects.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "update_weights_nccl",
-                "kwargs": {"update_info": update_info},
-            },
+            "/start_weight_update",
+            {"is_checkpoint_format": is_checkpoint_format},
         )
 
     async def finish_weight_update(self) -> Dict[str, Any]:
         """
-        Finish the current chunked weight update via /collective_rpc.
+        Finish the current chunked weight update via vLLM's native /finish_weight_update.
 
-        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
         For checkpoint-format weights, runs layerwise postprocessing.
 
         Returns:
             Dict mapping server_url to response.
         """
         return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_finish_weight_update"},
+            "/finish_weight_update",
+            {},
         )
 
     async def load_lora_adapter(

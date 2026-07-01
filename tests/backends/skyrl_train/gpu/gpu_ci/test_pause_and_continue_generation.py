@@ -59,6 +59,9 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
             # Ensure logprobs and token ids are returned for accumulation checks
             "logprobs": True,
             "top_logprobs": 1,
+            # vLLM 0.23.0+ returns sampled token IDs on the choice when set
+            # (https://github.com/vllm-project/vllm/pull/22587).
+            "return_token_ids": True,
         }
         async with InferenceEngineState.create(
             cfg=cfg,
@@ -165,7 +168,13 @@ async def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture)
                 assert (
                     len(prompt_tokens) == out["usage"]["prompt_tokens"]
                 ), f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
-                # TODO(Charlie): after we bump vllm such that it supports returnining tokens, check `choice["token_ids"]`
+                # vLLM 0.23.0+ returns sampled token IDs on the choice (we set
+                # `return_token_ids=True` above, https://github.com/vllm-project/vllm/pull/22587).
+                token_ids = choice.get("token_ids")
+                assert token_ids is not None, f"Request {i} missing `token_ids` on choice: {choice.keys()}"
+                assert (
+                    len(token_ids) == sampling_params["max_tokens"]
+                ), f"Request {i} expected {sampling_params['max_tokens']} token_ids, got {len(token_ids)}"
                 # TODO(Charlie): after we add model version to the output, check that as well
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
