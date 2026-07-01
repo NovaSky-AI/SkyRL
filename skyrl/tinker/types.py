@@ -142,6 +142,10 @@ class RenderedModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
+    # Shape of the tensor (row-major flattened into `data`). Used to recover 2D
+    # loss-fn inputs such as the (num_tokens, K) targets/weights for soft top-K
+    # distillation. None / 1D means a flat per-token sequence (the common case).
+    shape: list[int] | None = None
 
 
 class LossFnInputs(BaseModel):
@@ -255,6 +259,8 @@ class SampleInput(BaseModel):
     num_samples: int
     checkpoint_id: str
     prompt_logprobs: bool
+    # Number of top-K teacher logprobs to return per prompt position (0 = disabled).
+    topk_prompt_logprobs: int = 0
     # See make_routing_session_id.
     seq_id: int | None = None
     sampling_session_id: str | None = None
@@ -269,6 +275,9 @@ class GeneratedSequence(BaseModel):
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
     prompt_logprobs: list[float] | None = None
+    # Per prompt position: None, or a list of (token_id, logprob) for the top-K
+    # tokens predicting that position. Matches the Tinker SDK's expected shape.
+    topk_prompt_logprobs: list[list[tuple[int, float]] | None] | None = None
 
 
 # Metrics tracked in the engine
@@ -295,6 +304,9 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
+
+    # K for soft top-K distillation targets (0/1 => standard hard 1D targets).
+    target_topk: int = 0
 
     # Per-example scalars
     all_model_ids: list[str]
@@ -323,8 +335,12 @@ class PreparedSampleBatch(BaseModel):
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool
 
-    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
-    request_batch_slices: list[tuple[str, str, int, int, bool]]
+    # Max top-K prompt logprobs requested across the batch (0 = none). The backend
+    # computes this many for every sample; each request slices what it asked for.
+    max_topk_prompt_logprobs: int = 0
+
+    # Mapping: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested, topk_requested)
+    request_batch_slices: list[tuple[str, str, int, int, bool, int]]
 
 
 # All accepted loss functions across backends.

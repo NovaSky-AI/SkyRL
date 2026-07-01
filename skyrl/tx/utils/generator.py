@@ -149,6 +149,10 @@ class GenerateOutput:
     stop_reasons: list[str]
     logprobs: list[list[float]]
     prompt_logprobs: list[list[float]] | None = None
+    # Top-K teacher distribution at each prompt position (Tinker convention):
+    # one entry per prompt position; index 0 is None (no predictor), index i is a
+    # list of (token_id, logprob) for the top-K tokens predicting position i.
+    topk_prompt_logprobs: list[list[list[tuple[int, float]] | None]] | None = None
 
 
 def find_string_stop_position(
@@ -191,7 +195,8 @@ class GeneratorMixin:
 
     @staticmethod
     @functools.partial(
-        jax.jit, static_argnames=("max_length", "max_new_tokens", "max_top_k", "use_top_p", "prompt_logprobs")
+        jax.jit,
+        static_argnames=("max_length", "max_new_tokens", "max_top_k", "use_top_p", "prompt_logprobs", "topk_prompt"),
     )
     def _prefill_and_decode(
         model,
@@ -208,6 +213,7 @@ class GeneratorMixin:
         max_top_k: int,
         use_top_p: bool,
         prompt_logprobs: bool = False,
+        topk_prompt: int = 0,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
         # Prefill: process full prompt (left-aligned, so positions start at 0)
@@ -221,12 +227,28 @@ class GeneratorMixin:
         last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
         batch_idx = jnp.arange(input_ids.shape[0])
 
+        # top_k teacher distribution needs the full prompt logits, same as prompt_logprobs.
+        need_all_logits = prompt_logprobs or topk_prompt > 0
+
         # Compute logits for sampling and optionally for prompt logprobs
-        if prompt_logprobs:
+        topk_prompt_logprobs_array = None
+        topk_prompt_indices_array = None
+        if need_all_logits:
             # Compute all logits for prompt logprobs and sampling the first token
             all_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
             last_logits = all_logits[batch_idx, last_token_idx, :]  # Shape: [B, vocab_size]
-            prompt_logprobs_array = model.logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:])
+            prompt_logprobs_array = (
+                model.logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:]) if prompt_logprobs else None
+            )
+            if topk_prompt > 0:
+                # Top-K over the next-token distribution at each prompt position.
+                # Memory-efficient: take top-K logits, then convert to true logprobs by
+                # subtracting the full-vocab logsumexp (avoids a second full-vocab array).
+                sliced = all_logits[:, :-1, :]  # [B, seq-1, vocab]
+                topk_vals, topk_idx = jax.lax.top_k(sliced, topk_prompt)  # [B, seq-1, K]
+                lse = jax.nn.logsumexp(sliced, axis=-1, keepdims=True)  # [B, seq-1, 1]
+                topk_prompt_logprobs_array = topk_vals - lse
+                topk_prompt_indices_array = topk_idx
         else:
             # Only compute logits for the last position for sampling
             last_hidden = outputs.last_hidden_state[batch_idx, last_token_idx][:, None, :]  # Shape: [B, 1, H]
@@ -317,7 +339,14 @@ class GeneratorMixin:
         new_tokens = final_state.generated_tokens
         new_logprobs = final_state.generated_logprobs
 
-        return new_tokens, new_logprobs, final_state.stop_pos, prompt_logprobs_array
+        return (
+            new_tokens,
+            new_logprobs,
+            final_state.stop_pos,
+            prompt_logprobs_array,
+            topk_prompt_logprobs_array,
+            topk_prompt_indices_array,
+        )
 
     def generate(
         self,
@@ -327,6 +356,7 @@ class GeneratorMixin:
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
         prompt_logprobs: bool = False,
+        topk_prompt: int = 0,
         tokenizer=None,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
@@ -358,14 +388,21 @@ class GeneratorMixin:
             stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
-        # Capture prompt lengths for prompt_logprobs if requested
-        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
+        # Capture prompt lengths for prompt_logprobs / topk_prompt_logprobs if requested
+        prompt_lengths = attention_mask.sum(axis=1) if (prompt_logprobs or topk_prompt > 0) else None
 
         # Compute static flags for top_k and top_p filtering
         max_top_k = max((sp.top_k for sp in sampling_params if sp.top_k > 0), default=0)
         use_top_p = any(sp.top_p < 1.0 for sp in sampling_params)
 
-        new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
+        (
+            new_tokens,
+            new_logprobs,
+            stop_pos,
+            prompt_logprobs_array,
+            topk_prompt_logprobs_array,
+            topk_prompt_indices_array,
+        ) = self._prefill_and_decode(
             self,
             input_ids,
             attention_mask,
@@ -380,6 +417,7 @@ class GeneratorMixin:
             max_top_k,
             use_top_p,
             prompt_logprobs=prompt_logprobs,
+            topk_prompt=topk_prompt,
         )
 
         max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])
@@ -391,9 +429,27 @@ class GeneratorMixin:
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
 
-            (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths) = jax.tree.map(
+            (
+                new_tokens,
+                has_stop,
+                new_logprobs,
+                end_positions,
+                prompt_logprobs_array,
+                prompt_lengths,
+                topk_prompt_logprobs_array,
+                topk_prompt_indices_array,
+            ) = jax.tree.map(
                 lambda x: multihost_utils.process_allgather(x, tiled=True),
-                (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths),
+                (
+                    new_tokens,
+                    has_stop,
+                    new_logprobs,
+                    end_positions,
+                    prompt_logprobs_array,
+                    prompt_lengths,
+                    topk_prompt_logprobs_array,
+                    topk_prompt_indices_array,
+                ),
             )
 
         # Single device-to-host transfer
@@ -404,7 +460,20 @@ class GeneratorMixin:
             end_positions_host,
             prompt_logprobs_host,
             prompt_lengths_host,
-        ) = jax.device_get((new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths))
+            topk_prompt_logprobs_host,
+            topk_prompt_indices_host,
+        ) = jax.device_get(
+            (
+                new_tokens,
+                has_stop,
+                new_logprobs,
+                end_positions,
+                prompt_logprobs_array,
+                prompt_lengths,
+                topk_prompt_logprobs_array,
+                topk_prompt_indices_array,
+            )
+        )
 
         # Build output lists, applying string stop detection where needed
         generated_ids = []
@@ -430,6 +499,24 @@ class GeneratorMixin:
             stop_reasons.append(stop_reason)
             logprobs_out.append(token_logprobs)
 
+        # Build top-K prompt logprobs per example, following Tinker's convention:
+        # one entry per prompt position, index 0 is None (no predictor), index i is
+        # the top-K (token_id, logprob) distribution predicting token i.
+        topk_prompt_logprobs_out = None
+        if topk_prompt > 0 and topk_prompt_logprobs_host is not None:
+            topk_prompt_logprobs_out = []
+            for i in range(batch_size):
+                length = int(prompt_lengths_host[i])
+                per_pos: list[list[tuple[int, float]] | None] = [None]
+                vals_i = topk_prompt_logprobs_host[i]
+                idx_i = topk_prompt_indices_host[i]
+                for j in range(length - 1):
+                    entries = [
+                        (int(idx_i[j, k]), float(vals_i[j, k])) for k in range(topk_prompt)
+                    ]
+                    per_pos.append(entries)
+                topk_prompt_logprobs_out.append(per_pos)
+
         return GenerateOutput(
             generated_ids=generated_ids,
             stop_reasons=stop_reasons,
@@ -439,6 +526,7 @@ class GeneratorMixin:
                 if prompt_logprobs
                 else None
             ),
+            topk_prompt_logprobs=topk_prompt_logprobs_out,
         )
 
 
