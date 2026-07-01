@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from skyrl_gym.envs.search.env import SearchEnvConfig
 from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
+from skyrl_gym.envs.tau_bench.env import TauBenchEnvConfig
 
 # ---------------------------------------------------------------------------
 # Data
@@ -688,6 +689,7 @@ class SkyRLGymConfig(BaseConfig):
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    tau_bench: TauBenchEnvConfig = field(default_factory=TauBenchEnvConfig)
 
 
 @dataclass
