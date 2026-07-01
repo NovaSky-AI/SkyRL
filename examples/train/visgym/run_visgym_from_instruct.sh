@@ -60,7 +60,6 @@ uv run --isolated --extra fsdp \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.gpu_memory_utilization=0.8 \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.engine_init_kwargs.max_model_len=60000 \
   trainer.epochs=20 \
   trainer.train_batch_size=32 \

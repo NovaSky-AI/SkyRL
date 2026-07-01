@@ -120,7 +120,7 @@ def _validate_serve_cfg(cfg: SkyRLTrainConfig) -> None:
         )
 
     # Shared inference-engine validation (PD, parallelism, executor backend,
-    # new inference layer). Resolves `override_existing_update_group="auto"`.
+    # new inference layer).
     validate_inference_engine_cfg(cfg)
 
 

@@ -44,9 +44,8 @@ class DataLoaderConfig(BaseConfig):
         default=None,
         metadata={
             "help": (
-                "Prompt DataLoader worker processes. Default of None auto-derives the value "
-                "(0 with the inference HTTP endpoint, else 8). Set 0 for in-process loading "
-                "that never respawns workers at epoch boundaries."
+                "Prompt DataLoader worker processes. Default of None auto-derives to 8. "
+                "Set 0 for in-process loading that never respawns workers at epoch boundaries."
             )
         },
     )
@@ -575,7 +574,6 @@ class InferenceEngineConfig(BaseConfig):
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1
     data_parallel_size: int = 1
-    async_engine: bool = True
     vllm_v1_disable_multiproc: bool = True
     """Sets ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` for reproducibility."""
     enable_prefix_caching: bool = True
@@ -597,12 +595,6 @@ class InferenceEngineConfig(BaseConfig):
     its sleep/wake memory pool. On older vLLM, sleep mode + expandable segments is a hard
     error, so leave this off."""
     max_num_seqs: int = 1024
-    remote_urls: List[str] = field(default_factory=lambda: [])
-    enable_http_endpoint: bool = False
-    """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
-    
-    NOTE: When using HTTP endpoints directly, make sure to set ``trainer.algorithm.temperature`` to the temperature used during generation
-    """
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
@@ -615,8 +607,6 @@ class InferenceEngineConfig(BaseConfig):
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
-    override_existing_update_group: str = "auto"
-    """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
@@ -665,9 +655,6 @@ class GeneratorConfig(BaseConfig):
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
     exceed max length (truncated, no EOS token)."""
-    rope_scaling: Optional[Dict[str, Any]] = None
-    """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
-    rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
     vision_language_generator: bool = False
     """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts)"""
@@ -794,8 +781,6 @@ class TrainerConfig(BaseConfig):
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
     dump_eval_results: bool = True
-    rope_scaling: Optional[Dict[str, Any]] = None
-    rope_theta: Optional[float] = None
     log_example_interval: int = 1
     """Log an example prompt every N training steps, ``0``/``-1`` to disable"""
     logprobs_chunk_size: Optional[int] = 1024
@@ -840,6 +825,40 @@ def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
     valid_fields = {f.name for f in dataclasses.fields(datacls)}
     if invalid_keys := set(d.keys() - valid_fields):
         raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
+
+
+def _has_nested_key(cfg: Any, path: str) -> bool:
+    node = cfg
+    for key in path.split("."):
+        if not isinstance(node, (dict, DictConfig)) or key not in node:
+            return False
+        node = node[key]
+    return True
+
+
+_MISSING = object()
+
+
+def _get_nested_value(cfg: Any, path: str) -> Any:
+    node = cfg
+    for key in path.split("."):
+        if not isinstance(node, (dict, DictConfig)) or key not in node:
+            return _MISSING
+        node = node[key]
+    if isinstance(node, DictConfig):
+        return OmegaConf.to_container(node, resolve=True)
+    return node
+
+
+def _delete_nested_key(cfg: Any, path: str) -> None:
+    keys = path.split(".")
+    node = cfg
+    for key in keys[:-1]:
+        if not isinstance(node, (dict, DictConfig)) or key not in node:
+            return
+        node = node[key]
+    if isinstance(node, (dict, DictConfig)) and keys[-1] in node:
+        del node[keys[-1]]
 
 
 def _resolve_class_type(type_annotation: Any) -> Optional[Type]:
@@ -927,23 +946,16 @@ class SkyRLTrainConfig(BaseConfig):
         if self.generator.max_input_length is None:
             self.generator.max_input_length = self.trainer.max_prompt_length
 
-        # generator rope params default to trainer rope params
-        if self.generator.rope_scaling is None and self.trainer.rope_scaling is not None:
-            self.generator.rope_scaling = self.trainer.rope_scaling
-        if self.generator.rope_theta is None and self.trainer.rope_theta is not None:
-            self.generator.rope_theta = self.trainer.rope_theta
         # Copy temperature from generator sampling params to algorithm config
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
         if self.data.dataloader.num_workers is None:
-            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-            self.data.dataloader.num_workers = 0 if self.generator.inference_engine.enable_http_endpoint else 8
+            self.data.dataloader.num_workers = 8
         if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:
             raise ValueError(
-                "data.dataloader.persistent_workers requires num_workers > 0, but it was either"
-                " set explicitly to 0 or forced to 0 by the inference HTTP endpoint."
+                "data.dataloader.persistent_workers requires num_workers > 0, but it was set explicitly to 0."
             )
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
@@ -997,6 +1009,80 @@ class SkyRLTrainConfig(BaseConfig):
                     "To add custom config fields, subclass the relevant config dataclass."
                 )
         overrides = OmegaConf.from_cli(args)
+        unsupported_rope_paths = (
+            "trainer.rope_scaling",
+            "trainer.rope_theta",
+            "trainer.rope_parameters",
+            "generator.rope_scaling",
+            "generator.rope_theta",
+            "generator.rope_parameters",
+            "generator.inference_engine.rope_scaling",
+            "generator.inference_engine.rope_theta",
+            "generator.inference_engine.rope_parameters",
+            "generator.inference_engine.engine_init_kwargs.rope_scaling",
+            "generator.inference_engine.engine_init_kwargs.rope_theta",
+            "generator.inference_engine.engine_init_kwargs.rope_parameters",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_scaling",
+            "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_theta",
+        )
+        if any(_has_nested_key(overrides, path) for path in unsupported_rope_paths):
+            raise ValueError(
+                "`rope_scaling`, `rope_theta`, and `rope_parameters` are no longer supported as native "
+                "config overrides, use `generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` "
+                "and `trainer.policy.model_config_kwargs.rope_parameters` or "
+                "`trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters` instead"
+            )
+        inference_rope_parameters = _get_nested_value(
+            overrides, "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters"
+        )
+        if inference_rope_parameters is not _MISSING:
+            trainer_strategy = _get_nested_value(overrides, "trainer.strategy")
+            trainer_strategy = "fsdp" if trainer_strategy is _MISSING else trainer_strategy
+            trainer_rope_parameters_path = (
+                "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters"
+                if trainer_strategy == "megatron"
+                else "trainer.policy.model_config_kwargs.rope_parameters"
+            )
+            trainer_rope_parameters = _get_nested_value(overrides, trainer_rope_parameters_path)
+            if inference_rope_parameters != trainer_rope_parameters:
+                raise ValueError(
+                    "`generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` must match "
+                    f"the trainer-side override at `{trainer_rope_parameters_path}`"
+                )
+        async_engine_path = "generator.inference_engine.async_engine"
+        async_engine = _get_nested_value(overrides, async_engine_path)
+        if async_engine is not _MISSING:
+            if async_engine is True or (isinstance(async_engine, str) and async_engine.lower() == "true"):
+                _delete_nested_key(overrides, async_engine_path)
+            elif async_engine is False or (isinstance(async_engine, str) and async_engine.lower() == "false"):
+                raise ValueError(
+                    "`async_engine=False` is no longer supported; SkyRL always uses the async "
+                    "HTTP/vLLM inference path. Remove the override."
+                )
+            else:
+                raise ValueError("`async_engine` is no longer supported as a config field. Remove the override.")
+        removed_inference_engine_overrides = {
+            "generator.inference_engine.enable_http_endpoint": (
+                "`enable_http_endpoint` is no longer supported; SkyRL always uses the HTTP/vLLM inference path. "
+                "Remove the override."
+            ),
+            "generator.inference_engine.override_existing_update_group": (
+                "`override_existing_update_group` is no longer supported; update-group handling is managed "
+                "automatically by the vLLM-native inference path. Remove the override."
+            ),
+        }
+        for path, message in removed_inference_engine_overrides.items():
+            if _has_nested_key(overrides, path):
+                raise ValueError(message)
+        if (
+            "generator" in overrides
+            and "inference_engine" in overrides.generator
+            and "remote_urls" in overrides.generator.inference_engine
+        ):
+            raise ValueError(
+                "`remote_urls` is no longer supported, external inference servers can be used with "
+                "`external_proxy_url` and `external_server_urls` instead"
+            )
         # Accept the deprecated ``trainer.use_sample_packing`` key as an alias
         # for ``trainer.remove_microbatch_padding``. Remap it before
         # construction so the strict key validation does not reject the old

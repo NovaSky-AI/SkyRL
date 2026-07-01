@@ -195,9 +195,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     reports the full DP world size per server, so we divide by num_deployments."""
 
     model_name: str = "default"
-    """The base model identifier the inference server was started with.
+    """The model identifier accepted by the inference server for the base model.
 
-    Always the base model — never a LoRA adapter name. LoRA adapters are
+    This is usually the model path, but may be ``served_model_name`` when vLLM
+    is started with an alias. It is never a LoRA adapter name. LoRA adapters are
     addressed by the names callers register them under via
     ``load_lora_adapter(name, path)``, and per-call routing is done by
     passing that name as ``model`` on the data-plane methods.
@@ -998,11 +999,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode (InferenceEngineInterface method)."""
+        """Pause using keep mode."""
         return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Resume after pause (InferenceEngineInterface method)."""
+        """Resume after pause."""
         return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:

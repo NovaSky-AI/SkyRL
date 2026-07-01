@@ -34,14 +34,12 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.served_model_name="Qwen3-8B" \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
-  generator.inference_engine.enable_http_endpoint=true \
   generator.sampling_params.max_generate_length=4096 \
   trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
   generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.engine_init_kwargs.chat_template=$CHAT_TEMPLATE_PATH \
   trainer.algorithm.advantage_estimator="grpo" \

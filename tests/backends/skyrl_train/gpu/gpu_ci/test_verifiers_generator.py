@@ -28,7 +28,6 @@ def verifiers_runtime():
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model
     cfg.generator.max_input_length = 2048
-    cfg.generator.inference_engine.enable_http_endpoint = True
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client
@@ -36,7 +35,6 @@ def verifiers_runtime():
         cfg=cfg,
         model=model,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         backend="vllm",
@@ -72,8 +70,6 @@ async def _run_verifiers_end_to_end(
     generator_cfg = GeneratorConfig(
         sampling_params=SamplingParams(max_generate_length=max_generate_length, logprobs=None),
         max_input_length=max_input_length,
-        backend="vllm",
-        enable_http_endpoint=True,
     )
 
     from integrations.verifiers.verifiers_generator import VerifiersGenerator

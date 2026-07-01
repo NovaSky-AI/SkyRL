@@ -61,7 +61,6 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = num_inference_engines
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.inference_engine.run_engines_locally = True

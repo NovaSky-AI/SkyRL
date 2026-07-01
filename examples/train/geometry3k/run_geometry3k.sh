@@ -51,7 +51,6 @@ uv run --isolated --extra fsdp --with pylatexenc \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.vision_language_generator=true \
   environment.env_class=geometry3k \

@@ -223,7 +223,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             master_port=master_port,
             rank_offset=1,
             world_size=world_size,
-            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
+            override_existing_receiver=not ie_cfg.run_engines_locally,
         )
 
     @staticmethod

@@ -27,7 +27,7 @@ The `generator.inference_engine.run_engines_locally` argument controls inference
 
 If `run_engines_locally=true`, then the inference engines are launched during the training run and managed by SkyRL.
 
-If `run_engines_locally=false`, then the user can specify inference engine URLs managed externally (with the `generator.inference_engine.remote_urls` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines [here](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/remote_inference_engine) for convenience.
+If `run_engines_locally=false`, then the user can specify inference server URLs managed externally with `generator.inference_engine.external_server_urls` (and routing managed by SkyRL) or routing + inference servers managed externally with `generator.inference_engine.external_proxy_url` and `generator.inference_engine.external_server_url`. In this case, the user is responsible for setup and teardown. Note that SkyRL expects additional control-plane endpoints for weight syncing. We provide scripts for launching remote inference servers [here](https://github.com/NovaSky-AI/SkyRL/blob/fc829f830c039e9356e4c968b350e47cc7a1807d/examples/serve/run_serve_qwen1.5b.sh) for convenience.
 
 ## Inference Engine Placement
 
@@ -104,4 +104,4 @@ generator:
    **Resource Allocation Guidelines**
    
    - When `colocate_all=true`, all training models should have identical node and GPU counts.
-   - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+   - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for the inference engines should match the total number of GPUs used for training models.

@@ -147,7 +147,6 @@ def get_vlm_test_config(model: str) -> SkyRLTrainConfig:
     cfg.generator.step_wise_trajectories = False
     cfg.generator.apply_overlong_filtering = False
     cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.inference_engine.run_engines_locally = True

@@ -1,13 +1,18 @@
 from typing import Optional
-from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from openai import AsyncOpenAI
+
 import httpx
-from verifiers import load_environment
-from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
-from skyrl.train.generators.utils import get_rollout_metrics
+from openai import AsyncOpenAI
 
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.config import GeneratorConfig
+from skyrl.train.generators.base import (
+    GeneratorInput,
+    GeneratorInterface,
+    GeneratorOutput,
+)
+from skyrl.train.generators.utils import get_rollout_metrics
+from verifiers import load_environment
+from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
 
 
 class VerifiersGenerator(GeneratorInterface):
@@ -28,8 +33,6 @@ class VerifiersGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = model_name
 
-        ie_cfg = generator_cfg.inference_engine
-        assert ie_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
         self.base_url = f"{inference_engine_client.get_endpoint_url()}/v1"
         self.client = self._setup_client(connection_limit=None)  # None means unlimited connections
 

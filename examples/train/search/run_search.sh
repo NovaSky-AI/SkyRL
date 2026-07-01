@@ -96,7 +96,6 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   $MULTI_TURN_ARGS \
   $STEP_WISE_ARGS \

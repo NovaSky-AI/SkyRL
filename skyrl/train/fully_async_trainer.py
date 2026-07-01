@@ -367,7 +367,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
-        assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
         assert self.cfg.trainer.algorithm.policy_loss_type not in LOSSES_WITH_OLD_LOGPROBS, (

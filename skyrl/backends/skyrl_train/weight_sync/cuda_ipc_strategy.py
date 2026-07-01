@@ -277,7 +277,7 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(
             model_dtype_str=ie_cfg.model_dtype,
-            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
+            override_existing_receiver=not ie_cfg.run_engines_locally,
         )
 
     @staticmethod

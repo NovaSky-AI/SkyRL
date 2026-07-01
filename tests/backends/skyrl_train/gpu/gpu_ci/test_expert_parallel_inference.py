@@ -41,7 +41,6 @@ def test_config() -> SkyRLTrainConfig:
 
     # vLLM generator with EP enabled
     cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
     cfg.generator.inference_engine.tensor_parallel_size = 2
     cfg.generator.inference_engine.expert_parallel_size = 2

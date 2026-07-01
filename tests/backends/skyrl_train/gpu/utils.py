@@ -483,7 +483,6 @@ class InferenceEngineState:
         # optional overrides
         model: Optional[str] = None,
         use_local: Optional[bool] = None,
-        async_engine: Optional[bool] = None,
         tp_size: Optional[int] = None,
         colocate_all: Optional[bool] = None,
         backend: Optional[str] = None,
@@ -513,8 +512,6 @@ class InferenceEngineState:
             ie_cfg.backend = backend
         if use_local is not None:
             ie_cfg.run_engines_locally = use_local
-        if async_engine is not None:
-            ie_cfg.async_engine = async_engine
         if tp_size is not None:
             ie_cfg.tensor_parallel_size = tp_size
         if colocate_all is not None:

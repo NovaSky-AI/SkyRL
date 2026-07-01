@@ -26,7 +26,7 @@ REWARD_MIN_VALUE=0.0
 # Non-colocated layout: 2 GPUs for the trainer (FSDP policy) and 2 GPUs for the
 # inference engines (vLLM). micro_batch=4 (vs. CI default 8) to leave headroom
 # for the larger 1024-token sequences and 8B params on a 2-way FSDP shard.
-BACKEND_CONFIG='{"trainer.placement.colocate_all": false, "trainer.placement.policy_num_gpus_per_node": 2, "trainer.micro_forward_batch_size_per_gpu": 4, "trainer.micro_train_batch_size_per_gpu": 4, "generator.inference_engine.num_engines": 2, "generator.inference_engine.tensor_parallel_size": 1, "generator.inference_engine.backend": "vllm", "generator.inference_engine.run_engines_locally": true, "generator.inference_engine.weight_sync_backend": "nccl", "generator.inference_engine.async_engine": true, "generator.inference_engine.gpu_memory_utilization": 0.8, "generator.batched": true}'
+BACKEND_CONFIG='{"trainer.placement.colocate_all": false, "trainer.placement.policy_num_gpus_per_node": 2, "trainer.micro_forward_batch_size_per_gpu": 4, "trainer.micro_train_batch_size_per_gpu": 4, "generator.inference_engine.num_engines": 2, "generator.inference_engine.tensor_parallel_size": 1, "generator.inference_engine.backend": "vllm", "generator.inference_engine.run_engines_locally": true, "generator.inference_engine.weight_sync_backend": "nccl", "generator.inference_engine.gpu_memory_utilization": 0.8, "generator.batched": true}'
 
 setsid uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
   --base-model "$MODEL_NAME" --backend fsdp --port 8000 \

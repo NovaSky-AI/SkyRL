@@ -55,7 +55,6 @@ def get_test_config(
     cfg.generator.use_conversation_multi_turn = use_conversation_multi_turn
     cfg.generator.apply_overlong_filtering = False
     cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.enable_http_endpoint = False
     cfg.generator.step_wise_trajectories = is_step_wise
     cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
     cfg.environment.skyrl_gym.search.log_requests = True
@@ -105,7 +104,6 @@ MODEL_TO_GENERATION_PROMPT = {
 
 
 async def run_generator_end_to_end(
-    use_async_engine,
     batched,
     n_samples_per_prompt,
     num_inference_engines,
@@ -145,12 +143,11 @@ async def run_generator_end_to_end(
         enable_return_routed_experts,
     )
 
-    # Use InferenceEngineState to support both legacy and new inference backends
+    # Use InferenceEngineState to launch and clean up local inference servers.
     async with InferenceEngineState.create(
         cfg=cfg,
         model=model,
         use_local=True,
-        async_engine=use_async_engine,
         tp_size=tensor_parallel_size,
         colocate_all=False,
         backend="vllm",
@@ -193,7 +190,7 @@ async def run_generator_end_to_end(
             ),
         )
 
-        with Timer(f"generate_responses_async_engine_{use_async_engine}"):
+        with Timer("generate_responses"):
             generator_output = await generator.generate(input_batch)
 
         prompts_out = generator_output["prompt_token_ids"]
@@ -257,25 +254,24 @@ async def run_generator_end_to_end(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("use_async_engine", "batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
+    ("batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
     [
-        (False, True, 5, 2, 1),  # tests SkyRLGymGenerator.generate_batched for single-turn
-        (True, False, 5, 1, 2),  # tests SkyRLGymGenerator.agent_loop for single-turn
+        (True, 5, 2, 1),  # tests SkyRLGymGenerator.generate_batched for single-turn
+        (False, 5, 1, 2),  # tests SkyRLGymGenerator.agent_loop for single-turn
         # Add more combinations as needed
     ],
     ids=[
         "test_generator_single_turn_gsm8k_batched",
-        "test_generator_single_turn_gsm8k_async_engine",
+        "test_generator_single_turn_gsm8k_agent_loop",
     ],
 )
 async def test_generator_single_turn_gsm8k(
-    ray_init_fixture, use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
+    ray_init_fixture, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
 ):
     """
     Test the generator with a single turn of GSM8K
     """
     await run_generator_end_to_end(
-        use_async_engine=use_async_engine,
         batched=batched,
         n_samples_per_prompt=n_samples_per_prompt,
         num_inference_engines=num_inference_engines,
@@ -291,7 +287,6 @@ async def test_generator_multi_turn_search(ray_init_fixture):
     Test the generator with multiple turns of search
     """
     await run_generator_end_to_end(
-        use_async_engine=True,
         batched=False,
         n_samples_per_prompt=5,
         num_inference_engines=2,
@@ -319,7 +314,6 @@ async def test_generator_formatting_use_conversation_multi_turn(ray_init_fixture
     """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     generator_output = await run_generator_end_to_end(
-        use_async_engine=True,
         batched=False,
         n_samples_per_prompt=1,
         num_inference_engines=1,
@@ -391,7 +385,6 @@ async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixt
     """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     generator_output = await run_generator_end_to_end(
-        use_async_engine=True,
         batched=False,
         n_samples_per_prompt=1,
         num_inference_engines=1,
@@ -451,7 +444,6 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
     Test the generator with the multi-turn GSM8K environment for step-wise training
     """
     generator_output: GeneratorOutput = await run_generator_end_to_end(
-        use_async_engine=True,
         batched=False,
         n_samples_per_prompt=5,
         num_inference_engines=2,
@@ -484,7 +476,6 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
     n_samples_per_prompt = 2
     max_input_length = 4096
     generator_output: GeneratorOutput = await run_generator_end_to_end(
-        use_async_engine=True,
         batched=False,
         n_samples_per_prompt=n_samples_per_prompt,
         num_inference_engines=2,

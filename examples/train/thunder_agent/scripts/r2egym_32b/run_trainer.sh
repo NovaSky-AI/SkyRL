@@ -321,10 +321,8 @@ fi
   generator.inference_engine.num_engines="$ROLLOUT_ENGINES" \
   generator.inference_engine.tensor_parallel_size="$ROLLOUT_TP_SIZE" \
   generator.inference_engine.run_engines_locally=false \
-  generator.inference_engine.remote_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.external_server_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.backend=vllm \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.enforce_eager="$ROLLOUT_ENFORCE_EAGER" \

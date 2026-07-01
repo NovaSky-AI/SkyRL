@@ -413,8 +413,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
         NotImplementedError: if feature is not supported
         ValueError: when cfg.generator.sampling_params.logprobs > 1
     """
-    ie_cfg = cfg.generator.inference_engine
-
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -424,11 +422,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
-
-    if not ie_cfg.async_engine and ie_cfg.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
@@ -468,9 +461,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     Shared between the training path (via :func:`validate_generator_cfg`) and the
     inference-only serve entrypoint (``skyrl.train.entrypoints.serve``).
 
-    NOTE: this also resolves ``inference_engine.override_existing_update_group="auto"``
-    in place.
-
     Args:
         cfg (SkyRLTrainConfig): config to validate
 
@@ -485,20 +475,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             ie_cfg.num_prefill < ie_cfg.num_engines
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
-
-    if ie_cfg.override_existing_update_group == "auto":
-        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            ie_cfg.override_existing_update_group = "enable"
-        else:
-            # for local engines, we disable
-            ie_cfg.override_existing_update_group = "disable"
-
-    if ie_cfg.enable_http_endpoint:
-        if not ie_cfg.async_engine:
-            raise ValueError(
-                "inference_engine.async_engine must be True when inference_engine.enable_http_endpoint==True."
-            )
 
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
@@ -544,11 +520,12 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     """Validates config options for the inference layer.
 
     Config combinations:
-    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
-    - Neither set → Build servers internally
-    - external_server_urls only → Create router over external servers
-    - external_proxy_url only → Use proxy for both data + control plane
-    - Both set → Fully external (proxy for data plane, servers for control plane)
+    - Colocated + external URLs -> ERROR (requires driver-managed servers for PG sharing)
+    - run_engines_locally=False + no external URLs -> ERROR
+    - Neither set + run_engines_locally=True -> Build servers internally
+    - external_server_urls only -> Create router over external servers
+    - external_proxy_url only -> Use proxy for both data + control plane
+    - Both set -> Fully external (proxy for data plane, servers for control plane)
 
     Args:
         cfg: The config to validate.
@@ -568,6 +545,12 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
+    if not cfg.generator.inference_engine.run_engines_locally and not (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "generator.inference_engine.run_engines_locally=false requires "
+            "external_proxy_url or external_server_urls."
         )
 
 

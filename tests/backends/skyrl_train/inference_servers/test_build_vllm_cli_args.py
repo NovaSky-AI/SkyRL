@@ -20,9 +20,13 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     monkeypatch.setattr(vllm.platforms, "_current_platform", UnspecifiedPlatform())
 
     cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.engine_init_kwargs = {
+        "hf_overrides": {"rope_parameters": {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}}
+    }
     args = build_vllm_cli_args(cfg)
 
     assert args is not None
     assert args.model == cfg.trainer.policy.model.path
     assert args.tensor_parallel_size == cfg.generator.inference_engine.tensor_parallel_size
+    assert args.hf_overrides["rope_parameters"] == {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}
     assert vllm.platforms.current_platform.device_type == "cuda"
