@@ -2,7 +2,10 @@
 
 import pytest
 
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    build_vllm_cli_args,
+    resolve_policy_model_name,
+)
 from skyrl.train.config import SkyRLTrainConfig
 
 
@@ -32,3 +35,11 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     assert args.tensor_parallel_size == cfg.generator.inference_engine.tensor_parallel_size
     assert args.hf_overrides["rope_parameters"] == {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}
     assert vllm.platforms.current_platform.device_type == "cuda"
+
+
+def test_resolve_policy_model_name_uses_served_model_name():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = "base-model"
+    cfg.generator.inference_engine.served_model_name = "served-alias"
+
+    assert resolve_policy_model_name(cfg) == "served-alias"

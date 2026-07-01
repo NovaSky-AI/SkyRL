@@ -116,6 +116,7 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
         return ThunderAgentRemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
+            data_parallel_size=ie_cfg.data_parallel_size,
             model_name=self.cfg.trainer.policy.model.path,
         )
 
