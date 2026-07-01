@@ -25,8 +25,9 @@
 #     fallback; we additionally surface a module-level flag and a hard guard.)
 #   * Added ``FusedLinearLogprobTriton`` autograd Function — a SkyRL-shaped
 #     adapter around verl's ``LinearCrossEntropy``/kernels that matches the
-#     pure-torch ``FusedLinearLogprob`` contract in ``model_utils.py`` exactly
-#     (see that class for the contract). This is NEW code, not from verl.
+#     pure-torch ``FusedLinearChunkedDistributedLogprob`` contract in
+#     ``model_utils.py`` exactly (see that class for the contract). This is NEW
+#     code, not from verl.
 #
 # NOTE on the #2656 out-of-bounds-vocab fix: verl's forward mainloop masks
 # out-of-bounds vocab columns to -inf for the LSE max/exp/denominator while
@@ -68,7 +69,7 @@
 This module vendors verl's online-softmax fused linear-cross-entropy Triton
 kernels (with the #2656 TP all-reduce / OOB-vocab masking scheme) and exposes
 :class:`FusedLinearLogprobTriton`, an autograd Function that matches the exact
-interface of the pure-torch ``FusedLinearLogprob`` in ``model_utils.py``.
+interface of the pure-torch ``FusedLinearChunkedDistributedLogprob`` in ``model_utils.py``.
 
 Triton/CUDA is required to actually *run* the kernel, but the module is import-safe
 without triton (``TRITON_AVAILABLE`` will be ``False`` and the adapter raises a
@@ -1888,8 +1889,9 @@ linear_cross_entropy = LinearCrossEntropy.apply
 
 
 # ======================================================================================
-# SkyRL adapter (NEW code — not from verl). Matches the pure-torch FusedLinearLogprob
-# contract in model_utils.py exactly so the two backends are interchangeable.
+# SkyRL adapter (NEW code — not from verl). Matches the pure-torch
+# FusedLinearChunkedDistributedLogprob contract in model_utils.py exactly so the two
+# backends are interchangeable.
 # ======================================================================================
 
 # A label sentinel guaranteed to fall in NO shard's column range after re-keying. verl
@@ -1905,11 +1907,13 @@ def _verl_logprob_kernel_available() -> bool:
 class FusedLinearLogprobTriton(torch.autograd.Function):
     """Triton fused LM-head + vocab-parallel log-prob of the target token.
 
-    Drop-in, interface-identical replacement for the pure-torch ``FusedLinearLogprob``
-    in ``model_utils.py`` (same ``apply`` signature, same return/grad contract), backed by
-    verl's online-softmax fused linear-cross-entropy Triton kernels (vendored above).
+    Drop-in, interface-identical replacement for the pure-torch
+    ``FusedLinearChunkedDistributedLogprob`` in ``model_utils.py`` (same ``apply`` signature, same
+    return/grad contract), backed by verl's online-softmax fused linear-cross-entropy Triton
+    kernels (vendored above). Selected via ``fused_lm_head_logprob_backend="triton"`` and dispatched
+    from ``model_utils._fused_lm_head_logprob_apply``.
 
-    Contract (must match ``FusedLinearLogprob`` exactly):
+    Contract (must match ``FusedLinearChunkedDistributedLogprob`` exactly):
       * ``apply(hidden, weight, target, vocab_start_index, vocab_end_index, chunk_size,
         tp_group, inference_only=False) -> log_probs``.
       * ``hidden``: ``[B, S, H]`` (TP-replicated / SP-already-gathered by the caller).
@@ -1942,7 +1946,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
          label-logit all-reduce. verl's epilogue would then return ``max + log(accu) - 0`` = the
          LSE (garbage, not 0). We therefore force ``log_prob = 0`` for fully-OOV positions in
          forward. We do NOT touch the backward gradient at those positions: the references (stock
-         ``DistributedLogprob`` and the pure-torch ``FusedLinearLogprob``) still emit
+         ``DistributedLogprob`` and the pure-torch ``FusedLinearChunkedDistributedLogprob``) still emit
          ``-softmax * grad_output`` there (the chosen-position term is absent because no shard owns
          the column), and verl's kernel already reproduces that exact value for sentinel-keyed
          labels. Zeroing the backward gradient at those positions would drop that term and diverge
@@ -1964,8 +1968,8 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         if not _verl_logprob_kernel_available():
             raise RuntimeError(
                 "FusedLinearLogprobTriton requires Triton (and a CUDA device), but triton is not "
-                "importable. Install the optional 'triton' extra, or use the pure-torch "
-                "FusedLinearLogprob backend instead."
+                "importable. Install the optional 'triton' extra, or use the default pure-torch "
+                "'torch' backend (FusedLinearChunkedDistributedLogprob) instead."
             )
 
         B, S, H = hidden.shape
@@ -1983,7 +1987,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
 
         # hidden must be contiguous & 2D for the kernel. The kernel's ``tl.dot(hidden, weight.T)``
         # requires BOTH operands to share a dtype, so cast hidden to the LM-head weight dtype here
-        # — exactly what the pure-torch ``FusedLinearLogprob`` does (``hidden.to(weight.dtype) @
+        # — exactly what the pure-torch ``FusedLinearChunkedDistributedLogprob`` does (``hidden.to(weight.dtype) @
         # weight.t()``) and what ``ColumnParallelLinear`` does before its bf16 GEMM. On a real
         # hybrid model the pre-head hidden is fp32 (final norm) while the head is bf16, so without
         # this the kernel asserts "Both operands must be same dtype. Got fp32 and bf16". When the
@@ -2047,7 +2051,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         # would otherwise return the LSE there (no shard contributes the label logit). But the
         # GRADIENT contract is set by the references this backend must match exactly — stock
         # ``DistributedLogprob`` / ``ChunkedDistributedLogprob`` and the pure-torch
-        # ``FusedLinearLogprob`` in model_utils.py. Those compute, for every position
+        # ``FusedLinearChunkedDistributedLogprob`` in model_utils.py. Those compute, for every position
         # (in-shard, out-of-shard, or fully-OOV alike):
         #     d_logits = grad_output * (onehot(target) - softmax)
         # and only ADD the ``onehot`` (chosen-position) term where the target is owned by this

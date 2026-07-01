@@ -11,8 +11,8 @@ liger port:
   nvidia       : same logits, then ``fused_vocab_parallel_cross_entropy``
                  (@jit_fuser fused CE — fuses the softmax/CE stages, still
                  materializes the logits).
-  fused-torch  : FusedLinearLogprob (pure-torch chunked fused linear logprob —
-                 folds the projection into the chunked TP log-prob; logits never
+  fused-torch  : FusedLinearChunkedDistributedLogprob (pure-torch chunked fused linear
+                 logprob — folds the projection into the chunked TP log-prob; logits never
                  materialized).
   fused-triton : FusedLinearLogprobTriton (vendored verl/bytedance flash kernel).
 
@@ -49,14 +49,16 @@ def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
     from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
 
     from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-        FusedLinearLogprob,
+        FusedLinearChunkedDistributedLogprob,
     )
     from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
         FusedLinearLogprobTriton,
     )
 
     if mode == "fused-torch":
-        lp = FusedLinearLogprob.apply(hidden, weight, target, 0, vocab_local, chunk_size, tp_group, False)
+        lp = FusedLinearChunkedDistributedLogprob.apply(
+            hidden, weight, target, 0, vocab_local, chunk_size, tp_group, False
+        )
         return (-lp).sum()
     if mode == "fused-triton":
         lp = FusedLinearLogprobTriton.apply(hidden, weight, target, 0, vocab_local, chunk_size, tp_group, False)
@@ -138,7 +140,7 @@ def main():
         print(f"Device {torch.cuda.get_device_name(device)} | TP(world)={world} | hidden={HIDDEN} | chunk={args.chunk_size}")
         print(
             "baseline = vocab_parallel_cross_entropy (eager) | nvidia = fused_vocab_parallel_cross_entropy | "
-            "fused-torch = FusedLinearLogprob | fused-triton = FusedLinearLogprobTriton"
+            "fused-torch = FusedLinearChunkedDistributedLogprob | fused-triton = FusedLinearLogprobTriton"
         )
         print("all: hidden+weight -> per-token CE -> sum -> backward\n")
         print("correctness (TP=%d, vocab=%d):" % (world, vocab_shards[0]))
