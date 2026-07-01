@@ -202,7 +202,7 @@ class SFTConfig(BaseConfig):
     # ---- Data loading ----
     num_workers: int = 8
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
-    prefetch_data: bool = True
+    async_batch_collation: bool = True
     """Fetch and collate step N+1 from the stateful dataloader on a background
     thread while step N runs on the GPU. Checkpoint state remains pinned after
     the current batch, and epoch transitions stay owned by the dataloader. Set
