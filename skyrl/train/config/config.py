@@ -156,11 +156,106 @@ class MegatronDDPConfig(BaseConfig):
     average_in_collective: bool = True
 
 
+TORCH_PROFILER_ACTIVITIES = ("cpu", "cuda")
+TORCH_PROFILER_EXPORT_TYPES = ("chrome_trace", "stacks")
+
+
 @dataclass
-class MegatronTorchProfilerConfig(BaseConfig):
+class TorchProfilerConfig(BaseConfig):
+    """``torch.profiler`` config for policy training steps."""
+
     enable: bool = False
-    ranks: List[int] = field(default_factory=list)
+    ranks: List[int] = field(default_factory=lambda: [0])
     save_path: Optional[str] = None
+    """Trace output dir. Required when ``enable=True``; must be a local absolute path."""
+
+    # torch.profiler.schedule
+    skip_first: int = 10
+    """Steps to skip before scheduling begins."""
+    wait: int = 0
+    warmup: int = 1
+    active: int = 1
+    """Number of steps recorded per cycle."""
+    repeat: int = 1
+    """Number of cycles. 0 means forever."""
+
+    # torch.profiler.profile
+    activities: List[str] = field(default_factory=lambda: ["cpu", "cuda"])
+    record_shapes: bool = True
+    profile_memory: bool = False
+    with_stack: bool = True
+    with_flops: bool = False
+    with_modules: bool = False
+    export_type: str = "chrome_trace"
+    """``chrome_trace`` or ``stacks``; stacks require ``with_stack=True``."""
+
+    def validate(
+        self,
+        strategy: Optional[str] = None,
+        colocate_all: Optional[bool] = None,
+        colocate_policy_ref: Optional[bool] = None,
+        fsdp_cpu_offload: Optional[bool] = None,
+    ) -> None:
+        """Fail fast on invalid or known-incompatible profiler settings."""
+        if not self.enable:
+            return
+        if not self.ranks:
+            raise ValueError("`torch_profiler_config.ranks` must be non-empty when profiling is enabled.")
+        # Avoid implicit relative paths in Ray runtime working dirs.
+        if not self.save_path:
+            raise ValueError(
+                "`torch_profiler_config.save_path` must be set when profiling is enabled. "
+                "Use an absolute local path -- Ray workers run from a /tmp/ray runtime "
+                "working dir, so a relative path would write traces there."
+            )
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
+        if is_cloud_path(self.save_path):
+            raise ValueError(
+                f"`torch_profiler_config.save_path` must be a local path; got cloud URI "
+                f"{self.save_path!r}. torch.profiler cannot write to cloud storage."
+            )
+        # Empty activities record nothing.
+        if not self.activities:
+            raise ValueError("`torch_profiler_config.activities` must be non-empty when profiling is enabled.")
+        bad_activities = [a for a in self.activities if a.lower() not in TORCH_PROFILER_ACTIVITIES]
+        if bad_activities:
+            raise ValueError(
+                f"invalid `torch_profiler_config.activities` entries {bad_activities}. "
+                f"Each must be one of {list(TORCH_PROFILER_ACTIVITIES)}."
+            )
+        if self.export_type not in TORCH_PROFILER_EXPORT_TYPES:
+            raise ValueError(
+                f"invalid `torch_profiler_config.export_type`: {self.export_type!r}. "
+                f"Must be one of {list(TORCH_PROFILER_EXPORT_TYPES)}."
+            )
+        if self.export_type == "stacks" and not self.with_stack:
+            raise ValueError(
+                "`torch_profiler_config.export_type='stacks'` requires `with_stack=true` "
+                "(torch.profiler.export_stacks needs stack records)."
+            )
+        for name in ("skip_first", "wait", "warmup", "repeat"):
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"`torch_profiler_config.{name}` must be >= 0, got {value}.")
+        if self.active < 1:
+            raise ValueError(f"`torch_profiler_config.active` must be >= 1, got {self.active}.")
+
+        # FSDP manual CPU offload uses swap_tensors, which conflicts with profiler-held
+        # parameter refs during colocated runs.
+        if strategy == "fsdp" and fsdp_cpu_offload is False and (colocate_all or colocate_policy_ref):
+            raise ValueError(
+                "`torch_profiler_config.enable=true` is incompatible with this FSDP configuration: "
+                "with the manual CPU-offload path (`policy.fsdp_config.cpu_offload=false`, the default) "
+                "under colocation "
+                f"(`placement.colocate_all={colocate_all}`, `placement.colocate_policy_ref={colocate_policy_ref}`), "
+                "the trainer offloads models to CPU via `torch.utils.swap_tensors` while the profiler holds "
+                "references to their parameters, which crashes mid-run with "
+                "`RuntimeError: _apply(): Couldn't swap <param>`. "
+                "To profile: set `policy.fsdp_config.cpu_offload=true` (FSDP2-native offload, no swap), or "
+                "disable colocation (`placement.colocate_all=false` and `placement.colocate_policy_ref=false`), "
+                "or use the Megatron backend (`trainer.strategy=megatron`)."
+            )
 
 
 @dataclass
@@ -207,7 +302,6 @@ class MegatronConfig(BaseConfig):
     moe_router_dtype: str = "fp32"
     """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
-    torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
@@ -273,6 +367,8 @@ class PolicyConfig(BaseConfig):
     record_memory: bool = False
     """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
+    torch_profiler_config: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
+    """``torch.profiler`` config for policy training steps."""
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
     model_config_kwargs: dict = field(default_factory=dict)
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).

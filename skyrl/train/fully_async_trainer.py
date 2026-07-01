@@ -461,185 +461,197 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         start_epoch = resumed_start_epoch if resumed_start_epoch is not None else 0
         self.global_step += 1  # start training at global_step 1
         stop_training = False
-        for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            self.epoch = epoch
-            # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
+        self._profiler_start()
+        try:
+            for epoch in range(start_epoch, self.cfg.trainer.epochs):
+                self.epoch = epoch
+                # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
-            generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
-            )
-
-            # Maintain self.num_parallel_generation_workers concurrent group-generation workers
-            generator_tasks = [
-                asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
-                for _ in range(self.num_parallel_generation_workers)
-            ]
-
-            # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
-            # blocking forever on buffer.get() -- under sample_full_batch, drops can exhaust an epoch
-            # before num_steps_per_epoch steps complete.
-            all_generators_done = asyncio.Event()
-            generators_done_watcher = None
-            if self.sample_full_batch:
-
-                async def _watch_generators_done(tasks=generator_tasks, event=all_generators_done):
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    event.set()
-
-                generators_done_watcher = asyncio.create_task(_watch_generators_done())
-
-            # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
-            # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
-            # already reflects this epoch's trained steps. The range below is just an upper bound.
-            trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
-            for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                with Timer("step", self.all_timings):
-                    # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
-                    # sample_full_batch).
-                    (
-                        cur_generation_group_mini_batch,
-                        cur_dropped_groups,
-                        epoch_exhausted,
-                    ) = await self._collect_generation_mini_batch(generation_output_group_buffer, all_generators_done)
-
-                    if epoch_exhausted:
-                        # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
-                        # isn't regenerated on resume) and end the epoch early.
-                        if cur_generation_group_mini_batch:
-                            for _ in cur_generation_group_mini_batch:
-                                await self._staleness_manager.on_rollout_filtered()
-                            await self.async_train_dataloader.mark_filtered_uids(
-                                [g.uid for g in cur_generation_group_mini_batch]
-                            )
-                            logger.warning(
-                                f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
-                                f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
-                            )
-                        # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
-                        # we break before reaching it.
-                        if self.cfg.trainer.ckpt_interval > 0:
-                            with Timer("save_checkpoints", self.all_timings):
-                                await asyncio.to_thread(self.save_checkpoints)
-                        if self.cfg.trainer.hf_save_interval > 0:
-                            with Timer("save_hf_model", self.all_timings):
-                                await asyncio.to_thread(self.save_models)
-                        break
-
-                    if self.sample_full_batch:
-                        self.all_metrics["async/num_groups_dropped"] = len(cur_dropped_groups)
-
-                    # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input,
-                            cur_generation_group_mini_batch,
-                            cur_dropped_groups,
-                        )
-
-                    # 3. Run training and update consumed UIDs.
-                    with Timer("run_training", self.all_timings):
-                        status = await self._run_training(training_input)
-                        await self.async_train_dataloader.mark_consumed_uids(
-                            [g.uid for g in cur_generation_group_mini_batch]
-                        )
-
-                    # 4. After training: pause generation, sync weights, resume.
-                    with Timer("sync_weights", self.all_timings):
-                        await self.dispatch.save_weights_for_sampler()
-
-                # A training step completed: count it for this epoch's bookkeeping.
-                trained_steps_this_epoch += 1
-
-                # 5. Set logs for this training step.
-                logger.info(status)
-                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
-                self.all_metrics = {}
-                pbar.update(1)
-
-                # 6. Eval. At interval and at the last step.
-                # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
-                if self.cfg.trainer.eval_interval > 0 and (
-                    self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
-                ):
-                    with Timer("eval", self.all_timings):
-                        eval_metrics = await self.eval()
-                        self.all_metrics.update(eval_metrics)
-
-                # 7. Checkpointing. At interval and at the last step of each epoch.
-                is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
-                if self.cfg.trainer.ckpt_interval > 0:
-                    if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                        with Timer("save_checkpoints", self.all_timings):
-                            await asyncio.to_thread(self.save_checkpoints)
-                if self.cfg.trainer.hf_save_interval > 0:
-                    if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                        with Timer("save_hf_model", self.all_timings):
-                            await asyncio.to_thread(self.save_models)
-
-                timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
-                if self._vllm_metrics_scraper is not None:
-                    timing_payload.update(await self._vllm_metrics_scraper.sample())
-                self.tracker.log(timing_payload, step=self.global_step, commit=True)
-                self.all_timings = {}
-                self.global_step += 1
-
-                if (
-                    self.cfg.trainer.max_training_steps is not None
-                    and self.global_step > self.cfg.trainer.max_training_steps
-                ):
-                    logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
-                    for t in generator_tasks:
-                        t.cancel()
-                    await asyncio.gather(*generator_tasks, return_exceptions=True)
-                    if generators_done_watcher is not None:
-                        generators_done_watcher.cancel()
-                        await asyncio.gather(generators_done_watcher, return_exceptions=True)
-                    stop_training = True
-                    break
-
-                # 8. Notify generation workers that the capacity has increased, unblocking them.
-                await self._staleness_manager.notify_capacity_change(self.global_step)
-                # Only trained UIDs map to completed steps; filtered/dropped UIDs are extra consumption.
-                expected_trained_in_epoch = self.mini_batch_size * trained_steps_this_epoch
-                actual_trained_in_epoch = self.async_train_dataloader.num_trained()
-                assert actual_trained_in_epoch == expected_trained_in_epoch, (
-                    "Unexpected number of trained (consumed minus filtered) data UIDs. Got: "
-                    f"{actual_trained_in_epoch} != {expected_trained_in_epoch}"
+                # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
+                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
+                    maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
                 )
 
-            if stop_training:
-                break
+                # Maintain self.num_parallel_generation_workers concurrent group-generation workers
+                generator_tasks = [
+                    asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
+                    for _ in range(self.num_parallel_generation_workers)
+                ]
 
-            # 9. Per-epoch epilogue.
-            if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
-                with Timer("update_ref_with_policy", self.all_timings):
-                    await asyncio.to_thread(self.update_ref_with_policy)
+                # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
+                # blocking forever on buffer.get() -- under sample_full_batch, drops can exhaust an epoch
+                # before num_steps_per_epoch steps complete.
+                all_generators_done = asyncio.Event()
+                generators_done_watcher = None
+                if self.sample_full_batch:
 
-            # Cancel generator tasks for this epoch
-            for t in generator_tasks:
-                t.cancel()
-            try:
-                await asyncio.gather(*generator_tasks, return_exceptions=True)
-            except Exception:
-                pass
-            if generators_done_watcher is not None:
-                generators_done_watcher.cancel()
-                await asyncio.gather(generators_done_watcher, return_exceptions=True)
+                    async def _watch_generators_done(tasks=generator_tasks, event=all_generators_done):
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        event.set()
 
-            # Per-epoch reset/validation for data loading and staleness management
-            assert all(
-                t.done() for t in generator_tasks
-            ), "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
-            assert (
-                generation_output_group_buffer.qsize() == 0
-            ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {generation_output_group_buffer.qsize()}."
-            await self.async_train_dataloader.reset_at_epoch_end()
-            await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
+                    generators_done_watcher = asyncio.create_task(_watch_generators_done())
 
-            # End of an epoch.
+                # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
+                # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
+                # already reflects this epoch's trained steps. The range below is just an upper bound.
+                trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
+                for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+                    with Timer("step", self.all_timings):
+                        # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
+                        # sample_full_batch).
+                        (
+                            cur_generation_group_mini_batch,
+                            cur_dropped_groups,
+                            epoch_exhausted,
+                        ) = await self._collect_generation_mini_batch(
+                            generation_output_group_buffer, all_generators_done
+                        )
+
+                        if epoch_exhausted:
+                            # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
+                            # isn't regenerated on resume) and end the epoch early.
+                            if cur_generation_group_mini_batch:
+                                for _ in cur_generation_group_mini_batch:
+                                    await self._staleness_manager.on_rollout_filtered()
+                                await self.async_train_dataloader.mark_filtered_uids(
+                                    [g.uid for g in cur_generation_group_mini_batch]
+                                )
+                                logger.warning(
+                                    f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
+                                    f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
+                                )
+                            # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
+                            # we break before reaching it.
+                            if self.cfg.trainer.ckpt_interval > 0:
+                                with Timer("save_checkpoints", self.all_timings):
+                                    await asyncio.to_thread(self.save_checkpoints)
+                            if self.cfg.trainer.hf_save_interval > 0:
+                                with Timer("save_hf_model", self.all_timings):
+                                    await asyncio.to_thread(self.save_models)
+                            break
+
+                        if self.sample_full_batch:
+                            self.all_metrics["async/num_groups_dropped"] = len(cur_dropped_groups)
+
+                        # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
+                        with Timer("convert_to_training_input", self.all_timings):
+                            training_input = await asyncio.to_thread(
+                                self.convert_generation_group_mini_batch_to_training_input,
+                                cur_generation_group_mini_batch,
+                                cur_dropped_groups,
+                            )
+
+                        # 3. Run training and update consumed UIDs.
+                        with Timer("run_training", self.all_timings):
+                            status = await self._run_training(training_input)
+                            await self.async_train_dataloader.mark_consumed_uids(
+                                [g.uid for g in cur_generation_group_mini_batch]
+                            )
+
+                        # 4. After training: pause generation, sync weights, resume.
+                        with Timer("sync_weights", self.all_timings):
+                            await self.dispatch.save_weights_for_sampler()
+
+                    # A training step completed: count it for this epoch's bookkeeping.
+                    trained_steps_this_epoch += 1
+
+                    # One profiler step per async global step.
+                    self._profiler_step()
+
+                    # 5. Set logs for this training step.
+                    logger.info(status)
+                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
+                    self.all_metrics = {}
+                    pbar.update(1)
+
+                    # 6. Eval. At interval and at the last step.
+                    # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
+                    if self.cfg.trainer.eval_interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval_interval == 0
+                        or self.global_step == self.total_training_steps
+                    ):
+                        with Timer("eval", self.all_timings):
+                            eval_metrics = await self.eval()
+                            self.all_metrics.update(eval_metrics)
+
+                    # 7. Checkpointing. At interval and at the last step of each epoch.
+                    is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
+                    if self.cfg.trainer.ckpt_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                            with Timer("save_checkpoints", self.all_timings):
+                                await asyncio.to_thread(self.save_checkpoints)
+                    if self.cfg.trainer.hf_save_interval > 0:
+                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                            with Timer("save_hf_model", self.all_timings):
+                                await asyncio.to_thread(self.save_models)
+
+                    timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
+                    if self._vllm_metrics_scraper is not None:
+                        timing_payload.update(await self._vllm_metrics_scraper.sample())
+                    self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self.all_timings = {}
+                    self.global_step += 1
+
+                    if (
+                        self.cfg.trainer.max_training_steps is not None
+                        and self.global_step > self.cfg.trainer.max_training_steps
+                    ):
+                        logger.info(
+                            f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
+                        )
+                        for t in generator_tasks:
+                            t.cancel()
+                        await asyncio.gather(*generator_tasks, return_exceptions=True)
+                        if generators_done_watcher is not None:
+                            generators_done_watcher.cancel()
+                            await asyncio.gather(generators_done_watcher, return_exceptions=True)
+                        stop_training = True
+                        break
+
+                    # 8. Notify generation workers that the capacity has increased, unblocking them.
+                    await self._staleness_manager.notify_capacity_change(self.global_step)
+                    # Only trained UIDs map to completed steps; filtered/dropped UIDs are extra consumption.
+                    expected_trained_in_epoch = self.mini_batch_size * trained_steps_this_epoch
+                    actual_trained_in_epoch = self.async_train_dataloader.num_trained()
+                    assert actual_trained_in_epoch == expected_trained_in_epoch, (
+                        "Unexpected number of trained (consumed minus filtered) data UIDs. Got: "
+                        f"{actual_trained_in_epoch} != {expected_trained_in_epoch}"
+                    )
+
+                if stop_training:
+                    break
+
+                # 9. Per-epoch epilogue.
+                if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
+                    with Timer("update_ref_with_policy", self.all_timings):
+                        await asyncio.to_thread(self.update_ref_with_policy)
+
+                # Cancel generator tasks for this epoch
+                for t in generator_tasks:
+                    t.cancel()
+                try:
+                    await asyncio.gather(*generator_tasks, return_exceptions=True)
+                except Exception:
+                    pass
+                if generators_done_watcher is not None:
+                    generators_done_watcher.cancel()
+                    await asyncio.gather(generators_done_watcher, return_exceptions=True)
+
+                # Per-epoch reset/validation for data loading and staleness management
+                assert all(
+                    t.done() for t in generator_tasks
+                ), "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
+                assert (
+                    generation_output_group_buffer.qsize() == 0
+                ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {generation_output_group_buffer.qsize()}."
+                await self.async_train_dataloader.reset_at_epoch_end()
+                await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
+
+                # End of an epoch.
+        finally:
+            self._profiler_stop()
+
         pbar.close()
 
         if not stop_training:
