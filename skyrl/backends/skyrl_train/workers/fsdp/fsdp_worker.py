@@ -57,7 +57,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
     Args:
         model: FSDP model to extract weights from
-        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+        group_by_module: If True, group parameters by module (e.g., to keep fused QKV weights together)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
             when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
@@ -207,8 +207,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
         # Initialize weight extractor
-        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
+        # TODO(haochen): Module grouping (to keep vLLM-fused QKV weights together) is only enabled for the
+        # CUDA IPC transfer strategy for now; we can enable it for other strategies as well.
         from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
 
         group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy

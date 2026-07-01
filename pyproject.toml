@@ -148,15 +148,6 @@ megatron = [
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
-flashrl = [
-    "skyrl[skyrl-train]",
-    # NOTE: Custom vLLM wheel must be installed separately.
-    # See examples/train/flash_rl/README.md for installation instructions.
-    "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.7.0; sys_platform == 'linux'",
-    "flashinfer-python; sys_platform == 'linux'",
-    "torchvision; sys_platform == 'linux'",
-]
 miniswe = [
     "skyrl[skyrl-train]",
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
@@ -207,13 +198,11 @@ conflicts = [
         { extra = "jax" },
         { extra = "megatron" },
         { extra = "fsdp" },
-        { extra = "flashrl" },
     ],
     [
         { extra = "megatron" },
         { extra = "gpu" },
         { extra = "tpu" },
-        { extra = "flashrl" },
         { extra = "miniswe" },
     ]
 ]
@@ -302,7 +291,7 @@ flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/do
 causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
-# Pinned to cu128: flashrl extra needs torch 2.7, only on cu128.
+# Linux uses the cu128 index (torch 2.11 wheels are published there).
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },

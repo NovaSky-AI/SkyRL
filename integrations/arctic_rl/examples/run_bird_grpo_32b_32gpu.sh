@@ -12,7 +12,7 @@ set -euxo pipefail
 SKYRL_DIR=${SKYRL_DIR:-$(cd "$(dirname "$0")"/../../.. && pwd)}
 DATA_DIR=${DATA_DIR:-"$HOME/data/bird"}
 
-# Driver (same shape as flash_rl/harbor; see run_gsm8k_grpo_4gpu.sh for details).
+# Driver (same shape as harbor; see run_gsm8k_grpo_4gpu.sh for details).
 # FA3 (cp39-abi3 wheel from PyTorch's cu128 index) ships alongside FA2 — this
 # is the recipe that produced the 2.38x BIRD-SQL speedup on H200.
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"

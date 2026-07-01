@@ -288,7 +288,7 @@ class BasePPOExp:
         """Setup and return the inference engine client.
 
         This is a hook method that can be overridden by subclasses to customize
-        inference engine creation (e.g., FlashRL, custom backends).
+        inference engine creation (e.g., custom backends).
 
         Returns:
             InferenceEngineInterface: The inference engine client.
