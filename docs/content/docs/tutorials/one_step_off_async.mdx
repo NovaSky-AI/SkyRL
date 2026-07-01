@@ -64,6 +64,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
 ```
 
+When adapting this pattern, keep heavyweight synchronous trainer work off the event loop. In practice, checkpoint saves, HF exports, and similar blocking trainer methods should be invoked via `await asyncio.to_thread(...)` so the background generation coroutine can continue making progress.
+
 <Callout type="info">
 **Flexible execution plans:** The underlying implementation of training and generation is unchanged -- only the training loop is modified to parallelize the two phases. In general, SkyRL enables flexible modifications to the execution plan simply by modifying the high-level training loop.
 </Callout>
