@@ -169,11 +169,10 @@ def build_dataloader(
         batch_size=batch_size if not is_fully_async else 1,
         shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
-        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
+        num_workers=8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
-        multiprocessing_context="spawn" if not cfg.generator.inference_engine.enable_http_endpoint else None,
+        multiprocessing_context="spawn",
     )
     if is_train:
         if not is_fully_async:

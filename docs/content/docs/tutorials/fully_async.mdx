@@ -116,7 +116,6 @@ Other restrictions (will be validated by the trainer):
 
 - `trainer.train_batch_size`: Must be set to the same as `trainer.policy_mini_batch_size`.
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
-- `generator.inference_engine.async_engine`: Must be set to `true` to use async vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
 
 ## III. Design and Implementation of Fully Async Training in SkyRL

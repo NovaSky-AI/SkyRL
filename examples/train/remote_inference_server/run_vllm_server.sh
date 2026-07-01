@@ -1,5 +1,5 @@
 # Launches a standalone SkyRL inference deployment for Qwen2.5-1.5B-Instruct on 4 GPUs.
-# bash examples/train/remote_inference_engine/run_vllm_server.sh
+# bash examples/train/remote_inference_server/run_vllm_server.sh
 #
 # This uses the `serve` entrypoint, which brings up the vLLM server group + router
 # and keeps them alive. On startup it logs the `proxy_url` (data plane) and

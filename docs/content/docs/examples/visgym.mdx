@@ -136,7 +136,6 @@ uv run --isolated --extra fsdp \
   trainer.remove_microbatch_padding=false \
   # Multi-turn rollouts
   generator.max_turns=15 \
-  generator.inference_engine.async_engine=true \
   generator.sampling_params.temperature=0.7 \
   # Algorithm — task+format reward, no KL
   trainer.algorithm.advantage_estimator="grpo" \
