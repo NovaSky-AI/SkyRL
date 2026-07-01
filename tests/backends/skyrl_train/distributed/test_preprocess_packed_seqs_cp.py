@@ -130,8 +130,15 @@ class TestPreprocessPackedSeqsShortSequencesCP:
                 mock_mpu.get_context_parallel_world_size.return_value = cp_size
                 mock_mpu.get_context_parallel_rank.return_value = cp_rank
 
-                # This used to raise RuntimeError for short sequences
-                result_ids, packed_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
+                # This used to raise RuntimeError for short sequences.
+                result_ids, packed_params = preprocess_packed_seqs(
+                    input_ids,
+                    attention_mask,
+                    pre_process=True,
+                    fp8_enabled=True,
+                )
 
                 assert result_ids.shape[0] == 1  # unsqueezed
+                assert result_ids.shape[1] % 16 == 0
+                assert packed_params.max_seqlen_q % (16 * cp_size) == 0
                 assert packed_params.qkv_format == "thd"
