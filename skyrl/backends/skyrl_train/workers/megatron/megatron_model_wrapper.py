@@ -9,6 +9,9 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
+from skyrl.backends.skyrl_train.distributed.megatron.mask_utils import (
+    to_te_attention_mask,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
@@ -311,7 +314,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
@@ -321,7 +324,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                 )
 
@@ -748,7 +751,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
@@ -758,7 +761,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                 )
 
