@@ -56,7 +56,7 @@ def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, c
 
     The public entry point shifts targets internally; here we pass an ALREADY-shifted target and
     compare against a directly-driven stock reference, so the Triton kernel is exercised in
-    isolation from the ``_fused_linear_logprob_apply`` backend selection.
+    isolation from the ``_fused_lm_head_logprob_apply`` backend selection.
     """
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
