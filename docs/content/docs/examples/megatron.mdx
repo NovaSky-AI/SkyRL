@@ -85,6 +85,18 @@ empty_cuda_cache: true
 
 These default values can be overridden by passing in the corresponding arguments to `trainer.policy.megatron_config` in the launch script.
 
+`optimizer_config_kwargs` can set optimizer-state dtypes from YAML:
+
+```yaml
+optimizer_config_kwargs:
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: bf16
+  exp_avg_sq_dtype: fp8
+  main_params_dtype: fp32
+```
+
+See the [Megatron configuration guide](../configuration/config#megatron-configuration) for accepted aliases and per-field checks.
+
 ## Parallelism Resources
 
 Understanding and configuring parallelism strategies for large models can be challenging.
