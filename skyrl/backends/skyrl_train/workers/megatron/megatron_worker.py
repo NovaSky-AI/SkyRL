@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
     get_model_config,
@@ -1242,7 +1243,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            target_modules = infer_target_modules_from_adapter_weights(adapter_state.keys())
+            # The bridge exports the fused-MoE expert LoRA as 3D
+            # (num_experts-leading) tensors keyed `...mlp.experts.gate_up_proj`
+            # / `...mlp.experts.down_proj`. vLLM's fused-MoE LoRA loader
+            # (FusedMoE3DWithLoRA / _stack_moe_lora_weights) instead expects the
+            # flat PEFT layout keyed `...mlp.experts.base_layer` (gate_up_proj /
+            # w13) and `...mlp.experts` (down_proj / w2), with lora_A shaped
+            # (rank*num_experts, in) and lora_B shaped (out, rank*num_experts).
+            # Rewrite the expert tensors so merge_lora=False on-policy sync is
+            # accepted (otherwise load_lora_adapter rejects `experts.down_proj`).
+            adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+
+            target_modules = sorted(
+                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
+            )
             base_model_name_or_path = str(
                 getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
