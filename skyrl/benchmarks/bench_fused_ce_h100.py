@@ -1,22 +1,12 @@
-"""
-Benchmark: LM-head training signal — baseline vs NVIDIA fused CE vs OUR fused linear CE.
+"""Benchmark LM-head loss memory/time across materialized and fused paths.
 
-Mirrors the table in https://github.com/novasky-ai/skyrl/pull/1841 but exercises
-*our* fork's verl/bytedance-derived fused kernel (PR #1765) rather than #1841's
-liger port:
+Modes:
+  baseline     : hidden @ weight.T + vocab_parallel_cross_entropy
+  nvidia       : hidden @ weight.T + fused_vocab_parallel_cross_entropy
+  fused-torch  : FusedLinearChunkedDistributedLogprob
+  fused-triton : FusedLinearLogprobTriton
 
-  baseline     : logits = hidden @ weightᵀ, then megatron-core's eager
-                 ``vocab_parallel_cross_entropy`` (materializes [B,S,vocab//TP]
-                 logits + an fp32 grad of the same shape).
-  nvidia       : same logits, then ``fused_vocab_parallel_cross_entropy``
-                 (@jit_fuser fused CE — fuses the softmax/CE stages, still
-                 materializes the logits).
-  fused-torch  : FusedLinearChunkedDistributedLogprob (pure-torch chunked fused linear
-                 logprob — folds the projection into the chunked TP log-prob; logits never
-                 materialized).
-  fused-triton : FusedLinearLogprobTriton (vendored verl/bytedance flash kernel).
-
-All run forward+backward so grads flow to hidden *and* weight.
+All modes run forward+backward through hidden and weight.
 
 Usage (single GPU; --vocab is the FULL vocab, per-rank shard = vocab // world):
     uv run --isolated --extra megatron torchrun --nproc_per_node=1 \\
@@ -30,8 +20,7 @@ import time
 import torch
 import torch.distributed as dist
 
-# Qwen3.6-35B-A3B: hidden=2048, vocab=248320. Defaults show the per-rank shard
-# for TP=4 (62080) and the full vocab (248320).
+# Qwen3.6-35B-A3B defaults: TP4 shard and full vocab.
 HIDDEN = 2048
 VOCAB_SHARDS = [62080, 248320]
 SEQ_LENS = [8192, 16384, 32768, 65536, 131072, 262144]
@@ -42,17 +31,17 @@ MODES = ["baseline", "nvidia", "fused-torch", "fused-triton"]
 
 
 def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
-    """Per-token CE summed to a scalar (so all modes produce identical grads)."""
+    """Return summed per-token CE so modes produce comparable grads."""
     from megatron.core.fusions.fused_cross_entropy import (
         fused_vocab_parallel_cross_entropy,
     )
     from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
 
-    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-        FusedLinearChunkedDistributedLogprob,
-    )
     from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
         FusedLinearLogprobTriton,
+    )
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+        FusedLinearChunkedDistributedLogprob,
     )
 
     if mode == "fused-torch":
@@ -74,7 +63,7 @@ def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
 
 
 def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
-    """forward+backward; return (mean_ms, mean_peak_bytes) or (None, None) on OOM."""
+    """Return (mean_ms, mean_peak_bytes), or (None, None) on OOM."""
     times, peaks = [], []
     for _ in range(reps):
         hidden = weight = target = loss = None
@@ -102,7 +91,7 @@ def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
 
 
 def _correctness(vocab_local, tp_group, device):
-    """All modes must produce the same loss + grad_hidden (fair comparison)."""
+    """Compare grad_hidden from each mode to the eager baseline."""
     torch.manual_seed(0)
     S = 64
     h0 = torch.randn(1, S, HIDDEN, dtype=torch.bfloat16, device=device)
@@ -137,7 +126,9 @@ def main():
 
     vocab_shards = [args.vocab // world] if args.vocab else VOCAB_SHARDS
     if rank0:
-        print(f"Device {torch.cuda.get_device_name(device)} | TP(world)={world} | hidden={HIDDEN} | chunk={args.chunk_size}")
+        print(
+            f"Device {torch.cuda.get_device_name(device)} | TP(world)={world} | hidden={HIDDEN} | chunk={args.chunk_size}"
+        )
         print(
             "baseline = vocab_parallel_cross_entropy (eager) | nvidia = fused_vocab_parallel_cross_entropy | "
             "fused-torch = FusedLinearChunkedDistributedLogprob | fused-triton = FusedLinearLogprobTriton"
