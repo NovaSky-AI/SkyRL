@@ -658,6 +658,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
 
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
+        if self.has_critic:
+            self.dispatch.finalize_pending_saves("critic")
+
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
         self.tracker.finish()

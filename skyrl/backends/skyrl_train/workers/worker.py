@@ -459,6 +459,12 @@ class Worker(DistributedTorchRayActor):
             tokenizer=tokenizer,
         )
 
+    def finalize_pending_saves(self):
+        """Block until any in-flight async checkpoint write completes (no-op otherwise)."""
+        finalize = getattr(self.strategy, "finalize_pending_saves", None)
+        if finalize is not None:
+            finalize()
+
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
