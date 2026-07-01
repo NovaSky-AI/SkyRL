@@ -148,6 +148,12 @@ megatron = [
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
+# Optional backend for trainer.fused_lm_head_logprob_backend="triton".
+# The default torch backend does not require this extra.
+triton = [
+    "triton>=3.2.0; sys_platform == 'linux'",
+]
+
 flashrl = [
     "skyrl[skyrl-train]",
     # NOTE: Custom vLLM wheel must be installed separately.
@@ -380,4 +386,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

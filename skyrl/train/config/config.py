@@ -789,13 +789,13 @@ class TrainerConfig(BaseConfig):
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
     fused_lm_head_logprob: bool = False
-    """Megatron only. Fuse the LM-head projection into the chunked log-prob / entropy
-    computation via the GPTModel ``output_processor`` hook, so the full
-    ``[B, S, vocab//TP]`` logits tensor (and its float32 gradient) is never
-    materialized. Cuts LM-head activation memory from O(S·vocab//TP) to
-    O(chunk·vocab//TP)+O(S·H) — required to fit very long contexts (e.g. 262k).
-    Numerically matches the default path; see
-    ``model_utils.FusedLinearChunkedDistributedLogprob``."""
+    """Megatron only. Fuse the LM-head projection into log-prob / entropy
+    computation so the full ``[B, S, vocab//TP]`` logits tensor is never
+    materialized. Uses ``logprobs_chunk_size`` to bound peak memory."""
+    fused_lm_head_logprob_backend: str = "torch"
+    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
+    The Triton backend requires CUDA + triton and falls back to ``"torch"``
+    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -812,6 +812,16 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "logprobs_chunk_size=None (no chunking) is only supported with the Megatron backend. "
                 f"Set a positive integer for strategy={self.strategy!r}."
+            )
+        if self.fused_lm_head_logprob and self.strategy != "megatron":
+            raise ValueError(
+                "fused_lm_head_logprob=True is only supported with the Megatron backend, "
+                f"got strategy={self.strategy!r}."
+            )
+        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+            raise ValueError(
+                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"got {self.fused_lm_head_logprob_backend!r}."
             )
 
 
