@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    RETURN_PER_TOKEN_OUTPUTS_KEY,
     all_reduce_metrics,
+    pop_return_per_token_outputs,
     reduce_metrics,
 )
 
@@ -197,3 +199,34 @@ class TestAllReduceMetrics:
         assert result["is_ratio_min"] == 0.05  # 0.1 / 2 (min op)
         assert result["policy_loss"] == 6.0  # sum op
         assert result["entropy"] == 1.0  # 0.5 * 2 (mean op)
+
+
+class TestPopReturnPerTokenOutputs:
+    """Tests for the reserved loss_fn_config gate."""
+
+    def test_none_defaults_to_true(self):
+        cfg, flag = pop_return_per_token_outputs(None)
+        assert cfg is None
+        assert flag is True
+
+    def test_absent_flag_defaults_to_true(self):
+        cfg, flag = pop_return_per_token_outputs({"eps_clip_low": 0.1})
+        assert flag is True
+        assert cfg == {"eps_clip_low": 0.1}
+
+    def test_pops_explicit_false(self):
+        cfg, flag = pop_return_per_token_outputs({RETURN_PER_TOKEN_OUTPUTS_KEY: False, "eps_clip_low": 0.1})
+        assert flag is False
+        assert cfg == {"eps_clip_low": 0.1}
+
+    def test_pops_explicit_true(self):
+        cfg, flag = pop_return_per_token_outputs({RETURN_PER_TOKEN_OUTPUTS_KEY: True})
+        assert flag is True
+        assert cfg == {}
+
+    def test_does_not_mutate_caller_dict(self):
+        original = {RETURN_PER_TOKEN_OUTPUTS_KEY: False}
+        cfg, flag = pop_return_per_token_outputs(original)
+        assert original == {RETURN_PER_TOKEN_OUTPUTS_KEY: False}
+        assert cfg == {}
+        assert flag is False

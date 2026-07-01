@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train.workers.worker_utils import RETURN_PER_TOKEN_OUTPUTS_KEY
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
@@ -1274,11 +1275,12 @@ class SFTTrainer:
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config=None,
+                loss_fn_config={RETURN_PER_TOKEN_OUTPUTS_KEY: False},
             )
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
@@ -1299,7 +1301,13 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            # SFT consumes metrics only; skip per-token loss_fn_outputs.
+            output = self.dispatch.forward_backward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                loss_fn_config={RETURN_PER_TOKEN_OUTPUTS_KEY: False},
+            )
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
