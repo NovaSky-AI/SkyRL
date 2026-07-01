@@ -214,9 +214,15 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         seq_size = int(vocab_parallel_logits.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
-        all_grad_input = []
-
         batch_size = int(vocab_parallel_logits.shape[0])
+
+        # Stream chunk grads into a preallocated buffer instead of keeping every
+        # chunk alive until torch.cat. Each chunk owns one contiguous seq slice.
+        grad_input = torch.empty(
+            (batch_size, seq_size, partition_vocab_size),
+            dtype=torch.float32,
+            device=vocab_parallel_logits.device,
+        )
 
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size
@@ -251,15 +257,14 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
             flat_chosen = flat_idx.masked_select(valid_mask.reshape(-1)) + chunk_masked_target.masked_select(valid_mask)
 
             # `neg` is zero-copy; the subsequent mul_ writes in place.
-            grad_input = softmax_output.neg_()
-            grad_input.mul_(chunk_grad_output.unsqueeze(-1))
+            chunk_grad_input = softmax_output.neg_()
+            chunk_grad_input.mul_(chunk_grad_output.unsqueeze(-1))
 
             grad_output_selected = chunk_grad_output.masked_select(valid_mask)
-            grad_input.view(-1).scatter_add_(0, flat_chosen, grad_output_selected)
+            chunk_grad_input.view(-1).scatter_add_(0, flat_chosen, grad_output_selected)
 
-            all_grad_input.append(grad_input)
-
-        grad_input = torch.cat(all_grad_input, dim=1)
+            # Write this chunk into its non-overlapping sequence slice.
+            grad_input[:, chunk_start:chunk_end, :] = chunk_grad_input
 
         # if you add an argument to the forward method, then you must add a corresponding None here
         return grad_input, None, None, None, None, None, None
