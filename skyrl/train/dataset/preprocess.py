@@ -60,35 +60,11 @@ def convert_prompts_responses_to_batch_tensors(
     Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
 ]:
     """
-    Convert prompts and responses to batch tensors for training.
+    Convert tokenized prompt/response pairs to left-padded training tensors.
 
-    Each sequence is laid out as a single left-padded block:
-
-    | [PAD]  [PAD]  prompt prompt prompt respon respon |
-    | [PAD]  prompt prompt prompt respon respon respon |
-    | prompt prompt prompt respon respon respon respon |
-                          |<---- max_response_len ---->|
-
-    The padded sequence length is ``max(prompt_len_i + response_len_i)``.
-    This way, the max padded sequence length is ``max_seq_len``.
-
-    This makes the response-level tensors (action_mask, rewards, loss_masks, logprobs):
-    | prompt prompt respon respon |
-    | prompt respon respon respon |
-    | respon respon respon respon |
-
-    So the action_mask is:
-    | 0       0       1      1    |
-    | 0       1       1      1    |
-    | 1       1       1      1    |
-
-    Attention mask is 1 for all real tokens, 0 for padding.
-    Action mask is 1 for the last ``response_len_i`` positions, 0 for padding.
-
-    Response-level tensors are **right-aligned** within ``(batch, max_response_len)``: non-padded
-    values occupy the last ``response_len_i`` positions, with leading zeros. This matches the model
-    forward pass which extracts ``log_probs[:, -num_actions-1:-1]`` —- response tokens are always at
-    the end of the sequence, so their logprobs are right-aligned in the slice.
+    Sequences use the tightest batch length, ``max(prompt_len + response_len)``.
+    Response-level tensors are right-aligned to ``max_response_len`` so they
+    match ``log_probs[:, -num_actions-1:-1]`` from the model forward pass.
 
     Assumes that the responses already contain an eos token at index -1.
 
@@ -128,18 +104,13 @@ def convert_prompts_responses_to_batch_tensors(
     pad_token_id = tokenizer.pad_token_id
     num_samples = len(prompts)
 
-    # All tensors are built directly in NumPy and converted once at the end. The
-    # token content is ragged so each sequence row is written with two vectorized
-    # slice assignments (prompt + response, one C-level copy each); the
-    # fixed-width masks are produced with a single broadcast comparison instead
-    # of a per-token Python loop. The produced tensors are bit-identical to the
-    # previous implementation.
+    # Fill NumPy buffers by slice, then convert once.
     prompt_lens = np.asarray(prompt_token_lens, dtype=np.int64)
     response_lens = np.asarray(response_token_lens, dtype=np.int64)
     total_real = prompt_lens + response_lens  # (num_samples,)
     pad_lens = max_total - total_real  # left-pad width per sample
 
-    # sequences: unified left-pad [PAD ... PAD  PROMPT  RESPONSE].
+    # Left-pad each prompt+response row.
     sequences_np = np.full((num_samples, max_total), pad_token_id, dtype=np.int64)
     for i in range(num_samples):
         start = int(pad_lens[i])
@@ -147,12 +118,11 @@ def convert_prompts_responses_to_batch_tensors(
         sequences_np[i, start : start + p_len] = prompts[i]
         sequences_np[i, start + p_len :] = responses[i]
 
-    # attention_mask: 1 for the trailing ``total_real`` real-token positions.
+    # Real tokens occupy the trailing total_real positions.
     col_total = np.arange(max_total, dtype=np.int64)
     attention_mask_np = (col_total[None, :] >= pad_lens[:, None]).astype(np.int64)
 
-    # action_mask: response indicator within the last ``max_response`` positions
-    # (right-aligned), 1 for the trailing ``response_len_i`` positions.
+    # Response tokens occupy the trailing response_len positions.
     col_resp = np.arange(max_response, dtype=np.int64)
     resp_pad = max_response - response_lens
     action_mask_np = (col_resp[None, :] >= resp_pad[:, None]).astype(np.int64)
@@ -161,17 +131,12 @@ def convert_prompts_responses_to_batch_tensors(
     attention_mask = torch.from_numpy(attention_mask_np)
     action_mask = torch.from_numpy(action_mask_np)
 
-    # Response-level tensors are RIGHT-ALIGNED to match the model output.
-    # The model's log_probs[:, -num_actions-1:-1] returns logprobs where
-    # response tokens occupy the last response_len_i positions. Each is written
-    # with one slice assignment per sample into a zero-initialized buffer.
+    # Response-level tensors are right-aligned to match the model output.
     ret_loss_masks_np = np.zeros((num_samples, max_response), dtype=np.float32)
     for i, lm in enumerate(loss_masks):
         ret_loss_masks_np[i, max_response - len(lm) :] = lm
 
-    # Same thing for rewards. Tensor rewards are made explicit here instead of
-    # relying on NumPy's implicit torch conversion path, which cannot handle CUDA
-    # or grad-tracking tensors.
+    # Tensor rewards need explicit CPU/detach handling before NumPy packing.
     ret_rewards_np = np.zeros((num_samples, max_response), dtype=np.float32)
     for i, custom_reward in enumerate(rewards):
         reward_arr = _reward_to_numpy(custom_reward)
@@ -180,7 +145,7 @@ def convert_prompts_responses_to_batch_tensors(
     ret_loss_masks = torch.from_numpy(ret_loss_masks_np)
     ret_rewards = torch.from_numpy(ret_rewards_np)
 
-    # Same thing for logprobs.
+    # Rollout logprobs are right-aligned like rewards and loss masks.
     logprobs_tensor = None
     if logprobs:
         logprobs_np = np.zeros((num_samples, max_response), dtype=np.float32)

@@ -155,14 +155,7 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 1. Sequence lengths and full-sequence loss masks
         # ------------------------------------------------------------------
-        # We need the *full-sequence* loss mask (one entry per token, not
-        # just over the response window) so the packed bin row can have a
-        # per-position mask with correct boundary zeros.
-        #
-        # Per-example ``input_ids`` and the reconstructed full loss mask are
-        # kept as NumPy arrays so the row construction in section 4 can write
-        # them with vectorized slice assignments (one C-level copy per sub-seq)
-        # instead of a per-token Python loop.
+        # Build one mask per token so packed rows can shift loss by one position.
         seq_lengths: List[int] = []
         full_input_ids: List[np.ndarray] = []
         full_loss_masks: List[np.ndarray] = []
@@ -170,9 +163,7 @@ class PackedDataCollator:
             s = len(ex["input_ids"])
             seq_lengths.append(s)
             n_pad = s - ex["num_actions"]
-            # Full loss mask = [0]*n_pad (prompt prefix) then the per-response
-            # token mask. Built as float32 so it can be sliced straight into the
-            # float ``loss_mask`` row without a per-element cast.
+            # Prompt prefix is zero; response mask is copied as float32.
             full_mask = np.empty(s, dtype=np.float32)
             full_mask[:n_pad] = 0.0
             full_mask[n_pad:] = np.asarray(ex["loss_mask"], dtype=np.float32)
@@ -259,12 +250,7 @@ class PackedDataCollator:
             f"(~{num_bins // dp_size}/DP rank, bin_capacity={bin_capacity} tokens)"
         )
 
-        # Build the row tensors in NumPy and convert once at the end. Each
-        # sub-seq is written with vectorized slice assignments (one C-level copy
-        # per sub-seq), replacing the former per-token Python loop. The cost is
-        # O(sum of sub-seq lengths) of memory traffic instead of that many
-        # Python iterations, and the produced tensors are bit-identical to the
-        # previous implementation.
+        # Fill NumPy buffers by slice, then convert once.
         sequences_np = np.full((num_bins, max_packed_len), pad_token_id, dtype=np.int64)
         attention_mask_np = np.zeros((num_bins, max_packed_len), dtype=np.int64)
         # loss_mask is one position shorter than the row to match
@@ -276,23 +262,11 @@ class PackedDataCollator:
             row_offset = 0
             for ex_idx in bin_indices:
                 s = seq_lengths[ex_idx]
-                # Write the sub-seq tokens into the row (vectorized copy).
                 sequences_np[row_idx, row_offset : row_offset + s] = full_input_ids[ex_idx]
                 attention_mask_np[row_idx, row_offset : row_offset + s] = 1
 
-                # Build the per-position loss mask for this sub-seq.
-                # Position p (in row coords, p in [row_offset, row_offset + s))
-                # predicts token at p+1. The loss_mask at p (in the [B, S-1]
-                # action_log_probs slot) is 1 iff p+1 is a response/assistant
-                # token AND p+1 is in the same sub-seq.
-                #   For p_local in [0, s - 1): mask[row_offset + p_local] =
-                #       full_mask[p_local + 1]  (== full_mask[1:s]).
-                #   For p_local == s - 1: 0 (sub-seq boundary / row end).
-                # The write window is clamped to ``loss_mask_width`` to reproduce
-                # the original ``row_p < max_packed_len - 1`` guard. The ``min()``
-                # is a defensive no-op: ``max_packed_len`` is >= every bin's
-                # packed length by construction (PP rounding only grows it), so
-                # ``row_offset + s - 1`` never exceeds ``loss_mask_width``.
+                # loss_mask[p] predicts token p+1; leave each sub-seq's final
+                # token zero to prevent cross-boundary loss.
                 if s > 1:
                     write_end = min(row_offset + s - 1, loss_mask_width)
                     n_write = write_end - row_offset
@@ -303,8 +277,7 @@ class PackedDataCollator:
                 # multiple, plus FP8's 16-token local-rank multiple when active.
                 row_offset += _round_up(s, align_size)
 
-        # ``total_nonpad`` (sum of 1s BEFORE scaling) is the exact sum of the
-        # binary loss mask, computed in one vectorized reduction.
+        # Count response-token loss slots before normalization.
         total_nonpad = int(loss_mask_np.sum())
 
         sequences = torch.from_numpy(sequences_np)
@@ -324,15 +297,9 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 6. Pack into TrainingInputBatch with sub_seq_lengths data field
         # ------------------------------------------------------------------
-        # ``sub_seq_lengths`` is genuinely per-sample data: after FFD the
-        # batch's "sample" *is* a bin, so ``len(bin_subseq_lengths) == num_bins
-        # == batch_size``, co-indexed with ``sequences[r]``. We store it as a
-        # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
-        # pattern as ``image_grid_thw``) so ``MeshDispatch`` shards it per-DP
-        # rank automatically alongside ``sequences``/``attention_mask``,
-        # eliminating the worker-side per-rank slice. ``preprocess_packed_seqs``
-        # and the Megatron packed-logprob scatter want ``list[list[int]]``, so a
-        # ``.tolist()`` happens at the ``forward_step`` boundary.
+        # One TensorList item per packed bin lets MeshDispatch shard ragged
+        # sub_seq_lengths with the dense rows. forward_step converts back to
+        # list[list[int]] for Megatron.
         sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])
         batch = TrainingInputBatch(
             {

@@ -706,10 +706,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     max_num_actions = max(ex["num_actions"] for ex in examples)
     num_examples = len(examples)
 
-    # Build the left-padded rows directly in NumPy and convert once at the end.
-    # Each example is written with a single vectorized slice assignment (one
-    # C-level copy) instead of allocating a per-example padded Python list. The
-    # produced tensors are bit-identical to the previous implementation.
+    # Fill NumPy buffers by slice, then convert once.
     sequences_np = np.full((num_examples, max_len), tokenizer.pad_token_id, dtype=np.int64)
     attention_mask_np = np.zeros((num_examples, max_len), dtype=np.int64)
     loss_mask_np = np.zeros((num_examples, max_num_actions), dtype=np.int64)
@@ -729,13 +726,11 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     image_grid_thw = []
 
     for i, ex in enumerate(examples):
-        # Left-pad sequences (SkyRL convention): real tokens occupy the trailing
-        # ``len(input_ids)`` positions, with leading pad.
+        # Left-pad sequences; right-align response loss masks.
         pad_len = max_len - len(ex["input_ids"])
         sequences_np[i, pad_len:] = ex["input_ids"]
         attention_mask_np[i, pad_len:] = ex["attention_mask"]
 
-        # loss_mask is right-aligned within ``max_num_actions``.
         action_pad = max_num_actions - ex["num_actions"]
         loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
