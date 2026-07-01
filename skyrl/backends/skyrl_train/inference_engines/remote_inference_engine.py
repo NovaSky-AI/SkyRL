@@ -184,6 +184,14 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             else:
                 raise ValueError(f"Invalid engine backend: {self.engine_backend}")
             async with session.post(request_url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    # Surface the error body (e.g. vLLM's 404 for an unknown model name) instead of
+                    # silently parsing it into empty outputs.
+                    error_body = await resp.text()
+                    raise RuntimeError(
+                        f"Generation request to {request_url} for model {self.model_name!r} "
+                        f"failed with status {resp.status}: {error_body}"
+                    )
                 response = await resp.json()
 
         # 3. Parse outputs
