@@ -1870,9 +1870,8 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Consume a collated-ahead batch when available. ``None``
-                    # marks iterator exhaustion, so epoch transitions remain owned
-                    # by StatefulDataLoader and its sampler.
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate. ``None`` marks epoch exhaustion.
                     with Timer("data_loading", all_timings):
                         if async_collator is not None and async_collator.pending_step() == self.global_step:
                             batch = async_collator.get(self.global_step)

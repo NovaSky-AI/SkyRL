@@ -1,18 +1,4 @@
-"""Single-slot async double-buffer for a deterministic per-step producer.
-
-When a training loop's per-step input is built by a CPU-heavy producer that is
-deterministic given the current loop state (e.g. a slice + collate over an
-in-memory dataset), the producer for step ``N+1`` can run on a background
-thread while step ``N``'s forward/backward runs on the GPU, collating the next
-batch ahead of time and hiding the producer latency under GPU compute.
-
-:class:`AsyncBatchCollator` is the generic mechanism: it owns a single-worker
-executor and a one-slot future, and exposes a strict submit/get contract that
-turns any mis-wiring into a loud failure rather than a silent corruption of the
-input order. The caller supplies a ``compute(step) -> batch`` producer and is
-responsible for only ever collating ahead a step whose input is knowable in
-advance (i.e. no state change happens between submit and consume).
-"""
+"""Single-slot async double-buffer for deterministic per-step collation."""
 
 from __future__ import annotations
 
@@ -21,26 +7,10 @@ from typing import Any, Callable, Optional
 
 
 class AsyncBatchCollator:
-    """Single-slot async double-buffer for a deterministic per-step producer.
+    """Run ``compute(step)`` in a one-worker, one-future buffer.
 
-    Correctness contract:
-
-    * The producer is a single function ``compute(step) -> batch`` supplied by
-      the caller; it must read the loop's *current* state. The caller only ever
-      submits a step whose input is knowable while the current step runs — i.e.
-      a step for which no state change happens between submit and consume. If
-      the loop is about to mutate the producer's inputs (e.g. a dataset
-      reshuffle at an epoch boundary), it must :meth:`clear` the in-flight batch
-      first and collate the next step synchronously.
-    * At most one batch is in flight (``max_workers=1``). The submitted step is
-      recorded so :meth:`get` can assert the retrieved batch matches the step
-      the caller expects.
-    * The producer must construct fresh outputs per call and mutate no shared
-      state, so the worker thread genuinely overlaps with the GPU stream
-      (NumPy/torch release the GIL during the heavy array ops).
-
-    This component owns only its executor and a one-slot future; it holds no
-    reference to caller state, which keeps the threading surface tiny.
+    The caller may only submit steps whose inputs will not change before
+    consumption. ``get`` checks the expected step so stale batches fail loudly.
     """
 
     def __init__(self, compute: Callable[[int], Any], thread_name_prefix: str = "batch-collate"):
@@ -50,11 +20,7 @@ class AsyncBatchCollator:
         self._pending_step: Optional[int] = None
 
     def submit(self, step: int) -> None:
-        """Schedule the producer for ``step`` on the background thread.
-
-        Must not be called while a batch is already in flight (the single-slot
-        invariant); drain via :meth:`get` before resubmitting.
-        """
+        """Schedule ``compute(step)``; call ``get`` before submitting again."""
         assert self._future is None, (
             f"collate-ahead slot already occupied (pending step {self._pending_step}); "
             f"call get() before submitting step {step}"
@@ -69,12 +35,7 @@ class AsyncBatchCollator:
         return self._pending_step
 
     def get(self, expected_step: int) -> Any:
-        """Block until the in-flight batch is ready and return it.
-
-        Asserts the in-flight batch was produced for ``expected_step`` so a
-        mis-wired submit/get pairing fails loudly instead of silently feeding
-        the wrong batch into training.
-        """
+        """Return the in-flight batch for ``expected_step``."""
         assert self._future is not None, "get() called with no in-flight batch"
         assert self._pending_step == expected_step, (
             f"collated-ahead step {self._pending_step} != expected step {expected_step}; "
@@ -87,13 +48,7 @@ class AsyncBatchCollator:
         return future.result()
 
     def clear(self) -> None:
-        """Drop any in-flight batch.
-
-        Waits for the worker to finish (so it cannot still be reading caller
-        state) and discards the result. Used before the caller mutates the
-        producer's inputs, so a batch collated against the old state can never
-        be consumed.
-        """
+        """Drain and discard the in-flight batch, propagating worker errors."""
         if self._future is not None:
             self._future.result()
         self._future = None
