@@ -3,15 +3,15 @@
 When a training loop's per-step input is built by a CPU-heavy producer that is
 deterministic given the current loop state (e.g. a slice + collate over an
 in-memory dataset), the producer for step ``N+1`` can run on a background
-thread while step ``N``'s forward/backward runs on the GPU, hiding the producer
-latency under GPU compute.
+thread while step ``N``'s forward/backward runs on the GPU, collating the next
+batch ahead of time and hiding the producer latency under GPU compute.
 
-:class:`BatchPrefetcher` is the generic mechanism: it owns a single-worker
+:class:`AsyncBatchCollator` is the generic mechanism: it owns a single-worker
 executor and a one-slot future, and exposes a strict submit/get contract that
 turns any mis-wiring into a loud failure rather than a silent corruption of the
 input order. The caller supplies a ``compute(step) -> batch`` producer and is
-responsible for only ever prefetching a step whose input is knowable in advance
-(i.e. no state change happens between submit and consume).
+responsible for only ever collating ahead a step whose input is knowable in
+advance (i.e. no state change happens between submit and consume).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 
-class BatchPrefetcher:
+class AsyncBatchCollator:
     """Single-slot async double-buffer for a deterministic per-step producer.
 
     Correctness contract:
@@ -31,7 +31,7 @@ class BatchPrefetcher:
       a step for which no state change happens between submit and consume. If
       the loop is about to mutate the producer's inputs (e.g. a dataset
       reshuffle at an epoch boundary), it must :meth:`clear` the in-flight batch
-      first and compute the next step synchronously.
+      first and collate the next step synchronously.
     * At most one batch is in flight (``max_workers=1``). The submitted step is
       recorded so :meth:`get` can assert the retrieved batch matches the step
       the caller expects.
@@ -43,7 +43,7 @@ class BatchPrefetcher:
     reference to caller state, which keeps the threading surface tiny.
     """
 
-    def __init__(self, compute: Callable[[int], Any], thread_name_prefix: str = "batch-prefetch"):
+    def __init__(self, compute: Callable[[int], Any], thread_name_prefix: str = "batch-collate"):
         self._compute = compute
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name_prefix)
         self._future: Optional[Future] = None
@@ -56,7 +56,7 @@ class BatchPrefetcher:
         invariant); drain via :meth:`get` before resubmitting.
         """
         assert self._future is None, (
-            f"prefetch slot already occupied (pending step {self._pending_step}); "
+            f"collate-ahead slot already occupied (pending step {self._pending_step}); "
             f"call get() before submitting step {step}"
         )
         self._pending_step = step
@@ -75,9 +75,9 @@ class BatchPrefetcher:
         mis-wired submit/get pairing fails loudly instead of silently feeding
         the wrong batch into training.
         """
-        assert self._future is not None, "get() called with no pending prefetch"
+        assert self._future is not None, "get() called with no in-flight batch"
         assert self._pending_step == expected_step, (
-            f"prefetched step {self._pending_step} != expected step {expected_step}; "
+            f"collated-ahead step {self._pending_step} != expected step {expected_step}; "
             f"refusing to serve a mismatched batch"
         )
         future = self._future
@@ -91,8 +91,8 @@ class BatchPrefetcher:
 
         Waits for the worker to finish (so it cannot still be reading caller
         state) and discards the result. Used before the caller mutates the
-        producer's inputs, so a prefetch scheduled against the old state can
-        never be consumed.
+        producer's inputs, so a batch collated against the old state can never
+        be consumed.
         """
         if self._future is not None:
             self._future.result()

@@ -199,14 +199,14 @@ class SFTConfig(BaseConfig):
     # ---- Data loading ----
     num_workers: int = 8
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
-    prefetch_data: bool = True
+    async_batch_collation: bool = True
     """Async double-buffer the per-step collate. When True, the CPU-side collate
     for step N+1 runs on a single background thread while step N's
     forward/backward runs on the GPU, hiding the collate latency. The collate is
-    deterministic within an epoch, so the prefetched batch is byte-identical to
-    the synchronous path; at an epoch boundary (data reshuffle) the prefetch is
-    skipped and the next batch is computed synchronously on the post-shuffle
-    order. Set to False to A/B against the serial data-loading path."""
+    deterministic within an epoch, so the collated-ahead batch is byte-identical
+    to the synchronous path; at an epoch boundary (data reshuffle) the
+    collate-ahead is skipped and the next batch is collated synchronously on the
+    post-shuffle order. Set to False to A/B against the serial data-loading path."""
 
     # ---- Tokenized dataset caching ----
     cache_dir: str = os.path.join(

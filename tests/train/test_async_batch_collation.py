@@ -1,28 +1,28 @@
-"""CPU test: async data prefetch (double-buffering) is byte-identical to serial.
+"""CPU test: async batch collation (double-buffering) is byte-identical to serial.
 
 The SFT training loop optionally collates the NEXT step's batch on a background
 thread while the current step's forward/backward runs on the GPU
-(``SFTConfig.prefetch_data``). The prefetched batch MUST be byte-identical to
-what the synchronous path would have produced for that same step — including
-across epoch boundaries, where the data reshuffles in place.
+(``SFTConfig.async_batch_collation``). The collated-ahead batch MUST be
+byte-identical to what the synchronous path would have produced for that same
+step — including across epoch boundaries, where the data reshuffles in place.
 
 Strategy: run the real ``SFTTrainer.train()`` loop twice over the same dummy
-dataset/seed — once with prefetch OFF (the baseline) and once ON — capturing a
-deep snapshot of every ``batch`` handed to ``train_step``. Then assert the two
-batch sequences are tensor-equal step-for-step over a run that spans TWO epoch
-boundaries. The examples have distinct token ids so a stale pre-shuffle batch
-would differ from the baseline and fail the comparison.
+dataset/seed — once with async batch collation OFF (the baseline) and once ON —
+capturing a deep snapshot of every ``batch`` handed to ``train_step``. Then
+assert the two batch sequences are tensor-equal step-for-step over a run that
+spans TWO epoch boundaries. The examples have distinct token ids so a stale
+pre-shuffle batch would differ from the baseline and fail the comparison.
 
 Both collator paths are covered:
   * ``DefaultCollator`` (FSDP default left-pad path).
   * ``PackedDataCollator`` (Megatron FFD packing) — constructed directly,
     CPU-only, no Megatron runtime needed since the collate is pure numpy/torch.
 
-Also unit-tests the ``BatchPrefetcher`` invariants (mismatch assertion,
+Also unit-tests the ``AsyncBatchCollator`` invariants (mismatch assertion,
 exception propagation, single-slot guard).
 
 Run:
-  uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_prefetch.py -v
+  uv run --isolated --extra dev --extra fsdp pytest tests/train/test_async_batch_collation.py -v
 """
 
 import copy
@@ -34,7 +34,7 @@ import torch
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
 from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 from skyrl.train.sft_trainer import SFTTrainer
-from skyrl.train.utils.batch_prefetcher import BatchPrefetcher
+from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 
 # ---------------------------------------------------------------------------
 # Helpers: dummy config, dataset, and a trainer wired for a CPU-only train()
@@ -70,7 +70,7 @@ def _distinct_tokenized(n: int) -> list[dict]:
     """``n`` examples with DISTINCT token ids and varying lengths.
 
     Distinct ids + varying lengths mean different orderings produce different
-    collated batches, so a stale-shuffle prefetch bug cannot accidentally match
+    collated batches, so a stale-shuffle collate-ahead bug cannot accidentally match
     the synchronous baseline.
     """
     examples = []
@@ -142,9 +142,9 @@ def _capture_batches(trainer: SFTTrainer, monkeypatch) -> list[dict]:
     return captured
 
 
-def _assert_batch_sequences_equal(serial: list[dict], prefetch: list[dict]):
-    assert len(serial) == len(prefetch), f"step count differs: serial={len(serial)} prefetch={len(prefetch)}"
-    for s, p in zip(serial, prefetch):
+def _assert_batch_sequences_equal(serial: list[dict], collated: list[dict]):
+    assert len(serial) == len(collated), f"step count differs: serial={len(serial)} collated={len(collated)}"
+    for s, p in zip(serial, collated):
         assert s["step"] == p["step"], f"step mismatch: {s['step']} vs {p['step']}"
         s_snap, p_snap = s["snap"], p["snap"]
         assert s_snap.keys() == p_snap.keys(), f"step {s['step']} key mismatch: {s_snap.keys()} vs {p_snap.keys()}"
@@ -160,34 +160,34 @@ def _assert_batch_sequences_equal(serial: list[dict], prefetch: list[dict]):
 
 
 # ---------------------------------------------------------------------------
-# Integration: prefetch ON == serial baseline across epoch boundaries
+# Integration: collate-ahead ON == serial baseline across epoch boundaries
 # ---------------------------------------------------------------------------
 
 
 def _run_pair(monkeypatch, collator_factory, n_examples, batch_size, num_steps):
-    """Run the loop serially then with prefetch; return (serial, prefetch) captures.
+    """Run the loop serially then with collate-ahead; return (serial, collated) captures.
 
     Each run gets its OWN tokenized list (the loop shuffles in place) and its
     OWN collator so there is no cross-run state bleed.
     """
     base = _distinct_tokenized(n_examples)
 
-    def _run(prefetch_on: bool):
+    def _run(collate_ahead_on: bool):
         cfg = _build_test_sft_config(num_steps=num_steps, batch_size=batch_size)
-        cfg.prefetch_data = prefetch_on
+        cfg.async_batch_collation = collate_ahead_on
         tokenized = copy.deepcopy(base)
         trainer = _make_trainer(cfg, collator_factory(cfg))
         monkeypatch.setattr(trainer, "load_dataset", lambda: tokenized)
         monkeypatch.setattr(trainer, "load_eval_dataset", lambda: None)
         return _capture_batches(trainer, monkeypatch)
 
-    serial = _run(prefetch_on=False)
-    prefetch = _run(prefetch_on=True)
-    return serial, prefetch
+    serial = _run(collate_ahead_on=False)
+    collated = _run(collate_ahead_on=True)
+    return serial, collated
 
 
-def test_prefetch_matches_serial_default_collator(monkeypatch):
-    """DefaultCollator: prefetched batches are byte-identical across 2 epoch boundaries.
+def test_async_collation_matches_serial_default_collator(monkeypatch):
+    """DefaultCollator: collated-ahead batches are byte-identical across 2 epoch boundaries.
 
     n_examples=6, batch_size=2 -> steps_per_epoch=3; num_steps=7 spans the
     boundaries after step 3 and step 6 (3 epochs touched).
@@ -197,15 +197,15 @@ def test_prefetch_matches_serial_default_collator(monkeypatch):
     def factory(cfg):
         return DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1)
 
-    serial, prefetch = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
+    serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps, f"expected {num_steps} steps, got {len(serial)}"
     # Confirm the run actually crossed >=2 epoch boundaries (steps_per_epoch=3).
     assert num_steps // (n_examples // batch_size) >= 2
-    _assert_batch_sequences_equal(serial, prefetch)
+    _assert_batch_sequences_equal(serial, collated)
 
 
-def test_prefetch_matches_serial_packed_collator(monkeypatch):
-    """PackedDataCollator (FFD packing): prefetched batches byte-identical across boundaries.
+def test_async_collation_matches_serial_packed_collator(monkeypatch):
+    """PackedDataCollator (FFD packing): collated-ahead batches byte-identical across boundaries.
 
     Constructed CPU-only (dp_size=1, tp/pp/cp=1) — the collate is pure
     numpy/torch and needs no Megatron runtime.
@@ -224,90 +224,90 @@ def test_prefetch_matches_serial_packed_collator(monkeypatch):
             micro_train_batch_size_per_gpu=1,
         )
 
-    serial, prefetch = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
+    serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps
     # sub_seq_lengths must be present on the packed path (proves packing fired).
-    assert all("sub_seq_lengths" in c["snap"] for c in prefetch)
-    _assert_batch_sequences_equal(serial, prefetch)
+    assert all("sub_seq_lengths" in c["snap"] for c in collated)
+    _assert_batch_sequences_equal(serial, collated)
 
 
-def test_prefetch_matches_serial_uneven_wraparound(monkeypatch):
+def test_async_collation_matches_serial_uneven_wraparound(monkeypatch):
     """Wrap-around + uneven epoch: dataset not divisible by batch_size.
 
     n_examples=5, batch_size=2 -> the slice wraps around the dataset end inside
     an epoch and epoch boundaries land mid-list. Exercises the
-    ``end_idx > len(tokenized)`` branch under prefetch.
+    ``end_idx > len(tokenized)`` branch under collate-ahead.
     """
     n_examples, batch_size, num_steps = 5, 2, 9
 
     def factory(cfg):
         return DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1)
 
-    serial, prefetch = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
+    serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps
-    _assert_batch_sequences_equal(serial, prefetch)
+    _assert_batch_sequences_equal(serial, collated)
 
 
 # ---------------------------------------------------------------------------
-# Unit tests for the BatchPrefetcher invariants
+# Unit tests for the AsyncBatchCollator invariants
 # ---------------------------------------------------------------------------
 
 
-def test_prefetcher_basic_submit_get():
-    pf = BatchPrefetcher(lambda step: f"batch-{step}")
+def test_async_collator_basic_submit_get():
+    ac = AsyncBatchCollator(lambda step: f"batch-{step}")
     try:
-        assert not pf.has_pending()
-        pf.submit(5)
-        assert pf.has_pending()
-        assert pf.pending_step() == 5
-        assert pf.get(5) == "batch-5"
-        assert not pf.has_pending()
+        assert not ac.has_pending()
+        ac.submit(5)
+        assert ac.has_pending()
+        assert ac.pending_step() == 5
+        assert ac.get(5) == "batch-5"
+        assert not ac.has_pending()
     finally:
-        pf.shutdown()
+        ac.shutdown()
 
 
-def test_prefetcher_step_mismatch_raises():
-    pf = BatchPrefetcher(lambda step: step)
+def test_async_collator_step_mismatch_raises():
+    ac = AsyncBatchCollator(lambda step: step)
     try:
-        pf.submit(3)
+        ac.submit(3)
         with pytest.raises(AssertionError, match="!= expected step"):
-            pf.get(4)  # asking for a different step than was submitted
+            ac.get(4)  # asking for a different step than was submitted
     finally:
-        pf.shutdown()
+        ac.shutdown()
 
 
-def test_prefetcher_double_submit_raises():
-    pf = BatchPrefetcher(lambda step: step)
+def test_async_collator_double_submit_raises():
+    ac = AsyncBatchCollator(lambda step: step)
     try:
-        pf.submit(1)
+        ac.submit(1)
         with pytest.raises(AssertionError, match="slot already occupied"):
-            pf.submit(2)  # single-slot invariant
+            ac.submit(2)  # single-slot invariant
     finally:
-        pf.shutdown()
+        ac.shutdown()
 
 
-def test_prefetcher_worker_exception_propagates():
+def test_async_collator_worker_exception_propagates():
     def _boom(step):
         raise RuntimeError("producer failed")
 
-    pf = BatchPrefetcher(_boom)
+    ac = AsyncBatchCollator(_boom)
     try:
-        pf.submit(1)
+        ac.submit(1)
         with pytest.raises(RuntimeError, match="producer failed"):
-            pf.get(1)
+            ac.get(1)
     finally:
-        pf.shutdown()
+        ac.shutdown()
 
 
-def test_prefetcher_clear_drains_in_flight():
-    pf = BatchPrefetcher(lambda step: step)
+def test_async_collator_clear_drains_in_flight():
+    ac = AsyncBatchCollator(lambda step: step)
     try:
-        pf.submit(7)
-        pf.clear()
-        assert not pf.has_pending()
-        assert pf.pending_step() is None
+        ac.submit(7)
+        ac.clear()
+        assert not ac.has_pending()
+        assert ac.pending_step() is None
         # A fresh submit after clear works normally.
-        pf.submit(8)
-        assert pf.get(8) == 8
+        ac.submit(8)
+        assert ac.get(8) == 8
     finally:
-        pf.shutdown()
+        ac.shutdown()
