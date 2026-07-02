@@ -337,6 +337,35 @@ def test_cross_field_defaults():
     )  # same as `generator.sampling_params.max_generate_length`
 
 
+def test_fake_int4_qat_defaults():
+    """Defaults must stay pinned to the llm-compressor RTN convention, disabled."""
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    fq = cfg.trainer.policy.model.fake_int4_qat
+    assert fq.enabled is False
+    assert fq.group_size == 32
+    assert fq.scale_divisor == 7.5
+    assert fq.q_min == -8.0
+    assert fq.bf16_base_path is None
+
+
+def test_fake_int4_qat_cli_overrides():
+    """All convention knobs must be settable from the CLI (the Kimi K2.x convention)."""
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.policy.model.fake_int4_qat.enabled=true",
+            "trainer.policy.model.fake_int4_qat.group_size=32",
+            "trainer.policy.model.fake_int4_qat.scale_divisor=7.0",
+            "trainer.policy.model.fake_int4_qat.q_min=-7",
+            "trainer.policy.model.fake_int4_qat.bf16_base_path=/data/bf16-dump",
+        ]
+    )
+    fq = cfg.trainer.policy.model.fake_int4_qat
+    assert fq.enabled is True
+    assert fq.scale_divisor == 7.0
+    assert fq.q_min == -7.0
+    assert fq.bf16_base_path == "/data/bf16-dump"
+
+
 class TestTrainerUseSamplePackingAlias:
     """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
     on the RL entrypoint config (mirrors the ``fsdp2``->``fsdp`` alias)."""
