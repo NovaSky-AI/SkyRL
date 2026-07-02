@@ -15,6 +15,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -35,7 +35,6 @@ from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightTransferSender,
     WeightTransferStrategy,
 )
-from skyrl.train.utils.utils import str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor
 IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
