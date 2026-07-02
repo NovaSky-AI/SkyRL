@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
     get_model_config,
@@ -75,7 +76,7 @@ from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import (
+    from skyrl.backends.skyrl_train.inference_servers.base import (
         InferenceEngineInterface,
     )
     from skyrl.train.config.config import InferenceEngineConfig
@@ -1033,12 +1034,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
-        # Count microbatches that carry real (non-padding) samples. Token-based batching
-        # appends fully-padding microbatches (loss_mask all zero) so every DP rank runs the
-        # same number of forward passes; those contribute 0 to KL/entropy and to mean metrics
-        # but would otherwise inflate the denominators. `num_real_microbatches` lets the loss
-        # normalize KL/entropy over real microbatches only.
-        num_real_microbatches = sum(1 for m in micro_buffer if m["loss_mask"].sum().item() > 0)
+        # Count real (non-padding) microbatches. Token-based batching appends padding
+        # microbatches so every DP rank runs the same number of forward passes; they must
+        # not inflate the KL/entropy denominators. Use the iterator's padding count rather
+        # than loss_mask, since a real microbatch can be all-zero (e.g. DAPO overlong filtering).
+        num_padding_microbatches = (
+            getattr(microbatch_iterator, "num_padding_microbatches", 0) if microbatch_iterator is not None else 0
+        )
+        num_real_microbatches = len(micro_buffer) - num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
             m_batch["num_real_microbatches"] = num_real_microbatches
@@ -1118,7 +1121,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # identical on every rank; num_padding_microbatches reports the per-rank average).
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
-            status["num_padding_microbatches"] = float(len(micro_buffer) - num_real_microbatches)
+            status["num_padding_microbatches"] = float(num_padding_microbatches)
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
@@ -1238,7 +1241,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            target_modules = infer_target_modules_from_adapter_weights(adapter_state.keys())
+            # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
+            # merge_lora=False on-policy sync is accepted (otherwise
+            # load_lora_adapter rejects `experts.down_proj`). See
+            # _convert_moe_experts_lora_to_vllm for the layout details.
+            adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+
+            target_modules = sorted(
+                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
+            )
             base_model_name_or_path = str(
                 getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")

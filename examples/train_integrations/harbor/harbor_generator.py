@@ -1,27 +1,29 @@
 import asyncio
+import logging
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
-from loguru import logger
 from uuid import uuid4
-from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl.train.generators.utils import get_rollout_metrics
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from skyrl.train.utils.rate_limiter import create_rate_limiter
-from tqdm import tqdm
-from omegaconf import DictConfig
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from harbor.trial.trial import Trial
-from harbor.models.trial.config import TrialConfig
-from harbor.models.agent.rollout_detail import RolloutDetail
 
 # Suppress LiteLLM verbose logging
-
 import litellm
-import logging
+from loguru import logger
+from omegaconf import DictConfig
+from tqdm import tqdm
+
+from harbor.models.agent.rollout_detail import RolloutDetail
+from harbor.models.trial.config import TrialConfig
+from harbor.trial.trial import Trial
+from skyrl.backends.skyrl_train.inference_servers.base import ConversationType, InferenceEngineInterface
+from skyrl.train.generators.base import (
+    GeneratorInput,
+    GeneratorInterface,
+    GeneratorOutput,
+    TrajectoryID,
+)
+from skyrl.train.generators.utils import get_rollout_metrics
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 litellm.suppress_debug_info = True  # Suppress the "Provider List" output
 litellm.set_verbose = False
@@ -218,7 +220,7 @@ class HarborGenerator(GeneratorInterface):
         self,
         generator_cfg: DictConfig,
         harbor_cfg: DictConfig,
-        inference_engine_client: InferenceEngineClient,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         max_seq_len: int,
     ):
@@ -226,16 +228,12 @@ class HarborGenerator(GeneratorInterface):
         Args:
             generator_cfg: DictConfig object containing the generator configuration
             harbor_cfg: DictConfig object containing the Harbor configuration
-            inference_engine_client: InferenceEngineClient object for interacting with the inference engines
+            inference_engine_client: inference engine client for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
         ie_cfg = generator_cfg.inference_engine
-        if _SKYRL_USE_NEW_INFERENCE:
-            assert isinstance(inference_engine_client, RemoteInferenceClient)
-            self.base_url = inference_engine_client.proxy_url
-        else:
-            self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
+        self.base_url = inference_engine_client.get_endpoint_url()
         # Kept so we can notify the router when a session (trial attempt) ends,
         # which lets session-aware routing policies rebalance new trajectories.
         self.inference_engine_client = inference_engine_client
@@ -396,8 +394,7 @@ class HarborGenerator(GeneratorInterface):
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
             finally:
-                if _SKYRL_USE_NEW_INFERENCE:
-                    await self.inference_engine_client.finish_session(session_id)
+                await self.inference_engine_client.finish_session(session_id)
 
         if not successful:
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"

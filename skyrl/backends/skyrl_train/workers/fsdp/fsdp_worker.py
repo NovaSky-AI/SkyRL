@@ -7,11 +7,6 @@ import torch
 import torch.distributed
 from transformers import AutoConfig
 
-from skyrl.train.utils.trainer_utils import (
-    get_rope_scaling_config,
-    get_rope_theta_config,
-)
-
 try:
     # for torch 2.5+
     from torch.distributed.tensor import DTensor
@@ -57,7 +52,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
     Args:
         model: FSDP model to extract weights from
-        group_by_module: If True, group parameters by module (e.g., to keep fused QKV weights together)
+        group_by_module: If True, group parameters by module (e.g., for fused QKV loaders)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
             when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
@@ -172,8 +167,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
-            rope_scaling=get_rope_scaling_config(self.cfg),
-            rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.policy.language_model_only,
@@ -207,8 +200,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
         # Initialize weight extractor
-        # TODO(haochen): Module grouping (to keep vLLM-fused QKV weights together) is only enabled for the
-        # CUDA IPC transfer strategy for now; we can enable it for other strategies as well.
+        # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
+        # transfer strategy, we can enable it for other strategies as well.
         from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
 
         group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
@@ -430,8 +423,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
             bf16=self.cfg.bf16,
             sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
-            rope_scaling=get_rope_scaling_config(self.cfg),
-            rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.ref.language_model_only,

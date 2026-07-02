@@ -21,7 +21,7 @@
 # limitations under the License.
 
 import gc
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -160,6 +160,38 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                     layer.mlp.router.bias.requires_grad = False
     # modified in-place
     return model_or_models
+
+
+def _convert_moe_experts_lora_to_vllm(
+    adapter_state: Dict[str, "torch.Tensor"],
+) -> Dict[str, "torch.Tensor"]:
+    """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
+
+    Megatron-Bridge exports fused experts as 3D tensors keyed
+    ``...mlp.experts.gate_up_proj`` (w13) / ``...mlp.experts.down_proj`` (w2),
+    with ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``. vLLM's 3D-MoE
+    loader (``FusedMoE3DWithLoRA`` / ``_stack_moe_lora_weights``) instead expects
+    the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
+    (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
+    exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
+    """
+    converted: Dict[str, "torch.Tensor"] = {}
+    for key, tensor in adapter_state.items():
+        is_gate_up = ".mlp.experts.gate_up_proj." in key
+        is_down = ".mlp.experts.down_proj." in key
+        if (is_gate_up or is_down) and tensor.ndim == 3:
+            if key.endswith(".lora_A.weight"):
+                # (E, rank, in) -> (rank*E [expert-major], in)
+                tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
+            elif key.endswith(".lora_B.weight"):
+                # (E, out, rank) -> (out, rank*E [expert-minor])
+                tensor = tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
+            if is_gate_up:
+                key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
+            else:
+                key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+        converted[key] = tensor
+    return converted
 
 
 @torch.no_grad()
@@ -658,3 +690,18 @@ def broadcast_object_across_pp_ranks(obj):
     torch.distributed.broadcast_object_list(obj_list, src=global_src, group=pp_group)
 
     return obj_list[0]
+
+
+def to_te_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Convert a 2-D keep-mask to a 4-D padding mask for Transformer Engine attention.
+
+    ``remove_left_padding`` returns a 2-D ``[batch, seq]`` keep-mask where 1 marks a real token.
+    Transformer Engine's sliding-window ``get_full_mask`` expects a mask broadcastable to
+    ``[batch, 1, q_seq, kv_seq]``; a 2-D mask collides the batch dimension with the sequence
+    dimension and fails for ``micro_batch_size > 1``. Return a ``[batch, 1, 1, seq]`` padding mask
+    where True marks padding. A ``None`` mask (packed sequences) or an already higher-rank mask is
+    returned unchanged.
+    """
+    if attention_mask is None or attention_mask.dim() != 2:
+        return attention_mask
+    return (~attention_mask.bool())[:, None, None, :]

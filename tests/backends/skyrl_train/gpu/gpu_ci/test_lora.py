@@ -14,7 +14,7 @@ trainer + weight-sync path covered here.
 import pytest
 import ray
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
@@ -44,7 +44,6 @@ def get_test_actor_config(
     cfg.trainer.strategy = strategy
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
@@ -112,7 +111,6 @@ async def test_policy_local_engines_e2e(
         cfg=cfg,
         model=MODEL,
         use_local=True,
-        async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=1 if needs_vllm_lora else 2,

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from loguru import logger
 
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
 from skyrl.train.generators.base import (
     BatchMetadata,

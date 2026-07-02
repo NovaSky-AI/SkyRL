@@ -15,7 +15,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-RUN_NAME="sft_megatron_run_$(date +%Y%m%d%H)"
+# Unique per invocation (seconds + PID): the shared wandb project means an hour-granular
+# name can collide with a concurrent run on another host, and check_sft_trend.py would then
+# read the wrong run.
+RUN_NAME="sft_megatron_run_$(date +%Y%m%d%H%M%S)_$$"
 PROJECT_NAME="skyrl_sft_ci"
 ENTITY="sky-posttraining-uc-berkeley"
 NUM_STEPS=100

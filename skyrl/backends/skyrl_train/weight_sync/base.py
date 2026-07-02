@@ -66,7 +66,7 @@ class WeightChunk:
     """Represents one or more model parameters to be transferred.
 
     A WeightChunk can contain multiple parameters grouped together for efficient
-    transfer (e.g., Q/K/V projections that vLLM fuses into a single tensor).
+    transfer (e.g., Q/K/V projections for fused-weight loaders).
 
     Attributes:
         names: List of parameter names (e.g., ["model.layer.0.weight"])

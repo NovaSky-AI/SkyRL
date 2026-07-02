@@ -3,13 +3,18 @@ set -x
 # GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K using a standalone vllm server (at 127.0.0.1:8001)
 # First run `uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k` to setup the dataset.
 # then to launch the server, first run 
-# bash examples/train/remote_inference_engine/run_vllm_server.sh
+# bash examples/train/remote_inference_server/run_vllm_server.sh
 # then to start training, run
-# bash examples/train/remote_inference_engine/run_remote.sh
+# bash examples/train/remote_inference_server/run_remote.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 
+# Set these to the right proxy and server URLs
+EXTERNAL_PROXY_URL="http://127.0.0.1:8000"
+EXTERNAL_SERVER_URLS="['http://127.0.0.1:8001']"
+
 BACKEND="vllm"
+# This needs to match the exact settings used for the standalone deployment for weight syncing
 INF_ENGINE_TP=4
 
 NUM_TRAINING_GPUS=4
@@ -19,7 +24,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
     generator.inference_engine.run_engines_locally=False \
-    generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
+    generator.inference_engine.external_proxy_url="$EXTERNAL_PROXY_URL" \
+    generator.inference_engine.external_server_urls="$EXTERNAL_SERVER_URLS" \
     generator.inference_engine.tensor_parallel_size="$INF_ENGINE_TP" \
     generator.inference_engine.backend="$BACKEND" \
     generator.sampling_params.logprobs=null \
@@ -35,8 +41,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     trainer.micro_forward_batch_size_per_gpu=20 \
     trainer.micro_train_batch_size_per_gpu=20 \
     trainer.logger="wandb" \
-    trainer.project_name="remote_inference_engine" \
-    trainer.run_name="remote_inference_engine_test" \
+    trainer.project_name="remote_inference_server" \
+    trainer.run_name="remote_inference_server_test" \
     trainer.resume_mode=null \
     trainer.ckpt_path="$HOME/ckpts/" \
     trainer.eval_batch_size=1024 \

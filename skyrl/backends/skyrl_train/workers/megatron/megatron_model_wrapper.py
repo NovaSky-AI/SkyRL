@@ -16,6 +16,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
+    to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     _fused_vocab_parallel_entropy_from_hidden,
@@ -311,7 +312,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
@@ -321,7 +322,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                 )
 
@@ -748,7 +749,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
@@ -758,7 +759,7 @@ class MegatronModelWrapper:
                 outputs = model(
                     new_sequences,
                     new_position_ids,
-                    new_attention_mask,
+                    to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
                 )
 

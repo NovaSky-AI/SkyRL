@@ -11,7 +11,10 @@
     "search",
     "geometry3k",
     "visgym",
+<<<<<<< HEAD
     "quantized_rollouts",
+=======
+>>>>>>> a4799910c315edb7f86df837d72aac06abc6708a
     "mini_swe_agent",
     "openenv"
   ]
