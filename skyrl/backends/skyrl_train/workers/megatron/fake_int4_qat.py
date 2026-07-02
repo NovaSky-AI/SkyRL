@@ -39,12 +39,9 @@ from __future__ import annotations
 import torch
 from loguru import logger
 
+# Symmetric signed-INT4 upper bound; shared by both conventions. The convention
+# knobs (scale_divisor, q_min) come from ``trainer.policy.model.fake_int4_qat``.
 _Q_MAX = 7.0
-# scale_divisor/q_min conventions (see module docstring).
-SCALE_DIV_LLMCOMPRESSOR = 7.5
-SCALE_DIV_KIMI = 7.0
-Q_MIN_LLMCOMPRESSOR = -8.0
-Q_MIN_KIMI = -7.0
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -95,8 +92,8 @@ class _FakeInt4QuantizeSTE(torch.autograd.Function):
 def fake_int4_quantize_ste(
     x: torch.Tensor,
     group_size: int,
-    scale_div: float = SCALE_DIV_LLMCOMPRESSOR,
-    q_min: float = Q_MIN_LLMCOMPRESSOR,
+    scale_div: float,
+    q_min: float,
 ) -> torch.Tensor:
     """Apply the fake-INT4 STE to a 2D ``[out, in]`` weight, preserving Megatron's
     ``main_grad`` bookkeeping so the fused optimizer still finds its grad buffer.
@@ -113,9 +110,9 @@ _installed = False
 
 
 def install_fake_int4_qat(
-    group_size: int = 32,
-    scale_divisor: float = SCALE_DIV_LLMCOMPRESSOR,
-    q_min: float = Q_MIN_LLMCOMPRESSOR,
+    group_size: int,
+    scale_divisor: float,
+    q_min: float,
 ) -> None:
     """Monkeypatch ``TEGroupedLinear._get_weight_tensors`` to fake-quantize the
     fused MoE expert weights. Call once per worker when

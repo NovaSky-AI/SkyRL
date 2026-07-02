@@ -354,7 +354,7 @@ class MegatronWorker:
             install_fake_int4_qat(
                 group_size=fq.group_size,
                 scale_divisor=fq.scale_divisor,
-                q_min=getattr(fq, "q_min", -8.0),
+                q_min=fq.q_min,
             )
             if rank0:
                 logger.info(
