@@ -126,6 +126,7 @@ def test_chat_truncation(tokenizer):
     # If the prompt alone fills the budget, result is None -- also acceptable
 
 
+@pytest.mark.vllm
 def test_chat_vlm(vlm_processor):
     """A user+image+assistant conversation tokenizes with vision tokens."""
     example = {
@@ -305,6 +306,7 @@ def test_collate_metadata(tokenizer):
     assert batch.metadata["response_length"] == 3
 
 
+@pytest.mark.vllm
 def test_collate_vlm(vlm_processor):
     """Examples with vision tensors collate into the expected TensorList shapes."""
     examples = [
