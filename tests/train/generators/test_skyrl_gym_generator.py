@@ -363,10 +363,9 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
 async def test_generate_batched_metrics_use_truncated_responses(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
-    """Rollout metrics must describe the truncated responses that are actually
-    returned/trained, not the raw engine output. With max_generate_length below
-    the engine's output length, generate/max_num_tokens must equal the truncated
-    length, matching response_ids and loss_masks."""
+    """Rollout metrics must describe the truncated responses that are trained, not the
+    raw engine output: with max_generate_length below the engine output, generate/
+    max_num_tokens must equal the truncated length, matching response_ids/loss_masks."""
     generator_cfg.sampling_params.max_generate_length = 2  # < len(MOCK_LLM_OUTPUT_IDS) == 4
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})

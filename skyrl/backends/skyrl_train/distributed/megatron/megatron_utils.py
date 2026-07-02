@@ -167,24 +167,13 @@ def _convert_moe_experts_lora_to_vllm(
 ) -> Dict[str, "torch.Tensor"]:
     """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
 
-    Megatron-Bridge exports the fused experts as 3D (num_experts-leading)
-    tensors under two keys per layer::
-
-        ...mlp.experts.gate_up_proj.lora_{A,B}.weight   # w13
-        ...mlp.experts.down_proj.lora_{A,B}.weight       # w2
-
-    with shapes ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``.
-
-    vLLM's fused-MoE LoRA loader for a 3D-MoE model
-    (``FusedMoE3DWithLoRA`` / ``LoRAModelManager._stack_moe_lora_weights``)
-    instead consumes the flat PEFT layout, keyed by the FusedMoE module name
-    itself for ``down_proj`` (w2) and ``<module>.base_layer`` for the packed
-    ``gate_up_proj`` (w13), with shapes ``lora_A=(rank*E, in)`` and
-    ``lora_B=(out, rank*E)``.  It then reconstructs the per-expert tensors via
-    ``reshape(E, -1, in)`` (lora_A) and ``reshape(out, -1, E).permute(2,0,1)``
-    (lora_B); this transform is the exact inverse, verified to round-trip.
-
-    Non-expert tensors (attention, shared_expert) are passed through unchanged.
+    Megatron-Bridge exports fused experts as 3D tensors keyed
+    ``...mlp.experts.gate_up_proj`` (w13) / ``...mlp.experts.down_proj`` (w2),
+    with ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``. vLLM's 3D-MoE
+    loader (``FusedMoE3DWithLoRA`` / ``_stack_moe_lora_weights``) instead expects
+    the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
+    (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
+    exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
     """
     converted: Dict[str, "torch.Tensor"] = {}
     for key, tensor in adapter_state.items():
