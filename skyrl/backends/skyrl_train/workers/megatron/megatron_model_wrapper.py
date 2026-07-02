@@ -9,9 +9,6 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
-from skyrl.backends.skyrl_train.distributed.megatron.mask_utils import (
-    to_te_attention_mask,
-)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
@@ -19,6 +16,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
+    to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     _fused_vocab_parallel_entropy_from_hidden,
