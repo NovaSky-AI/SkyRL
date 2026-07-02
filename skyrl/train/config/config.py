@@ -101,9 +101,40 @@ class SkyRLLoraConfig(BaseConfig):
 
 
 @dataclass
+class FakeInt4QatConfig(BaseConfig):
+    """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
+
+    When the inference engine serves the MoE experts as real ``compressed-tensors``
+    INT4 (e.g. ``casperhansen/Qwen3.6-35B-A3B-INT4-RTN``) but the trainer holds
+    BF16 masters, enabling this fake-quantizes the frozen expert GEMMs onto the
+    same INT4 grid in the forward pass (straight-through backward), removing the
+    train/infer weight mismatch. See
+    ``skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat``.
+    """
+
+    enabled: bool = False
+    group_size: int = 32
+    """Group size along the input dim; must match the served checkpoint (32)."""
+    symmetric: bool = True
+    scale_divisor: float = 7.5
+    """Symmetric-INT4 scale divisor ``scale = amax / scale_divisor``:
+    ``7.5`` = llm-compressor / compressed-tensors RTN (``[-8, 7]``; matches
+    ``casperhansen/Qwen3.6-35B-A3B-INT4-RTN``); ``7.0`` = Kimi K2-Thinking / Miles
+    (``[-7, 7]``)."""
+    bf16_base_path: Optional[str] = None
+    """Megatron-Bridge cannot load a compressed-tensors INT4 checkpoint, so when
+    ``model.path`` points at the INT4 model the trainer loads its BF16 master
+    weights from this path instead (the Miles ``--ref-load`` pattern). The INT4
+    ``model.path`` remains what the inference engine serves and the logical name.
+    When None, the trainer loads weights from ``model.path`` directly (only valid
+    if that path is already a BF16 checkpoint)."""
+
+
+@dataclass
 class ModelConfig(BaseConfig):
     path: Optional[str] = None
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
 
 # ---------------------------------------------------------------------------

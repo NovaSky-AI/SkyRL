@@ -324,6 +324,47 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def _maybe_setup_fake_int4_qat(self):
+        """Wire up INT4-served training and return the BF16 bridge-weights path.
+
+        Reads the *policy's* ``model.fake_int4_qat`` (single source of truth for the
+        shared base model; the ref worker mirrors it). Two independent knobs:
+
+        - ``bf16_base_path``: when set, the trainer loads its BF16 master weights
+          from here instead of ``model.path``. Needed whenever ``model.path`` is a
+          compressed-tensors INT4 checkpoint (which Megatron-Bridge cannot load)
+          served by the inference engine. This redirect happens regardless of
+          ``enabled`` -- so an INT4-served *baseline* WITHOUT fake-quant (to show
+          the uncorrected train/infer mismatch) still loads.
+        - ``enabled``: additionally install the ``TEGroupedLinear`` fake-quant STE
+          so the trainer's MoE experts match the INT4 grid the sampler serves.
+
+        Returns ``bf16_base_path`` (or ``None`` for a plain BF16 ``model.path``).
+        """
+        fq = getattr(self.cfg.policy.model, "fake_int4_qat", None)
+        if fq is None:
+            return None
+
+        rank0 = getattr(self, "_rank", 0) == 0
+        if fq.enabled:
+            from skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat import (
+                install_fake_int4_qat,
+            )
+
+            install_fake_int4_qat(group_size=fq.group_size, scale_divisor=fq.scale_divisor)
+            if rank0:
+                logger.info(
+                    f"fake-INT4 QAT enabled (group_size={fq.group_size}, scale_divisor={fq.scale_divisor}); "
+                    f"trainer BF16 masters from {fq.bf16_base_path or 'model.path'}, "
+                    "MoE experts fake-quantized to INT4 in forward (STE backward)."
+                )
+        elif fq.bf16_base_path and rank0:
+            logger.info(
+                f"fake-INT4 QAT disabled; trainer loads BF16 masters from {fq.bf16_base_path} "
+                "while the inference engine serves INT4 model.path (uncorrected train/infer mismatch)."
+            )
+        return fq.bf16_base_path or None
+
     def init_configs(
         self,
         model_path,
@@ -334,9 +375,17 @@ class MegatronWorker:
         flash_attn=False,
         lora_config=None,
         language_model_only=False,
+        bridge_weights_path=None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
+
+        ``bridge_weights_path`` (fake-INT4 QAT): when set, the Megatron-Bridge loads
+        its BF16 master weights from this path instead of ``model_path``. Used when
+        ``model_path`` is a compressed-tensors INT4 checkpoint (which the bridge
+        cannot load) served by the inference engine, while the trainer keeps BF16
+        masters and fake-quantizes them in the forward pass. Tokenizer + HF config
+        (the logical model identity) still come from ``model_path``.
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -359,7 +408,13 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+        bridge_source = bridge_weights_path or model_path
+        if bridge_weights_path:
+            logger.info(
+                f"fake-INT4 QAT: loading BF16 master weights from {bridge_source} "
+                f"(logical model / inference checkpoint: {model_path})"
+            )
+        bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
         # path (which supports sample packing) instead of the VL Qwen3VLModel
@@ -427,6 +482,10 @@ class MegatronWorker:
 
         self.provider = provider
         self.bridge = bridge
+        # Logical model identity (what the inference engine serves). Differs from
+        # the bridge weights path only under fake-INT4 QAT (INT4 model.path, BF16
+        # bridge weights); used so saved LoRA adapters reference the INT4 base.
+        self._logical_model_path = model_path
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
@@ -762,6 +821,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
+        # Fake-INT4 QAT: install the MoE expert fake-quant hook and (when the
+        # served checkpoint is INT4) redirect the trainer's BF16 master weights.
+        bridge_weights_path = self._maybe_setup_fake_int4_qat()
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -771,6 +834,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
             language_model_only=self.cfg.policy.language_model_only,
+            bridge_weights_path=bridge_weights_path,
         )
 
         if self.enable_router_replay:
@@ -1244,7 +1308,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             target_modules = infer_target_modules_from_adapter_weights(adapter_state.keys())
             base_model_name_or_path = str(
-                getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
+                getattr(self, "_logical_model_path", "")
+                or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             )
             adapter_config = build_adapter_config_dict(
@@ -1456,6 +1521,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Initialize the model for the ref worker.
         """
+        # Fake-INT4 QAT: the ref shares the policy's base model. Mirror the
+        # BF16-master redirect so it can load an INT4-served checkpoint, and the
+        # (global) fake-quant hook keeps the KL anchor in the same weight space.
+        bridge_weights_path = self._maybe_setup_fake_int4_qat()
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -1465,6 +1535,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
             language_model_only=self.cfg.ref.language_model_only,
+            bridge_weights_path=bridge_weights_path,
         )
 
         self.actor_module = self.make_megatron_module(
