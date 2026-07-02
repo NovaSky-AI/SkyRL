@@ -18,7 +18,7 @@ skyrl/backends/skyrl_train/weight_sync/
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
-- `skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. Three-phase chunked lifecycle.
+- `skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. As of vLLM 0.23.0 this is a near-empty **hook** class: weight sync runs entirely through vLLM's native endpoints (below), and the class only exists as the place to add SkyRL-specific worker overrides when upstream lacks something we need. It currently applies the `#44814` layerwise-reload numel patch at import time (remove once vLLM ≥ 0.23.1).
 
 The weight sync implementation relies on the native vLLM weight sync APIs - `WeightTransferEngine` abstractions as well as native RPC endpoints for weight updates.
 
@@ -29,10 +29,15 @@ The weight sync implementation relies on the native vLLM weight sync APIs - `Wei
 
 Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
 
-## Lifecycle (`NewInferenceWorkerWrap`)
-1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
-2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
-3. `finish_weight_update()` — runs `finalize_layerwise_reload` (quantization repacking, attention weight postprocessing).
+## Lifecycle — vLLM 0.23.0 native endpoints
+
+Driven by `RemoteInferenceClient`; the GPUWorker's `weight_transfer_engine` is selected via `weight_transfer_config`, already passed at `inference_servers/utils.py`:
+1. `/init_weight_transfer_engine` — once per session.
+2. `/start_weight_update` (`is_checkpoint_format=True`) — initializes layerwise reload (moves layers to meta device, wraps loaders).
+3. `/update_weights` — called per chunk. For CUDA IPC the sender delegates packing to vLLM's `IPCWeightTransferEngine.trainer_send_weights` (packed mode) and the worker's `weight_transfer_engine` unpacks via `packed_ipc_consumer`; for NCCL the sender uses `NCCLWeightTransferEngine.trainer_send_weights`.
+4. `/finish_weight_update` — runs `finalize_layerwise_reload`.
+
+The `set_current_vllm_config` wrap the worker used to apply is no longer needed: vLLM 0.23.0 (vllm-project/vllm#44613) dropped the `get_current_vllm_config()` read from the FlashInfer MoE kernels.
 
 ## Convention: vLLM imports
 
