@@ -252,6 +252,68 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     assert torch.allclose(data["returns"], expected_advantages)
 
 
+def test_normalize_advantages_batch_normalize_masks_padding(dummy_config):
+    """Regression test for advantage batch normalization over padding positions.
+
+    The z-score mean must be computed only over valid response positions so that padding
+    contents (zeros, or non-zero GAE leftovers) cannot bias the statistics.
+    See https://github.com/NovaSky-AI/SkyRL/issues/1305.
+    """
+    dummy_config.trainer.algorithm.advantage_batch_normalize = True
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    batch_size = 2
+    response_mask = torch.tensor(
+        [
+            [0, 0, 1, 1, 1],
+            [0, 0, 0, 1, 1],
+        ],
+        dtype=torch.int32,
+    )
+    advantages = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 2.0, 3.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+        ]
+    )
+    # GAE leaves non-zero leftovers at padding positions (``masked_whiten`` does not zero
+    # them out), so normalization must be invariant to whatever lives under the mask.
+    polluted_advantages = advantages.clone()
+    polluted_advantages[response_mask == 0] = 100.0
+
+    def normalize(adv: torch.Tensor) -> torch.Tensor:
+        data = TrainingInputBatch(
+            {
+                "advantages": adv.clone(),
+                "response_mask": response_mask,
+                "loss_mask": response_mask.clone(),
+            }
+        )
+        return trainer._normalize_advantages(data, [(0, batch_size)])["advantages"]
+
+    normalized = normalize(advantages)
+    normalized_polluted = normalize(polluted_advantages)
+
+    valid = response_mask.bool()
+    assert torch.allclose(normalized[valid], normalized_polluted[valid])
+
+    # Undo the uniform 1 / num_loss_tokens scaling from the "token_mean" loss reduction so
+    # the z-score statistics can be checked directly: over valid positions, the mean must
+    # be 0 and the (biased) std must be 1.
+    z_scores = (normalized * response_mask.sum())[valid]
+    assert z_scores.mean().item() == approx(0.0, abs=1e-5)
+    assert z_scores.pow(2).mean().sqrt().item() == approx(1.0, abs=1e-4)
+
+
 def test_flush_pending_metrics_logs_and_clears(dummy_config):
     """Metrics accumulated for an in-flight step are flushed to the tracker."""
     trainer = RayPPOTrainer(
