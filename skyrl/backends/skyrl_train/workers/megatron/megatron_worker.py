@@ -351,7 +351,11 @@ class MegatronWorker:
                 install_fake_int4_qat,
             )
 
-            install_fake_int4_qat(group_size=fq.group_size, scale_divisor=fq.scale_divisor)
+            install_fake_int4_qat(
+                group_size=fq.group_size,
+                scale_divisor=fq.scale_divisor,
+                q_min=getattr(fq, "q_min", -8.0),
+            )
             if rank0:
                 logger.info(
                     f"fake-INT4 QAT enabled (group_size={fq.group_size}, scale_divisor={fq.scale_divisor}); "

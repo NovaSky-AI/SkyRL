@@ -5,12 +5,33 @@ holds BF16 masters, the two disagree (a train/infer log-prob gap). This fake-
 quantizes the frozen fused expert GEMMs (``TEGroupedLinear``) onto the same
 group-symmetric INT4 grid inside the forward pass with a straight-through-
 estimator backward, so gradients still reach the BF16 masters (LoRA adapters stay
-BF16, matching "INT4 base + BF16 adapter" at inference). The grid is
-``scale = amax(group) / scale_divisor``, ``q = clamp(round(w / scale), -8, 7)``,
-grouped along the input dim: ``scale_divisor=7.5`` matches llm-compressor /
-compressed-tensors RTN (verified bit-exact) and ``7.0`` matches the Kimi/Miles
-scheme (values land in ``[-7, 7]``, so the ``-8`` clamp is a no-op). Enabled and
-parameterised entirely by ``trainer.policy.model.fake_int4_qat``.
+BF16, matching "INT4 base + BF16 adapter" at inference).
+
+The grid is computed with the *same arithmetic* the serving artifact was produced
+with, so the fake-quantized weights are bit-exact to what the inference engine
+dequantizes (verified element-for-element against real checkpoints):
+
+    amax  = max|w| per group (exact)
+    scale = rn_dtype(amax / scale_divisor)      # single fp32->bf16 rounding,
+                                                # equals the stored ``weight_scale``
+    q     = clamp(round(w / scale), q_min, 7)   # divide+round in the weight dtype,
+                                                # matches compressed-tensors quantize()
+    deq   = q * scale                           # bf16 multiply, matches dequantize()
+
+All-zero groups quantize to zero (guarded division; no eps clamp -- an eps floor
+would distort near-denormal groups that real checkpoints do contain).
+
+Two conventions, selected by ``(scale_divisor, q_min)``:
+
+- ``(7.5, -8)``: llm-compressor / compressed-tensors RTN. Verified bit-exact
+  against ``Qwen3.6-35B-A3B-INT4-RTN`` (requires the *original* BF16 weights as
+  masters; a dequantized INT4 checkpoint does NOT reproduce a /7.5 grid).
+- ``(7.0, -7)``: Kimi K2-Thinking / K2.6 / Miles QAT. Verified bit-exact against
+  ``moonshotai/Kimi-K2.6`` with masters dequantized from the INT4 release (the
+  max-|w| element of every group codes to +-7, which makes the recomputed grid
+  reproduce the stored one exactly).
+
+Enabled and parameterised entirely by ``trainer.policy.model.fake_int4_qat``.
 """
 
 from __future__ import annotations
@@ -18,12 +39,12 @@ from __future__ import annotations
 import torch
 from loguru import logger
 
-# int4 signed range (clamp is a no-op for the [-7, 7] Kimi convention).
-_Q_MIN = -8.0
 _Q_MAX = 7.0
-# scale_divisor: 7.5 = llm-compressor/compressed-tensors RTN; 7.0 = Kimi/Miles.
+# scale_divisor/q_min conventions (see module docstring).
 SCALE_DIV_LLMCOMPRESSOR = 7.5
 SCALE_DIV_KIMI = 7.0
+Q_MIN_LLMCOMPRESSOR = -8.0
+Q_MIN_KIMI = -7.0
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -31,10 +52,15 @@ def _ceil_div(a: int, b: int) -> int:
 
 
 class _FakeInt4QuantizeSTE(torch.autograd.Function):
-    """Group-symmetric INT4 fake-quantize with a straight-through backward."""
+    """Group-symmetric INT4 fake-quantize with a straight-through backward.
+
+    The forward reproduces the compressed-tensors quantize->dequantize pipeline
+    bit-exactly in the weight dtype (see module docstring); the backward is the
+    identity, so gradients pass straight through to the BF16 master weight.
+    """
 
     @staticmethod
-    def forward(ctx, x: torch.Tensor, group_size: int, scale_div: float) -> torch.Tensor:  # noqa: D401
+    def forward(ctx, x: torch.Tensor, group_size: int, scale_div: float, q_min: float) -> torch.Tensor:  # noqa: D401
         out_features, in_features = x.shape
 
         # Pad the input dim up to a whole number of groups. Real MoE dims divide
@@ -46,30 +72,38 @@ class _FakeInt4QuantizeSTE(torch.autograd.Function):
         else:
             x_p = x
 
-        g = x_p.view(out_features, n_padded // group_size, group_size).to(torch.float32)
-        amax = g.abs().amax(dim=-1, keepdim=True)
-        scale = (amax / scale_div).clamp(min=torch.finfo(torch.float32).eps)
+        g = x_p.view(out_features, n_padded // group_size, group_size)
+        # amax is exact in the weight dtype; the fp32 divide + cast back applies
+        # exactly one rounding, matching compressed-tensors' calculate_qparams
+        # (the stored ``weight_scale``). Grid arithmetic below stays in the
+        # weight dtype so q and deq match quantize()/dequantize() bit-for-bit.
+        amax = g.abs().amax(dim=-1, keepdim=True).to(torch.float32)
+        scale = (amax / scale_div).to(x.dtype)
+        safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
 
-        q = torch.clamp(torch.round(g / scale), _Q_MIN, _Q_MAX)
+        q = torch.clamp(torch.round(g / safe_scale), q_min, _Q_MAX)
         deq = (q * scale).view(out_features, n_padded)
-        out = deq[:, :in_features].contiguous().to(x.dtype)
+        out = deq[:, :in_features].contiguous()
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
         # Straight-through estimator: identity gradient to the BF16 master weight.
-        return grad_output, None, None
+        return grad_output, None, None, None
 
 
 def fake_int4_quantize_ste(
-    x: torch.Tensor, group_size: int, scale_div: float = SCALE_DIV_LLMCOMPRESSOR
+    x: torch.Tensor,
+    group_size: int,
+    scale_div: float = SCALE_DIV_LLMCOMPRESSOR,
+    q_min: float = Q_MIN_LLMCOMPRESSOR,
 ) -> torch.Tensor:
     """Apply the fake-INT4 STE to a 2D ``[out, in]`` weight, preserving Megatron's
     ``main_grad`` bookkeeping so the fused optimizer still finds its grad buffer.
 
-    ``scale_div`` selects the convention: ``7.5`` (llm-compressor RTN) or ``7.0``
-    (Kimi/Miles)."""
-    out = _FakeInt4QuantizeSTE.apply(x, group_size, scale_div)
+    ``(scale_div, q_min)`` selects the convention: ``(7.5, -8)`` llm-compressor
+    RTN, ``(7.0, -7)`` Kimi/Miles."""
+    out = _FakeInt4QuantizeSTE.apply(x, group_size, scale_div, q_min)
     if hasattr(x, "main_grad"):
         out.main_grad = x.main_grad
     return out
@@ -78,11 +112,15 @@ def fake_int4_quantize_ste(
 _installed = False
 
 
-def install_fake_int4_qat(group_size: int = 32, scale_divisor: float = SCALE_DIV_LLMCOMPRESSOR) -> None:
+def install_fake_int4_qat(
+    group_size: int = 32,
+    scale_divisor: float = SCALE_DIV_LLMCOMPRESSOR,
+    q_min: float = Q_MIN_LLMCOMPRESSOR,
+) -> None:
     """Monkeypatch ``TEGroupedLinear._get_weight_tensors`` to fake-quantize the
     fused MoE expert weights. Call once per worker when
     ``trainer.policy.model.fake_int4_qat.enabled`` is set (the config also supplies
-    ``group_size`` and ``scale_divisor``)."""
+    ``group_size``, ``scale_divisor`` and ``q_min``)."""
     global _installed
     if _installed:
         return
@@ -93,7 +131,7 @@ def install_fake_int4_qat(group_size: int = 32, scale_divisor: float = SCALE_DIV
 
     def _patched(self):
         return [
-            fake_int4_quantize_ste(w, group_size, scale_divisor)
+            fake_int4_quantize_ste(w, group_size, scale_divisor, q_min)
             if isinstance(w, torch.Tensor) and w.dim() == 2
             else w
             for w in original(self)
@@ -103,5 +141,5 @@ def install_fake_int4_qat(group_size: int = 32, scale_divisor: float = SCALE_DIV
     _installed = True
     logger.info(
         f"fake-INT4 QAT: patched TEGroupedLinear MoE experts "
-        f"(group_size={group_size}, scale_divisor={scale_divisor}, STE backward)."
+        f"(group_size={group_size}, scale_divisor={scale_divisor}, q_min={q_min}, STE backward)."
     )

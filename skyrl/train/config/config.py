@@ -119,8 +119,12 @@ class FakeInt4QatConfig(BaseConfig):
     scale_divisor: float = 7.5
     """Symmetric-INT4 scale divisor ``scale = amax / scale_divisor``:
     ``7.5`` = llm-compressor / compressed-tensors RTN (``[-8, 7]``; matches
-    ``casperhansen/Qwen3.6-35B-A3B-INT4-RTN``); ``7.0`` = Kimi K2-Thinking / Miles
-    (``[-7, 7]``)."""
+    ``casperhansen/Qwen3.6-35B-A3B-INT4-RTN``); ``7.0`` = Kimi K2-Thinking / K2.6 /
+    Miles (``[-7, 7]``). Set ``q_min`` consistently."""
+    q_min: float = -8.0
+    """Lower clamp of the INT4 code range: ``-8`` for llm-compressor RTN
+    (``scale_divisor=7.5``), ``-7`` for Kimi/Miles (``scale_divisor=7.0``, whose
+    QAT never emits ``-8``)."""
     bf16_base_path: Optional[str] = None
     """Megatron-Bridge cannot load a compressed-tensors INT4 checkpoint, so when
     ``model.path`` points at the INT4 model the trainer loads its BF16 master
