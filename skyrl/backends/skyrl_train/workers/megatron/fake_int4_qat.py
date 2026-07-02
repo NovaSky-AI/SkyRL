@@ -69,7 +69,9 @@ class _FakeInt4QuantizeSTE(torch.autograd.Function):
         else:
             x_p = x
 
-        g = x_p.view(out_features, n_padded // group_size, group_size)
+        # reshape (not view): free for the always-contiguous TE weights, and
+        # copy-on-noncontiguous keeps the public helper safe for sliced inputs.
+        g = x_p.reshape(out_features, n_padded // group_size, group_size)
         # amax is exact in the weight dtype; the fp32 divide + cast back applies
         # exactly one rounding, matching compressed-tensors' calculate_qparams
         # (the stored ``weight_scale``). Grid arithmetic below stays in the
@@ -79,7 +81,7 @@ class _FakeInt4QuantizeSTE(torch.autograd.Function):
         safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
 
         q = torch.clamp(torch.round(g / safe_scale), q_min, _Q_MAX)
-        deq = (q * scale).view(out_features, n_padded)
+        deq = (q * scale).reshape(out_features, n_padded)
         out = deq[:, :in_features].contiguous()
         return out
 
@@ -128,9 +130,11 @@ def install_fake_int4_qat(
 
     def _patched(self):
         return [
-            fake_int4_quantize_ste(w, group_size, scale_divisor, q_min)
-            if isinstance(w, torch.Tensor) and w.dim() == 2
-            else w
+            (
+                fake_int4_quantize_ste(w, group_size, scale_divisor, q_min)
+                if isinstance(w, torch.Tensor) and w.dim() == 2
+                else w
+            )
             for w in original(self)
         ]
 
