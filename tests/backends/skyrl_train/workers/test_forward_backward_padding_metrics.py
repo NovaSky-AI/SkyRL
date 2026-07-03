@@ -87,9 +87,14 @@ def test_policy_padding_microbatch_excluded_from_metrics(force_one_padding_micro
         padding_flags.append(is_padding)
         if is_padding:
             # A fully-padding microbatch has an all-zero loss mask, so its masked-mean
-            # metrics come out as exactly 0 (see TokenBasedBatchIterator._create_padding_microbatch).
-            return {"policy_entropy": 0.0, "policy_loss": 0.0}
-        return {"policy_entropy": 1.0, "policy_loss": 0.5}
+            # metrics come out as exactly 0, and its loss_fn_outputs are dummy entries
+            # (see TokenBasedBatchIterator._create_padding_microbatch).
+            return {"policy_entropy": 0.0, "policy_loss": 0.0, "loss_fn_outputs": [{"logprobs": [0.0]}]}
+        return {
+            "policy_entropy": 1.0,
+            "policy_loss": 0.5,
+            "loss_fn_outputs": [{"logprobs": [1.0]}, {"logprobs": [1.0]}],
+        }
 
     worker._forward_backward_micro = fake_forward_backward_micro
 
@@ -104,6 +109,10 @@ def test_policy_padding_microbatch_excluded_from_metrics(force_one_padding_micro
     # Diagnostics still count the padding microbatch.
     assert out.metrics["num_microbatches"] == 3.0
     assert out.metrics["num_padding_microbatches"] == 1.0
+    # loss_fn_outputs from the padding microbatch are excluded too: 2 real microbatches
+    # x 2 samples each remain, with no dummy [0.0] entry.
+    assert len(out.loss_fn_outputs) == 4
+    assert all(entry == {"logprobs": [1.0]} for entry in out.loss_fn_outputs)
 
 
 def test_critic_padding_microbatch_excluded_from_metrics(force_one_padding_microbatch):
