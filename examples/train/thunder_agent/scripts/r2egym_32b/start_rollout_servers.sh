@@ -165,7 +165,9 @@ LOG_DIR="${LOG_DIR:-$TMP_LOG_ROOT/$RUN_NAME/rollout}"
 SCRATCH_ROOT="$(resolve_writable_runtime_root "${SCRATCH_ROOT:-/scratch/$USER/skyrl_runtime/${RUN_NAME}-rollout}")"
 PYTHON_BIN="$(resolve_python_bin)"
 ROLLOUT_NOFILE_SOFT="${ROLLOUT_NOFILE_SOFT:-131072}"
-VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server}"
+# SkyRL's vLLM server entrypoint: a vLLM OpenAI-compatible server plus SkyRL's
+# custom endpoints (weight sync via /collective_rpc, /reset_prefix_cache, etc.).
+VLLM_SERVER_MODULE="${VLLM_SERVER_MODULE:-skyrl.backends.skyrl_train.inference_servers.vllm_server_actor}"
 
 mkdir -p "$LOG_DIR" "$SCRATCH_ROOT"
 
@@ -250,12 +252,33 @@ if [ "${#SERVER_GPU_GROUPS[@]}" -ne "${#SERVER_PORTS[@]}" ]; then
   exit 1
 fi
 
+# Kill a process and all of its descendants (depth-first: children before
+# parent). A vLLM server spawns an EngineCore subprocess (and, with the mp
+# backend, TP/PP worker processes); a plain `kill` on the launched server PID
+# leaves those orphaned and still holding the GPU, so we walk the whole tree.
+kill_tree() {
+  local pid="$1" sig="$2" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child" "$sig"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
 SERVER_PIDS=()
 cleanup() {
-  if [ "${#SERVER_PIDS[@]}" -gt 0 ]; then
-    kill "${SERVER_PIDS[@]}" 2>/dev/null || true
-    wait "${SERVER_PIDS[@]}" 2>/dev/null || true
+  if [ "${#SERVER_PIDS[@]}" -eq 0 ]; then
+    return
   fi
+  # Graceful stop of each server's whole process tree, then SIGKILL stragglers.
+  local pid
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" TERM
+  done
+  sleep 5
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" KILL
+  done
+  wait "${SERVER_PIDS[@]}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -272,7 +295,7 @@ for idx in "${!SERVER_PORTS[@]}"; do
   fi
   : >"$log_file"
   echo "Starting $source_name port=${SERVER_PORTS[$idx]} gpus=${SERVER_GPU_GROUPS[$idx]} log=$log_file"
-  SKYRL_EXTERNAL_SERVER_IDX="$idx" CUDA_VISIBLE_DEVICES="${SERVER_GPU_GROUPS[$idx]}" "$PYTHON_BIN" \
+  SKYRL_EXTERNAL_SERVER_IDX="$idx" VLLM_SERVER_DEV_MODE=1 CUDA_VISIBLE_DEVICES="${SERVER_GPU_GROUPS[$idx]}" "$PYTHON_BIN" \
     -m "$VLLM_SERVER_MODULE" \
     --model "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
@@ -291,7 +314,7 @@ for idx in "${!SERVER_PORTS[@]}"; do
     --trust-remote-code \
     --chat-template "$CHAT_TEMPLATE_PATH" \
     --distributed-executor-backend mp \
-    --worker-extension-cls skyrl.backends.skyrl_train.inference_servers.vllm_worker.WorkerWrap \
+    --worker-extension-cls skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap \
     "${extra_vllm_args[@]}" \
     >"$log_file" 2>&1 &
   SERVER_PIDS+=("$!")

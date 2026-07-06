@@ -15,11 +15,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from examples.train.rlm.openrouter_client import OpenRouterInferenceClient
+from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
 )
-
-from examples.train.rlm.openrouter_client import OpenRouterInferenceClient
 from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.generators.skyrl_gym_generator import (
     SkyRLGymGenerator,

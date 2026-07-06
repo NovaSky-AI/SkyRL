@@ -16,8 +16,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
+    to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+    _fused_vocab_parallel_entropy_from_hidden,
+    from_parallel_hidden_to_entropy_packed_sequences,
+    from_parallel_hidden_to_logprobs,
+    from_parallel_hidden_to_logprobs_packed_sequences,
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
     vocab_parallel_entropy,
@@ -76,6 +81,35 @@ def _build_packed_targets(
     return targets.unsqueeze(0)
 
 
+def _fused_lm_head_output_processor(**kwargs):
+    """GPTModel ``output_processor`` hook for the fused LM-head log-prob path.
+
+    Skips the output-layer matmul (so the [S, B, vocab//TP] logits are never
+    built), returns the decoder hidden states in [b, s, h] layout (the same
+    layout the default logits path returns), and stashes the resolved
+    output-layer weight into the caller-provided ``context`` dict so the fused
+    log-prob / entropy can run downstream with it.
+    """
+    hidden_states = kwargs["hidden_states"]
+    output_layer = kwargs["output_layer"]
+    ctx = kwargs.get("context")
+    if ctx is not None:
+        output_weight = kwargs.get("output_weight")
+        ctx["lm_head_weight"] = output_weight if output_weight is not None else output_layer.weight
+    # With sequence parallelism the decoder hidden states are sharded along the
+    # sequence dim; the ColumnParallelLinear output layer all-gathers them before
+    # projecting (megatron tensor_parallel/layers.py). We skip that layer, so
+    # replicate the gather here. tensor_parallel_output_grad=True makes the
+    # backward reduce-scatter the hidden grad across TP ranks — exactly the sum
+    # of each rank's vocab-slice grad_hidden that the fused op produces.
+    if getattr(output_layer, "sequence_parallel", False):
+        from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
+
+        hidden_states = gather_from_sequence_parallel_region(hidden_states, tensor_parallel_output_grad=True)
+    # [s, b, h] -> [b, s, h], matching `logits.transpose(0, 1)` in the default path.
+    return hidden_states.transpose(0, 1).contiguous()
+
+
 class MegatronModelWrapper:
     def __init__(
         self,
@@ -83,12 +117,18 @@ class MegatronModelWrapper:
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
+        is_vlm: bool = False,
     ):
         self.cfg = config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
+        self.is_vlm = is_vlm
+        # Fuse the LM-head projection into the chunked log-prob/entropy via the
+        # GPTModel output_processor hook (avoids materializing the full
+        # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
+        self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
         # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
         # sequences inside their own forward; SkyRL sample packing would then
         # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
@@ -121,6 +161,18 @@ class MegatronModelWrapper:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
+    def _assert_vlm_supported(self):
+        """Guard the VLM parallelism constraints carried over from the FSDP path.
+
+        3D RoPE and multimodal token positions make sample/microbatch packing,
+        context parallelism, and sequence parallelism unsafe for VLMs today.
+        """
+        assert not self.remove_microbatch_padding, "VLM + microbatch padding removal unsupported"
+        assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
+        assert (
+            mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
+        ), "VLM + sequence parallelism unsupported"
+
     def forward(
         self,
         micro_batches: List[dict],
@@ -141,6 +193,8 @@ class MegatronModelWrapper:
         Returns:
             torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data):
@@ -150,10 +204,51 @@ class MegatronModelWrapper:
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
-            if temperature != 1.0:
+            # Fused LM-head: `logits` is actually decoder hidden states [B, S, H]
+            # (the output_processor skipped the projection); fold the LM-head into
+            # the chunked log-prob so this forward-only pass never materializes the
+            # full [B, S, vocab//TP] logits (which would OOM at long context).
+            fused_lm_head = self._fused_lm_head and data.get("lm_head_weight") is not None
+            lm_head_weight = data.get("lm_head_weight")
+            if fused_lm_head:
+                _v_local = int(lm_head_weight.shape[0])
+                fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
+
+            # temperature normalization (the fused path applies it inside the op)
+            if temperature != 1.0 and not fused_lm_head:
                 logits.div_(temperature)
 
-            if packed_seq_params is not None and packed_targets is not None:
+            if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+                token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
+                    logits,  # decoder hidden states [1, T, H]
+                    lm_head_weight,
+                    packed_targets,
+                    packed_seq_params.cu_seqlens_q_padded,
+                    sequences.shape[1],
+                    vocab_start_index=fused_vocab_start,
+                    vocab_end_index=fused_vocab_end,
+                    group=tp_grp,
+                    inference_only=True,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                    temperature=temperature,
+                )
+            elif fused_lm_head:
+                token_logprobs = from_parallel_hidden_to_logprobs(
+                    logits,  # decoder hidden states [B, S, H]
+                    lm_head_weight,
+                    sequences,
+                    vocab_start_index=fused_vocab_start,
+                    vocab_end_index=fused_vocab_end,
+                    tp_group=tp_grp,
+                    inference_only=True,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    temperature=temperature,
+                )
+            elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
                     packed_targets,
@@ -200,11 +295,17 @@ class MegatronModelWrapper:
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+            if batch.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
@@ -218,16 +319,40 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
+                # Qwen-style VLMs recompute 3D mRoPE positions internally from
+                # image_grid_thw and ignore any position_ids passed in.
+                if self.is_vlm:
+                    new_position_ids = None
 
-            outputs = model(
-                new_sequences,
-                new_position_ids,
-                new_attention_mask,
-                packed_seq_params=packed_seq_params,
-            )
+            if self._fused_lm_head:
+                # Fused LM-head inference: the output_processor returns decoder
+                # hidden states (not logits) and stashes the LM-head weight, so
+                # collection_func can fold the projection into the chunked
+                # log-prob op. Without this, a forward-only ref/old-logprob pass
+                # (e.g. PPO reference logprobs) at long context would still
+                # materialize the full [B, S, vocab//TP] logits and OOM.
+                _op_ctx: dict = {}
+                outputs = model(
+                    new_sequences,
+                    new_position_ids,
+                    to_te_attention_mask(new_attention_mask),
+                    packed_seq_params=packed_seq_params,
+                    output_processor=_fused_lm_head_output_processor,
+                    output_processor_context=_op_ctx,
+                    **vlm_inputs,
+                )
+                batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
+            else:
+                outputs = model(
+                    new_sequences,
+                    new_position_ids,
+                    to_te_attention_mask(new_attention_mask),
+                    packed_seq_params=packed_seq_params,
+                    **vlm_inputs,
+                )
 
             if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(
@@ -296,6 +421,8 @@ class MegatronModelWrapper:
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
         """
+        if self.is_vlm:
+            self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
         # Resolve loss function
@@ -335,11 +462,56 @@ class MegatronModelWrapper:
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
-            # temperature normalization
-            if temperature != 1.0:
+            # Fused LM-head: `logits` is actually decoder hidden states [B, S, H]
+            # (the output_processor skipped the projection); fold the LM-head into
+            # the chunked log-prob/entropy so the full logits tensor + its fp32
+            # grad are never materialized.
+            fused_lm_head = self._fused_lm_head and data.get("lm_head_weight") is not None
+            lm_head_weight = data.get("lm_head_weight")
+            if fused_lm_head and loss_config.use_entropy_loss:
+                raise NotImplementedError(
+                    "fused_lm_head_logprob does not support use_entropy_loss=True "
+                    "(the fused entropy is a no-grad metric)."
+                )
+            if fused_lm_head:
+                _v_local = int(lm_head_weight.shape[0])
+                fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
+
+            # temperature normalization (the fused path applies it inside the op)
+            if temperature != 1.0 and not fused_lm_head:
                 logits.div_(temperature)
 
-            if packed_seq_params is not None and packed_targets is not None:
+            if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+                token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
+                    logits,  # decoder hidden states [1, T, H]
+                    lm_head_weight,
+                    packed_targets,
+                    packed_seq_params.cu_seqlens_q_padded,
+                    sequences.shape[1],
+                    vocab_start_index=fused_vocab_start,
+                    vocab_end_index=fused_vocab_end,
+                    group=tp_grp,
+                    inference_only=False,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                    temperature=temperature,
+                )
+            elif fused_lm_head:
+                token_logprobs = from_parallel_hidden_to_logprobs(
+                    logits,  # decoder hidden states [B, S, H]
+                    lm_head_weight,
+                    sequences,
+                    vocab_start_index=fused_vocab_start,
+                    vocab_end_index=fused_vocab_end,
+                    tp_group=tp_grp,
+                    inference_only=False,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    temperature=temperature,
+                )
+            elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
                     packed_targets,
@@ -427,7 +599,33 @@ class MegatronModelWrapper:
 
             # RL path: add optional KL/entropy terms
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
-                if packed_seq_params is not None and packed_targets is not None:
+                if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+                    entropy, entropy_for_loss = from_parallel_hidden_to_entropy_packed_sequences(
+                        logits,  # decoder hidden states [1, T, H]
+                        lm_head_weight,
+                        packed_seq_params.cu_seqlens_q_padded,
+                        sequences.shape[1],
+                        num_actions,
+                        data["attention_mask"],
+                        loss_mask,
+                        mpu.get_context_parallel_group(),
+                        tp_group=tp_grp,
+                        sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                        chunk_size=self.cfg.logprobs_chunk_size,
+                        temperature=temperature,
+                    )
+                elif fused_lm_head:
+                    action_hidden = logits[:, -num_actions - 1 : -1, :]
+                    entropy_BS = _fused_vocab_parallel_entropy_from_hidden(
+                        action_hidden,
+                        lm_head_weight,
+                        tp_grp,
+                        chunk_size=self.cfg.logprobs_chunk_size,
+                        temperature=temperature,
+                    )
+                    entropy = masked_mean(entropy_BS, loss_mask)
+                    entropy_for_loss = entropy
+                elif packed_seq_params is not None and packed_targets is not None:
                     entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
                         logits,
                         packed_seq_params.cu_seqlens_q_padded,
@@ -552,11 +750,17 @@ class MegatronModelWrapper:
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
 
+            vlm_inputs = {}
+            if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
+                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+            if batch.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
@@ -570,16 +774,36 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
+                # Qwen-style VLMs recompute 3D mRoPE positions internally from
+                # image_grid_thw and ignore any position_ids passed in.
+                if self.is_vlm:
+                    new_position_ids = None
 
-            outputs = model(
-                new_sequences,
-                new_position_ids,
-                new_attention_mask,
-                packed_seq_params=packed_seq_params,
-            )
+            if self._fused_lm_head:
+                # output_processor returns decoder hidden states (not logits) and
+                # stashes the LM-head weight; loss_func then fuses the projection.
+                _op_ctx: dict = {}
+                outputs = model(
+                    new_sequences,
+                    new_position_ids,
+                    to_te_attention_mask(new_attention_mask),
+                    packed_seq_params=packed_seq_params,
+                    output_processor=_fused_lm_head_output_processor,
+                    output_processor_context=_op_ctx,
+                    **vlm_inputs,
+                )
+                batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
+            else:
+                outputs = model(
+                    new_sequences,
+                    new_position_ids,
+                    to_te_attention_mask(new_attention_mask),
+                    packed_seq_params=packed_seq_params,
+                    **vlm_inputs,
+                )
 
             if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(

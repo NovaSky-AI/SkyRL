@@ -20,9 +20,9 @@ from examples.train_integrations.harbor.harbor_generator import (
     HarborAgentOutput,
     HarborGenerator,
 )
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
+from skyrl.backends.skyrl_train.inference_servers.base import (
+    ConversationType,
+    InferenceEngineInterface,
 )
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
@@ -46,7 +46,7 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         self,
         generator_cfg: DictConfig,
         harbor_cfg: DictConfig,
-        inference_engine_client: InferenceEngineClient,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         max_seq_len: int,
     ):

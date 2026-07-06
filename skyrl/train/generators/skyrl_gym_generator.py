@@ -18,14 +18,11 @@ from loguru import logger
 from tqdm.asyncio import tqdm
 
 import skyrl_gym
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInput,
+    InferenceEngineInterface,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -148,14 +145,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         self,
         generator_cfg: GeneratorConfig,
         skyrl_gym_cfg: SkyRLGymConfig,
-        inference_engine_client: InferenceEngineClient,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         policy_model_name: Optional[str] = None,
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
-            inference_engine_client: InferenceEngineClient object for interacting with the inference engines
+            inference_engine_client: InferenceEngineInterface object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
             policy_model_name: identifier the inference engine knows the policy
                 by (base model path or registered LoRA adapter name). Threaded
@@ -617,8 +614,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             return agent_loop_output
 
         finally:
-            if _SKYRL_USE_NEW_INFERENCE:
-                await self.inference_engine_client.finish_session(session_id)
+            await self.inference_engine_client.finish_session(session_id)
 
     def _build_per_token_rewards(
         self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int], appended_eos_token: bool
@@ -804,7 +800,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
+        rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"

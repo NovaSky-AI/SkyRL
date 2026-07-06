@@ -38,6 +38,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
 )
@@ -70,7 +71,11 @@ from skyrl.train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
-from skyrl.utils.tok import get_tokenizer
+from skyrl.utils.tok import (
+    check_is_vlm,
+    get_processor,
+    get_tokenizer,
+)
 
 # ---------------------------------------------------------------------------
 # Tokenization helpers
@@ -438,6 +443,7 @@ def tokenize_chat_example(
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     tools_key: Optional[str] = "tools",
     system_key: Optional[str] = "system",
+    processor=None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a chat-format example with configurable loss targets.
@@ -497,17 +503,42 @@ def tokenize_chat_example(
     if tools is not None:
         tokenizer_kwargs = {"tools": tools, **tokenizer_kwargs}
 
+    # Detect image content. VLM tokenization runs through the HF processor and
+    # only supports last-assistant training (image token positions are tied to
+    # a single forward over the full conversation).
+    has_images = any(
+        isinstance(m.get("content"), list)
+        and any(isinstance(d, dict) and d.get("type") == "image" for d in m["content"])
+        for m in messages
+    )
+    if has_images and train_on_what == TrainOnWhat.ALL_ASSISTANT_MESSAGES:
+        raise NotImplementedError("Training on all assistant messages with vision inputs is not yet supported")
+
     if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
-        return _tokenize_chat_last_assistant(messages, tokenizer, max_length, **tokenizer_kwargs)
+        return _tokenize_chat_last_assistant(
+            messages, tokenizer, max_length, processor if has_images else None, **tokenizer_kwargs
+        )
     else:
         # ALL_ASSISTANT_MESSAGES
         return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+
+
+def _unbatch(proc_tok_output):
+    """Strip the outer batch list from a processor output.
+
+    ``processor.apply_chat_template`` returns batched ids (``list[list[int]]``)
+    while a plain tokenizer returns a flat ``list[int]``. Normalize to flat.
+    """
+    if proc_tok_output and isinstance(proc_tok_output[0], list):
+        return proc_tok_output[0]
+    return proc_tok_output
 
 
 def _tokenize_chat_last_assistant(
     messages: list[dict],
     tokenizer,
     max_length: Optional[int] = None,
+    processor=None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a conversation and compute loss only on the last assistant message.
@@ -517,43 +548,74 @@ def _tokenize_chat_last_assistant(
         tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
         max_length: Optional sequence length cap; truncates both prompt and full
             conversation to this limit.
+        processor: Optional HF processor used for VLM examples. When provided,
+            image tensors (``pixel_values``, ``image_grid_thw``) are produced and
+            returned alongside the token ids.
         **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
 
     Returns:
-        Dict with ``input_ids``, ``attention_mask``, and ``num_actions`` (number
-        of last-assistant tokens), or ``None`` if truncation left no response tokens.
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions`` (number of
+        last-assistant tokens), and, for VLM examples, ``pixel_values`` and
+        ``image_grid_thw``. Returns ``None`` if truncation left no response
+        tokens or dropped an image's placeholder tokens.
     """
+    # The processor (when present) tokenizes text and images together; otherwise
+    # the plain tokenizer handles text. ``return_dict=True`` so we can read both
+    # token ids and any image tensors back out.
+    processing_class = processor or tokenizer
+
+    length_kwargs = {}
+    if max_length is not None and processor is None:
+        length_kwargs = dict(truncation=True, max_length=max_length)
+
     # Tokenize prompt (everything except last assistant message)
-    prompt_ids = tokenizer.apply_chat_template(
+    prompt_ids = processing_class.apply_chat_template(
         messages[:-1],
         add_generation_prompt=True,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
-        return_dict=False,
+        return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
     # Tokenize full conversation
-    full_ids = tokenizer.apply_chat_template(
+    full_ids = processing_class.apply_chat_template(
         messages,
         add_generation_prompt=False,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
-        return_dict=False,
+        return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
-    num_actions = len(full_ids) - len(prompt_ids)
+    full_input_ids = _unbatch(full_ids["input_ids"])
+    full_prompt_ids = _unbatch(prompt_ids["input_ids"])
+
+    # VLM samples can't be safely truncated (it would drop image placeholder tokens
+    # and break image/text alignment), so drop anything that exceeds the limit.
+    if processor is not None and max_length is not None and len(full_input_ids) > max_length:
+        logger.warning(
+            f"Dropping VLM sample longer than max_length={max_length}, consider increasing max_length if you see this warning too much"
+        )
+        return None
+
+    vlm_kwargs = {}  # We only support Qwen-style image kwargs at the moment
+    if "pixel_values" in full_ids and "image_grid_thw" in full_ids:
+        vlm_kwargs = dict(
+            pixel_values=full_ids["pixel_values"],
+            image_grid_thw=full_ids["image_grid_thw"],
+        )
+
+    num_actions = len(full_input_ids) - len(full_prompt_ids)
     if num_actions <= 0:
         return None
 
     return {
-        "input_ids": full_ids,
-        "attention_mask": [1] * len(full_ids),
+        "input_ids": full_input_ids,
+        "attention_mask": [1] * len(full_input_ids),
         "num_actions": num_actions,
         "loss_mask": [1] * num_actions,
+        **vlm_kwargs,
     }
 
 
@@ -647,6 +709,20 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     attention_masks = []
     loss_masks = []
 
+    # VLM image tensors travel as a TensorList (one variable-shape tensor per
+    # sample). Mixed text+image batches are not supported; every sample in a VLM
+    # batch must carry images. Check homogeneity up front so a mixed batch fails
+    # here with a clear message rather than a KeyError deep in the pad loop.
+    num_with_images = sum("pixel_values" in ex for ex in examples)
+    if num_with_images not in (0, len(examples)):
+        raise ValueError(
+            f"Mixed text+image batches are not supported: {num_with_images}/{len(examples)} "
+            "samples carry 'pixel_values'. Every sample in a VLM batch must carry images."
+        )
+    batch_has_images = num_with_images > 0
+    pixel_values = []
+    image_grid_thw = []
+
     for ex in examples:
         pad_len = max_len - len(ex["input_ids"])
         # Left-pad sequences (SkyRL convention)
@@ -656,11 +732,17 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         action_pad = max_num_actions - ex["num_actions"]
         loss_masks.append([0] * action_pad + ex["loss_mask"])
 
+        if batch_has_images:
+            pixel_values.append(torch.as_tensor(ex["pixel_values"]))
+            image_grid_thw.append(torch.as_tensor(ex["image_grid_thw"]))
+
     batch = TrainingInputBatch(
         {
             "sequences": torch.tensor(sequences, dtype=torch.long),
             "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
             "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "pixel_values": TensorList(pixel_values) if batch_has_images else None,
+            "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
     )
     batch.metadata = {"response_length": max_num_actions}
@@ -698,6 +780,8 @@ class SFTTrainer:
         # When not provided (e.g. standalone usage), build it here.
         self.cfg = skyrl_cfg if skyrl_cfg is not None else build_skyrl_config_for_sft(cfg)
         self.tokenizer = None
+        self.processor = None  # set in setup() for VLM models
+        self.is_vlm = False
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
         self.global_step = 0
@@ -780,12 +864,26 @@ class SFTTrainer:
         Ray must already be initialized before calling this (either via
         ``initialize_ray`` on the head node or inside a Ray task).
         """
-        self.tokenizer = get_tokenizer(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
-            padding_side="left",
-        )
+        tokenizer_kwargs = {
+            "trust_remote_code": True,
+            "use_fast": not self.cfg.trainer.disable_fast_tokenizer,
+            "padding_side": "left",
+        }
+
+        self.is_vlm = check_is_vlm(self.cfg.trainer.policy.model.path)
+        if self.is_vlm:
+            self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
+            # Sequence packing / microbatch padding removal are unsupported for
+            # VLMs (3D RoPE + image token positions). ``remove_microbatch_padding``
+            # defaults to True, so disable both unconditionally and mirror the
+            # change onto the already-built trainer config the workers receive.
+            if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
+                logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
+            self.sft_cfg.use_sequence_packing = False
+            self.sft_cfg.remove_microbatch_padding = False
+            self.cfg.trainer.remove_microbatch_padding = False
+
+        self.tokenizer = get_tokenizer(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
         self.collator = self._build_collator(self.tokenizer)
         self._init_tracker()
         self._init_workers()
@@ -935,6 +1033,13 @@ class SFTTrainer:
         columns = dataset.column_names
         num_workers = self.sft_cfg.num_workers
 
+        # The HF processor needed for VLM tokenization does not round-trip
+        # cleanly through the spawn-based worker pool, so VLM tokenization runs
+        # sequentially.
+        if self.is_vlm and num_workers != 0:
+            logger.warning("VLM detected: forcing sequential tokenization (num_workers=0).")
+            num_workers = 0
+
         # Sequential tokenization path
         if num_workers == 0:
             logger.info("Tokenizing dataset (sequential)...")
@@ -950,6 +1055,7 @@ class SFTTrainer:
                         train_on_what=self.sft_cfg.train_on_what,
                         tools_key=tools_key,
                         system_key=system_key,
+                        processor=self.processor,
                     )
                     for ex in dataset
                 ]

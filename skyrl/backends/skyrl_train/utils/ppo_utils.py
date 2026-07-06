@@ -460,6 +460,20 @@ class PolicyLossType(StrEnum):
 # skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
 LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
 
+LOSSES_WITH_OLD_LOGPROBS = frozenset(
+    {
+        PolicyLossType.REGULAR,
+        PolicyLossType.DUAL_CLIP,
+        PolicyLossType.GSPO,
+        PolicyLossType.CISPO,
+        PolicyLossType.CLIP_COV,
+        PolicyLossType.KL_COV,
+        PolicyLossType.SAPO,
+        PolicyLossType.CROSS_ENTROPY,
+        PolicyLossType.IMPORTANCE_SAMPLING,
+    }
+)
+
 
 class PolicyLossRegistry(BaseFunctionRegistry):
     """

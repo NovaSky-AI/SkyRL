@@ -217,3 +217,37 @@ def local_read_dir(input_path: str):
         if not exists(input_path):
             raise FileNotFoundError(f"Path does not exist: {input_path}")
         yield input_path
+
+
+@contextmanager
+def local_read_files(input_dir, filenames):
+    """
+    Context manager that provides a local directory with specific files from input_dir.
+
+    For local paths, returns the path directly.
+    For cloud paths, downloads specified files to a temporary directory.
+
+    Args:
+        input_dir: The source directory (local or cloud)
+        filenames: List of filenames to download
+
+    Yields:
+        str: Local directory path containing the requested files
+
+    Example:
+        with local_read_files("s3://bucket/model", ["config.json", "pytorch_model.bin"]) as read_dir:
+            # Load files from read_dir
+            config_path = os.path.join(read_dir, "config.json")
+            model_path = os.path.join(read_dir, "pytorch_model.bin")
+    """
+    if is_cloud_path(input_dir):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name in filenames:
+                src = input_dir.rstrip("/") + "/" + name
+                if exists(src):
+                    download_file(src, os.path.join(temp_dir, name))
+            yield temp_dir
+    else:
+        if not exists(input_dir):
+            raise FileNotFoundError(f"Path does not exist: {input_dir}")
+        yield input_dir

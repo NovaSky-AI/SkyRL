@@ -12,17 +12,10 @@ from typing import Optional
 import ray
 from loguru import logger
 from ray.util.placement_group import placement_group
-from transformers import PreTrainedTokenizerBase
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
-from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
-    create_remote_inference_engines,
-)
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.generators.base import GeneratorInterface
@@ -46,91 +39,6 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig,
-    colocate_pg: Optional[ResolvedPlacementGroup],
-    tokenizer: PreTrainedTokenizerBase,
-):
-    from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
-        create_ray_wrapped_inference_engines,
-    )
-
-    ie_cfg = cfg.generator.inference_engine
-    engine_kwargs = {
-        "num_inference_engines": ie_cfg.num_engines,
-        "tensor_parallel_size": ie_cfg.tensor_parallel_size,
-        "pipeline_parallel_size": ie_cfg.pipeline_parallel_size,
-        "model_dtype": ie_cfg.model_dtype,
-        "pretrain": cfg.trainer.policy.model.path,
-        "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": ie_cfg.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": ie_cfg.enable_prefix_caching,
-        "enforce_eager": ie_cfg.enforce_eager,
-        "expert_parallel_size": ie_cfg.expert_parallel_size,
-        "data_parallel_size": ie_cfg.data_parallel_size,
-        "shared_pg": colocate_pg,
-        "gpu_memory_utilization": ie_cfg.gpu_memory_utilization,
-        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": ie_cfg.async_engine,
-        "max_num_batched_tokens": ie_cfg.max_num_batched_tokens,
-        "max_num_seqs": ie_cfg.max_num_seqs,
-        "tokenizer": tokenizer,
-        "backend": ie_cfg.backend,
-        "language_model_only": ie_cfg.language_model_only,
-        "engine_init_kwargs": ie_cfg.engine_init_kwargs,
-        "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
-        "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
-        "distributed_executor_backend": ie_cfg.distributed_executor_backend,
-        "use_expandable_segments": ie_cfg.use_expandable_segments,
-    }
-
-    # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
-        lora_cfg = cfg.trainer.policy.model.lora
-        engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = lora_cfg.rank
-        engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = lora_cfg.max_loras
-        if lora_cfg.max_cpu_loras is not None:
-            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
-        engine_kwargs["fully_sharded_loras"] = ie_cfg.fully_sharded_loras
-
-        # TODO(devpatel): Bandaid solution, replace this once we have a better
-        # solution for LoRA performance degradation on the vLLM side
-        if ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
-            logger.warning(
-                "LoRA is enabled but inference_engine.enforce_eager=true. "
-                "This combination causes significant performance degradation (2-3x slower generation). "
-                "Automatically setting enforce_eager=false for better performance. "
-            )
-            engine_kwargs["enforce_eager"] = False
-
-    if cfg.generator.rope_scaling is not None:
-        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
-    if cfg.generator.rope_theta is not None:
-        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
-    if ie_cfg.served_model_name is not None:
-        engine_kwargs["served_model_name"] = ie_cfg.served_model_name
-
-    return create_ray_wrapped_inference_engines(**engine_kwargs)
-
-
-def create_remote_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):
-    # TODO(tgriggs): We may want a separate config for the model name in case
-    # it's different from the name used in the OpenAI API
-    ie_cfg = cfg.generator.inference_engine
-    return create_remote_inference_engines(
-        urls=ie_cfg.remote_urls,
-        model_name=cfg.trainer.policy.model.path,
-        engine_backend=ie_cfg.backend,
-        tokenizer=tokenizer,
-        tensor_parallel_size=ie_cfg.tensor_parallel_size,
-        pipeline_parallel_size=ie_cfg.pipeline_parallel_size,
-        data_parallel_size=ie_cfg.data_parallel_size,
-        expert_parallel_size=ie_cfg.expert_parallel_size,
-    )
-
-
 class BasePPOExp:
     def __init__(self, cfg: SkyRLTrainConfig):
         """
@@ -150,7 +58,7 @@ class BasePPOExp:
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
 
-        # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
+        # Inference resources (created lazily in _get_new_inference_client)
         self._server_groups = None
         self._prefill_server_groups = None
         self._decode_server_groups = None
@@ -288,33 +196,13 @@ class BasePPOExp:
         """Setup and return the inference engine client.
 
         This is a hook method that can be overridden by subclasses to customize
-        inference engine creation (e.g., FlashRL, custom backends).
+        inference engine creation (e.g., custom clients or backends).
 
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
-        if _SKYRL_USE_NEW_INFERENCE:
-            logger.info("Initializing new inference client")
-            return self._get_new_inference_client()
-        else:
-            return self._get_legacy_inference_client()
-
-    def _get_legacy_inference_client(self) -> InferenceEngineInterface:
-        """Legacy inference client using Ray actors."""
-        if self.cfg.generator.inference_engine.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(
-                self.cfg, self.colocate_pg, self.tokenizer
-            )
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
-
-        return InferenceEngineClient(
-            inference_engines,
-            self.tokenizer,
-            self.cfg.trainer.policy.model.path,
-            self.cfg.trainer.policy.model.lora,
-            self.cfg.generator.inference_engine,
-        )
+        logger.info("Initializing inference client")
+        return self._get_new_inference_client()
 
     def _get_new_inference_client(self):
         """New inference client using HTTP endpoints.
@@ -438,7 +326,20 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 
 def main() -> None:
-    # Parse CLI args and build typed config
+    # Peek at trainer.override_entrypoint BEFORE strict config parse: integrations
+    # may add their own config fields that core SkyRLTrainConfig doesn't know
+    # about, so the strict parse would fail. If override is set, dispatch to the
+    # named entrypoint and let it parse with its own extended config.
+    override_entrypoint = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("trainer.override_entrypoint="):
+            override_entrypoint = arg.split("=", 1)[1]
+            break
+    if override_entrypoint:
+        from importlib import import_module
+
+        return import_module(override_entrypoint).main()
+
     cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
 
     # validate the arguments

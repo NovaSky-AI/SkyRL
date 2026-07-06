@@ -287,8 +287,8 @@
           description: ""
           objects:
             - skyrl.train.generators.base.GeneratorInterface
-            - skyrl.backends.skyrl_train.inference_engines.base.InferenceEngineInterface
-            - skyrl.backends.skyrl_train.inference_engines.inference_engine_client.InferenceEngineClient
+            - skyrl.backends.skyrl_train.inference_servers.base.InferenceEngineInterface
+            - skyrl.backends.skyrl_train.inference_servers.remote_inference_client.RemoteInferenceClient
 
     - slug: registry
       title: Algorithm Registry
