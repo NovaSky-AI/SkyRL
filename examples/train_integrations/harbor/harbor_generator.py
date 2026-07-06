@@ -253,6 +253,10 @@ class HarborGenerator(GeneratorInterface):
 
         self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
+        # Model name the inference engine knows the policy by; mixed into the prefix-cache salt so
+        # distinct models / LoRA adapters do not share cache blocks (see ``_compute_cache_salt``).
+        self._served_model_name = ie_cfg.served_model_name
+
         # Set model_name and api_base once (constant across all trials)
         assert ie_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
@@ -285,6 +289,26 @@ class HarborGenerator(GeneratorInterface):
         rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
+    def _compute_cache_salt(self) -> Optional[str]:
+        """Derive a prefix-cache salt from the current policy version.
+
+        Mirrors ``SkyRLGymGenerator._compute_cache_salt``. When ``generator.use_cache_salt`` is enabled,
+        returns a string keyed on the inference engine's current weight version
+        (``inference_engine_client.weight_version``), which advances by one each time fresh weights are
+        synced to the engines. Captured once per ``generate`` batch, so all trajectories in the batch
+        share one salt (the policy version at the start of the batch) -- vLLM's prefix cache is then
+        shared within a version and isolated across weight updates. The served model name is included so
+        distinct models / LoRA adapters / tenants do not collide. Returns ``None`` (no salting) when
+        disabled or when the client does not expose a weight version.
+        """
+        if not getattr(self.generator_cfg, "use_cache_salt", False):
+            return None
+        weight_version = getattr(self.inference_engine_client, "weight_version", None)
+        if weight_version is None:
+            return None
+        version = f"{self._served_model_name}@" if self._served_model_name is not None else ""
+        return f"{version}{weight_version}"
+
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         prompts = input_batch["prompts"]
         trajectory_ids = input_batch["trajectory_ids"]
@@ -296,6 +320,10 @@ class HarborGenerator(GeneratorInterface):
                 f"Prompt count ({len(prompts)}) doesn't match trajectory_ids count ({len(trajectory_ids)})"
             )
 
+        # Captured once for the whole batch so every trajectory shares the policy version at the start
+        # of generation (see ``_compute_cache_salt``).
+        cache_salt = self._compute_cache_salt()
+
         all_outputs: List[HarborTrajectoryOutput] = [None] * len(prompts)  # type: ignore[list-item]
         progress = tqdm(
             disable=disable_tqdm,  # disable for fully async training
@@ -306,7 +334,7 @@ class HarborGenerator(GeneratorInterface):
         )
 
         async def _worker(idx, prompt, trajectory_id):
-            result = await self._harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            result = await self._harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id, cache_salt=cache_salt)
             all_outputs[idx] = result
             progress.update(1)
 
@@ -325,6 +353,7 @@ class HarborGenerator(GeneratorInterface):
         self,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
+        cache_salt: Optional[str] = None,
     ) -> HarborTrajectoryOutput:
         """Run a single Harbor trial and return the rollout details plus a trajectory-level reward.
         Retries on unknown errors; context length errors train with reward=0; agent timeouts mask the trajectory.
@@ -349,6 +378,17 @@ class HarborGenerator(GeneratorInterface):
                 config = deepcopy(self._harbor_trial_config_template)
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = session_id
+                # Salt vLLM's prefix cache with the policy version. Forwarded via
+                # llm_kwargs.extra_body -> LiteLLM's acompletion() -> the vLLM chat-completions request's
+                # top-level `cache_salt` field, so blocks are only shared between requests at the same
+                # policy version (see `_compute_cache_salt`). vLLM rejects an empty salt, so we only
+                # attach it when present.
+                if cache_salt is not None:
+                    llm_kwargs = config["agent"]["kwargs"].setdefault("llm_kwargs", {})
+                    extra_body = llm_kwargs.setdefault("extra_body", {})
+                    if not isinstance(extra_body, dict):
+                        raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
+                    extra_body["cache_salt"] = cache_salt
                 trial_config = TrialConfig.model_validate(config)
                 trial = await Trial.create(trial_config)
 
