@@ -126,6 +126,7 @@ def test_chat_truncation(tokenizer):
     # If the prompt alone fills the budget, result is None -- also acceptable
 
 
+# NOTE: This test requires torchvision and thus torch - we use the vllm marker so that the test is run with the appropriate extras
 @pytest.mark.vllm
 def test_chat_vlm(vlm_processor):
     """A user+image+assistant conversation tokenizes with vision tokens."""
