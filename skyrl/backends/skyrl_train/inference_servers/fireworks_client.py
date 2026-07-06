@@ -47,11 +47,12 @@ class FireworksInferenceClient(InferenceEngineInterface):
         api_key: Optional[str] = None,
         max_retries: int = 3,
         request_timeout: float = 600.0,
-        http_client: Optional[httpx.AsyncClient] = None,
+        *,
+        _http_client: Optional[httpx.AsyncClient] = None,
     ):
         """Args:
         model_name: Fireworks model id used as the request ``model`` (e.g.
-            ``accounts/fireworks/models/qwen3-4b``).
+            ``accounts/fireworks/models/gpt-oss-20b``).
         tokenizer: The policy tokenizer; must be the served model's tokenizer since prompts
             are sent as raw token ids.
         base_url: Server root without ``/v1`` (defaults to the Fireworks data plane).
@@ -61,7 +62,8 @@ class FireworksInferenceClient(InferenceEngineInterface):
         max_retries: SDK retry budget (backoff on 408/409/429/5xx and ``x-should-retry``).
         request_timeout: Per-request timeout in seconds. Overrides the SDK's 60s default,
             which is too short for long generations.
-        http_client: Injectable httpx client, used by tests with ``httpx.MockTransport``.
+        _http_client: Internal-reserved injectable httpx client, used by tests with
+            ``httpx.MockTransport``.
         """
         self._base_url = (base_url or DEFAULT_FIREWORKS_BASE_URL).rstrip("/")
         self._model_name = model_name
@@ -71,7 +73,7 @@ class FireworksInferenceClient(InferenceEngineInterface):
             api_key=api_key or "EMPTY",
             max_retries=max_retries,
             timeout=request_timeout,
-            http_client=http_client,
+            http_client=_http_client,
         )
 
     @property
@@ -118,8 +120,7 @@ class FireworksInferenceClient(InferenceEngineInterface):
             # Re-encoding `choice.text` locally would silently reintroduce the retokenization
             # drift this backend exists to avoid, so a missing field is a hard error.
             assert token_ids is not None, (
-                f"Fireworks response missing `token_ids` for choice {choice.index} despite "
-                "return_token_ids=true."
+                f"Fireworks response missing `token_ids` for choice {choice.index} despite " "return_token_ids=true."
             )
             response_ids.append(list(token_ids))
             # Decode locally to guarantee the InferenceEngineOutput invariant:

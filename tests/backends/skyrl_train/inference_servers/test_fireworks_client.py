@@ -53,7 +53,7 @@ def _make_client(payload, captured, status=200, api_key="fw-x"):
         base_url="https://api.fireworks.ai/inference",
         api_key=api_key,
         max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        _http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
 
 
