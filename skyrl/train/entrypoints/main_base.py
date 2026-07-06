@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import sys
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import ray
 from loguru import logger

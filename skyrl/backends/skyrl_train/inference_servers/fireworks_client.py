@@ -127,7 +127,18 @@ class FireworksInferenceClient(InferenceEngineInterface):
             # tokenizer.decode(response_ids[i], skip_special_tokens=True) == responses[i].
             responses.append(self._tokenizer.decode(token_ids, skip_special_tokens=True))
             stop_reasons.append(choice.finish_reason or "stop")
-            response_logprobs.append(self._extract_logprobs(choice) if want_logprobs else None)
+            if want_logprobs:
+                logprobs = self._extract_logprobs(choice)
+                # Silently emitting None here would surface far downstream as a confusing
+                # length-validation failure on GeneratorOutput["rollout_logprobs"].
+                if logprobs is None:
+                    raise RuntimeError(
+                        f"Sampling params requested logprobs but Fireworks returned none (or an "
+                        f"unrecognized shape) for choice {choice.index}. Set "
+                        f"generator.eval_sampling_params.logprobs=null (and "
+                        f"generator.sampling_params.logprobs=null) if logprobs are not needed."
+                    )
+                response_logprobs.append(logprobs)
 
         return InferenceEngineOutput(
             responses=responses,
@@ -140,15 +151,24 @@ class FireworksInferenceClient(InferenceEngineInterface):
 
     @staticmethod
     def _extract_logprobs(choice: Any) -> Optional[List[float]]:
-        # `choice.logprobs` is a union of the classic completions shape (carries
-        # `token_logprobs`) and a content-based shape; only the classic shape is extracted.
+        """Extract per-token logprobs from either Fireworks response shape.
+
+        ``choice.logprobs`` is a union of the classic completions shape (``LogProbs``, carries
+        ``token_logprobs``; what the live endpoint returns for integer ``logprobs``) and the
+        OpenAI chat-style shape (``NewLogProbs``, carries ``content`` items with ``.logprob``).
+        Null entries map to 0.0 rather than being dropped so the result stays aligned 1:1 with
+        the generated token ids (downstream validation asserts equal lengths).
+        """
         logprobs = choice.logprobs
         if logprobs is None:
             return None
         token_logprobs = getattr(logprobs, "token_logprobs", None)
-        if not token_logprobs:
-            return None
-        return [logprob for logprob in token_logprobs if logprob is not None]
+        if token_logprobs is not None:
+            return [logprob if logprob is not None else 0.0 for logprob in token_logprobs]
+        content = getattr(logprobs, "content", None)
+        if content is not None:
+            return [item.logprob if item.logprob is not None else 0.0 for item in content]
+        return None
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         response = await self._client.completions.create(**request_payload.get("json", {}))

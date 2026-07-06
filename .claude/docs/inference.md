@@ -49,6 +49,13 @@ ids and Fireworks returns the generated `token_ids` (`return_token_ids`), so the
   (`include_stop_str_in_output=True`, `skip_special_tokens=True`), including
   `append_eos_token_after_stop_str_in_multi_turn` detection. `min_tokens` is the only true gap
   (no Fireworks equivalent; zero-length completions are possible).
+- **Logprobs**: supported. Integer `logprobs` returns the legacy `LogProbs` shape
+  (`token_logprobs`, verified live to align 1:1 with `token_ids`); the client also parses the
+  OpenAI chat-style `NewLogProbs.content` shape. If logprobs are requested but the response
+  carries neither shape, `generate` raises immediately (a silent `None` would surface as a
+  confusing length-validation failure downstream). Note that eval uses
+  `generator.eval_sampling_params.logprobs` (not `sampling_params.logprobs`), and the stock
+  generator keys logprobs tracking off the sampling params actually passed per generation.
 - Example: `examples/eval/run_eval_fireworks.sh`. Tests:
   `tests/backends/skyrl_train/inference_servers/test_fireworks_client.py` (offline, mocked HTTP
   transport through the real SDK).

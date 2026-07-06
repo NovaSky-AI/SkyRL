@@ -122,7 +122,9 @@ async def test_generate_auth_tokenids_model_url():
     out = await eng.generate(
         InferenceEngineInput(
             prompt_token_ids=[[1, 2], [3]],
-            sampling_params=get_fireworks_sampling_params(SamplingParams(max_generate_length=16)),
+            # logprobs=None: the mock payload carries no logprobs, and requesting them without a
+            # logprobs field in the response is a hard error (see test_requested_logprobs_missing_raises).
+            sampling_params=get_fireworks_sampling_params(SamplingParams(max_generate_length=16, logprobs=None)),
         ),
         model="accounts/fw/qwen3-4b",
     )
@@ -143,6 +145,79 @@ async def test_missing_token_ids_errors_out():
     eng = _make_client(_payload([{"index": 0, "text": "abc", "finish_reason": "stop"}]), {})
     with pytest.raises(AssertionError, match="token_ids"):
         await eng.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={}))
+
+
+@pytest.mark.asyncio
+async def test_generate_extracts_legacy_logprobs():
+    # Verified against the live endpoint (gpt-oss-20b): integer `logprobs` yields the legacy
+    # LogProbs shape with `token_logprobs` aligned 1:1 with `token_ids`.
+    eng = _make_client(
+        _payload(
+            [
+                {
+                    "index": 0,
+                    "text": "a",
+                    "finish_reason": "stop",
+                    "token_ids": [7, 8, 9],
+                    "logprobs": {
+                        "tokens": ["a", "b", "c"],
+                        "token_ids": [7, 8, 9],
+                        # a null entry must map to 0.0 (not be dropped) to stay aligned with token_ids
+                        "token_logprobs": [-0.5, None, -1.25],
+                    },
+                }
+            ]
+        ),
+        {},
+    )
+    out = await eng.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={"logprobs": 1}))
+    assert out["response_logprobs"] == [[-0.5, 0.0, -1.25]]
+
+
+@pytest.mark.asyncio
+async def test_generate_extracts_openai_style_logprobs():
+    # The OpenAI chat-style shape (NewLogProbs): `content` items each carrying `.logprob`.
+    content = [
+        {"token": "a", "bytes": [97], "logprob": -0.1, "text_offset": 0, "token_id": 7},
+        {"token": "b", "bytes": [98], "logprob": -0.2, "text_offset": 1, "token_id": 8},
+    ]
+    eng = _make_client(
+        _payload(
+            [
+                {
+                    "index": 0,
+                    "text": "ab",
+                    "finish_reason": "stop",
+                    "token_ids": [7, 8],
+                    "logprobs": {"content": content},
+                }
+            ]
+        ),
+        {},
+    )
+    out = await eng.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={"logprobs": 1}))
+    assert out["response_logprobs"] == [[-0.1, -0.2]]
+
+
+@pytest.mark.asyncio
+async def test_requested_logprobs_missing_raises():
+    # A silent None here would crash much later in GeneratorOutput validation; fail at the source.
+    eng = _make_client(
+        _payload([{"index": 0, "text": "a", "finish_reason": "stop", "token_ids": [7]}]),
+        {},
+    )
+    with pytest.raises(RuntimeError, match="requested logprobs"):
+        await eng.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={"logprobs": 1}))
+
+
+@pytest.mark.asyncio
+async def test_logprobs_not_requested_stay_none():
+    eng = _make_client(
+        _payload([{"index": 0, "text": "a", "finish_reason": "stop", "token_ids": [7]}]),
+        {},
+    )
+    out = await eng.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={}))
+    assert out["response_logprobs"] is None
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,6 @@ uv run --isolated --extra fireworks \
   generator.inference_engine.served_model_name="$FW_MODEL" \
   generator.inference_engine.hf_tokenizer_name="$TOKENIZER" \
   generator.inference_engine.api_key="$FIREWORKS_AI_API_KEY" \
-  generator.sampling_params.logprobs=null \
   generator.eval_sampling_params.max_generate_length=2048 \
   generator.eval_sampling_params.temperature=0.7 \
   environment.env_class=gsm8k \
