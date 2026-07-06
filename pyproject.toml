@@ -157,6 +157,12 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
 ]
+# External Fireworks generation backend (eval-only, used via `main_generate`). Exact
+# prerelease pin: the fireworks-ai 1.x line supports token-in/token-out natively.
+fireworks = [
+    "skyrl[skyrl-train]",
+    "fireworks-ai==1.2.0a85",
+]
 
 dev = [
     "mkdocs",
