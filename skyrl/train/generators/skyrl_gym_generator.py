@@ -354,7 +354,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             agent_loop_output = StepWiseOutput(step_outputs=[]) if is_step_wise else None
 
-            get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+            get_logprobs = current_sampling_params.get("logprobs", None) is not None
             agent_loop_state = AgentLoopState(
                 chat_history=chat_history,
                 input_ids=initial_input_ids,
