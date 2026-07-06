@@ -27,6 +27,7 @@ uv run --isolated --extra fsdp \
   -m examples.train.fully_async.main_fully_async_sim \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.fully_async.enabled=true \
   trainer.fully_async.simulate_training=true \
   trainer.fully_async.simulate_training_step_seconds=$SIM_STEP_SECONDS \
@@ -55,7 +56,6 @@ uv run --isolated --extra fsdp \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.batched=false \

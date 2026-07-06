@@ -21,7 +21,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY,
 )
-from skyrl.train.config import SkyRLTrainConfig, TrainerConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
@@ -897,11 +897,3 @@ def build_dataloader(
         logger.info(f"Validation set size: {len(dataloader)}")
 
     return dataloader
-
-
-def get_rope_scaling_config(trainer_cfg: TrainerConfig) -> dict[str, Any]:
-    return trainer_cfg.rope_scaling
-
-
-def get_rope_theta_config(trainer_cfg: TrainerConfig) -> int | None:
-    return trainer_cfg.rope_theta

@@ -15,8 +15,8 @@ NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
-CLIP_RATIO_LOW=0.2
-CLIP_RATIO_HIGH=0.28
+CLIP_RATIO_LOW=0.5
+CLIP_RATIO_HIGH=4.0
 LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
@@ -45,8 +45,6 @@ LR=1e-6
 : "${MINI_BATCH_SIZE:=32}"
 : "${EVAL_CKPT_INTERVAL:=80}"
 
-# Use new inference_servers implementation based on native vLLM RL APIs
-_SKYRL_USE_NEW_INFERENCE=1
 
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
@@ -65,7 +63,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
   trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.policy_loss_type="dual_clip" \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
   trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
@@ -107,7 +105,6 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=false \
   environment.env_class=aime \

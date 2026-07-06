@@ -18,7 +18,7 @@ def yield_module_grouped_chunks(
     """Yield WeightChunk objects grouped by module.
 
     This helper function eliminates duplication between different weight extractors
-    that need to group parameters by module (e.g., for FlashRL QKV fusion).
+    that need to group parameters by module (e.g., for fused QKV loaders).
 
     Groups parameters by their parent module by removing the last two components
     from the parameter name. For example:
@@ -34,9 +34,9 @@ def yield_module_grouped_chunks(
     Yields:
         WeightChunk objects containing all parameters for each module (or batched modules if threshold set)
     """
-    # Group parameters by module for FlashRL
+    # Group parameters by module for integrations that load fused QKV weights.
     # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
-    # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+    # We allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
     # we need to pass the weights for all of these together.
     # Overall, this doesn't hurt perf even in the general case
     module_to_params: Dict[str, List[str]] = defaultdict(list)

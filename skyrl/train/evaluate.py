@@ -1,6 +1,7 @@
+import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
 from loguru import logger
@@ -8,7 +9,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
@@ -29,6 +30,9 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
 )
 
+if TYPE_CHECKING:
+    from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
+
 
 @torch.no_grad()
 async def evaluate(
@@ -37,6 +41,7 @@ async def evaluate(
     cfg: SkyRLTrainConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
+    vllm_metrics_scraper: Optional["VLLMMetricsScraper"] = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
@@ -47,6 +52,9 @@ async def evaluate(
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use
+        vllm_metrics_scraper: when set, the open ``vllm/eval`` window is resumed
+            around each generation and paused after, so only generation time
+            counts toward eval throughput.
 
     Returns:
         Dict[str, float]: evaluation metrics
@@ -58,6 +66,7 @@ async def evaluate(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -69,7 +78,13 @@ async def evaluate(
             "eval",
             global_step,
         )
+        gen_start = time.monotonic()
+        if vllm_metrics_scraper is not None:
+            vllm_metrics_scraper.resume()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        if vllm_metrics_scraper is not None:
+            vllm_metrics_scraper.pause()
+        eval_generate_time += time.monotonic() - gen_start
         validate_generator_output(len(generator_input["prompts"]), generator_output)
         generator_outputs.append(generator_output)
         concat_all_envs.extend(generator_input["env_classes"])
@@ -127,6 +142,7 @@ async def evaluate(
                 eval_metrics,
             )
 
+    eval_metrics["timing/eval_generate"] = eval_generate_time
     return eval_metrics
 
 
@@ -137,6 +153,7 @@ async def evaluate_step_wise(
     cfg: SkyRLTrainConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
+    vllm_metrics_scraper: Optional["VLLMMetricsScraper"] = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories for step-wise training.
 
@@ -149,6 +166,9 @@ async def evaluate_step_wise(
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use
+        vllm_metrics_scraper: when set, the open ``vllm/eval`` window is resumed
+            around each generation and paused after, so only generation time
+            counts toward eval throughput.
 
     Returns:
         Dict[str, float]: evaluation metrics
@@ -160,6 +180,7 @@ async def evaluate_step_wise(
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
+    eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -171,7 +192,13 @@ async def evaluate_step_wise(
             "eval",
             global_step,
         )
+        gen_start = time.monotonic()
+        if vllm_metrics_scraper is not None:
+            vllm_metrics_scraper.resume()
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        if vllm_metrics_scraper is not None:
+            vllm_metrics_scraper.pause()
+        eval_generate_time += time.monotonic() - gen_start
         traj_id_to_input = {
             traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
             for traj_id, env_class, env_extra in zip(
@@ -244,4 +271,5 @@ async def evaluate_step_wise(
                 eval_metrics,
             )
 
+    eval_metrics["timing/eval_generate"] = eval_generate_time
     return eval_metrics

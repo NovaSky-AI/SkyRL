@@ -2,8 +2,8 @@
 RemoteInferenceClient - Serializable HTTP client for inference.
 
 This is a lightweight, fully serializable HTTP client that wraps the inference
-server HTTP API. It replaces the old InferenceEngineInterface for HTTP-based
-inference servers.
+server HTTP API. It is the concrete ``InferenceEngineInterface`` implementation
+used for HTTP-based inference servers.
 
 Architecture:
 -------------
@@ -39,10 +39,9 @@ Usage:
         data_parallel_size=1,
     )
 
-Comparison with existing code:
-- Replaces: InferenceEngineClient + RemoteInferenceEngine (for remote-only usage)
-- Key difference: Talks directly to router via HTTP, no Ray actor wrapping
-- The router handles session-aware routing; this client handles control plane fan-out
+Design notes:
+- Talks directly to the router via HTTP, no Ray actor wrapping.
+- The router handles session-aware routing; this client handles control plane fan-out.
 """
 
 from __future__ import annotations
@@ -66,8 +65,9 @@ from typing import (
 
 import aiohttp
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
@@ -163,9 +163,9 @@ class SampleResponse(TypedDict):
 
 
 @dataclass
-class RemoteInferenceClient:
+class RemoteInferenceClient(InferenceEngineInterface):
     """
-    Serializable HTTP client for inference. Replaces InferenceEngineInterface.
+    Serializable HTTP client for inference. The concrete InferenceEngineInterface.
 
     This class maintains two URL types:
     - proxy_url: Single URL for data plane operations (routed requests)
@@ -195,9 +195,10 @@ class RemoteInferenceClient:
     reports the full DP world size per server, so we divide by num_deployments."""
 
     model_name: str = "default"
-    """The base model identifier the inference server was started with.
+    """The model identifier accepted by the inference server for the base model.
 
-    Always the base model — never a LoRA adapter name. LoRA adapters are
+    This is usually the model path, but may be ``served_model_name`` when vLLM
+    is started with an alias. It is never a LoRA adapter name. LoRA adapters are
     addressed by the names callers register them under via
     ``load_lora_adapter(name, path)``, and per-call routing is done by
     passing that name as ``model`` on the data-plane methods.
@@ -233,6 +234,10 @@ class RemoteInferenceClient:
             raise ValueError(
                 f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
             )
+
+    def get_endpoint_url(self) -> str:
+        """Data-plane endpoint base URL (the router/proxy that load-balances requests)."""
+        return self.proxy_url
 
     # ---------------------------
     # Session Management
@@ -994,11 +999,11 @@ class RemoteInferenceClient:
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode - compatibility with InferenceEngineClient interface."""
+        """Pause using keep mode."""
         return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Resume after pause - compatibility with InferenceEngineClient interface."""
+        """Resume after pause."""
         return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1118,7 +1123,7 @@ class RemoteInferenceClient:
         """
         Start a new chunked weight update via /collective_rpc.
 
-        Calls the NewInferenceWorkerWrap.start_weight_update method on all
+        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on all
         workers. For checkpoint-format weights this initializes layerwise
         reload. Must be called before any update_weights_ipc calls.
 
@@ -1132,7 +1137,7 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/collective_rpc",
             {
-                "method": "start_weight_update",
+                "method": "skyrl_start_weight_update",
                 "kwargs": {"is_checkpoint_format": is_checkpoint_format},
             },
         )
@@ -1145,8 +1150,8 @@ class RemoteInferenceClient:
         Send a single weight chunk via /collective_rpc.
 
         Calls NewInferenceWorkerWrap.update_weights_ipc on all workers.
-        Can be called multiple times between start_weight_update and
-        finish_weight_update.
+        Can be called multiple times between skyrl_start_weight_update and
+        skyrl_finish_weight_update.
 
         Args:
             update_info: Dict with backend-specific update info (names,
@@ -1196,7 +1201,7 @@ class RemoteInferenceClient:
         """
         Finish the current chunked weight update via /collective_rpc.
 
-        Calls NewInferenceWorkerWrap.finish_weight_update on all workers.
+        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
         For checkpoint-format weights, runs layerwise postprocessing.
 
         Returns:
@@ -1204,7 +1209,7 @@ class RemoteInferenceClient:
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "finish_weight_update"},
+            {"method": "skyrl_finish_weight_update"},
         )
 
     async def load_lora_adapter(

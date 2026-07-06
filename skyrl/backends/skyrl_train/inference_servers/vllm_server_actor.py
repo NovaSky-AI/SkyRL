@@ -202,7 +202,6 @@ class VLLMServerActor(ServerActorProtocol):
             logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
         # Initialized lazily to not block the actor initialization.
-        self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
 
     def _setup_mp_gpu_visibility(self, mp_cuda_visible_devices: Optional[str]) -> None:
@@ -318,57 +317,19 @@ class VLLMServerActor(ServerActorProtocol):
             self._nixl_port_reservation.close()
             self._nixl_port_reservation = None
 
-        sock_addr = (self._cli_args.host, self._cli_args.port)
-        sock = create_server_socket(sock_addr)
-        app = build_app(self._cli_args)
-
-        # Initialize the engine (this loads the model - takes time)
-        engine_args = AsyncEngineArgs.from_cli_args(self._cli_args)
-
-        stat_loggers = None
-        if self._enable_ray_prometheus_stats:
-            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
-
-            logger.info("Enabling RayPrometheusStatLogger for vLLM engine metrics")
-            stat_loggers = [RayPrometheusStatLogger]
-
-        self._engine = AsyncLLMEngine.from_engine_args(
-            engine_args=engine_args,
-            usage_context=UsageContext.OPENAI_API_SERVER,
-            stat_loggers=stat_loggers,
+        await _build_and_serve_vllm_server(
+            self._cli_args,
+            enable_ray_prometheus_stats=self._enable_ray_prometheus_stats,
         )
-        logger.info(f"Engine initialized on {self._ip}:{self._port}, adding custom endpoints...")
 
-        # Add custom SkyRL endpoints
-        self._add_custom_endpoints(app)
+    @staticmethod
+    def _add_custom_endpoints(app, engine, cli_args) -> None:
+        """Add custom SkyRL endpoints to the FastAPI app.
 
-        await init_app_state(self._engine, app.state, self._cli_args)
-
-        # Use uvicorn directly (serve_http tries to add signal handlers which fails in Ray actors)
-        config = uvicorn.Config(
-            app,
-            host=self._cli_args.host,
-            port=self._cli_args.port,
-            log_level=self._cli_args.uvicorn_log_level,
-            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
-            ssl_keyfile=self._cli_args.ssl_keyfile,
-            ssl_certfile=self._cli_args.ssl_certfile,
-            ssl_ca_certs=self._cli_args.ssl_ca_certs,
-            ssl_cert_reqs=self._cli_args.ssl_cert_reqs,
-            access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
-        )
-        server = uvicorn.Server(config)
-        # vllm's engine_error_handler reads app.state.server to call
-        # terminate_if_errored; normally wired up by vllm's own launcher.
-        app.state.server = server
-        await server.serve(sockets=[sock])
-
-    def _add_custom_endpoints(self, app) -> None:
-        """Add custom SkyRL endpoints to the FastAPI app."""
-        engine = self._engine
-        cli_args = self._cli_args
-
+        Shared by the Ray-actor deployment and the standalone ``python -m``
+        entrypoint, so it takes the engine and CLI args explicitly rather than
+        reading them off ``self``.
+        """
         # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
         # /update_weights, /get_world_size) registered by the RLHF router when
         # VLLM_SERVER_DEV_MODE=1.
@@ -490,3 +451,116 @@ class VLLMServerActor(ServerActorProtocol):
                 await self._server_task
             except asyncio.CancelledError:
                 pass
+
+
+async def _build_and_serve_vllm_server(
+    cli_args: Namespace,
+    *,
+    enable_ray_prometheus_stats: bool = False,
+) -> None:
+    """Build the vLLM OpenAI app + engine, register SkyRL custom endpoints, and
+    serve with uvicorn. Blocks until the server stops.
+
+    Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
+    standalone ``python -m`` entrypoint below.
+    """
+    sock_addr = (cli_args.host, cli_args.port)
+    sock = create_server_socket(sock_addr)
+    app = build_app(cli_args)
+
+    # Initialize the engine (this loads the model - takes time)
+    engine_args = AsyncEngineArgs.from_cli_args(cli_args)
+
+    stat_loggers = None
+    if enable_ray_prometheus_stats:
+        from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+        logger.info("Enabling RayPrometheusStatLogger for vLLM engine metrics")
+        stat_loggers = [RayPrometheusStatLogger]
+
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args=engine_args,
+        usage_context=UsageContext.OPENAI_API_SERVER,
+        stat_loggers=stat_loggers,
+    )
+    logger.info(f"Engine initialized on {cli_args.host}:{cli_args.port}, adding custom endpoints...")
+
+    # Add custom SkyRL endpoints
+    VLLMServerActor._add_custom_endpoints(app, engine, cli_args)
+
+    await init_app_state(engine, app.state, cli_args)
+
+    # Use uvicorn directly (serve_http tries to add signal handlers which fails in Ray actors)
+    config = uvicorn.Config(
+        app,
+        host=cli_args.host,
+        port=cli_args.port,
+        log_level=cli_args.uvicorn_log_level,
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+        backlog=SKYRL_HTTP_CONNECTION_LIMIT,
+        ssl_keyfile=cli_args.ssl_keyfile,
+        ssl_certfile=cli_args.ssl_certfile,
+        ssl_ca_certs=cli_args.ssl_ca_certs,
+        ssl_cert_reqs=cli_args.ssl_cert_reqs,
+        access_log=not getattr(cli_args, "disable_uvicorn_access_log", False),
+    )
+    server = uvicorn.Server(config)
+    # vllm's engine_error_handler reads app.state.server to call
+    # terminate_if_errored; normally wired up by vllm's own launcher.
+    app.state.server = server
+    await server.serve(sockets=[sock])
+
+
+def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
+    """Parse vLLM OpenAI-server CLI args for the standalone server entrypoint.
+
+    Mirrors the parser used by ``vllm.entrypoints.openai.api_server`` (frontend
+    args + async engine args), so any flag the upstream server accepts works here
+    too (``--model``, ``--tensor-parallel-size``, ``--host``, ``--port``,
+    ``--worker-extension-cls``, ...).
+    """
+    from vllm import AsyncEngineArgs as _AsyncEngineArgs
+    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.platforms import current_platform
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    # See build_vllm_cli_args: pin the device type so arg parsing's DeviceConfig
+    # autodetection succeeds even before CUDA is fully initialized.
+    if not current_platform.device_type:
+        current_platform.device_type = "cuda"
+
+    parser = FlexibleArgumentParser(
+        description="SkyRL standalone vLLM OpenAI-compatible server (with SkyRL weight-sync endpoints)."
+    )
+    parser = FrontendArgs.add_cli_args(parser)
+    parser = _AsyncEngineArgs.add_cli_args(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Standalone entrypoint: run a vLLM OpenAI server with SkyRL's custom
+    endpoints (plus vLLM's native dev/weight-transfer endpoints), without Ray.
+
+    Used for external rollout-server deployments (e.g. the Thunder agent), where
+    servers are launched directly with ``python -m`` and pinned to GPUs via
+    ``CUDA_VISIBLE_DEVICES`` rather than a Ray placement group. Ray-actor-only
+    concerns (placement-group bundle indices, DP master rendezvous) do not apply
+    here; pass standard vLLM flags to control parallelism and placement.
+    """
+    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints (sleep/wake,
+    # /init_weight_transfer_engine, /collective_rpc, /get_world_size), runtime
+    # LoRA load/unload, and CUDA-IPC weight transfer.
+    os.environ["VLLM_SERVER_DEV_MODE"] = "1"
+    os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    cli_args = _build_standalone_cli_args(argv)
+    if not cli_args.host:
+        cli_args.host = "0.0.0.0"
+    set_ulimit()
+    logger.info(f"Starting standalone SkyRL vLLM server on {cli_args.host}:{cli_args.port}")
+    asyncio.run(_build_and_serve_vllm_server(cli_args, enable_ray_prometheus_stats=False))
+
+
+if __name__ == "__main__":
+    main()

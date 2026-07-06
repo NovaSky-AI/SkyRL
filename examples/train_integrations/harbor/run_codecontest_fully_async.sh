@@ -86,6 +86,7 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.fully_async.max_staleness_steps=$MAX_STALENESS_STEPS \
   trainer.fully_async.num_parallel_generation_workers=$NUM_PARALLEL_GENERATION_WORKERS \
   trainer.fully_async.clear_kv_cache_on_weight_sync=false \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
@@ -131,12 +132,8 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.inference_engine.enforce_eager=false \
-  generator.inference_engine.enable_http_endpoint=true \
-  generator.inference_engine.http_endpoint_host=127.0.0.1 \
-  generator.inference_engine.http_endpoint_port=8000 \
   generator.rate_limit.enabled=$ENABLE_RATE_LIMITING \
   generator.rate_limit.trajectories_per_second=$TRAJECTORIES_PER_SECOND \
   generator.rate_limit.max_concurrency=$MAX_CONCURRENCY \

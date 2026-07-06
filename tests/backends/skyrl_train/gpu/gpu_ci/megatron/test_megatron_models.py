@@ -12,7 +12,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch

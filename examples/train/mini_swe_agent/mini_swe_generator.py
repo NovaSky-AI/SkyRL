@@ -1,27 +1,37 @@
 import asyncio
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Tuple
-import yaml
+import os
 import traceback
-import ray
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from minisweagent.models import get_model
+import ray
+import yaml
 from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
-from .mini_swe_utils import evaluate_trajectory, get_sb_environment
+from minisweagent.models import get_model
+from minisweagent.run.utils.save import save_traj
 
-from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl.train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.generators.utils import (
-    get_rollout_metrics,
-    get_response_ids_and_loss_mask_from_messages,
+from skyrl.backends.skyrl_train.inference_servers.base import (
+    ConversationType,
+    InferenceEngineInterface,
 )
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
+from skyrl.train.generators.base import BatchMetadata, TrainingPhase, TrajectoryID
+from skyrl.train.generators.skyrl_gym_generator import (
+    GeneratorInput,
+    GeneratorOutput,
+    SkyRLGymGenerator,
+)
+from skyrl.train.generators.utils import (
+    get_response_ids_and_loss_mask_from_messages,
+    get_rollout_metrics,
+)
+
+from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
 
 @dataclass
@@ -59,8 +69,14 @@ def init_and_run(
     trajectory_id: TrajectoryID,
     global_step: int,
     training_phase: TrainingPhase,
+    base_url: str,
 ):
     from loguru import logger
+
+    # mini-swe-agent talks to the inference router through LiteLLM's ``openai/``
+    # provider, which POSTs to ``{OPENAI_BASE_URL}/chat/completions``; the router
+    # serves the OpenAI routes under ``/v1``.
+    os.environ["OPENAI_BASE_URL"] = f"{base_url}/v1"
 
     model_config = sweagent_config.get("model", {})
     # Use new sampling parameters
@@ -116,7 +132,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         self,
         generator_cfg: GeneratorConfig,
         skyrl_gym_cfg: SkyRLGymConfig,
-        inference_engine_client: InferenceEngineClient,
+        inference_engine_client: InferenceEngineInterface,
         tokenizer,
         model_name: str,
     ):
@@ -124,13 +140,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
 
-        self.http_server_inference_engine_client_host = generator_cfg.inference_engine.http_endpoint_host
-
-        self.http_server_inference_engine_client_port = generator_cfg.inference_engine.http_endpoint_port
-
-        self.base_url = (
-            f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
-        )
+        self.base_url = inference_engine_client.get_endpoint_url()
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -162,6 +172,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             trajectory_id,
             batch_metadata.global_step,
             batch_metadata.training_phase,
+            self.base_url,
         )
         if not len(messages):
             return None, None, None, None, None, None

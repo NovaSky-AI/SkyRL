@@ -111,7 +111,7 @@ No other changes to SkyRL are needed.
 
 When `HarborGenerator` is created, it:
 
-1. Builds a `base_url` from the vLLM HTTP endpoint host and port.
+1. Uses SkyRL's router deployment as the `base_url` for generation requests.
 2. Converts the Harbor YAML config into a Python dict (the **config template**).
 3. Injects the model name (`hosted_vllm/{served_model_name}`) and API base URL (`{base_url}/v1`) into the template. These stay constant across all trials.
 4. Creates a rate limiter from the `generator.rate_limit` config (passed via `generator.rate_limit.*` overrides, separate from the Harbor TrialConfig).
@@ -355,7 +355,7 @@ You must run `prepare_harbor_dataset.py` before launching training. The launch s
 - **Sandbox access**: Daytona API key (`DAYTONA_API_KEY`) or Modal credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`), or other sandbox providers that Harbor supports.
 - **Dataset**: Harbor task directories, each with `instruction.md` and `tests/test.sh`
 - **GPUs**: Typically 4-8 for combined training and inference
-- **vLLM HTTP endpoint**: Enabled via `generator.inference_engine.enable_http_endpoint=true`
+- **SkyRL inference server**: SkyRL launches the vLLM HTTP endpoint and router from `generator.inference_engine.*`.
 
 ### Launch
 
@@ -384,7 +384,6 @@ uv run --isolated --extra fsdp --extra harbor \
   generator.n_samples_per_prompt=8 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.train_batch_size=64 \
-  generator.inference_engine.enable_http_endpoint=true \
   generator.rate_limit.enabled=true \
   generator.rate_limit.trajectories_per_second=5 \
   generator.rate_limit.max_concurrency=512

@@ -27,11 +27,11 @@ from litellm import atext_completion as litellm_async_text_completion
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInput,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
@@ -61,7 +61,6 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = num_inference_engines
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.inference_engine.run_engines_locally = True
@@ -88,7 +87,6 @@ def vllm_server(module_scoped_ray_init_fixture):
         model=MODEL_QWEN2_5,
         sleep_level=1,
         engine_init_kwargs={"max_model_len": 1024},  # for test_context_length_error_returns_400
-        use_new_inference_servers=True,
     )
     yield engines
     engines.close()
