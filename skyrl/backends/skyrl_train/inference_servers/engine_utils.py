@@ -1,6 +1,7 @@
 import os
 from typing import Any, Dict, Optional, Union
 
+from loguru import logger
 from omegaconf import DictConfig, ListConfig
 
 from skyrl.train.config import SamplingParams
@@ -82,8 +83,63 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
     return vllm_sampling_params
 
 
+# vLLM-only sampling keys the Fireworks /completions API rejects. `skip_special_tokens` and
+# `include_stop_str_in_output` are unnecessary: FireworksInferenceClient decodes responses locally
+# from token ids, and Fireworks includes a matched stop string's tokens in `token_ids` (only its
+# `text` field, which the client ignores, excludes it). `min_tokens` has no counterpart.
+_FIREWORKS_UNSUPPORTED_KEYS = ("min_tokens", "skip_special_tokens", "include_stop_str_in_output")
+
+
+def get_fireworks_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
+    """Convert sampling params to the subset Fireworks' OpenAI-schema ``/completions`` accepts.
+
+    All sources are merged first (typed fields, then DictConfig keys / ``additional_kwargs``),
+    then the result is sanitized: vLLM-only keys are dropped with a warning, out-of-range
+    ``top_k`` values are dropped with a warning (Fireworks accepts ``0..100``), and the
+    ``top_k=-1`` / ``min_p=0.0`` disable-sentinels and ``None`` values are dropped silently
+    (absence disables them; ``None`` would serialize as ``null`` via ``extra_body``).
+    """
+    stop_val = sampling_params.stop
+    params: Dict[str, Any] = {
+        "max_tokens": sampling_params.max_generate_length,
+        "temperature": sampling_params.temperature,
+        "top_p": sampling_params.top_p,
+        "top_k": sampling_params.top_k,
+        "min_p": sampling_params.min_p,
+        "logprobs": sampling_params.logprobs,
+        "stop": list(stop_val) if stop_val is not None else None,
+    }
+    if isinstance(sampling_params, DictConfig):
+        exclude_keys = ["max_generate_length"]  # renamed to max_tokens above
+        for key, value in sampling_params.items():
+            if key not in params and key not in exclude_keys:
+                if isinstance(value, ListConfig):
+                    value = list(value)
+                params[key] = value
+    else:
+        if sampling_params.additional_kwargs is not None:
+            for key, value in sampling_params.additional_kwargs.items():
+                if key not in params:
+                    params[key] = value
+
+    for key in _FIREWORKS_UNSUPPORTED_KEYS:
+        if key in params:
+            logger.warning(f"Dropping sampling param `{key}`: not supported by the Fireworks completions API.")
+            del params[key]
+    top_k = params.get("top_k")
+    if top_k is not None and not (isinstance(top_k, int) and 0 <= top_k <= 100):
+        if top_k != -1:  # -1 is the disable sentinel; absence disables top_k on Fireworks
+            logger.warning(f"Dropping sampling param `top_k={top_k}`: Fireworks accepts 0..100.")
+        del params["top_k"]
+    if params.get("min_p") is not None and params["min_p"] <= 0:
+        del params["min_p"]
+    return {key: value for key, value in params.items() if value is not None}
+
+
 def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
+    elif backend == "fireworks":
+        return get_fireworks_sampling_params(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")

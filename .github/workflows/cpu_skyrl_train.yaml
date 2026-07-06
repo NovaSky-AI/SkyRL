@@ -70,7 +70,7 @@ jobs:
         with:
           activate-environment: true
       - name: Run cpu tests (without vllm)
-        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
+        run:  uv run --isolated --extra skyrl-train --extra fireworks --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
       - name: Run cpu tests (with vllm)
         run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
   

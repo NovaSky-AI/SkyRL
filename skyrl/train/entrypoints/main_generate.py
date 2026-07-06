@@ -10,7 +10,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
 )
@@ -19,10 +19,42 @@ from skyrl.train.utils.trainer_utils import build_dataloader
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
 
 
+def _get_fireworks_inference_client(
+    ie_cfg: InferenceEngineConfig, model_path: str, tokenizer
+) -> InferenceEngineInterface:
+    """Build the external Fireworks client: no local engines, no vllm import, no control plane."""
+    try:
+        from skyrl.backends.skyrl_train.inference_servers.fireworks_client import (
+            FireworksInferenceClient,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "backend='fireworks' requires the fireworks-ai SDK. Install the `fireworks` extra, "
+            "e.g. `uv run --isolated --extra fireworks ...`."
+        ) from e
+
+    return FireworksInferenceClient(
+        model_name=ie_cfg.served_model_name or model_path,
+        tokenizer=tokenizer,
+        base_url=ie_cfg.external_proxy_url,
+        api_key=ie_cfg.api_key,
+    )
+
+
 class EvalOnlyEntrypoint(BasePPOExp):
     def get_train_dataset(self):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
+
+    def get_inference_client(self) -> InferenceEngineInterface:
+        """Additionally allow the eval-only ``fireworks`` backend; defer to BasePPOExp otherwise."""
+        if self.cfg.generator.inference_engine.backend == "fireworks":
+            return _get_fireworks_inference_client(
+                self.cfg.generator.inference_engine,
+                self.cfg.trainer.policy.model.path,
+                self.tokenizer,
+            )
+        return super().get_inference_client()
 
     async def run(self, inference_engine_client: InferenceEngineInterface) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"

@@ -20,6 +20,37 @@ Prefill-Decode disaggregation:
 - **Config**: `enable_pd=true` and `num_prefill` passed to `ServerGroup` constructor. Requires a `kv_connector`
 - **Server groups**: Separate prefill and decode `ServerGroup`s, one per engine.
 
+## Fireworks (external generation, eval-only)
+
+`generator.inference_engine.backend=fireworks` sends generation to the external Fireworks endpoint
+via `FireworksInferenceClient` (`inference_servers/fireworks_client.py`, built on the `fireworks-ai`
+SDK — install the `fireworks` extra). Token-in/token-out is preserved: prompts are sent as raw token
+ids and Fireworks returns the generated `token_ids` (`return_token_ids`), so the stock
+`SkyRLGymGenerator` works unchanged.
+
+- **Eval-only**: accepted only by `skyrl.train.entrypoints.main_generate` (`EvalOnlyEntrypoint`
+  overrides `get_inference_client`); `BasePPOExp.get_inference_client` raises for any non-vllm
+  backend, and the client raises on weight-sync methods.
+- **Config** (all under `generator.inference_engine.*`): `run_engines_locally=false`,
+  `served_model_name` (the Fireworks model id, e.g. `accounts/fireworks/models/qwen3-4b`), and
+  `api_key` are required; `external_proxy_url` is optional and is the server root **without**
+  `/v1` (the SDK appends `/v1/completions`; defaults to `https://api.fireworks.ai/inference`).
+- **Tokenizer pairing**: `trainer.policy.model.path` must be the served model's tokenizer — token
+  ids are consumed raw by the server, so a mismatch degrades generations silently instead of
+  erroring.
+- **Sampling params**: converted by `get_fireworks_sampling_params` — vLLM-only keys
+  (`min_tokens`, `skip_special_tokens`, `include_stop_str_in_output`) are dropped with a warning.
+  Verified against the live endpoint (gpt-oss-20b): a matched `stop` string is excluded from
+  Fireworks' `text` field but its tokens are **included in `token_ids`**, and a natural stop ends
+  with the EOS token id. Since the client builds `response_ids` from `token_ids` and decodes
+  `responses` locally, the effective behavior matches the vLLM path
+  (`include_stop_str_in_output=True`, `skip_special_tokens=True`), including
+  `append_eos_token_after_stop_str_in_multi_turn` detection. `min_tokens` is the only true gap
+  (no Fireworks equivalent; zero-length completions are possible).
+- Example: `examples/eval/run_eval_fireworks.sh`. Tests:
+  `tests/backends/skyrl_train/inference_servers/test_fireworks_client.py` (offline, mocked HTTP
+  transport through the real SDK).
+
 ## Key Config Knobs
 
 All under `generator.inference_engine.*`:

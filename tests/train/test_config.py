@@ -314,6 +314,40 @@ def test_run_engines_locally_false_requires_external_endpoint():
         validate_inference_engine_cfg(cfg)
 
 
+def _fireworks_backend_cfg() -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.backend = "fireworks"
+    cfg.generator.inference_engine.run_engines_locally = False
+    cfg.generator.inference_engine.served_model_name = "accounts/fireworks/models/qwen3-4b"
+    cfg.generator.inference_engine.api_key = "fw-key"
+    return cfg
+
+
+def test_fireworks_backend_valid_config_passes():
+    validate_inference_engine_cfg(_fireworks_backend_cfg())
+
+    # external_proxy_url is optional; a server root without /v1 is accepted.
+    cfg = _fireworks_backend_cfg()
+    cfg.generator.inference_engine.external_proxy_url = "http://localhost:8000"
+    validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("run_engines_locally", True, "run_engines_locally=false"),
+        ("served_model_name", None, "served_model_name"),
+        ("api_key", None, "api_key"),
+        ("external_proxy_url", "https://api.fireworks.ai/inference/v1", "server root"),
+    ],
+)
+def test_fireworks_backend_invalid_configs_raise(field, value, match):
+    cfg = _fireworks_backend_cfg()
+    setattr(cfg.generator.inference_engine, field, value)
+    with pytest.raises(AssertionError, match=match):
+        validate_inference_engine_cfg(cfg)
+
+
 def test_temperature_propagation():
     """Test that temperature is copied from generator to algorithm config in __post_init__."""
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])

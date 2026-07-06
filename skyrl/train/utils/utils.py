@@ -469,6 +469,24 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
+    if ie_cfg.backend == "fireworks":
+        assert (
+            not ie_cfg.run_engines_locally
+        ), "backend='fireworks' targets an external endpoint; set inference_engine.run_engines_locally=false"
+        if ie_cfg.external_proxy_url:
+            assert not ie_cfg.external_proxy_url.rstrip("/").endswith("/v1"), (
+                "For backend='fireworks', external_proxy_url is the server root; the fireworks SDK "
+                "appends /v1/completions. Use e.g. https://api.fireworks.ai/inference, not .../inference/v1."
+            )
+        assert (
+            ie_cfg.served_model_name
+        ), "backend='fireworks' requires inference_engine.served_model_name (the Fireworks model id)"
+        assert (
+            ie_cfg.api_key
+        ), "backend='fireworks' requires inference_engine.api_key (use 'EMPTY' for keyless self-hosted endpoints)"
+        # The remaining checks cover vllm serving topology, which fireworks does not use.
+        return
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (

@@ -201,6 +201,13 @@ class BasePPOExp:
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
+        backend = self.cfg.generator.inference_engine.backend
+        if backend != "vllm":
+            raise ValueError(
+                f"generator.inference_engine.backend='{backend}' is not supported for training; "
+                "use backend='vllm'. backend='fireworks' is generation/eval-only, available via "
+                "skyrl.train.entrypoints.main_generate."
+            )
         logger.info("Initializing inference client")
         return self._get_new_inference_client()
 

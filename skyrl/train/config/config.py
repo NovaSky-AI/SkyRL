@@ -566,7 +566,11 @@ class InferenceEngineConfig(BaseConfig):
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
-    """``"vllm"``."""
+    """``"vllm"`` (self-hosted) or ``"fireworks"`` (external Fireworks endpoint via the
+    fireworks-ai SDK; generation/eval-only, accepted only by
+    ``skyrl.train.entrypoints.main_generate`` -- training entrypoints raise. Install the
+    ``fireworks`` extra). ``"fireworks"`` requires ``run_engines_locally=false``,
+    ``served_model_name``, and ``api_key``; ``external_proxy_url`` is optional."""
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
@@ -597,7 +601,16 @@ class InferenceEngineConfig(BaseConfig):
     max_num_seqs: int = 1024
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
-    ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
+    ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used.
+    For ``backend="fireworks"``, this is the Fireworks model id
+    (e.g. ``accounts/fireworks/models/qwen3-4b``)."""
+    # TODO: obfuscate api_key in config output (dataclass repr, the startup config log via
+    # yaml.dump(asdict(cfg)), and the tracker config dict) with a general secret-redaction
+    # solution.
+    api_key: Optional[str] = None
+    """API key for ``backend="fireworks"``, sent as ``Authorization: Bearer``. Use ``"EMPTY"``
+    for keyless self-hosted endpoints. Keep it out of checked-in configs; pass it at the CLI
+    (e.g. ``generator.inference_engine.api_key="$FIREWORKS_AI_API_KEY"``)."""
     distributed_executor_backend: str = "ray"
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
     or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
@@ -608,7 +621,10 @@ class InferenceEngineConfig(BaseConfig):
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     external_proxy_url: Optional[str] = None
-    """Data-plane URL (load-balanced router) for the new inference layer."""
+    """Data-plane URL. For ``backend="vllm"``, the load-balanced router URL for the new
+    inference layer. For ``backend="fireworks"``, the server root without ``/v1`` (the SDK
+    appends ``/v1/completions``), e.g. ``https://api.fireworks.ai/inference`` (the default
+    when unset) or ``http://<host>:8000`` for a self-hosted OpenAI-compatible server."""
     external_server_urls: Optional[List[str]] = None
     """Control-plane URLs (direct backend access) for the new inference layer."""
     enable_pd: bool = False
