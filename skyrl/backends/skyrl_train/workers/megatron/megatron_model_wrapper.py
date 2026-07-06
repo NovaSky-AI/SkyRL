@@ -321,6 +321,10 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
+                # Qwen-style VLMs recompute 3D mRoPE positions internally from
+                # image_grid_thw and ignore any position_ids passed in.
+                if self.is_vlm:
+                    new_position_ids = None
 
             if self._fused_lm_head:
                 # Fused LM-head inference: the output_processor returns decoder
@@ -772,6 +776,10 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                 )
                 packed_seq_params = None
+                # Qwen-style VLMs recompute 3D mRoPE positions internally from
+                # image_grid_thw and ignore any position_ids passed in.
+                if self.is_vlm:
+                    new_position_ids = None
 
             if self._fused_lm_head:
                 # output_processor returns decoder hidden states (not logits) and

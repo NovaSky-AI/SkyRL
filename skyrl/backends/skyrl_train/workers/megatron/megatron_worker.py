@@ -1521,8 +1521,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        # Ref worker does not handle VLM inputs during SFT, so is_vlm stays False (the wrapper default).
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        # Propagate is_vlm so ref forwards apply the same VLM image handling and
+        # parallelism guards as the policy worker.
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
 
         self._set_expandable_segments(True)
 
