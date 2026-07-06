@@ -32,7 +32,7 @@ ids and Fireworks returns the generated `token_ids` (`return_token_ids`), so the
   overrides `get_inference_client`); `BasePPOExp.get_inference_client` raises for any non-vllm
   backend, and the client raises on weight-sync methods.
 - **Config** (all under `generator.inference_engine.*`): `run_engines_locally=false`,
-  `served_model_name` (the Fireworks model id, e.g. `accounts/fireworks/models/qwen3-4b`), and
+  `served_model_name` (the Fireworks model id, e.g. `accounts/fireworks/models/gpt-oss-20b`), and
   `api_key` are required; `external_proxy_url` is optional and is the server root **without**
   `/v1` (the SDK appends `/v1/completions`; defaults to `https://api.fireworks.ai/inference`).
 - **Tokenizer pairing**: `trainer.policy.model.path` must be the served model's tokenizer — token

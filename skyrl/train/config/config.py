@@ -603,7 +603,7 @@ class InferenceEngineConfig(BaseConfig):
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used.
     For ``backend="fireworks"``, this is the Fireworks model id
-    (e.g. ``accounts/fireworks/models/qwen3-4b``)."""
+    (e.g. ``accounts/fireworks/models/gpt-oss-20b``)."""
     # TODO: obfuscate api_key in config output (dataclass repr, the startup config log via
     # yaml.dump(asdict(cfg)), and the tracker config dict) with a general secret-redaction
     # solution.
