@@ -271,7 +271,8 @@ async def test_vlm_sft_hf_parity(ray_init_fixture):
 @pytest.mark.parametrize(
     ("tp", "cp", "sequence_parallel_size", "remove_microbatch_padding", "gpus_per_node", "expected_substring"),
     [
-        (1, 1, 1, True, 2, "microbatch padding"),
+        # Qwen3VL packs sequences internally, `remove_microbatch_padding` is not supported
+        (1, 1, 1, True, 2, "pack sequences inside their own forward"),
         (2, 1, 2, False, 2, "sequence parallelism"),
     ],
     ids=[
@@ -295,18 +296,16 @@ async def test_megatron_vlm_unsupported_parallelism_raises(
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     batch = get_test_training_batch(max(4, gpus_per_node))
 
-    actor_group = init_worker_with_type(
-        "policy",
-        shared_pg=None,
-        colocate_all=False,
-        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-        cfg=cfg,
-    )
-
-    action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(Exception, match=expected_substring):
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
         ray.get(action_log_probs_refs)
-    assert expected_substring in str(excinfo.value)
 
 
 @pytest.mark.asyncio
