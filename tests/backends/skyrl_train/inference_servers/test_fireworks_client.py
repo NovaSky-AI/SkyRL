@@ -211,6 +211,7 @@ def _fireworks_cfg() -> SkyRLTrainConfig:
     cfg.generator.inference_engine.run_engines_locally = False
     cfg.generator.inference_engine.served_model_name = "accounts/fw/qwen3-4b"
     cfg.generator.inference_engine.api_key = "fw-x"
+    cfg.generator.inference_engine.hf_tokenizer_name = "org/some-tokenizer"
     return cfg
 
 
@@ -229,3 +230,18 @@ def test_eval_entrypoint_builds_fireworks_client_without_vllm():
     assert isinstance(client, FireworksInferenceClient)
     assert client.model_name == "accounts/fw/qwen3-4b"
     assert "vllm" not in sys.modules
+
+
+def test_eval_entrypoint_tokenizer_from_hf_tokenizer_name(monkeypatch):
+    captured = {}
+
+    def fake_get_tokenizer(name, **kwargs):
+        captured["name"] = name
+        return _FakeTokenizer()
+
+    monkeypatch.setattr("skyrl.train.entrypoints.main_generate.get_tokenizer", fake_get_tokenizer)
+    exp = object.__new__(EvalOnlyEntrypoint)
+    exp.cfg = _fireworks_cfg()
+    tokenizer = EvalOnlyEntrypoint.get_tokenizer(exp)
+    assert captured["name"] == "org/some-tokenizer"
+    assert isinstance(tokenizer, _FakeTokenizer)

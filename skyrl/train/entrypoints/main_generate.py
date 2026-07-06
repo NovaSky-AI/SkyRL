@@ -17,11 +17,10 @@ from skyrl.train.entrypoints.main_base import (
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.utils.trainer_utils import build_dataloader
 from skyrl.train.utils.utils import initialize_ray, validate_generator_cfg
+from skyrl.utils.tok import get_tokenizer
 
 
-def _get_fireworks_inference_client(
-    ie_cfg: InferenceEngineConfig, model_path: str, tokenizer
-) -> InferenceEngineInterface:
+def _get_fireworks_inference_client(ie_cfg: InferenceEngineConfig, tokenizer) -> InferenceEngineInterface:
     """Build the external Fireworks client: no local engines, no vllm import, no control plane."""
     try:
         from skyrl.backends.skyrl_train.inference_servers.fireworks_client import (
@@ -34,7 +33,7 @@ def _get_fireworks_inference_client(
         ) from e
 
     return FireworksInferenceClient(
-        model_name=ie_cfg.served_model_name or model_path,
+        model_name=ie_cfg.served_model_name,
         tokenizer=tokenizer,
         base_url=ie_cfg.external_proxy_url,
         api_key=ie_cfg.api_key,
@@ -46,14 +45,24 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
+    def get_tokenizer(self):
+        """Load the tokenizer from ``hf_tokenizer_name`` for the eval-only ``fireworks`` backend
+        (which serves a model independent of ``trainer.policy.model.path``); defer to BasePPOExp
+        otherwise."""
+        ie_cfg = self.cfg.generator.inference_engine
+        if ie_cfg.backend == "fireworks":
+            return get_tokenizer(
+                ie_cfg.hf_tokenizer_name,
+                trust_remote_code=True,
+                use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+                padding_side="left",
+            )
+        return super().get_tokenizer()
+
     def get_inference_client(self) -> InferenceEngineInterface:
         """Additionally allow the eval-only ``fireworks`` backend; defer to BasePPOExp otherwise."""
         if self.cfg.generator.inference_engine.backend == "fireworks":
-            return _get_fireworks_inference_client(
-                self.cfg.generator.inference_engine,
-                self.cfg.trainer.policy.model.path,
-                self.tokenizer,
-            )
+            return _get_fireworks_inference_client(self.cfg.generator.inference_engine, self.tokenizer)
         return super().get_inference_client()
 
     async def run(self, inference_engine_client: InferenceEngineInterface) -> dict[str, Any]:

@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import ray
 from loguru import logger
@@ -29,6 +29,9 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.tok import get_tokenizer
 
+if TYPE_CHECKING:
+    from transformers import AutoTokenizer
+
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
 # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
@@ -48,12 +51,7 @@ class BasePPOExp:
             cfg: The fully resolved SkyRLTrainConfig instance.
         """
         self.cfg = cfg
-        self.tokenizer = get_tokenizer(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
-            padding_side="left",
-        )
+        self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
@@ -67,6 +65,22 @@ class BasePPOExp:
     @staticmethod
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
         return get_config_as_yaml_str(cfg)
+
+    def get_tokenizer(self) -> "AutoTokenizer":
+        """Initializes the tokenizer for the policy model.
+
+        This is a hook method that can be overridden by subclasses to customize tokenizer
+        creation (e.g., loading a tokenizer that is not derived from the policy model path).
+
+        Returns:
+            AutoTokenizer: The policy tokenizer.
+        """
+        return get_tokenizer(
+            self.cfg.trainer.policy.model.path,
+            trust_remote_code=True,
+            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+            padding_side="left",
+        )
 
     def get_train_dataset(self):
         """Initializes the training dataset.

@@ -484,8 +484,16 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         assert (
             ie_cfg.api_key
         ), "backend='fireworks' requires inference_engine.api_key (use 'EMPTY' for keyless self-hosted endpoints)"
+        assert ie_cfg.hf_tokenizer_name, (
+            "backend='fireworks' requires inference_engine.hf_tokenizer_name "
+            "(the served model's HF tokenizer, e.g. openai/gpt-oss-20b)"
+        )
         # The remaining checks cover vllm serving topology, which fireworks does not use.
         return
+
+    assert (
+        ie_cfg.hf_tokenizer_name is None
+    ), "inference_engine.hf_tokenizer_name is only settable with backend='fireworks'"
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"

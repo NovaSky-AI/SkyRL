@@ -32,12 +32,14 @@ ids and Fireworks returns the generated `token_ids` (`return_token_ids`), so the
   overrides `get_inference_client`); `BasePPOExp.get_inference_client` raises for any non-vllm
   backend, and the client raises on weight-sync methods.
 - **Config** (all under `generator.inference_engine.*`): `run_engines_locally=false`,
-  `served_model_name` (the Fireworks model id, e.g. `accounts/fireworks/models/gpt-oss-20b`), and
-  `api_key` are required; `external_proxy_url` is optional and is the server root **without**
-  `/v1` (the SDK appends `/v1/completions`; defaults to `https://api.fireworks.ai/inference`).
-- **Tokenizer pairing**: `trainer.policy.model.path` must be the served model's tokenizer — token
-  ids are consumed raw by the server, so a mismatch degrades generations silently instead of
-  erroring.
+  `served_model_name` (the Fireworks model id, e.g. `accounts/fireworks/models/gpt-oss-20b`),
+  `api_key`, and `hf_tokenizer_name` (the served model's HF tokenizer, e.g. `openai/gpt-oss-20b`;
+  only settable with this backend — `EvalOnlyEntrypoint.get_tokenizer` loads it instead of
+  `trainer.policy.model.path`, which this backend does not use) are required; `external_proxy_url`
+  is optional and is the server root **without** `/v1` (the SDK appends `/v1/completions`;
+  defaults to `https://api.fireworks.ai/inference`).
+- **Tokenizer pairing**: `hf_tokenizer_name` must be the served model's tokenizer — token ids are
+  consumed raw by the server, so a mismatch degrades generations silently instead of erroring.
 - **Sampling params**: converted by `get_fireworks_sampling_params` — vLLM-only keys
   (`min_tokens`, `skip_special_tokens`, `include_stop_str_in_output`) are dropped with a warning.
   Verified against the live endpoint (gpt-oss-20b): a matched `stop` string is excluded from

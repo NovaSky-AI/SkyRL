@@ -318,8 +318,9 @@ def _fireworks_backend_cfg() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.backend = "fireworks"
     cfg.generator.inference_engine.run_engines_locally = False
-    cfg.generator.inference_engine.served_model_name = "accounts/fireworks/models/qwen3-4b"
+    cfg.generator.inference_engine.served_model_name = "accounts/fireworks/models/gpt-oss-20b"
     cfg.generator.inference_engine.api_key = "fw-key"
+    cfg.generator.inference_engine.hf_tokenizer_name = "openai/gpt-oss-20b"
     return cfg
 
 
@@ -338,6 +339,7 @@ def test_fireworks_backend_valid_config_passes():
         ("run_engines_locally", True, "run_engines_locally=false"),
         ("served_model_name", None, "served_model_name"),
         ("api_key", None, "api_key"),
+        ("hf_tokenizer_name", None, "hf_tokenizer_name"),
         ("external_proxy_url", "https://api.fireworks.ai/inference/v1", "server root"),
     ],
 )
@@ -345,6 +347,13 @@ def test_fireworks_backend_invalid_configs_raise(field, value, match):
     cfg = _fireworks_backend_cfg()
     setattr(cfg.generator.inference_engine, field, value)
     with pytest.raises(AssertionError, match=match):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_hf_tokenizer_name_requires_fireworks_backend():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.hf_tokenizer_name = "openai/gpt-oss-20b"
+    with pytest.raises(AssertionError, match="only settable"):
         validate_inference_engine_cfg(cfg)
 
 

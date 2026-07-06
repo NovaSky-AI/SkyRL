@@ -570,7 +570,8 @@ class InferenceEngineConfig(BaseConfig):
     fireworks-ai SDK; generation/eval-only, accepted only by
     ``skyrl.train.entrypoints.main_generate`` -- training entrypoints raise. Install the
     ``fireworks`` extra). ``"fireworks"`` requires ``run_engines_locally=false``,
-    ``served_model_name``, and ``api_key``; ``external_proxy_url`` is optional."""
+    ``served_model_name``, ``api_key``, and ``hf_tokenizer_name``; ``external_proxy_url`` is
+    optional."""
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
@@ -611,6 +612,11 @@ class InferenceEngineConfig(BaseConfig):
     """API key for ``backend="fireworks"``, sent as ``Authorization: Bearer``. Use ``"EMPTY"``
     for keyless self-hosted endpoints. Keep it out of checked-in configs; pass it at the CLI
     (e.g. ``generator.inference_engine.api_key="$FIREWORKS_AI_API_KEY"``)."""
+    hf_tokenizer_name: Optional[str] = None
+    """HF tokenizer path for ``backend="fireworks"`` (e.g. ``openai/gpt-oss-20b``). Must be the
+    served model's tokenizer, since prompts are sent to the endpoint as raw token ids. Only
+    settable with ``backend="fireworks"``; other backends derive the tokenizer from
+    ``trainer.policy.model.path``."""
     distributed_executor_backend: str = "ray"
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
     or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 

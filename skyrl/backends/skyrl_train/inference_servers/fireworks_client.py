@@ -164,8 +164,8 @@ class FireworksInferenceClient(InferenceEngineInterface):
     async def wake_up(self, *args: Any, **kwargs: Any):
         # TODO: tokenizer handshake — probe with a text prompt + return_token_ids=true and
         # compare the returned prompt_token_ids against a local tokenizer.encode() of the same
-        # string. A mispaired model.path / served_model_name fails silently otherwise: the
-        # server consumes raw token ids, so a wrong tokenizer yields degraded generations,
+        # string. A mispaired hf_tokenizer_name / served_model_name fails silently otherwise:
+        # the server consumes raw token ids, so a wrong tokenizer yields degraded generations,
         # never an error.
         return {}
 
