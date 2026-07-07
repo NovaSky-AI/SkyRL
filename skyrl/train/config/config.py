@@ -653,10 +653,9 @@ class GeneratorConfig(BaseConfig):
     zero_reward_on_non_stop: bool = False
     """Set reward to 0 when ``stop_reason`` is not ``"stop"`` (i.e., generation was truncated or aborted)."""
     use_cache_salt: bool = True
-    """Salt vLLM's prefix cache with the policy version so cache blocks are only shared within a
-    version (throughput) and not reused across weight updates where the cached KV is stale
-    (correctness). The salt is keyed on the engine's weight version, captured at the start of each
-    ``generate`` batch. Matters for fully-async RL; a no-op for synchronous training (which resets the
+    """Salt vLLM's prefix cache with the policy version so cache blocks are only shared across trajectories that started
+    with the same policy weight version. The salt is keyed on the engine's weight version, captured at the start of each
+    ``generate`` call. Matters for fully-async RL; a no-op for synchronous training (which resets the
     cache each sync) and when prefix caching is off, so it is safe to leave on by default."""
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
