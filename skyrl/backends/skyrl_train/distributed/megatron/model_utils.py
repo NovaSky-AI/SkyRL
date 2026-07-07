@@ -428,7 +428,6 @@ def _fused_lm_head_logprob_apply(
                 chunk_size,
                 tp_group,
                 inference_only,
-                False,  # entropy is computed by the no-grad fused entropy helpers
             )
         except (ImportError, RuntimeError) as e:
             warnings.warn(

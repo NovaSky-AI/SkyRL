@@ -458,6 +458,8 @@ class MegatronModelWrapper:
             fused_lm_head = self._fused_lm_head and data.get("lm_head_weight") is not None
             lm_head_weight = data.get("lm_head_weight")
             if fused_lm_head and loss_config.use_entropy_loss:
+                # Fused LM-head entropy is metric-only today; entropy gradients
+                # should be wired and validated separately for both backends.
                 raise NotImplementedError(
                     "fused_lm_head_logprob does not support use_entropy_loss=True "
                     "(the fused entropy is a no-grad metric)."
