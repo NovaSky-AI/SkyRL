@@ -14,7 +14,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import VLLMRenderer
+from skyrl.backends.renderer import VLLMRenderer, render_model_input
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -532,10 +532,21 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        if self._renderer is None:
-            self._ensure_inference_engines()
-            self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
-        rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        # Only image chunks need vLLM's render endpoint. Text-only batches
+        # (the SFT path) render locally so pure training runs never pay for
+        # inference-engine startup.
+        has_image_chunks = any(
+            isinstance(chunk, (types.ImageChunk, types.ImageAssetPointerChunk))
+            for model_input in prepared_batch.all_model_inputs
+            for chunk in model_input.chunks
+        )
+        if has_image_chunks:
+            if self._renderer is None:
+                self._ensure_inference_engines()
+                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        else:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
 
         all_input_ids = [r.prompt_ids for r in rendered_inputs]
 
