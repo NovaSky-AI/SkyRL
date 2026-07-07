@@ -23,6 +23,7 @@ from skyrl.tinker.db_models import (
     RequestStatus,
     SessionDB,
     enable_sqlite_wal,
+    prepare_sqlite_path,
 )
 from skyrl.utils.log import logger
 
@@ -249,6 +250,7 @@ class TinkerEngine:
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
+        prepare_sqlite_path(config.database_url)
         self.db_engine = create_engine(config.database_url, echo=False)
         enable_sqlite_wal(self.db_engine)
 

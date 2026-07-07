@@ -47,7 +47,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 - `forward_backward` and `forward` requests are batched using look-ahead scheduling -- the engine groups all pending ops before the next barrier (`optim_step` or `load_weights`).
 - `sample` requests are batched ensuring one checkpoint_id per model_id per batch.
 - `optim_step`, `create_model`, `save_weights`, `load_weights` are processed individually and act as barriers.
-- DB uses SQLite WAL mode with 30s busy timeout by default.
+- DB uses SQLite WAL mode with `synchronous=NORMAL` and 30s busy timeout by default. Default DB path is `/tmp/skyrl_tinker/tinker.db` (node-local). `prepare_sqlite_path` in `db_models.py` creates missing parent dirs and warns if the SQLite file is on a network filesystem, where locking/WAL are unreliable.
 
 ## Weight Sync Modes
 

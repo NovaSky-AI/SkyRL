@@ -45,7 +45,7 @@ The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
 | `--backend` | (required) | Backend type (`fsdp` or `megatron`) |
 | `--port` | 8000 | API server port |
 | `--checkpoints-base` | `/tmp/skyrl_checkpoints` | Directory for checkpoint storage |
-| `--database-url` | `sqlite:///...tinker.db` | Database URL for request tracking |
+| `--database-url` | `sqlite:////tmp/skyrl_tinker/tinker.db` | Database URL for request tracking. If you point this at a SQLite file, keep it on node-local disk -- SQLite locking is unreliable on network filesystems (NFS) and causes `database is locked` errors under concurrency. |
 
 ## 3. Run a Training Script
 

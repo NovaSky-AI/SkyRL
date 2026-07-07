@@ -2,18 +2,43 @@
 
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 
 from sqlalchemy import DateTime, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
 from skyrl.tinker import types
+from skyrl.utils.log import logger
+
+# Filesystem types on which SQLite locking and WAL shared memory are unreliable.
+_NETWORK_FS_TYPES = frozenset(
+    {
+        "nfs",
+        "nfs3",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "smb3",
+        "9p",
+        "afs",
+        "ceph",
+        "glusterfs",
+        "lustre",
+        "beegfs",
+        "gpfs",
+        "davfs",
+    }
+)
 
 
 def enable_sqlite_wal(engine) -> None:
-    """Enable WAL mode and busy timeout for SQLite engines.
+    """Enable WAL mode, relaxed fsync, and busy timeout for SQLite engines.
 
     WAL mode allows concurrent readers with a single writer.
+    synchronous=NORMAL is the recommended pairing with WAL: it skips the
+    per-transaction fsync (a major writer bottleneck) while still
+    guaranteeing database integrity.
     Busy timeout makes SQLite retry internally instead of immediately
     raising 'database is locked'.
 
@@ -26,8 +51,66 @@ def enable_sqlite_wal(engine) -> None:
     def _set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
+
+
+def _filesystem_type(path: Path) -> str | None:
+    """Return the filesystem type of the mount containing ``path``, or None if unknown.
+
+    Linux-only (reads /proc/self/mounts); returns None elsewhere.
+    """
+    try:
+        mounts = Path("/proc/self/mounts").read_text()
+    except OSError:
+        return None
+
+    best_fstype = None
+    best_depth = -1
+    resolved = path.resolve()
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        # /proc/mounts octal-escapes spaces in mount points
+        mount_point = Path(fields[1].replace("\\040", " "))
+        if mount_point != resolved and mount_point not in resolved.parents:
+            continue
+        depth = len(mount_point.parts)
+        if depth > best_depth:
+            best_depth = depth
+            best_fstype = fields[2]
+    return best_fstype
+
+
+def prepare_sqlite_path(db_url: str) -> None:
+    """Prepare the filesystem for a SQLite database URL.
+
+    Creates missing parent directories for the database file and warns when
+    the file lives on a network filesystem, where SQLite locking and WAL mode
+    are unreliable and cause 'database is locked' errors under concurrency.
+
+    No-op for non-SQLite URLs and in-memory databases.
+    """
+    parsed_url = sqlalchemy_url.make_url(db_url)
+    if parsed_url.get_backend_name() != "sqlite":
+        return
+    database = parsed_url.database
+    if not database or database == ":memory:" or parsed_url.query.get("mode") == "memory":
+        return
+
+    db_path = Path(database).resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fstype = _filesystem_type(db_path.parent)
+    if fstype and (fstype in _NETWORK_FS_TYPES or fstype.startswith("fuse")):
+        logger.warning(
+            f"SQLite database {db_path} is on a '{fstype}' filesystem. SQLite locking and WAL "
+            "mode are unreliable on network/FUSE filesystems and can cause 'database is locked' "
+            "errors under concurrency. Point --database-url (or SKYRL_DATABASE_URL) at a "
+            "node-local path (e.g. under /tmp), or use Postgres."
+        )
 
 
 def get_async_database_url(db_url: str) -> str:

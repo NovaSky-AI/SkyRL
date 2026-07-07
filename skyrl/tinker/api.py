@@ -41,6 +41,7 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
     get_async_database_url,
+    prepare_sqlite_path,
 )
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
@@ -109,6 +110,7 @@ def _build_uv_run_cmd_engine(parent_cmd: list[str], engine_config: BaseModel) ->
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
+    prepare_sqlite_path(app.state.engine_config.database_url)
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
     enable_sqlite_wal(app.state.db_engine.sync_engine)
