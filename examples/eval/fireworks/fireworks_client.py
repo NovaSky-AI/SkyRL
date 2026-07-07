@@ -21,7 +21,6 @@ Part of the standalone Fireworks eval example (``examples/eval/fireworks``); con
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import httpx
 from fireworks import AsyncFireworks
 from loguru import logger
 
@@ -82,8 +81,6 @@ class FireworksInferenceClient(InferenceEngineInterface):
         api_key: Optional[str] = None,
         max_retries: int = 3,
         request_timeout: float = 600.0,
-        *,
-        _http_client: Optional[httpx.AsyncClient] = None,
     ):
         """Args:
         model_name: Fireworks model id used as the request ``model`` (e.g.
@@ -97,8 +94,6 @@ class FireworksInferenceClient(InferenceEngineInterface):
         max_retries: SDK retry budget (backoff on 408/409/429/5xx and ``x-should-retry``).
         request_timeout: Per-request timeout in seconds. Overrides the SDK's 60s default,
             which is too short for long generations.
-        _http_client: Internal-reserved injectable httpx client for offline testing with
-            ``httpx.MockTransport``.
         """
         base_url = (base_url or DEFAULT_FIREWORKS_BASE_URL).rstrip("/")
         if base_url.endswith("/v1"):
@@ -114,7 +109,6 @@ class FireworksInferenceClient(InferenceEngineInterface):
             api_key=api_key or "EMPTY",
             max_retries=max_retries,
             timeout=request_timeout,
-            http_client=_http_client,
         )
 
     @property
