@@ -26,6 +26,25 @@ bash examples/train/sft/run_sft_megatron.sh
 
 Trains `Qwen/Qwen3-0.6B` on 4 GPUs with Megatron (TP=2, PP=2). Key defaults: max length 512, batch size 4, 10 training steps.
 
+### VLM SFT (Megatron, multi-GPU)
+
+```bash
+# One-time: build a small messages-format dataset from HuggingFaceM4/the_cauldron
+uv run examples/train/sft/prepare_cauldron_vlm.py --output-dir $HOME/data/cauldron-vlm
+
+bash examples/train/sft/run_sft_megatron_vlm.sh
+```
+
+Fine-tunes the vision-language model `Qwen/Qwen3-VL-2B-Instruct` on 4 GPUs with the Megatron backend (pure DP=4 by default). Scale to larger models by overriding `megatron_config.tensor_model_parallel_size` / `pipeline_model_parallel_size`.
+
+VLM SFT mirrors the constraints of the FSDP VLM RL path (3D RoPE + image-token positions tie image tensors to specific sequence positions), so the following are required and enforced:
+
+- `remove_microbatch_padding=false` — no microbatch padding / sequence packing.
+- `megatron_config.sequence_parallel_size=1` and `megatron_config.context_parallel_size=1`.
+- `train_on_what=last_assistant_message` — VLM tokenization only supports last-assistant training.
+
+Mixed text+image batches are not supported: every sample in a VLM batch must carry image(s). The dataset must use the chat `messages` format with image content encoded as `{"type": "image", "image": <data-uri>}` (see `prepare_cauldron_vlm.py`).
+
 ### LoRA (FSDP, single GPU)
 
 ```bash

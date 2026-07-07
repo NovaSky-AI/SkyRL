@@ -38,6 +38,11 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+    get_unpacked_seq_align_size,
+)
+
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
@@ -408,6 +413,7 @@ def preprocess_packed_seqs(
     attention_mask: torch.Tensor,
     pre_process: bool = True,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    fp8_enabled: bool = False,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -435,7 +441,7 @@ def preprocess_packed_seqs(
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
 
     batch_size = input_ids.shape[0]
 
@@ -576,6 +582,7 @@ def remove_left_padding(
     attention_mask: torch.Tensor,
     position_ids: torch.Tensor,
     pre_process: bool = True,
+    fp8_enabled: bool = False,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -589,10 +596,9 @@ def remove_left_padding(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if mpu.get_tensor_model_parallel_world_size() > 1:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
+    align_size = get_unpacked_seq_align_size(mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled)
+    pad_size = (align_size - seq_len % align_size) % align_size
+    seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)

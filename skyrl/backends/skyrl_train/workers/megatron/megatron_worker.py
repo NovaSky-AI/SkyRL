@@ -342,6 +342,14 @@ class MegatronWorker:
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        if not language_model_only:
+            # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
+            # HF config means a vision tower is present. Megatron's TransformerConfig
+            # has no such field, so this must be read off the HF config.
+            self.is_vlm = hasattr(hf_config_original, "vision_config") and hf_config_original.vision_config is not None
+        else:
+            self.is_vlm = False
+
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
@@ -524,6 +532,8 @@ class MegatronWorker:
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
+
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         if use_token_batching:
@@ -552,6 +562,13 @@ class MegatronWorker:
             rollout_expert_indices = micro.get("rollout_expert_indices")
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            vlm_inputs = {}
+            if micro.get("pixel_values") is not None:
+                vlm_inputs["pixel_values"] = micro.get("pixel_values")
+            if micro.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
+
             micro_dicts.append(
                 {
                     "sequences": micro["sequences"],
@@ -560,6 +577,7 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
+                    **vlm_inputs,
                 }
             )
 
@@ -696,6 +714,14 @@ class MegatronWorker:
     def _get_module_for_offload(self):
         # The underlying offloadable module is `self.actor_module` instead of `self.model`.
         return self.actor_module
+
+    def _drop_pixel_values_on_non_first_pp_stage(self, data: TrainingInputBatch) -> None:
+        """
+        Drop ``pixel_values`` from the batch on every pipeline stage except the first.
+        Do this prior to moving to GPU to save memory
+        """
+        if mpu.get_pipeline_model_parallel_rank() != 0 and data.get("pixel_values") is not None:
+            data["pixel_values"] = None
 
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
@@ -836,6 +862,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
+            is_vlm=self.is_vlm,
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
@@ -876,6 +903,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -889,6 +917,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             rollout_expert_indices = experience.rollout_expert_indices
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
 
             micro_buffer.append(
                 {
@@ -904,6 +938,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    **vlm_inputs,
                 }
             )
 
@@ -981,6 +1016,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         all_metrics = defaultdict(list)
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -1013,6 +1049,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
+
             micro_buffer.append(
                 {
                     "sequences": experience.sequences,
@@ -1031,6 +1073,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "is_padding_batch": (
                         experience.metadata.get("is_padding_batch", False) if experience.metadata else False
                     ),
+                    **vlm_inputs,
                 }
             )
 
@@ -1492,7 +1535,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        # Propagate is_vlm so ref forwards apply the same VLM image handling and
+        # parallelism guards as the policy worker.
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
 
         self._set_expandable_segments(True)
 
