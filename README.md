@@ -12,9 +12,6 @@
 
 # Overview
 
-> [!IMPORTANT]
-> **Note:** SkyRL is undergoing a repo reorganization into the [`skyrl/`](./skyrl) folder, which unifies the skyrl libraries below into a single package. The existing packages below are fully functional but will be migrated to new paths shortly. For full [Tinker API](https://docs.skyrl.ai/docs/tinker/overview) support please use the `skyrl/` folder. See the [Tinker Quickstart docs](https://docs.skyrl.ai/docs/tinker/quickstart) to get started. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
-
 SkyRL is a full-stack RL library that provides the following components:
 
 - [skyrl](./skyrl): Our new unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). `skyrl` combines our previous work:

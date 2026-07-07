@@ -6,7 +6,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 - `algorithms/`: Examples for how to configure and run RL with various algorithms and policy-loss variants (e.g., DAPO, SAPO, GRPO, CISPO, GSPO, or your own custom advantage estimators and custom policy losses).
 - `ppo/`: Vanilla PPO training (with a critic, ref, and policy model)
 - `on_policy_distillation/`: [On-policy distillation recipe](https://novasky-ai.notion.site/on-policy-distillation) that uses a teacher model to provide dense token-level rewards during training, reproducing results from the [Thinking Machines blog](https://thinkingmachines.ai/blog/on-policy-distillation/).
-- `tis_correction/`: Applying [Flash-RL TIS](https://fengyao.notion.site/off-policy-rl) correction to improve off-policy stability.
+- `tis_correction/`: Applying [Truncated Importance Sampling (TIS)](https://fengyao.notion.site/off-policy-rl) correction to improve off-policy stability.
 - `turn_level_rewards/`: GSM8K multi-turn environment illustrating turn-level rewards and custom advantage estimators.
 
 ## Async RL
@@ -20,7 +20,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 - `llm_as_a_judge/`: GSM8K training with an external LLM as a judge to produce rewards instead of strict exact-match grading.
 - `multiply/`: Toy arithmetic environment for multiplying numbers, useful for quick sanity checks and debugging.
 - `livecodebench/`: LiveCodeBench code-generation task setup and training scripts.
-- `text_to_sql/`: [Text-to-SQL (SkyRL-SQL)](https://docs.skyrl.ai/docs/examples/multi_turn_text2sql) environment and training scripts for mapping natural language questions to SQL queries.
+- `text_to_sql/`: [Text-to-SQL (SkyRL-SQL)](https://docs.skyrl.ai/docs/examples/multi_turn_text2sql) environment and training scripts for mapping natural language questions to SQL queries. Includes `run_skyrl_sql_fp8.sh` for [quantized (FP8) rollouts](https://docs.skyrl.ai/docs/examples/quantized_rollouts).
 - `step_wise/`: Step-wise training for chat-template agnostic multi-turn RL training.
 - `search/`: Multi-turn search agent training with the SearchR1 dataset, backed by a FAISS-based retriever server.
 
