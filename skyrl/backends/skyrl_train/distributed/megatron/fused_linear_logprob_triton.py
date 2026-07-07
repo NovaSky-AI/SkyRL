@@ -1864,7 +1864,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         if not _verl_logprob_kernel_available():
             raise RuntimeError(
                 "FusedLinearLogprobTriton requires Triton (and a CUDA device), but triton is not "
-                "importable. Install the optional 'triton' extra, or use the default pure-torch "
+                "importable. Use the Linux Megatron/FSDP dependency stack, or use the default pure-torch "
                 "'torch' backend (FusedLinearChunkedDistributedLogprob) instead."
             )
 

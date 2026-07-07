@@ -269,10 +269,22 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
 class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
     """Fused LM-head + distributed token-logprob, chunked over the sequence.
 
-    Matches :class:`ChunkedDistributedLogprob`, but folds
-    ``hidden @ weight.T`` into the chunk loop. The full ``[B, S, V//TP]``
-    logits tensor and its fp32 gradient are never materialized; backward
-    recomputes logits per chunk from saved ``hidden`` and ``weight``.
+    This brings the Liger fused-linear-cross-entropy memory technique
+    (https://github.com/linkedin/Liger-Kernel) to Megatron RL: the per-token
+    log-prob is computed straight from the decoder ``hidden`` states and the
+    output-layer ``weight`` without ever building the logits. We generalize it
+    beyond Liger's stock kernel along two axes Liger does not cover — Megatron
+    **tensor/vocab + context parallelism** (the cross-rank max / sum-exp /
+    chosen-logit all-reduces) and **per-token log-probs** (Liger's FLCE only
+    supports reduction='mean'/'sum' in backward, not 'none').
+
+    Identical math to :class:`ChunkedDistributedLogprob`, but the output-layer
+    matmul ``logits = hidden @ weightᵀ`` is folded into the chunk loop so the
+    full ``[B, S, V//TP]`` logits tensor (and, in backward, its float32
+    gradient) is *never* materialized. Only ``hidden`` and ``weight`` are saved
+    for backward; per-chunk logits are recomputed. Peak memory for this op drops
+    from O(S · V//TP) to O(chunk · V//TP) + O(S · H), which is what makes
+    very long contexts (e.g. 262k) fit.
 
     Args mirror ``ChunkedDistributedLogprob`` with ``vocab_parallel_logits``
     replaced by ``(hidden, weight)``:
@@ -305,7 +317,11 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             chunk_start = chunk_idx * chunk_size
             chunk_end = min(seq_size, (chunk_idx + 1) * chunk_size)
 
-            # Match ColumnParallelLinear's compute dtype, then keep softmax math in fp32.
+            # Fused output projection for this chunk only; cast to fp32 inside
+            # the loop so a full fp32 logits tensor is never materialized.
+            # Cast hidden to the weight dtype first (matches what the
+            # ColumnParallelLinear output layer does: hidden may be bf16 while
+            # the output weight is fp32, or vice versa).
             logits = torch.matmul(hidden[:, chunk_start:chunk_end, :].to(weight.dtype), weight.t()).to(
                 dtype=torch.float32
             )
@@ -315,8 +331,13 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             log_probs[target_mask[:, chunk_start:chunk_end]] = 0.0
             all_log_probs.append(log_probs)
 
-        # One TP all-reduce after concat is equivalent to reducing each chunk:
-        # ranks hold shard-local log-probs and 0 elsewhere.
+        # Defer the cross-TP combine to a single all_reduce over the full [B, S]
+        # log-prob tensor instead of one per chunk. Each rank holds the log-prob
+        # for targets in its own vocab shard (0 elsewhere), and SUM is
+        # associative across the sequence concat, so this is numerically
+        # identical to reducing per chunk while cutting the number of (blocking)
+        # collective calls from num_chunks to 1 (e.g. 256 -> 1 at S=262k,
+        # chunk=1024), removing the per-chunk launch/sync overhead.
         log_probs = torch.cat(all_log_probs, dim=1)
         torch.distributed.all_reduce(
             log_probs,
@@ -347,8 +368,10 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         seq_size = int(hidden.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
-        # Keep only [B, S, H] grad_hidden and fp32 per-shard grad_weight.
-        # Per-chunk logit grads are projected and freed immediately.
+        # grad_hidden has the same (small) [B, S, H] shape as the input; the
+        # weight grad is accumulated in fp32. The full [B, S, V//TP] logit grad
+        # is never built — each chunk's logit grad is immediately projected onto
+        # grad_hidden / grad_weight and then freed.
         grad_hidden = torch.empty_like(hidden)
         grad_weight = torch.zeros((partition_vocab_size, hidden_size), dtype=torch.float32, device=weight.device)
 
@@ -361,8 +384,10 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             logits = torch.matmul(h_chunk.to(weight.dtype), weight.t()).to(dtype=torch.float32)
             softmax_output = _compute_distributed_log_softmax(logits, group=tp_group).exp_()
 
-            # Compute (one_hot(target) - softmax) * grad_output without
-            # materializing one_hot over the partition vocab.
+            # Same memory-efficient scatter-add fast path as
+            # ChunkedDistributedLogprob.backward, computing
+            # (one_hot(target) - softmax) * grad_output without materializing
+            # one_hot over the partition vocab.
             chunk_target_mask = target_mask[:, chunk_start:chunk_end]
             chunk_masked_target = masked_target[:, chunk_start:chunk_end]
             chunk_grad_output = grad_output[:, chunk_start:chunk_end]
@@ -385,7 +410,12 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             grad_hidden[:, chunk_start:chunk_end, :] = torch.matmul(grad_logits, weight)
             grad_logits_2d = grad_logits.reshape(-1, partition_vocab_size)
             h_2d = h_chunk.reshape(-1, hidden_size)
-            # Use the layer's compute dtype for Tensor Cores, then accumulate in fp32.
+            # Run the [V//TP, H] weight-grad matmul in the low-precision compute
+            # dtype (grad_logits.dtype == weight.dtype) so it hits Tensor Cores,
+            # then cast up to fp32 for the accumulator. This matches what
+            # ColumnParallelLinear's own backward does and is much faster / uses
+            # less memory than an fp32 matmul, while the cross-chunk accumulation
+            # still happens in fp32.
             grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
         # forward args: hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, inference_only
@@ -432,7 +462,7 @@ def _fused_lm_head_logprob_apply(
         except (ImportError, RuntimeError) as e:
             warnings.warn(
                 f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
-                "pure-PyTorch backend. Install triton (and run on GPU) to use the fused Triton kernel.",
+                "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
                 stacklevel=2,
             )
 
@@ -689,9 +719,16 @@ def from_parallel_hidden_to_logprobs(
 ) -> torch.Tensor:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
-    Takes decoder ``hidden`` [B, S//CP, H] and LM-head weight [V//TP, H]
-    instead of precomputed logits. ``temperature`` is folded into the weight so
-    the fused op stays temperature-agnostic.
+    Takes the decoder ``hidden`` states [B, S//CP, H] and the output-layer
+    ``lm_head_weight`` [V//TP, H] instead of pre-computed vocab-parallel logits,
+    and folds the output projection into the chunked logprob op so the full
+    logits tensor is never materialized. Numerically identical to
+    ``from_parallel_logits_to_logprobs((hidden @ lm_head_weightᵀ) / temperature, ...)``.
+
+    ``temperature`` scaling is applied by dividing the weight (``hidden @
+    (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
+    ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
+    temperature-agnostic.
     """
     if temperature != 1.0:
         lm_head_weight = lm_head_weight / temperature
@@ -747,9 +784,11 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
 
-    Reuses the packed-sequence, CP, and scatter-back logic, but computes
-    log-probs from ``hidden`` [1, T//CP, H] and ``lm_head_weight`` [V//TP, H]
-    instead of materialized logits.
+    Identical packed-sequence / CP / scatter-back logic, but the output
+    projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
+    ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
+    ``temperature`` is applied by dividing the weight (see
+    ``from_parallel_hidden_to_logprobs``).
     """
     if temperature != 1.0:
         lm_head_weight = lm_head_weight / temperature
