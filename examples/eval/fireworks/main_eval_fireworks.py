@@ -48,7 +48,7 @@ class FireworksEvalOnlyEntrypoint(EvalOnlyEntrypoint):
             "(e.g. accounts/fireworks/models/gpt-oss-20b)"
         )
         api_key = os.environ.get("FIREWORKS_AI_API_KEY")
-        assert api_key, "Export FIREWORKS_AI_API_KEY (use 'EMPTY' for keyless self-hosted endpoints)"
+        assert api_key, "Please set a fireworks ai api key to `FIREWORKS_AI_API_KEY` env-var."
 
         # Surface the tokenizer/model pairing at startup: model.path must be the served model's
         # tokenizer since prompts are sent as raw token ids (see module docstring).

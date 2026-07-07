@@ -16,7 +16,7 @@ Sampling params arrive vLLM-shaped: the stock eval path emits them via
 converts that dict to the subset Fireworks accepts at request time.
 
 Part of the standalone Fireworks eval example (``examples/eval/fireworks``); constructed by
-``FireworksEvalOnlyEntrypoint`` in ``main_eval_fireworks.py`` — core entrypoints never build it.
+``FireworksEvalOnlyEntrypoint`` in ``main_eval_fireworks.py``.
 """
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
