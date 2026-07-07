@@ -225,17 +225,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
-    # Monotonic counter of weight syncs to the engines (see `increment_weight_version`). Used as the
-    # prefix-cache salt source so cache blocks are only shared within a single policy version.
+    # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
     _weight_version: int = field(default=0, repr=False)
 
     @property
     def weight_version(self) -> int:
-        """Number of weight syncs broadcast to the engines so far (0 before the first sync).
-
-        Acts as the policy version: it advances by one each time fresh weights are pushed to the
-        inference engines, so it uniquely identifies the weights currently loaded.
-        """
+        """Number of weight syncs to the engines so far (0 before the first sync); the policy version."""
         return self._weight_version
 
     def increment_weight_version(self) -> None:
@@ -495,8 +490,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
-        # param. The custom `/skyrl/v1/generate` endpoint honors it; the native data-plane endpoint
-        # forwards it when supported and otherwise ignores it.
+        # param.
         if cache_salt is not None:
             payload["cache_salt"] = cache_salt
 

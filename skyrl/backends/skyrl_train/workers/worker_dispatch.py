@@ -604,6 +604,6 @@ class WorkerDispatch:
                 finally:
                     await self._inference_engine_client.resume_generation()
 
-        # Weights now live on the engines: advance the policy version so prefix-cache salting (see
-        # `GeneratorConfig.use_cache_salt`) isolates cache blocks computed under the previous weights.
+        # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
+        # (see `GeneratorConfig.use_cache_salt`).
         self._inference_engine_client.increment_weight_version()

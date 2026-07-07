@@ -265,17 +265,12 @@ class SkyRLGymGenerator(GeneratorInterface):
     def _compute_cache_salt(self) -> Optional[str]:
         """Derive a prefix-cache salt from the current policy version.
 
-        When ``generator.use_cache_salt`` is enabled, returns a string keyed on the inference engine's
-        current weight version (``inference_engine_client.weight_version``), which advances by one each
-        time fresh weights are synced to the engines. Captured once per ``generate`` batch, so all
-        trajectories in the batch share one salt (the policy version at the start of the batch) -- vLLM's
-        prefix cache is then shared within a version and isolated across weight updates. The policy model
-        name is included so distinct LoRA adapters / tenants do not collide. Returns ``None`` (no
-        salting) when disabled or when the client does not expose a weight version.
-
-        We key on the engine weight version rather than the trainer's ``global_step`` because in
-        fully-async training the two are not in lock-step: weights are broadcast to the engines (and this
-        counter advances) before ``global_step`` increments, and generation overlaps that gap.
+        Returns a string keyed on the engine's ``weight_version`` (which advances on each weight sync)
+        and the policy model name (so distinct adapters / tenants don't collide). Called once per
+        ``generate`` batch so all trajectories share the version at the start of the batch. Returns
+        ``None`` when disabled or when the client exposes no weight version. We key on the engine's
+        weight version rather than ``global_step`` because in fully-async training they aren't in
+        lock-step.
         """
         if not self.generator_cfg.use_cache_salt:
             return None
