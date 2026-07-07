@@ -44,7 +44,7 @@ tinker = [
 ]
 
 ray = [
-    "ray[default]==2.51.1",
+    "ray[default]==2.56.0",
 ]
 
 aws = [
@@ -79,7 +79,7 @@ skyrl-train = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.51.1",
+    "ray==2.56.0",
     "peft==0.18.1",
     "debugpy==1.8.0",
     "hf_transfer",
