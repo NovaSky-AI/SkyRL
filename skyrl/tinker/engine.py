@@ -751,6 +751,34 @@ class TinkerEngine:
                 results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
         self._complete_futures(results)
 
+    def _chunk_forward_backward_requests(
+        self,
+        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+    ) -> list[dict[str, tuple[str, types.ForwardBackwardInput]]]:
+        max_request_count = self.config.forward_backward_max_request_count
+        if not requests:
+            return []
+        if max_request_count is None or max_request_count <= 0 or len(requests) <= max_request_count:
+            return [requests]
+
+        items = list(requests.items())
+        chunks = [dict(items[start : start + max_request_count]) for start in range(0, len(items), max_request_count)]
+        logger.info(
+            "forward_backward request batch split %s requests into %s chunks "
+            "(forward_backward_max_request_count=%s)",
+            len(requests),
+            len(chunks),
+            max_request_count,
+        )
+        return chunks
+
+    def process_forward_backward_requests(
+        self,
+        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+    ) -> None:
+        for request_chunk in self._chunk_forward_backward_requests(requests):
+            self.process_batch_requests(request_chunk, self.process_forward_backward, "forward_backward")
+
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
@@ -767,7 +795,7 @@ class TinkerEngine:
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(forward_backward_requests, self.process_forward_backward, "forward_backward")
+            self.process_forward_backward_requests(forward_backward_requests)
             self.process_batch_requests(forward_requests, self.process_forward, "forward")
             self.process_batch_requests(sample_requests, self.process_sample, "sample")
 

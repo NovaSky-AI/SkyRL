@@ -180,6 +180,66 @@ def test_prepare_sample_batch_session_ids():
     assert batch.all_session_ids == ["sampling_abcd:3", "sampling_abcd:3", None, None]
 
 
+def _fake_forward_backward_input() -> types.ForwardBackwardInput:
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 3, 4]),
+            weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+            advantages=types.TensorData(data=[]),
+            logprobs=types.TensorData(data=[]),
+        ),
+    )
+    return types.ForwardBackwardInput(data=[datum], loss_fn="cross_entropy")
+
+
+def _fake_forward_backward_requests(count: int) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
+    return {str(index): ("model_a", _fake_forward_backward_input()) for index in range(1, count + 1)}
+
+
+def test_chunk_forward_backward_requests_preserves_default_batching():
+    engine = object.__new__(TinkerEngine)
+    engine.config = EngineConfig(base_model=BASE_MODEL)
+    requests = _fake_forward_backward_requests(5)
+
+    chunks = engine._chunk_forward_backward_requests(requests)
+
+    assert chunks == [requests]
+
+
+def test_chunk_forward_backward_requests_splits_by_configured_request_count():
+    engine = object.__new__(TinkerEngine)
+    engine.config = EngineConfig(base_model=BASE_MODEL, forward_backward_max_request_count=4)
+
+    chunks = engine._chunk_forward_backward_requests(_fake_forward_backward_requests(10))
+
+    assert [list(chunk) for chunk in chunks] == [
+        ["1", "2", "3", "4"],
+        ["5", "6", "7", "8"],
+        ["9", "10"],
+    ]
+
+
+def test_process_forward_backward_requests_processes_each_chunk_in_order():
+    engine = object.__new__(TinkerEngine)
+    engine.config = EngineConfig(base_model=BASE_MODEL, forward_backward_max_request_count=2)
+    calls = []
+
+    def process_batch_requests(requests, processor, name):
+        calls.append((list(requests), processor, name))
+
+    engine.process_batch_requests = process_batch_requests
+
+    engine.process_forward_backward_requests(_fake_forward_backward_requests(5))
+
+    assert [(keys, name) for keys, _, name in calls] == [
+        (["1", "2"], "forward_backward"),
+        (["3", "4"], "forward_backward"),
+        (["5"], "forward_backward"),
+    ]
+    assert all(processor == engine.process_forward_backward for _, processor, _ in calls)
+
+
 @pytest.fixture()
 def scheduling_engine():
     """Create a TinkerEngine with only the DB initialized (no backend) for scheduling tests."""

@@ -58,6 +58,15 @@ class EngineConfig(BaseModel):
         ),
         json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
     )
+    forward_backward_max_request_count: int | None = Field(
+        default=None,
+        description=(
+            "Optional cap on how many pending forward_backward requests the engine "
+            "coalesces into one backend call. Default `None` preserves the current "
+            "unlimited batching behavior."
+        ),
+        json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
