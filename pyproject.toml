@@ -158,6 +158,13 @@ harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
 ]
 
+# Use the alpha sdk for fireworks-ai as the stable releases don't
+# support token-in/token-out that SkyRL interfaces expect.
+fireworks = [
+    "skyrl[skyrl-train]",
+    "fireworks-ai==1.2.0a85",
+]
+
 dev = [
     "mkdocs",
     "mkdocs-material",
