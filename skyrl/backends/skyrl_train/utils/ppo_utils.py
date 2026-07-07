@@ -746,10 +746,10 @@ def compute_policy_loss_cispo(
     gradient and are essentially ignored.
     """
     ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
-    clamped_ratio = torch.clamp(ratio, 1 - config.cispo.cispo_eps_clip_low, 1 + config.cispo.cispo_eps_clip_high)
+    clamped_ratio = torch.clamp(ratio, config.cispo.cispo_eps_clip_low, config.cispo.cispo_eps_clip_high)
     loss = -advantages * clamped_ratio.detach() * log_probs
 
-    is_clipped = (ratio < 1 - config.cispo.cispo_eps_clip_low) | (ratio > 1 + config.cispo.cispo_eps_clip_high)
+    is_clipped = (ratio < config.cispo.cispo_eps_clip_low) | (ratio > config.cispo.cispo_eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
     # apply off policy correction
