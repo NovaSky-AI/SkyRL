@@ -31,8 +31,11 @@ def import_sampler_class(class_path: str) -> type:
 
     Args:
         class_path: Fully-qualified import path, e.g.
-            ``"curriculum_sampler.CurriculumLearningSampler"`` (with the module's
-            directory on ``PYTHONPATH``).
+            ``"examples.train.sft.curriculum_sampler.CurriculumLearningSampler"``.
+            The import runs inside a Ray task (which does not inherit the
+            driver's ``PYTHONPATH``), so the module must be importable from the
+            worker's ``sys.path`` -- e.g. a dotted path from the repo root when
+            launching from it.
 
     Returns:
         The resolved class object.

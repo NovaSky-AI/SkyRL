@@ -2,13 +2,23 @@
 
 This is an *example* of a user-supplied stateful sampler plugged into
 ``SFTTrainer`` via the ``sampler=custom`` config path -- it is intentionally
-NOT part of the core library. Point ``sampler_class_path`` at this class (with
-the directory on ``PYTHONPATH``) to use it::
+NOT part of the core library. Point ``sampler_class_path`` at this class via a
+dotted path importable from the repo root (run from the repo root; no
+``__init__.py`` needed thanks to namespace packages), passing the sampler
+config as overrides on the base SFT example script::
 
-    PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+    bash examples/train/sft/run_sft_megatron.sh \
         sampler=custom \
-        sampler_class_path=curriculum_sampler.CurriculumLearningSampler \
-        'sampler_kwargs={lengths: [2000, 2000, 2000], num_samples: 800, seed: 42}'
+        sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
+        'sampler_kwargs={lengths: [34, 33, 33], num_samples: 40, seed: 42}'
+
+(``lengths`` must sum to the dataset size -- 100 for the script's
+``train[:100]`` split -- and ``num_samples`` should be
+``num_steps * batch_size``.)
+
+Note: the import happens inside a Ray task, which does not inherit the driver's
+``PYTHONPATH`` -- so the path must resolve from the worker's ``sys.path``
+(which includes the repo root when launching from it).
 
 A custom sampler only needs ``__iter__``/``__len__`` plus
 ``state_dict``/``load_state_dict`` to be checkpointable by the trainer's

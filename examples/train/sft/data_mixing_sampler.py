@@ -2,13 +2,23 @@
 
 Like ``curriculum_sampler.py``, this is an *example* of a user-supplied stateful
 sampler plugged into ``SFTTrainer`` via ``sampler=custom`` -- it is intentionally
-NOT part of the core library. Point ``sampler_class_path`` at this class (with
-the directory on ``PYTHONPATH``) to use it::
+NOT part of the core library. Point ``sampler_class_path`` at this class via a
+dotted path importable from the repo root (run from the repo root; no
+``__init__.py`` needed thanks to namespace packages), passing the sampler
+config as overrides on the base SFT example script::
 
-    PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+    bash examples/train/sft/run_sft_megatron.sh \
         sampler=custom \
-        sampler_class_path=data_mixing_sampler.DataMixingSampler \
-        'sampler_kwargs={lengths: [8000, 2000], weights: [0.5, 0.5], num_samples: 800, seed: 42}'
+        sampler_class_path=examples.train.sft.data_mixing_sampler.DataMixingSampler \
+        'sampler_kwargs={lengths: [80, 20], weights: [0.5, 0.5], num_samples: 40, seed: 42}'
+
+(``lengths`` must sum to the dataset size -- 100 for the script's
+``train[:100]`` split -- and ``num_samples`` should be
+``num_steps * batch_size``.)
+
+Note: the import happens inside a Ray task, which does not inherit the driver's
+``PYTHONPATH`` -- so the path must resolve from the worker's ``sys.path``
+(which includes the repo root when launching from it).
 
 It mixes a concatenation of sources (``ConcatDataset([src_a, src_b, ...])``)
 according to per-source ``weights``, using torch's native

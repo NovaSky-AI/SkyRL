@@ -144,7 +144,10 @@ Three sampler strategies are built in:
 - `sampler=custom` — loads your own stateful sampler from `sampler_class_path`,
   instantiated as `ClassName(tokenized, **sampler_kwargs)`. A custom sampler
   only needs `__iter__`/`__len__` plus `state_dict`/`load_state_dict` to be
-  checkpointable. The module must be importable, i.e. on `PYTHONPATH`.
+  checkpointable. The import runs inside a Ray task, which does **not** inherit
+  the driver's `PYTHONPATH` -- use a dotted path importable from the repo root
+  (e.g. `examples.train.sft.curriculum_sampler.CurriculumLearningSampler`) and
+  launch from the repo root. No `__init__.py` is needed (namespace packages).
 
 ### Curriculum learning example
 
@@ -154,14 +157,16 @@ progressively unlocking harder data. Order the dataset easy→hard and give the
 per-stage `lengths`. Set `num_samples=num_steps*batch_size` so the whole
 schedule is covered in a single pass (this keeps the curriculum state intact
 across epoch boundaries and makes resume bit-exact across the entire run).
-Put the file's directory on `PYTHONPATH` so the dotted path resolves:
+Pass the sampler config as overrides on the base SFT example script, run from
+the repo root so the dotted path resolves (`lengths` must sum to the dataset
+size — 100 for the script's `train[:100]` split — and `num_samples` should be
+`num_steps * batch_size` to cover the whole schedule):
 
 ```bash
-PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+bash examples/train/sft/run_sft_megatron.sh \
     sampler=custom \
-    sampler_class_path=curriculum_sampler.CurriculumLearningSampler \
-    'sampler_kwargs={lengths: [2000, 2000, 2000], num_samples: 800, seed: 42}' \
-    num_steps=200 batch_size=4
+    sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
+    'sampler_kwargs={lengths: [34, 33, 33], num_samples: 40, seed: 42}'
 ```
 
 ### Data mixing example
@@ -174,11 +179,10 @@ proportion matches `weights` regardless of how many examples each source has.
 Order the dataset by source and give `lengths`/`weights` per source:
 
 ```bash
-PYTHONPATH=examples/train/sft python -m skyrl.train.main_sft \
+bash examples/train/sft/run_sft_megatron.sh \
     sampler=custom \
-    sampler_class_path=data_mixing_sampler.DataMixingSampler \
-    'sampler_kwargs={lengths: [8000, 2000], weights: [0.5, 0.5], num_samples: 800, seed: 42}' \
-    num_steps=200 batch_size=4
+    sampler_class_path=examples.train.sft.data_mixing_sampler.DataMixingSampler \
+    'sampler_kwargs={lengths: [80, 20], weights: [0.5, 0.5], num_samples: 40, seed: 42}'
 ```
 
 ## Limitations
