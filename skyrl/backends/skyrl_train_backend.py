@@ -682,6 +682,12 @@ class SkyRLTrainBackend(AbstractBackend):
         if "critic_lr" in data:
             metrics["critic_lr:last"] = float(data["critic_lr"])
 
+        # Loss-specific metrics (e.g. clip_ratio for ppo/cispo/dppo). Workers
+        # mean-reduce these across micro-batches and DP ranks already.
+        for key, value in data.items():
+            if key.startswith("loss_metrics/") and isinstance(value, (int, float)):
+                metrics[f"{key.removeprefix('loss_metrics/')}:mean"] = float(value)
+
         return metrics
 
     def _sleep_inference_engines(self):
@@ -704,10 +710,22 @@ class SkyRLTrainBackend(AbstractBackend):
         role: str,
         loss_fn: str,
         loss_fn_config: dict[str, float] | None,
-    ) -> tuple[str, dict[str, float] | None]:
+    ) -> tuple[str, dict | None]:
         """Normalize public Tinker loss names/config into SkyRL-Train policy settings."""
         if role == "critic":
             return loss_fn, loss_fn_config
+
+        if loss_fn == "dppo":
+            # DPPO thresholds live in the nested `algorithm.dppo` sub-config, but
+            # Tinker's loss_fn_config is a flat float dict. Re-nest so the
+            # worker-side OmegaConf merge lands them on AlgorithmConfig.dppo.
+            normalized_config = dict(loss_fn_config or {})
+            dppo_overrides = {
+                key: normalized_config.pop(key) for key in ("delta_low", "delta_high") if key in normalized_config
+            }
+            if dppo_overrides:
+                normalized_config["dppo"] = dppo_overrides
+            return loss_fn, normalized_config or None
 
         if loss_fn != "ppo":
             return loss_fn, loss_fn_config

@@ -452,10 +452,14 @@ class ForwardBackwardInput(BaseModel):
         "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
+        # DPPO (https://arxiv.org/abs/2602.04879) divergence thresholds. The
+        # divergence variant (binary_tv/binary_kl) is server-side config:
+        # `trainer.algorithm.dppo.dppo_type` in --backend-config.
+        "dppo": {"delta_low", "delta_high"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")

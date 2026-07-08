@@ -86,11 +86,15 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
-        and optimizer storages are live before we tensor.copy_() into them.
+        ``AdapterStore.swap_to`` snapshots the outgoing adapter's params,
+        grads, and optimizer state with ``tensor.copy_()`` from the live GPU
+        buffers, so all of them must be GPU-resident before the swap — under
+        colocation they may have been offloaded (e.g. after a weight sync),
+        so backload here rather than relying on the caller's residency needs.
         """
         if model_id is None or role not in self._actor_groups:
             return
+        self._ensure_on_gpu(role, need_optimizer=True, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -618,11 +622,15 @@ class WorkerDispatch:
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
 
-        # Sync weights to inference engine
-        self._prepare_for_weight_sync()
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
+        # Must happen before _prepare_for_weight_sync offloads the optimizer:
+        # AdapterStore.swap_to snapshots the outgoing adapter's grads and
+        # optimizer state with tensor.copy_() from the live GPU buffers.
         self.ensure_active_adapter("policy", model_id)
+
+        # Sync weights to inference engine
+        self._prepare_for_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
