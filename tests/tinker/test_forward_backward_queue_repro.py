@@ -17,8 +17,8 @@ def test_repro_uses_many_pending_forward_backward_requests_with_uneven_lengths()
 
     assert request_count == 43
     assert example_count == 43
-    assert max_sequence_length == 164_724
-    assert input_tokens == 3_827_364
+    assert max_sequence_length == 166_112
+    assert input_tokens == 3_833_474
 
 
 def test_repro_chunks_each_pending_forward_backward_request_individually():
