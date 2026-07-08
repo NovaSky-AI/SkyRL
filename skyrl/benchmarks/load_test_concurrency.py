@@ -64,7 +64,6 @@ def get_config() -> SkyRLTrainConfig:
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.logger = "console"
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.generator.inference_engine.run_engines_locally = True

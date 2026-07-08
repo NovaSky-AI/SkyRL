@@ -17,7 +17,7 @@ from loguru import logger
 from PIL import Image
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
@@ -147,7 +147,6 @@ def get_vlm_test_config(model: str) -> SkyRLTrainConfig:
     cfg.generator.step_wise_trajectories = False
     cfg.generator.apply_overlong_filtering = False
     cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.inference_engine.run_engines_locally = True
@@ -180,7 +179,6 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
             "limit_mm_per_prompt": {"image": 2, "video": 0},
             "mm_processor_cache_gb": 0,
         },
-        use_new_inference_servers=True,
     ) as engines:
         inference_client = engines.client
         env_cfg = cfg.environment.skyrl_gym

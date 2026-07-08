@@ -37,6 +37,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
 )
@@ -69,7 +70,11 @@ from skyrl.train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
-from skyrl.utils.tok import get_tokenizer
+from skyrl.utils.tok import (
+    check_is_vlm,
+    get_processor,
+    get_tokenizer,
+)
 
 # ---------------------------------------------------------------------------
 # Tokenization helpers
@@ -437,6 +442,7 @@ def tokenize_chat_example(
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     tools_key: Optional[str] = "tools",
     system_key: Optional[str] = "system",
+    processor=None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a chat-format example with configurable loss targets.
@@ -496,17 +502,42 @@ def tokenize_chat_example(
     if tools is not None:
         tokenizer_kwargs = {"tools": tools, **tokenizer_kwargs}
 
+    # Detect image content. VLM tokenization runs through the HF processor and
+    # only supports last-assistant training (image token positions are tied to
+    # a single forward over the full conversation).
+    has_images = any(
+        isinstance(m.get("content"), list)
+        and any(isinstance(d, dict) and d.get("type") == "image" for d in m["content"])
+        for m in messages
+    )
+    if has_images and train_on_what == TrainOnWhat.ALL_ASSISTANT_MESSAGES:
+        raise NotImplementedError("Training on all assistant messages with vision inputs is not yet supported")
+
     if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
-        return _tokenize_chat_last_assistant(messages, tokenizer, max_length, **tokenizer_kwargs)
+        return _tokenize_chat_last_assistant(
+            messages, tokenizer, max_length, processor if has_images else None, **tokenizer_kwargs
+        )
     else:
         # ALL_ASSISTANT_MESSAGES
         return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+
+
+def _unbatch(proc_tok_output):
+    """Strip the outer batch list from a processor output.
+
+    ``processor.apply_chat_template`` returns batched ids (``list[list[int]]``)
+    while a plain tokenizer returns a flat ``list[int]``. Normalize to flat.
+    """
+    if proc_tok_output and isinstance(proc_tok_output[0], list):
+        return proc_tok_output[0]
+    return proc_tok_output
 
 
 def _tokenize_chat_last_assistant(
     messages: list[dict],
     tokenizer,
     max_length: Optional[int] = None,
+    processor=None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a conversation and compute loss only on the last assistant message.
@@ -516,43 +547,74 @@ def _tokenize_chat_last_assistant(
         tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
         max_length: Optional sequence length cap; truncates both prompt and full
             conversation to this limit.
+        processor: Optional HF processor used for VLM examples. When provided,
+            image tensors (``pixel_values``, ``image_grid_thw``) are produced and
+            returned alongside the token ids.
         **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
 
     Returns:
-        Dict with ``input_ids``, ``attention_mask``, and ``num_actions`` (number
-        of last-assistant tokens), or ``None`` if truncation left no response tokens.
+        Dict with ``input_ids``, ``attention_mask``, ``num_actions`` (number of
+        last-assistant tokens), and, for VLM examples, ``pixel_values`` and
+        ``image_grid_thw``. Returns ``None`` if truncation left no response
+        tokens or dropped an image's placeholder tokens.
     """
+    # The processor (when present) tokenizes text and images together; otherwise
+    # the plain tokenizer handles text. ``return_dict=True`` so we can read both
+    # token ids and any image tensors back out.
+    processing_class = processor or tokenizer
+
+    length_kwargs = {}
+    if max_length is not None and processor is None:
+        length_kwargs = dict(truncation=True, max_length=max_length)
+
     # Tokenize prompt (everything except last assistant message)
-    prompt_ids = tokenizer.apply_chat_template(
+    prompt_ids = processing_class.apply_chat_template(
         messages[:-1],
         add_generation_prompt=True,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
-        return_dict=False,
+        return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
     # Tokenize full conversation
-    full_ids = tokenizer.apply_chat_template(
+    full_ids = processing_class.apply_chat_template(
         messages,
         add_generation_prompt=False,
         tokenize=True,
-        truncation=max_length is not None,
-        max_length=max_length,
-        return_dict=False,
+        return_dict=True,
+        **length_kwargs,
         **tokenizer_kwargs,
     )
 
-    num_actions = len(full_ids) - len(prompt_ids)
+    full_input_ids = _unbatch(full_ids["input_ids"])
+    full_prompt_ids = _unbatch(prompt_ids["input_ids"])
+
+    # VLM samples can't be safely truncated (it would drop image placeholder tokens
+    # and break image/text alignment), so drop anything that exceeds the limit.
+    if processor is not None and max_length is not None and len(full_input_ids) > max_length:
+        logger.warning(
+            f"Dropping VLM sample longer than max_length={max_length}, consider increasing max_length if you see this warning too much"
+        )
+        return None
+
+    vlm_kwargs = {}  # We only support Qwen-style image kwargs at the moment
+    if "pixel_values" in full_ids and "image_grid_thw" in full_ids:
+        vlm_kwargs = dict(
+            pixel_values=full_ids["pixel_values"],
+            image_grid_thw=full_ids["image_grid_thw"],
+        )
+
+    num_actions = len(full_input_ids) - len(full_prompt_ids)
     if num_actions <= 0:
         return None
 
     return {
-        "input_ids": full_ids,
-        "attention_mask": [1] * len(full_ids),
+        "input_ids": full_input_ids,
+        "attention_mask": [1] * len(full_input_ids),
         "num_actions": num_actions,
         "loss_mask": [1] * num_actions,
+        **vlm_kwargs,
     }
 
 
@@ -646,6 +708,20 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     attention_masks = []
     loss_masks = []
 
+    # VLM image tensors travel as a TensorList (one variable-shape tensor per
+    # sample). Mixed text+image batches are not supported; every sample in a VLM
+    # batch must carry images. Check homogeneity up front so a mixed batch fails
+    # here with a clear message rather than a KeyError deep in the pad loop.
+    num_with_images = sum("pixel_values" in ex for ex in examples)
+    if num_with_images not in (0, len(examples)):
+        raise ValueError(
+            f"Mixed text+image batches are not supported: {num_with_images}/{len(examples)} "
+            "samples carry 'pixel_values'. Every sample in a VLM batch must carry images."
+        )
+    batch_has_images = num_with_images > 0
+    pixel_values = []
+    image_grid_thw = []
+
     for ex in examples:
         pad_len = max_len - len(ex["input_ids"])
         # Left-pad sequences (SkyRL convention)
@@ -655,11 +731,17 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         action_pad = max_num_actions - ex["num_actions"]
         loss_masks.append([0] * action_pad + ex["loss_mask"])
 
+        if batch_has_images:
+            pixel_values.append(torch.as_tensor(ex["pixel_values"]))
+            image_grid_thw.append(torch.as_tensor(ex["image_grid_thw"]))
+
     batch = TrainingInputBatch(
         {
             "sequences": torch.tensor(sequences, dtype=torch.long),
             "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
             "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "pixel_values": TensorList(pixel_values) if batch_has_images else None,
+            "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
     )
     batch.metadata = {"response_length": max_num_actions}
@@ -723,6 +805,8 @@ class SFTTrainer:
         # When not provided (e.g. standalone usage), build it here.
         self.cfg = skyrl_cfg if skyrl_cfg is not None else build_skyrl_config_for_sft(cfg)
         self.tokenizer = None
+        self.processor = None  # set in setup() for VLM models
+        self.is_vlm = False
         self.dispatch: WorkerDispatch | None = None
         self.tracker: Tracking | None = None
         # Stateful dataloaders, built in train() once data is tokenized.
@@ -743,6 +827,11 @@ class SFTTrainer:
         self._steps_per_epoch: int = 0
         self._current_epoch: int = 0
 
+    @property
+    def _torch_profiler_enabled(self) -> bool:
+        """Whether to dispatch policy profiler RPCs."""
+        return self.cfg.trainer.policy.torch_profiler_config.enable
+
     def _build_collator(self, tokenizer):
         """Select the batch collator from the configured packing mode.
 
@@ -757,7 +846,12 @@ class SFTTrainer:
         from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 
         if self.sft_cfg.use_sequence_packing:
+            from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+                is_fp8_enabled,
+            )
+
             self._validate_packing_cfg()
+            transformer_config_kwargs = self.sft_cfg.megatron_config.transformer_config_kwargs or {}
             return PackedDataCollator(
                 tokenizer=tokenizer,
                 max_tokens_per_microbatch=self.sft_cfg.resolved_bin_capacity(),
@@ -767,6 +861,7 @@ class SFTTrainer:
                 dp_size=self._dp_size(),
                 batch_size=self.sft_cfg.batch_size,
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
+                fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
             )
         return DefaultCollator(
             tokenizer=tokenizer,
@@ -808,12 +903,26 @@ class SFTTrainer:
         Ray must already be initialized before calling this (either via
         ``initialize_ray`` on the head node or inside a Ray task).
         """
-        self.tokenizer = get_tokenizer(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
-            padding_side="left",
-        )
+        tokenizer_kwargs = {
+            "trust_remote_code": True,
+            "use_fast": not self.cfg.trainer.disable_fast_tokenizer,
+            "padding_side": "left",
+        }
+
+        self.is_vlm = check_is_vlm(self.cfg.trainer.policy.model.path)
+        if self.is_vlm:
+            self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
+            # Sequence packing / microbatch padding removal are unsupported for
+            # VLMs (3D RoPE + image token positions). ``remove_microbatch_padding``
+            # defaults to True, so disable both unconditionally and mirror the
+            # change onto the already-built trainer config the workers receive.
+            if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
+                logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
+            self.sft_cfg.use_sequence_packing = False
+            self.sft_cfg.remove_microbatch_padding = False
+            self.cfg.trainer.remove_microbatch_padding = False
+
+        self.tokenizer = get_tokenizer(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
         self.collator = self._build_collator(self.tokenizer)
         self._init_tracker()
         self._init_workers()
@@ -963,6 +1072,13 @@ class SFTTrainer:
         columns = dataset.column_names
         num_workers = self.sft_cfg.num_workers
 
+        # The HF processor needed for VLM tokenization does not round-trip
+        # cleanly through the spawn-based worker pool, so VLM tokenization runs
+        # sequentially.
+        if self.is_vlm and num_workers != 0:
+            logger.warning("VLM detected: forcing sequential tokenization (num_workers=0).")
+            num_workers = 0
+
         # Sequential tokenization path
         if num_workers == 0:
             logger.info("Tokenizing dataset (sequential)...")
@@ -978,6 +1094,7 @@ class SFTTrainer:
                         train_on_what=self.sft_cfg.train_on_what,
                         tools_key=tools_key,
                         system_key=system_key,
+                        processor=self.processor,
                     )
                     for ex in dataset
                 ]
@@ -1459,6 +1576,11 @@ class SFTTrainer:
             grad_norm = self.dispatch.optim_step("policy")
 
         metrics = output.metrics
+
+        # One profiler step per SFT global step.
+        if self._torch_profiler_enabled:
+            self.dispatch.profile_step("policy")
+
         loss_val = metrics.get("final_loss", metrics.get("loss", float("nan")))
         return {
             "loss": loss_val,
@@ -1549,35 +1671,41 @@ class SFTTrainer:
 
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
-        for step in range(num_steps):
-            all_timings: dict[str, float] = {}
+        if self._torch_profiler_enabled:
+            self.dispatch.start_profile("policy")
+        try:
+            for step in range(num_steps):
+                all_timings: dict[str, float] = {}
 
-            with Timer("step", all_timings):
-                step_result = self.train_step(batch, step)
-                all_timings.update(step_result["timings"])
+                with Timer("step", all_timings):
+                    step_result = self.train_step(batch, step)
+                    all_timings.update(step_result["timings"])
 
-            actual_num_tokens = batch["attention_mask"].sum().item()
-            self._total_tokens_processed += actual_num_tokens
-            tokens_per_second = actual_num_tokens / all_timings["step"]
+                actual_num_tokens = batch["attention_mask"].sum().item()
+                self._total_tokens_processed += actual_num_tokens
+                tokens_per_second = actual_num_tokens / all_timings["step"]
 
-            log_dict = {
-                "train/loss": step_result["loss"],
-                "train/grad_norm": step_result["grad_norm"],
-                "train/tokens_per_second": tokens_per_second,
-                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
-                "train/actual_num_tokens": actual_num_tokens,
-                "train/total_tokens_processed": self._total_tokens_processed,
-            }
-            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
-            if self._ray_gpu_monitor is not None:
-                log_dict.update(self._ray_gpu_monitor.flush())
+                log_dict = {
+                    "train/loss": step_result["loss"],
+                    "train/grad_norm": step_result["grad_norm"],
+                    "train/tokens_per_second": tokens_per_second,
+                    "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
+                    "train/actual_num_tokens": actual_num_tokens,
+                    "train/total_tokens_processed": self._total_tokens_processed,
+                }
+                log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                if self._ray_gpu_monitor is not None:
+                    log_dict.update(self._ray_gpu_monitor.flush())
 
-            self.tracker.log(log_dict, step=step, commit=True)
-            logger.info(
-                f"Step {step}: loss={step_result['loss']:.4f}, "
-                f"grad_norm={step_result['grad_norm']}, "
-                f"tokens_per_second={tokens_per_second:.0f}"
-            )
+                self.tracker.log(log_dict, step=step, commit=True)
+                logger.info(
+                    f"Step {step}: loss={step_result['loss']:.4f}, "
+                    f"grad_norm={step_result['grad_norm']}, "
+                    f"tokens_per_second={tokens_per_second:.0f}"
+                )
+        finally:
+            if self._torch_profiler_enabled:
+                self.dispatch.stop_profile("policy")
 
         logger.info("Dummy SFT training complete!")
 
@@ -1722,116 +1850,123 @@ class SFTTrainer:
         # their state across the (conceptual) epoch boundaries.
         data_iter = iter(self.train_dataloader)
 
-        while self.global_step <= num_steps:
-            all_timings: dict[str, float] = {}
+        if self._torch_profiler_enabled:
+            self.dispatch.start_profile("policy")
+        try:
+            while self.global_step <= num_steps:
+                all_timings: dict[str, float] = {}
 
-            with Timer("step", all_timings):
+                with Timer("step", all_timings):
 
-                # Fetch the next batch; on epoch exhaustion, close the epoch and
-                # restart the iterator (reshuffles the random/sequential samplers).
-                with Timer("data_loading", all_timings):
-                    batch = next(data_iter, None)
-                if batch is None:
-                    self._fire("on_epoch_end")
-                    current_epoch += 1
-                    self._current_epoch = current_epoch
-                    self._fire("on_epoch_start")
-                    data_iter = iter(self.train_dataloader)
+                    # Fetch the next batch; on epoch exhaustion, close the epoch and
+                    # restart the iterator (reshuffles the random/sequential samplers).
                     with Timer("data_loading", all_timings):
-                        batch = next(data_iter)
+                        batch = next(data_iter, None)
+                    if batch is None:
+                        self._fire("on_epoch_end")
+                        current_epoch += 1
+                        self._current_epoch = current_epoch
+                        self._fire("on_epoch_start")
+                        data_iter = iter(self.train_dataloader)
+                        with Timer("data_loading", all_timings):
+                            batch = next(data_iter)
 
-                self._fire("on_step_start", batch=batch)
+                    self._fire("on_step_start", batch=batch)
 
-                # Training step
-                step_result = self.train_step(batch, self.global_step)
-                all_timings.update(step_result["timings"])
+                    # Training step
+                    step_result = self.train_step(batch, self.global_step)
+                    all_timings.update(step_result["timings"])
 
-            # Compute throughput using actual (non-padding) tokens. A padded
-            # tail batch appends ``pad_size`` rows (copies of row 0) that are
-            # masked out of the loss; exclude them from the token count so the
-            # throughput metric reflects only real tokens.
-            batch_padded_seq_len = batch["sequences"].shape[1]
-            pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
-            real_rows = batch["attention_mask"].shape[0] - pad_size
-            actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
-            self._total_tokens_processed += actual_num_tokens
-            tokens_per_second = actual_num_tokens / all_timings["step"]
+                # Compute throughput using actual (non-padding) tokens. A padded
+                # tail batch appends ``pad_size`` rows (copies of row 0) that are
+                # masked out of the loss; exclude them from the token count so the
+                # throughput metric reflects only real tokens.
+                batch_padded_seq_len = batch["sequences"].shape[1]
+                pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
+                real_rows = batch["attention_mask"].shape[0] - pad_size
+                actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
+                self._total_tokens_processed += actual_num_tokens
+                tokens_per_second = actual_num_tokens / all_timings["step"]
 
-            # Build log dict
-            log_dict = {
-                "train/loss": step_result["loss"],
-                "train/grad_norm": step_result["grad_norm"],
-                "train/tokens_per_second": tokens_per_second,
-                "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
-                "train/actual_num_tokens": actual_num_tokens,
-                "train/batch_padded_seq_len": batch_padded_seq_len,
-                "train/total_tokens_processed": self._total_tokens_processed,
-            }
-            log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
-            if self._ray_gpu_monitor is not None:
-                log_dict.update(self._ray_gpu_monitor.flush())
+                # Build log dict
+                log_dict = {
+                    "train/loss": step_result["loss"],
+                    "train/grad_norm": step_result["grad_norm"],
+                    "train/tokens_per_second": tokens_per_second,
+                    "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
+                    "train/actual_num_tokens": actual_num_tokens,
+                    "train/batch_padded_seq_len": batch_padded_seq_len,
+                    "train/total_tokens_processed": self._total_tokens_processed,
+                }
+                log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                if self._ray_gpu_monitor is not None:
+                    log_dict.update(self._ray_gpu_monitor.flush())
 
-            self._fire("on_step_end", batch=batch, metrics=step_result)
+                self._fire("on_step_end", batch=batch, metrics=step_result)
 
-            # Capture callback-driven triggers, then reset so they only fire once.
-            force_save = self._training_control.should_save
-            force_eval = self._training_control.should_evaluate
-            self._training_control.should_save = False
-            self._training_control.should_evaluate = False
+                # Capture callback-driven triggers, then reset so they only fire once.
+                force_save = self._training_control.should_save
+                force_eval = self._training_control.should_evaluate
+                self._training_control.should_save = False
+                self._training_control.should_evaluate = False
 
-            # Checkpoint: interval-driven or callback-requested.
-            interval_save = (
-                self.sft_cfg.ckpt_interval > 0
-                and self.global_step > 0
-                and self.global_step % self.sft_cfg.ckpt_interval == 0
-            )
-            did_save_last_step = force_save or interval_save
-            if did_save_last_step:
-                with Timer("save_checkpoint", all_timings):
-                    ckpt_path = self.save_checkpoint()
-                log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
-                self._fire("on_save", ckpt_path=ckpt_path)
+                # Checkpoint: interval-driven or callback-requested.
+                interval_save = (
+                    self.sft_cfg.ckpt_interval > 0
+                    and self.global_step > 0
+                    and self.global_step % self.sft_cfg.ckpt_interval == 0
+                )
+                did_save_last_step = force_save or interval_save
+                if did_save_last_step:
+                    with Timer("save_checkpoint", all_timings):
+                        ckpt_path = self.save_checkpoint()
+                    log_dict["timing/save_checkpoint"] = all_timings["save_checkpoint"]
+                    self._fire("on_save", ckpt_path=ckpt_path)
 
-            # HF export at regular intervals
-            if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
-                with Timer("save_hf_model", all_timings):
-                    self.save_hf_model()
-                log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
+                # HF export at regular intervals
+                if self.sft_cfg.hf_save_interval > 0 and self.global_step % self.sft_cfg.hf_save_interval == 0:
+                    with Timer("save_hf_model", all_timings):
+                        self.save_hf_model()
+                    log_dict["timing/save_hf_model"] = all_timings["save_hf_model"]
 
-            eval_metrics = None
-            num_eval_batches: int | None = None
-            # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
-            # whenever a callback set ``control.should_evaluate``.
-            interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
-            if eval_tokenized is not None and (force_eval or interval_eval):
-                self._fire("on_eval_start")
-                with Timer("eval", all_timings):
-                    eval_metrics, num_eval_batches = self.run_eval()
-                self._fire("on_eval_end", metrics=eval_metrics)
+                eval_metrics = None
+                num_eval_batches: int | None = None
+                # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
+                # whenever a callback set ``control.should_evaluate``.
+                interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
+                if eval_tokenized is not None and (force_eval or interval_eval):
+                    self._fire("on_eval_start")
+                    with Timer("eval", all_timings):
+                        eval_metrics, num_eval_batches = self.run_eval()
+                    self._fire("on_eval_end", metrics=eval_metrics)
+                    if eval_metrics:
+                        log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                        log_dict["timing/eval"] = all_timings["eval"]
+
+                log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
+                # Callbacks may mutate log_dict in place via on_log.
+                self._fire("on_log", logs=log_dict)
+                self.tracker.log(log_dict, step=self.global_step, commit=True)
+
+                if self.global_step % 5 == 0:
+                    logger.info(
+                        f"Step {self.global_step}: loss={step_result['loss']:.4f}, "
+                        f"grad_norm={step_result['grad_norm']}"
+                    )
+
                 if eval_metrics:
-                    log_dict.update({f"eval/{k}": v for k, v in eval_metrics.items()})
-                    log_dict["timing/eval"] = all_timings["eval"]
+                    logger.info(
+                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"over {num_eval_batches} batches"
+                    )
 
-            log_dict.update({"train/epoch": current_epoch, "train/global_step": self.global_step})
-            # Callbacks may mutate log_dict in place via on_log.
-            self._fire("on_log", logs=log_dict)
-            self.tracker.log(log_dict, step=self.global_step, commit=True)
+                # Epoch boundaries are detected at the top of the loop when the
+                # dataloader iterator is exhausted (StopIteration), not here.
 
-            if self.global_step % 5 == 0:
-                logger.info(
-                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, " f"grad_norm={step_result['grad_norm']}"
-                )
-
-            if eval_metrics:
-                logger.info(
-                    f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
-                    f"over {num_eval_batches} batches"
-                )
-
-            # Epoch boundaries are detected at the top of the loop when the
-            # dataloader iterator is exhausted (StopIteration), not here.
-
-            self.global_step += 1
+                self.global_step += 1
+        finally:
+            if self._torch_profiler_enabled:
+                self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)
 
         # Close the final epoch. The loop always exits with exactly one epoch

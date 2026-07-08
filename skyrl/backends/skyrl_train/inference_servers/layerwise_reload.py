@@ -1,9 +1,8 @@
 """Shared vLLM layerwise-reload lifecycle for SkyRL's vLLM worker-extension classes.
 
-Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that both
-`vllm_worker.WorkerWrap` and
-`new_inference_worker_wrap.NewInferenceWorkerWrap` use to run vLLM's
-layerwise reload once per weight sync rather than once per chunk.
+Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that
+`new_inference_worker_wrap.NewInferenceWorkerWrap` uses to run vLLM's layerwise
+reload once per weight sync rather than once per chunk.
 """
 
 import inspect

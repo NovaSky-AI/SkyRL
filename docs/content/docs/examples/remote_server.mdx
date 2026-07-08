@@ -1,5 +1,5 @@
 ---
-title: "Remote Inference Engine"
+title: "Remote Inference Server"
 ---
 
 <Callout type="info">
@@ -8,71 +8,56 @@ This example uses the `fsdp` backend.
 
 This example shows how to run GRPO training on GSM8K using a standalone inference engine instance behind an HTTP server. 
 
+Using remote inference servers is especially useful when you're iterating on just the generation code (ex: the agent loop) or on the trainer and want to avoid startup/teardown of the vLLM servers each time.
+
 In this example, we will be using 4 GPUs for training (policy and ref models) and 4 GPUs for inference (inference engine) on a single node.
 
 ## Prerequisites
 
 First, make sure you are familiar with the standard setup process for running GRPO training. See [Quick Start Guide](../getting-started/quickstart) for more details.
 
-## Starting the Remote Inference Engine
+## Starting the Remote Inference Server
 
-We provide an example remote server implementation at `skyrl/backends/skyrl_train/inference_engines/vllm/vllm_server.py`.
-In addition to the standard OpenAI-compatible generation endpoints (`/v1/chat/completions` and `/v1/completions`), the remote server simply needs to expose endpoints for the following operations:
+We use the `serve` entrypoint (`skyrl.train.entrypoints.serve`) to bring up a standalone
+inference deployment: a vLLM server group fronted by the SkyRL router. It exposes all the standard endpoints in vLLM (including `/v1/chat/completions` and `/v1/completions`)
+plus the control-plane endpoints used for sleep/wake and weight updates in SkyRL.
 
-- `/sleep` and `/wake_up` to sleep and wake up the inference engine (only needed if you want to colocate the inference engine with the training process)
-- `/init_weight_update_communicator` to create a process group for weight updates
-- `/update_weight` to update the model weights
-
-That's it! We use a custom `WorkerWrap` class at `skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py` with VLLM's worker extension API to enable efficient NCCL weight updates.
-
-To launch the server, run the following command (the full script is at `examples/train/remote_inference_engine/run_vllm_server.sh`):
+To launch the deployment, run the following command (the full script is at `examples/train/remote_inference_server/run_vllm_server.sh`):
 
 ```bash
-uv run --isolated --extra fsdp -m skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.serve \
     # model and tensor parallel size
-    --model Qwen/Qwen2.5-1.5B-Instruct \
-    --tensor-parallel-size 4 \
+    trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
+    generator.inference_engine.tensor_parallel_size=4 \
 
-    # host and port for the server
-    --host 127.0.0.1 \
-    --port 8001 \
-
-    # seed for reproducibility
-    --seed 42 \
-
-    # max context length
-    --max-model-len 4096 \
+    # one engine, non-colocated (training lives on separate GPUs)
+    generator.inference_engine.num_engines=1 \
+    trainer.placement.colocate_all=false \
 
     # vllm performance related settings
-    --enable-prefix-caching \
-    --enable-chunked-prefill \
-    --dtype bfloat16 \
-    --gpu-memory-utilization 0.9 \
-    --enable-sleep-mode \
-    --max-num_batched_tokens 8192 \
-    --max-num-seqs 1024 \
-
-    # other misc settings
-    --trust-remote-code \
-    --distributed-executor-backend ray \
-
-    # worker extension class for handling weight updates
-    --worker-extension-cls skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
+    generator.inference_engine.gpu_memory_utilization=0.9 \
+    generator.inference_engine.max_num_batched_tokens=8192 \
+    generator.inference_engine.max_num_seqs=1024
 
 ```
 
+On startup the `serve` entrypoint logs the `proxy_url` (data plane) and `server_urls`
+(control plane) of the deployment. You pass those to the training run below.
+
 ## Starting Training
 
-Now that we've started our remote inference engine (located behind `127.0.0.1:8001`), we can start a training run!
+Now that we've started our remote inference deployment, we can start a training run!
 
-To start training, we need to set up our training script. You can find a complete example in `examples/train/remote_inference_engine/run_remote.sh`:
+To start training, we need to set up our training script. Point the trainer at the
+`proxy_url` and `server_urls` logged by the `serve` entrypoint. You can find a complete
+example in `examples/train/remote_inference_server/run_remote.sh`:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
-    # Setup for training with a remote inference engine
+    # Setup for training against an external inference deployment
     generator.inference_engine.run_engines_locally=False \
-    generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
-    generator.inference_engine.override_existing_update_group=True \
+    generator.inference_engine.external_proxy_url="http://127.0.0.1:8000" \
+    generator.inference_engine.external_server_urls="['http://127.0.0.1:8001']" \
 
     # sampling parameters for generation
     generator.sampling_params.temperature=0.6 \
@@ -106,13 +91,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     trainer.eval_before_train=true \
     trainer.eval_interval=5 \
 
-    ... # Other parameters (see `examples/train/remote_inference_engine/run_remote.sh` for more)
+    ... # Other parameters (see `examples/train/remote_inference_server/run_remote.sh` for more)
 
 ```
-
-<Callout type="info">
-With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `generator.inference_engine.run_engines_locally=True` to maximize throughput.
-</Callout>
 
 ## Launching Your Training Run
 
@@ -120,12 +101,13 @@ You're done setting up! Now let's get our training run started!
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/train/remote_inference_engine/run_remote.sh
+bash examples/train/remote_inference_server/run_remote.sh
 
 ```
 
+
 ## What's Next?
 
-Now that you've set up training with a remote inference engine, you might want to explore ways of speeding up training:
+Now that you've set up training with a remote inference server, you might want to explore ways of speeding up training:
 
 - [Async Training](../tutorials/one_step_off_async): Asynchronous off-by-one training in < 100 lines of code!

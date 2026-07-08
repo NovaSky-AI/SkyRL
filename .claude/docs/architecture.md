@@ -10,8 +10,7 @@ skyrl/                  # Core library
 ├── backends/           # Backend implementations
 │   └── skyrl_train/    # FSDP/Megatron training backend
 │       ├── distributed/        # Dispatch, FSDP/Megatron strategies
-│       ├── inference_engines/  # Legacy inference path
-│       ├── inference_servers/  # New inference path
+│       ├── inference_servers/  # HTTP inference path (RemoteInferenceClient, vLLM servers, router)
 │       ├── weight_sync/        # Weight extraction and transfer
 │       └── workers/            # FSDP/Megatron workers
 ├── train/              # Training entrypoints, config, dataset, generators, trainer

@@ -6,6 +6,12 @@ from typing import List
 
 import torch
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+    get_unpacked_seq_align_size,
+    is_fp8_enabled,
+)
+
 
 def patch_topk_router_layer_number():
     """Monkey-patch TopKRouter.set_layer_number to propagate the global layer
@@ -89,6 +95,7 @@ def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> List[torch.Te
 def _remove_left_padding_from_indices(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
+    fp8_enabled: bool = False,
 ) -> torch.Tensor:
     """Apply the same left-padding removal as remove_left_padding to routing indices.
 
@@ -104,8 +111,7 @@ def _remove_left_padding_from_indices(
     seq_lens = attention_mask.sum(dim=1)
     effective_seq_len = seq_lens.max().item()
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    align_size = get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled)
     if align_size > 1:
         pad_size = (align_size - effective_seq_len % align_size) % align_size
         effective_seq_len += pad_size
@@ -128,6 +134,7 @@ def _remove_left_padding_from_indices(
 def _pack_replay_indices(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
+    fp8_enabled: bool = False,
 ) -> torch.Tensor:
     """Pack routing indices to match the token layout produced by preprocess_packed_seqs.
 
@@ -147,7 +154,7 @@ def _pack_replay_indices(
     seq_lens = attention_mask.sum(dim=-1, dtype=torch.int32)
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
 
     pad_sizes = (align_size - seq_lens % align_size) % align_size
     seqlens_padded = seq_lens + pad_sizes
@@ -254,11 +261,16 @@ def setup_per_microbatch_replay_forward(
     )
 
     _patch_alltoall_dispatcher_for_replay()
+    fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
 
     if remove_microbatch_padding:
-        aligned = _pack_replay_indices(rollout_expert_indices, attention_mask)
+        aligned = _pack_replay_indices(rollout_expert_indices, attention_mask, fp8_enabled=fp8_enabled)
     else:
-        aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
+        aligned = _remove_left_padding_from_indices(
+            rollout_expert_indices,
+            attention_mask,
+            fp8_enabled=fp8_enabled,
+        )
 
     # TP splitting: sequence parallelism across the tensor model parallel region
     tp_size = mpu.get_tensor_model_parallel_world_size()

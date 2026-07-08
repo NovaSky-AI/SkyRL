@@ -21,6 +21,7 @@ from skyrl.train.config import (
     ModelConfig,
     OptimizerConfig,
     SkyRLTrainConfig,
+    TorchProfilerConfig,
 )
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,8 @@ class SFTConfig(BaseConfig):
     record_memory: bool = False
     """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
+    torch_profiler_config: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
+    """torch.profiler config for policy training steps."""
 
     # ---- SFT-specific flat fields ----
     strategy: str = "megatron"  # "megatron" or "fsdp"
@@ -327,6 +330,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     if cfg.dataloader_num_workers < 0:
         raise ValueError(f"dataloader_num_workers must be >= 0, got {cfg.dataloader_num_workers}")
 
+    cfg.torch_profiler_config.validate()
+
     # Eval config
     if cfg.eval_interval < 0:
         raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
@@ -410,6 +415,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     cfg.trainer.policy.model_config_kwargs = sft_cfg.model_config_kwargs
     cfg.trainer.policy.use_torch_compile = sft_cfg.use_torch_compile
     cfg.trainer.policy.record_memory = sft_cfg.record_memory
+    cfg.trainer.policy.torch_profiler_config = sft_cfg.torch_profiler_config
 
     # SFT doesn't use KL/ref model
     cfg.trainer.algorithm.use_kl_loss = False

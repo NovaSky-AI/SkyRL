@@ -57,6 +57,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
@@ -84,7 +85,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   $MULTI_TURN_ARGS \
   $STEP_WISE_ARGS \

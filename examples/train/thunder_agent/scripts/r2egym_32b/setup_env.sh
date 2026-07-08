@@ -90,7 +90,7 @@ from examples.train.thunder_agent.main_harbor_thunder_agent import HarborThunder
 from examples.train.thunder_agent.skyrl_integration.generator import ThunderAgentHarborGenerator
 from examples.train.thunder_agent.skyrl_integration.remote_inference_client import ThunderAgentRemoteInferenceClient
 from examples.train_integrations.harbor.dataset import HarborTaskDataset
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap
+from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import NewInferenceWorkerWrap
 
 print("pr_core_thunder_agent_imports=ok")
 PY
