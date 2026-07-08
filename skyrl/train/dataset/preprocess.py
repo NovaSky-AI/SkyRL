@@ -60,11 +60,35 @@ def convert_prompts_responses_to_batch_tensors(
     Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
 ]:
     """
-    Convert tokenized prompt/response pairs to left-padded training tensors.
+    Convert prompts and responses to batch tensors for training.
 
-    Sequences use the tightest batch length, ``max(prompt_len + response_len)``.
-    Response-level tensors are right-aligned to ``max_response_len`` so they
-    match ``log_probs[:, -num_actions-1:-1]`` from the model forward pass.
+    Each sequence is laid out as a single left-padded block:
+
+    | [PAD]  [PAD]  prompt prompt prompt respon respon |
+    | [PAD]  prompt prompt prompt respon respon respon |
+    | prompt prompt prompt respon respon respon respon |
+                          |<---- max_response_len ---->|
+
+    The padded sequence length is ``max(prompt_len_i + response_len_i)``.
+    This way, the max padded sequence length is ``max_seq_len``.
+
+    This makes the response-level tensors (action_mask, rewards, loss_masks, logprobs):
+    | prompt prompt respon respon |
+    | prompt respon respon respon |
+    | respon respon respon respon |
+
+    So the action_mask is:
+    | 0       0       1      1    |
+    | 0       1       1      1    |
+    | 1       1       1      1    |
+
+    Attention mask is 1 for all real tokens, 0 for padding.
+    Action mask is 1 for the last ``response_len_i`` positions, 0 for padding.
+
+    Response-level tensors are **right-aligned** within ``(batch, max_response_len)``: non-padded
+    values occupy the last ``response_len_i`` positions, with leading zeros. This matches the model
+    forward pass which extracts ``log_probs[:, -num_actions-1:-1]`` —- response tokens are always at
+    the end of the sequence, so their logprobs are right-aligned in the slice.
 
     Assumes that the responses already contain an eos token at index -1.
 
@@ -72,7 +96,7 @@ def convert_prompts_responses_to_batch_tensors(
         tokenizer: Model tokenizer
         prompts: List of tokenized prompts
         responses: List of tokenized responses
-        rewards: List of rewards for each response
+        rewards: List of rewards for each response (lists or 1D tensors)
         loss_masks: List of loss masks for each response
         logprobs: List of rollout log probs for each response
         max_seq_len: Optional. If provided and ``max(prompt_i + response_i)``

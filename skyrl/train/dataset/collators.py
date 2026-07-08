@@ -297,9 +297,15 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 6. Pack into TrainingInputBatch with sub_seq_lengths data field
         # ------------------------------------------------------------------
-        # One TensorList item per packed bin lets MeshDispatch shard ragged
-        # sub_seq_lengths with the dense rows. forward_step converts back to
-        # list[list[int]] for Megatron.
+        # ``sub_seq_lengths`` is genuinely per-sample data: after FFD the
+        # batch's "sample" *is* a bin, so ``len(bin_subseq_lengths) == num_bins
+        # == batch_size``, co-indexed with ``sequences[r]``. We store it as a
+        # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
+        # pattern as ``image_grid_thw``) so ``MeshDispatch`` shards it per-DP
+        # rank automatically alongside ``sequences``/``attention_mask``,
+        # eliminating the worker-side per-rank slice. ``preprocess_packed_seqs``
+        # and the Megatron packed-logprob scatter want ``list[list[int]]``, so a
+        # ``.tolist()`` happens at the ``forward_step`` boundary.
         sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])
         batch = TrainingInputBatch(
             {
