@@ -1,9 +1,9 @@
-"""Reproduce a forward_backward queue-drain OOM shape against a real service.
+"""Reproduce a forward_backward queue-drain pressure shape against a real service.
 
 The useful path is `run-forward-backward`: pass a SkyRL/Tinker-compatible service
 URL, create a real LoRA training client, submit many pending FORWARD_BACKWARD
 futures, and wait for actual service results. `summarize` is only a cheap preview
-of the request shape.
+of the request shape and expected backend batching pressure.
 """
 
 from __future__ import annotations
@@ -58,7 +58,6 @@ PENDING_FORWARD_BACKWARD_SEQUENCE_LENGTHS = [
     102_244,
     98_936,
 ]
-PACKED_BATCH_CUDA_ALLOCATION_GIB = 38.0
 FORWARD_BACKWARD_MAX_REQUEST_COUNT = 1
 
 TEXT_HIDDEN_SIZE = 5_120
@@ -125,9 +124,13 @@ def summarize_repro() -> None:
     )
     print_batch("single queue drain before limiting", requests)
     print(
-        "failure symptom: "
-        "process_batch_requests(forward_backward, n=43) hit CUDA OOM while trying to "
-        f"allocate {PACKED_BATCH_CUDA_ALLOCATION_GIB:.2f} GiB"
+        "pressure symptom: "
+        "process_batch_requests(forward_backward) can coalesce the pending requests "
+        "into one very large token-packed train call"
+    )
+    print(
+        "padding note: sequence packing and padding removal mean this is not modeled "
+        "as dense rows * max_sequence_length padding"
     )
     print(
         "model config note: text hidden_size is "

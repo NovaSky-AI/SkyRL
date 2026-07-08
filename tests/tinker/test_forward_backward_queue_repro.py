@@ -5,6 +5,7 @@ from examples.repro_forward_backward_queue_drain import (
     build_repro_requests,
     chunk_by_request_count,
     summarize_batch,
+    summarize_repro,
 )
 
 
@@ -34,3 +35,12 @@ def test_repro_chunks_each_pending_forward_backward_request_individually():
 def test_repro_documents_text_width_instead_of_vision_position_count():
     assert TEXT_HIDDEN_SIZE == 5_120
     assert VISION_NUM_POSITION_EMBEDDINGS == 2_304
+
+
+def test_repro_describes_token_packed_pressure_not_dense_padding(capsys):
+    summarize_repro()
+
+    output = capsys.readouterr().out
+
+    assert "token-packed train call" in output
+    assert "not modeled as dense rows * max_sequence_length padding" in output
