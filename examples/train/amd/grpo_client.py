@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import datasets
 import torch
@@ -95,6 +97,33 @@ def write_jsonl(output_dir: str, payload: Mapping[str, Any]) -> None:
     path.mkdir(parents=True, exist_ok=True)
     with (path / "metrics.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def post_json(base_url: str, path: str, payload: dict[str, Any], timeout: float = 300.0) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = Request(
+        f"{base_url}{path}",
+        data=data,
+        headers={"accept": "application/json", "content-type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def unload_training_model(base_url: str, training_client: tinker.TrainingClient | None) -> None:
+    if training_client is None:
+        return
+    model_id = getattr(training_client, "model_id", None)
+    if not model_id:
+        return
+    try:
+        response = post_json(base_url, "/api/v1/unload_model", {"model_id": model_id}, timeout=10.0)
+        request_id = response["request_id"]
+        post_json(base_url, "/api/v1/retrieve_future", {"request_id": request_id}, timeout=300.0)
+        logger.info("Unloaded model %s", model_id)
+    except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to unload model %s: %s", model_id, exc)
 
 
 def extract_solution(solution_str: str) -> str:
@@ -390,27 +419,30 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     random.seed(args.seed)
+    base_url = args.base_url.rstrip("/")
 
     logger.info("base_url=%s model=%s data_dir=%s", args.base_url, args.base_model, args.data_dir)
     train_path, val_path = ensure_gsm8k_data(args)
 
-    service_client = tinker.ServiceClient(base_url=args.base_url.rstrip("/"), api_key=args.api_key)
-    training_client = service_client.create_lora_training_client(
-        base_model=args.base_model,
-        rank=LORA_RANK,
-        seed=args.seed,
-        train_mlp=True,
-        train_attn=True,
-        train_unembed=True,
-        user_metadata={"example": "skyrl-amd-tinker-grpo-gsm8k"},
-    )
-    tokenizer = training_client.get_tokenizer()
-    train_records = load_split(train_path, tokenizer, args.max_prompt_length, limit=args.max_train_examples)
-    val_records = load_split(val_path, tokenizer, args.max_prompt_length, limit=args.max_val_examples)
-    if not train_records:
-        raise RuntimeError("No train records were loaded")
-
+    service_client = None
+    training_client = None
     try:
+        service_client = tinker.ServiceClient(base_url=base_url, api_key=args.api_key)
+        training_client = service_client.create_lora_training_client(
+            base_model=args.base_model,
+            rank=LORA_RANK,
+            seed=args.seed,
+            train_mlp=True,
+            train_attn=True,
+            train_unembed=True,
+            user_metadata={"example": "skyrl-amd-tinker-grpo-gsm8k"},
+        )
+        tokenizer = training_client.get_tokenizer()
+        train_records = load_split(train_path, tokenizer, args.max_prompt_length, limit=args.max_train_examples)
+        val_records = load_split(val_path, tokenizer, args.max_prompt_length, limit=args.max_val_examples)
+        if not train_records:
+            raise RuntimeError("No train records were loaded")
+
         for step in range(1, args.max_train_steps + 1):
             step_start = time.time()
             step_records = sample_train_records(train_records, args.num_prompts, args.seed, step)
@@ -444,7 +476,9 @@ def main() -> None:
         logger.info("Final sample response: %r", preview)
         logger.info("PASS")
     finally:
-        service_client.holder.close()
+        unload_training_model(base_url, training_client)
+        if service_client is not None:
+            service_client.holder.close()
 
 
 if __name__ == "__main__":

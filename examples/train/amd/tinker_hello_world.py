@@ -83,6 +83,33 @@ def fetch_json(url: str, timeout: float = 5.0) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def post_json(base_url: str, path: str, payload: dict[str, Any], timeout: float = 300.0) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = Request(
+        f"{base_url}{path}",
+        data=data,
+        headers={"accept": "application/json", "content-type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def unload_training_model(base_url: str, training_client: tinker.TrainingClient | None) -> None:
+    if training_client is None:
+        return
+    model_id = getattr(training_client, "model_id", None)
+    if not model_id:
+        return
+    try:
+        response = post_json(base_url, "/api/v1/unload_model", {"model_id": model_id}, timeout=10.0)
+        request_id = response["request_id"]
+        post_json(base_url, "/api/v1/retrieve_future", {"request_id": request_id}, timeout=300.0)
+        print(f"      unloaded model {model_id}", flush=True)
+    except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+        print(f"      warning: failed to unload model {model_id}: {exc}", file=sys.stderr, flush=True)
+
+
 def check_health(base_url: str) -> None:
     health_url = f"{base_url}/api/v1/healthz"
     try:
@@ -216,62 +243,69 @@ def run() -> int:
 
     check_health(base_url)
 
-    service_client = tinker.ServiceClient(base_url=base_url, api_key=args.api_key)
-    base_model = discover_base_model(service_client, args.base_model)
+    service_client = None
+    training_client = None
+    try:
+        service_client = tinker.ServiceClient(base_url=base_url, api_key=args.api_key)
+        base_model = discover_base_model(service_client, args.base_model)
 
-    print(f"[3/7] creating LoRA training client rank={SMOKE_LORA_RANK}", flush=True)
-    training_client = service_client.create_lora_training_client(
-        base_model=base_model,
-        rank=SMOKE_LORA_RANK,
-        seed=1,
-        train_mlp=True,
-        train_attn=True,
-        train_unembed=True,
-        user_metadata={"example": "skyrl-amd-tinker-smoke"},
-    )
-    tokenizer = training_client.get_tokenizer()
+        print(f"[3/7] creating LoRA training client rank={SMOKE_LORA_RANK}", flush=True)
+        training_client = service_client.create_lora_training_client(
+            base_model=base_model,
+            rank=SMOKE_LORA_RANK,
+            seed=1,
+            train_mlp=True,
+            train_attn=True,
+            train_unembed=True,
+            user_metadata={"example": "skyrl-amd-tinker-smoke"},
+        )
+        tokenizer = training_client.get_tokenizer()
 
-    encoded_datums = build_datums(tokenizer)
-    datums = [item.datum for item in encoded_datums]
-    total_prompt_tokens = sum(len(item.prompt_tokens) for item in encoded_datums)
-    total_target_tokens = sum(len(item.target_tokens) for item in encoded_datums)
-    print(
-        "[4/7] built smoke batch "
-        f"examples={len(datums)} prompt_tokens={total_prompt_tokens} target_tokens={total_target_tokens}",
-        flush=True,
-    )
-
-    print("[5/7] syncing initial weights and sampling once", flush=True)
-    sampling_client = training_client.save_weights_and_get_sampling_client()
-    sample_once(sampling_client, tokenizer, encoded_datums[0].prompt_tokens, "pre_train_sample")
-
-    print(
-        f"[6/7] training steps={SMOKE_STEPS} loss=cross_entropy lr={SMOKE_LEARNING_RATE}",
-        flush=True,
-    )
-    for step in range(1, SMOKE_STEPS + 1):
-        forward_backward_future = training_client.forward_backward(datums, "cross_entropy")
-        optim_future = training_client.optim_step(types.AdamParams(learning_rate=SMOKE_LEARNING_RATE))
-
-        forward_backward_result = forward_backward_future.result()
-        optim_result = optim_future.result()
-        fb_metrics = forward_backward_result.metrics
-        optim_metrics = optim_result.metrics
+        encoded_datums = build_datums(tokenizer)
+        datums = [item.datum for item in encoded_datums]
+        total_prompt_tokens = sum(len(item.prompt_tokens) for item in encoded_datums)
+        total_target_tokens = sum(len(item.target_tokens) for item in encoded_datums)
         print(
-            f"      step {step}/{SMOKE_STEPS} "
-            f"tokens={metric_value(fb_metrics, 'num_tokens:sum')} "
-            f"loss={metric_value(fb_metrics, 'total_loss:sum')} "
-            f"grad_norm={metric_value(optim_metrics, 'skyrl.ai/grad_norm')} "
-            f"lr={metric_value(optim_metrics, 'skyrl.ai/learning_rate')}",
+            "[4/7] built smoke batch "
+            f"examples={len(datums)} prompt_tokens={total_prompt_tokens} target_tokens={total_target_tokens}",
             flush=True,
         )
 
-    print("[7/7] syncing trained weights and sampling once", flush=True)
-    sampling_client = training_client.save_weights_and_get_sampling_client()
-    sample_once(sampling_client, tokenizer, encoded_datums[0].prompt_tokens, "post_train_sample")
+        print("[5/7] syncing initial weights and sampling once", flush=True)
+        sampling_client = training_client.save_weights_and_get_sampling_client()
+        sample_once(sampling_client, tokenizer, encoded_datums[0].prompt_tokens, "pre_train_sample")
 
-    print("PASS", flush=True)
-    return 0
+        print(
+            f"[6/7] training steps={SMOKE_STEPS} loss=cross_entropy lr={SMOKE_LEARNING_RATE}",
+            flush=True,
+        )
+        for step in range(1, SMOKE_STEPS + 1):
+            forward_backward_future = training_client.forward_backward(datums, "cross_entropy")
+            optim_future = training_client.optim_step(types.AdamParams(learning_rate=SMOKE_LEARNING_RATE))
+
+            forward_backward_result = forward_backward_future.result()
+            optim_result = optim_future.result()
+            fb_metrics = forward_backward_result.metrics
+            optim_metrics = optim_result.metrics
+            print(
+                f"      step {step}/{SMOKE_STEPS} "
+                f"tokens={metric_value(fb_metrics, 'num_tokens:sum')} "
+                f"loss={metric_value(fb_metrics, 'total_loss:sum')} "
+                f"grad_norm={metric_value(optim_metrics, 'skyrl.ai/grad_norm')} "
+                f"lr={metric_value(optim_metrics, 'skyrl.ai/learning_rate')}",
+                flush=True,
+            )
+
+        print("[7/7] syncing trained weights and sampling once", flush=True)
+        sampling_client = training_client.save_weights_and_get_sampling_client()
+        sample_once(sampling_client, tokenizer, encoded_datums[0].prompt_tokens, "post_train_sample")
+
+        print("PASS", flush=True)
+        return 0
+    finally:
+        unload_training_model(base_url, training_client)
+        if service_client is not None:
+            service_client.holder.close()
 
 
 def main() -> int:
