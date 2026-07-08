@@ -1242,10 +1242,11 @@ class SFTTrainer:
     def build_eval_dataloader(self, eval_tokenized: list) -> StatefulDataLoader:
         """Build the eval ``StatefulDataLoader``.
 
-        Eval runs in chunks of ``micro_train_batch_size_per_gpu * dp_size`` (one
-        micro-batch per DP rank per dispatch). Order is sequential and the final
-        short chunk is kept (``drop_last=False``); :meth:`run_eval` pads it.
+        Order is sequential and the final short chunk is kept (``drop_last=False``);
+        :meth:`run_eval` pads it.
         """
+        # One micro-batch per DP rank per dispatch call — keeps memory usage bounded
+        # and removes the need for a separate `eval_batch_size` knob.
         dp_size = self.dispatch.dp_size("policy")
         eval_chunk_size = self.sft_cfg.micro_train_batch_size_per_gpu * dp_size
         collate_fn = functools.partial(
