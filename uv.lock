@@ -8454,6 +8454,8 @@ megatron = [
     { name = "torchvision", marker = "sys_platform == 'linux'" },
     { name = "tqdm" },
     { name = "transformer-engine", extra = ["pytorch"], marker = "(sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+    { name = "transformer-engine-torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }, marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "uvicorn" },
     { name = "vllm", marker = "sys_platform == 'linux'" },
     { name = "vllm-router", version = "0.1.14", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'aarch64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_machine == 'x86_64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
@@ -8643,6 +8645,8 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'megatron'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", marker = "extra == 'skyrl-train'" },
     { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
+    { name = "transformer-engine-torch", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" },
+    { name = "transformer-engine-torch", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux' and extra == 'megatron') or (platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron')", specifier = "==2.11.0" },
     { name = "transformers", specifier = ">=5.6.1,<=5.8.0" },
     { name = "ty", marker = "extra == 'dev'" },
     { name = "typer", specifier = ">=0.17.4" },
@@ -9549,23 +9553,80 @@ wheels = [
 
 [package.optional-dependencies]
 pytorch = [
-    { name = "transformer-engine-torch", marker = "sys_platform == 'linux'" },
+    { name = "transformer-engine-torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }, marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+]
+
+[[package]]
+name = "transformer-engine-cu12"
+version = "2.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-metadata", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "packaging", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "pydantic", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/27/5c4c27cb245a3513e5ad7ccef50e2e9688996e2cc558edbbb575dfcca276/transformer_engine_cu12-2.11.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:ed5fda0925cb304d6864b451d8d012c579d5bd097bfefefca769b2704b06381a", size = 287630565, upload-time = "2026-01-02T09:56:43.645Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/a2/1439bbb6bc7d4d6045bad7d213884f7be92301c0982f009e3bbafa40e4ff/transformer_engine_cu12-2.11.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:6e5c0707583b2a90b2570da6f57409c6802653e069dfec38cf07a3b77ba9b12d", size = 288159349, upload-time = "2026-01-02T09:57:56.435Z" },
 ]
 
 [[package]]
 name = "transformer-engine-torch"
 version = "2.11.0"
-source = { registry = "../../../../opt/wheels" }
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
+    "python_full_version == '3.13.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
+]
 dependencies = [
-    { name = "einops", marker = "sys_platform == 'linux'" },
-    { name = "onnx", marker = "sys_platform == 'linux'" },
-    { name = "onnxscript", marker = "sys_platform == 'linux'" },
-    { name = "packaging", marker = "sys_platform == 'linux'" },
-    { name = "pydantic", marker = "sys_platform == 'linux'" },
-    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
+    { name = "einops", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "onnx", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "onnxscript", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "packaging", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "pydantic", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+    { name = "transformer-engine-cu12", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/42/068a40f5b213a3a8899e3885eb178776662897abed03cd725953d1106c39/transformer_engine_torch-2.11.0.tar.gz", hash = "sha256:b58d6322bdf885dfab0646da572aff9cf090b332ad470559aa58883c231e1816", size = 242065, upload-time = "2026-01-02T09:58:58.423Z" }
+
+[[package]]
+name = "transformer-engine-torch"
+version = "2.11.0"
+source = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }
+resolution-markers = [
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "einops", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "onnx", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "onnxscript", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "packaging", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "pydantic", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { path = "transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", hash = "sha256:66c81f8c67c88a2b7911c86a3a8e0fa99098eb7fba448a053d0e0ad18ec93a5d" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "onnx" },
+    { name = "onnxscript" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "torch", specifier = ">=2.1" },
+    { name = "transformer-engine-cu13", specifier = "==2.11.0" },
 ]
 
 [[package]]
