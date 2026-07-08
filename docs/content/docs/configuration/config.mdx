@@ -304,9 +304,9 @@ policy:
 
 `policy.torch_profiler_config` profiles policy training steps for FSDP and Megatron in RL and SFT. It writes one Kineto/[HTA](https://github.com/facebookresearch/HolisticTraceAnalysis)-friendly `*.pt.trace.json` per active window and profiled rank.
 
-Scope: policy forward/backward/optimizer only. RL critic/ref models and generation are not profiled.
+Scope: policy workers only. Active windows capture policy-worker operations between profiler steps: in RL, this includes policy log-prob forwards and policy training; in SFT, this includes training and may include eval forwards. Critic/ref workers, the controller, and generation/inference engines are not profiled.
 
-FSDP restriction: profiling is rejected when manual CPU offload and colocation are both active (`policy.fsdp_config.cpu_offload: false` with `placement.colocate_all` or `placement.colocate_policy_ref`). Use FSDP native CPU offload, disable colocation, or use Megatron.
+FSDP restriction: profiling is rejected when colocation is enabled without CPU offloading (`policy.fsdp_config.cpu_offload: false` with `placement.colocate_all` or `placement.colocate_policy_ref`).
 
 - `policy.torch_profiler_config.enable`: Enables profiling.
 - `policy.torch_profiler_config.ranks`: Global ranks to profile, for example `[0]`.
