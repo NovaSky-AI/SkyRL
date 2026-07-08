@@ -27,8 +27,8 @@ RUN sudo apt-get update && sudo apt-get install -y \
     libnccl2=2.25.1-1+cuda12.8 \
     && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
-# ---------- PyTorch + cuDNN + Transformer Engine ----------
-# PyTorch + cuDNN + Transformer Engine
+# ---------- PyTorch + cuDNN (setup for transformer-engine) ----------
+# PyTorch + cuDNN
 RUN uv pip install --system --no-cache-dir "torch==2.11.0" "nvidia-cudnn-cu12>=9.3" && \
     CUDNN_PATH="$(python -c 'import nvidia.cudnn as c; print(c.__path__[0])')" && \
     sudo mkdir -p /opt && sudo ln -sfn "$CUDNN_PATH" /opt/cudnn && \
@@ -45,10 +45,4 @@ RUN uv pip install  --system --no-cache-dir \
     wheel
 
 ENV CMAKE_ARGS=-DPython_EXECUTABLE=/home/ray/anaconda3/bin/python3
-
-RUN sudo mkdir /opt/wheels && sudo chown ray: /opt/wheels && \
-     pip wheel --no-cache-dir --no-build-isolation --no-deps \
-        -w /opt/wheels "transformer-engine-torch==2.11.0"
-RUN pip install --no-cache-dir --no-build-isolation --find-links /opt/wheels "transformer_engine[pytorch]==2.11.0"
-ENV UV_FIND_LINKS=/opt/wheels
 # --------------------
