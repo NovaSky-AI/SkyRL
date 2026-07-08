@@ -12,53 +12,122 @@ import argparse
 import time
 from dataclasses import dataclass
 
-FIRST_REQUEST_SEQUENCE_LENGTH = 68_608
+LEADING_BLOCKER_SEQUENCE_LENGTH = 10_000
+LONG_SEQUENCE_LENGTH = 35_000
+SHORT_SEQUENCE_LENGTHS = [
+    3_693,
+    5_363,
+    4_319,
+    3_097,
+    3_940,
+    3_494,
+    3_659,
+    3_967,
+    5_271,
+    3_861,
+    4_449,
+    3_660,
+    4_075,
+    4_969,
+    5_111,
+    4_011,
+    3_366,
+    2_864,
+    4_951,
+    5_161,
+    2_618,
+    5_310,
+    4_591,
+    2_596,
+    4_295,
+    4_314,
+    3_235,
+    3_567,
+    4_180,
+    4_347,
+    4_241,
+    2_562,
+    3_892,
+    4_508,
+    3_312,
+    3_869,
+    3_570,
+    3_969,
+    5_494,
+    3_178,
+    4_033,
+    4_231,
+    4_976,
+    2_911,
+    5_368,
+    2_847,
+    4_849,
+    3_707,
+    4_227,
+    5_495,
+    4_033,
+    3_027,
+    4_108,
+    5_021,
+    3_600,
+    5_046,
+    4_874,
+    3_092,
+    5_011,
+    4_944,
+    3_757,
+    3_206,
+    5_355,
+    5_432,
+    4_020,
+    2_667,
+    4_975,
+    5_493,
+    4_771,
+    5_147,
+    3_171,
+    3_852,
+    3_292,
+    5_440,
+    2_616,
+    3_101,
+    3_961,
+    5_411,
+    5_028,
+    3_500,
+    3_371,
+    2_771,
+    3_927,
+    3_575,
+    3_441,
+    4_063,
+    3_472,
+    3_767,
+    4_100,
+    4_450,
+    4_451,
+    3_054,
+    4_771,
+    4_026,
+    3_779,
+    3_424,
+]
+JITTERED_SHORT_SEQUENCE_LENGTHS = [
+    length + ((index % 7) - 3) * 137
+    for index, length in enumerate(SHORT_SEQUENCE_LENGTHS)
+]
 PENDING_FORWARD_BACKWARD_SEQUENCE_LENGTHS = [
-    63_104,
-    62_873,
-    72_416,
-    76_204,
-    75_688,
-    77_932,
-    76_991,
-    134_912,
-    113_407,
-    111_584,
-    140_116,
-    55_902,
-    44_789,
-    43_618,
-    62_744,
-    64_806,
-    71_095,
-    64_223,
-    66_412,
-    63_118,
-    64_206,
-    63_477,
-    57_229,
-    110_984,
-    103_776,
-    150_219,
-    156_804,
-    154_106,
-    166_112,
-    92_384,
-    88_963,
-    84_721,
-    88_456,
-    122_019,
-    119_344,
-    109_506,
-    94_721,
-    68_996,
-    68_614,
-    56_641,
-    69_082,
-    102_244,
-    98_936,
+    *SHORT_SEQUENCE_LENGTHS[:8],
+    LONG_SEQUENCE_LENGTH,
+    *SHORT_SEQUENCE_LENGTHS[8:],
+    *JITTERED_SHORT_SEQUENCE_LENGTHS,
 ]
 FORWARD_BACKWARD_MAX_REQUEST_COUNT = 1
+UNBOUNDED_EXPECTED_PADDED_ROWS = len(PENDING_FORWARD_BACKWARD_SEQUENCE_LENGTHS)
+UNBOUNDED_EXPECTED_MAX_PACKED_SEQUENCE_LENGTH = LONG_SEQUENCE_LENGTH
+UNBOUNDED_EXPECTED_PADDED_SEQUENCE_SLOTS = (
+    UNBOUNDED_EXPECTED_PADDED_ROWS * UNBOUNDED_EXPECTED_MAX_PACKED_SEQUENCE_LENGTH
+)
 
 TEXT_HIDDEN_SIZE = 5_120
 VISION_NUM_POSITION_EMBEDDINGS = 2_304
@@ -120,17 +189,22 @@ def summarize_repro() -> None:
     )
     print(
         "Optional first single request: "
-        f"sequence_length={FIRST_REQUEST_SEQUENCE_LENGTH:,}."
+        f"sequence_length={LEADING_BLOCKER_SEQUENCE_LENGTH:,}."
     )
     print_batch("single queue drain before limiting", requests)
     print(
         "pressure symptom: "
         "process_batch_requests(forward_backward) can coalesce the pending requests "
-        "into one very large token-packed train call"
+        "into one large train call"
     )
     print(
-        "padding note: sequence packing and padding removal mean this is not modeled "
-        "as dense rows * max_sequence_length padding"
+        "padding note: sample microbatching can pad all rows in the coalesced "
+        "batch to the longest sequence before backend microbatching"
+    )
+    print(
+        "expected unbounded padded batch shape: "
+        f"rows={UNBOUNDED_EXPECTED_PADDED_ROWS}, "
+        f"sequence_slots={UNBOUNDED_EXPECTED_PADDED_SEQUENCE_SLOTS:,}"
     )
     print(
         "model config note: text hidden_size is "
@@ -188,15 +262,16 @@ def run_forward_backward(args: argparse.Namespace) -> None:
     )
     print(f"created_training_client base_model={args.base_model} rank={args.rank}")
 
-    if args.run_first_completed_request:
+    leading_future = None
+    if not args.skip_leading_blocker:
         print(
-            "submitting optional first request: "
-            f"sequence_length={FIRST_REQUEST_SEQUENCE_LENGTH:,}"
+            "submitting leading blocker request: "
+            f"sequence_length={LEADING_BLOCKER_SEQUENCE_LENGTH:,}"
         )
-        first_datum = _make_datum(FIRST_REQUEST_SEQUENCE_LENGTH, args.token_id)
-        first = training_client.forward_backward([first_datum], "cross_entropy")
-        first_result = _result_with_timeout(first, args.future_timeout_s)
-        print(f"first_forward_backward metrics={first_result.metrics}")
+        leading_datum = _make_datum(LEADING_BLOCKER_SEQUENCE_LENGTH, args.token_id)
+        leading_future = training_client.forward_backward(
+            [leading_datum], "cross_entropy"
+        )
 
     pending_lengths = PENDING_FORWARD_BACKWARD_SEQUENCE_LENGTHS[
         : args.max_pending_requests
@@ -223,6 +298,16 @@ def run_forward_backward(args: argparse.Namespace) -> None:
             print(f"forward_backward {index} failed: {type(exc).__name__}: {exc}")
             continue
         print(f"forward_backward {index} metrics={result.metrics}")
+
+    if leading_future is not None:
+        print("awaiting leading blocker result")
+        try:
+            leading_result = _result_with_timeout(leading_future, args.future_timeout_s)
+        except Exception as exc:
+            failures += 1
+            print(f"leading blocker failed: {type(exc).__name__}: {exc}")
+        else:
+            print(f"leading_blocker metrics={leading_result.metrics}")
 
     if failures:
         raise RuntimeError(f"{failures} forward_backward requests failed")
@@ -252,7 +337,7 @@ def add_forward_backward_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=len(PENDING_FORWARD_BACKWARD_SEQUENCE_LENGTHS),
     )
-    parser.add_argument("--run-first-completed-request", action="store_true")
+    parser.add_argument("--skip-leading-blocker", action="store_true")
 
 
 def main() -> None:
