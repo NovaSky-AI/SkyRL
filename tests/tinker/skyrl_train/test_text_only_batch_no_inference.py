@@ -28,9 +28,16 @@ class _EngineInitCalled(Exception):
     """Sentinel raised by the stubbed _ensure_inference_engines."""
 
 
+class _RenderServerUsed(Exception):
+    """Sentinel raised by the stubbed _create_render_client."""
+
+
 def _fake_backend() -> SimpleNamespace:
     def _ensure_inference_engines():
         raise _EngineInitCalled
+
+    def _create_render_client():
+        raise _RenderServerUsed
 
     return SimpleNamespace(
         _renderer=None,
@@ -38,6 +45,7 @@ def _fake_backend() -> SimpleNamespace:
         _cfg=None,
         _tokenizer=SimpleNamespace(pad_token_id=PAD_TOKEN_ID),
         _ensure_inference_engines=_ensure_inference_engines,
+        _create_render_client=_create_render_client,
     )
 
 
@@ -68,11 +76,11 @@ def test_text_only_batch_skips_inference_engines():
     assert fake_self._renderer is None
 
 
-def test_image_batch_still_initializes_inference_engines():
-    """Batches with image chunks still go through the lazy engine init."""
+def test_image_batch_uses_render_server_not_engines():
+    """Batches with image chunks go to the CPU render server, never the engines."""
     fake_self = _fake_backend()
     image_chunk = types.ImageChunk(data=base64.b64encode(b"not-a-real-png"), format="png")
     prepared_batch = _prepared_batch(types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3]), image_chunk]))
 
-    with pytest.raises(_EngineInitCalled):
+    with pytest.raises(_RenderServerUsed):
         skyrl_train_backend.SkyRLTrainBackend._to_training_batch(fake_self, prepared_batch, role="policy")

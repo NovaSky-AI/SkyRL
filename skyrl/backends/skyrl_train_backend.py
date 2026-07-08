@@ -125,6 +125,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         self._renderer = None
+        # CPU-only render server for multi-modal preprocessing; started
+        # lazily on the first image-bearing training batch.
+        self._render_server = None
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
@@ -369,6 +372,28 @@ class SkyRLTrainBackend(AbstractBackend):
         if is_colocated:
             asyncio.run(client.sleep())
 
+    def _create_render_client(self):
+        """Lazily start a CPU-only render server and return a client for it.
+
+        Rendering image chunks needs vLLM's ``/v1/chat/completions/render``,
+        but not an inference engine: the render-only server loads just the
+        tokenizer and HF processor on CPU (no weights, no KV cache, no GPU).
+        This keeps the training path (forward / forward_backward) free of
+        inference-engine startup for VLM workloads too.
+        """
+        from skyrl.backends.skyrl_train.inference_servers.render_server import (
+            CPURenderServer,
+            RenderServerClient,
+        )
+
+        if self._render_server is None:
+            self._render_server = CPURenderServer(
+                self._cfg.trainer.policy.model.path,
+                log_path=self._cfg.trainer.log_path,
+            )
+            self._render_server.start()
+        return RenderServerClient(self._render_server.url)
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
@@ -511,6 +536,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
@@ -533,8 +561,8 @@ class SkyRLTrainBackend(AbstractBackend):
             return TrainingInputBatch({})
 
         # Only image chunks need vLLM's render endpoint. Text-only batches
-        # (the SFT path) render locally so pure training runs never pay for
-        # inference-engine startup.
+        # render locally, and image batches use a CPU-only render server, so
+        # the training path never pays for inference-engine startup.
         has_image_chunks = any(
             isinstance(chunk, (types.ImageChunk, types.ImageAssetPointerChunk))
             for model_input in prepared_batch.all_model_inputs
@@ -542,8 +570,7 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         if has_image_chunks:
             if self._renderer is None:
-                self._ensure_inference_engines()
-                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+                self._renderer = VLLMRenderer(self._create_render_client(), self._cfg.trainer.policy.model.path)
             rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
         else:
             rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
