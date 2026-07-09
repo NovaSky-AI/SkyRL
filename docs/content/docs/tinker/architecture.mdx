@@ -146,14 +146,8 @@ The following loss functions are validated through the Tinker API:
 |--------------|-------------|----------|
 | `cross_entropy` | Standard next-token prediction loss | Supervised fine-tuning |
 | `importance_sampling` | Off-policy policy gradient: `-(exp(logp - old_logp) * advantage)` | RL training (GRPO, REINFORCE) |
-| `ppo` | Clipped-ratio PPO surrogate; `clip_low_threshold` / `clip_high_threshold` (policy) and `value_clip` (critic) via `loss_fn_config` | RL training (PPO) |
-| `cispo` | Clipped-IS-weight policy gradient; `clip_low_threshold` / `clip_high_threshold` via `loss_fn_config` | RL training (CISPO) |
-| `ppo_critic` | Clipped value loss for critic models; `value_clip` via `loss_fn_config` | PPO critic training |
-| `dppo` | Divergence-masked policy gradient ([DPPO](https://arxiv.org/abs/2602.04879)); `delta_low` / `delta_high` via `loss_fn_config`. SkyRL-Train backends only. The divergence variant (`binary_tv` / `binary_kl`) is server-side config: `trainer.algorithm.dppo.dppo_type` in `--backend-config` | RL training (DPPO) |
 
-For `dppo`, the sampling `logprobs` passed in `loss_fn_inputs` serve as the behavior policy: the backend routes them into the loss as the "old" logprobs, matching the paper's recommendation to compute both the IS ratio and the divergence mask against the rollout policy.
-
-SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`regular`, `dual_clip`, `gspo`, `sapo`, `clip_cov`, `kl_cov`, `rollout_is`) used by SkyRL's native trainer. These are not yet exposed through the Tinker API.
+SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo`, `clip_cov`, `kl_cov`) used by SkyRL's native trainer. These are not yet wired through the Tinker data conversion path, which does not currently populate the required `advantages` and `old_log_probs` fields in the training batch for these loss types.
 
 ## Concurrency Model
 

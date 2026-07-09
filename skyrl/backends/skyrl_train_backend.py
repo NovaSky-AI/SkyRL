@@ -682,12 +682,6 @@ class SkyRLTrainBackend(AbstractBackend):
         if "critic_lr" in data:
             metrics["critic_lr:last"] = float(data["critic_lr"])
 
-        # Loss-specific metrics (e.g. clip_ratio for ppo/cispo/dppo). Workers
-        # mean-reduce these across micro-batches and DP ranks already.
-        for key, value in data.items():
-            if key.startswith("loss_metrics/") and isinstance(value, (int, float)):
-                metrics[f"{key.removeprefix('loss_metrics/')}:mean"] = float(value)
-
         return metrics
 
     def _sleep_inference_engines(self):
