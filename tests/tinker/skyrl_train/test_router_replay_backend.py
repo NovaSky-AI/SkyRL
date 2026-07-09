@@ -160,6 +160,33 @@ class _SpyClient:
         pass
 
 
+def test_routed_experts_cache_cap_is_declared_not_forwarded():
+    """The cap is a declared backend-config field, so it must not leak into model_extra.
+
+    ``_build_skyrl_train_config`` forwards ``model_extra`` as SkyRL-Train config
+    overrides; a leaked key would be applied to SkyRLTrainConfig and error out.
+    """
+    overrides = skyrl_train_backend.MegatronBackendOverrides(
+        routed_experts_cache_cap=123, **{"trainer.micro_train_batch_size_per_gpu": 2}
+    )
+    assert overrides.routed_experts_cache_cap == 123
+    assert "routed_experts_cache_cap" not in overrides.model_extra
+    assert overrides.model_extra.get("trainer.micro_train_batch_size_per_gpu") == 2
+    # Default preserved when unset; must be positive.
+    assert skyrl_train_backend.MegatronBackendOverrides().routed_experts_cache_cap == 8192
+    with pytest.raises(Exception):
+        skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_cap=0)
+
+
+def test_backend_honors_configured_cache_cap():
+    """The configured cap reaches the backend's live cache bound (no ray init in __init__)."""
+    backend = SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_cap=321))
+    assert backend._routed_experts_cache_cap == 321
+    assert (
+        SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides())._routed_experts_cache_cap == 8192
+    )
+
+
 @pytest.mark.parametrize("replay_enabled", [True, False])
 def test_sample_requests_routed_experts_gated_on_replay(monkeypatch, replay_enabled):
     """The sample body sets return_routed_experts iff R3 is enabled on the backend."""
