@@ -33,7 +33,11 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, _build_rollout_expert_indices
+from skyrl.backends.skyrl_train_backend import (
+    SkyRLTrainBackend,
+    _build_rollout_expert_indices,
+    _routing_cache_key,
+)
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.train.generators.base import GeneratorInput
@@ -157,12 +161,13 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
             asyncio.run(client.sleep())
 
         # Exercise the real server-side cache: store each sample's routing keyed by
-        # its full sampled sequence (prompt + response), exactly as the backend does
-        # in _aggregate_sample_results.
+        # (model_id, digest of the full sampled sequence), exactly as the backend
+        # does in _aggregate_sample_results.
+        model_id = "r3_test_model"
         cache_backend = _cache_backend()
         for prompt_ids, response, sample_routing in zip(prompt_token_ids, responses, indices):
             if sample_routing:
-                SkyRLTrainBackend._store_routed_experts(cache_backend, prompt_ids, response, sample_routing)
+                SkyRLTrainBackend._store_routed_experts(cache_backend, model_id, prompt_ids, response, sample_routing)
 
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
@@ -185,7 +190,9 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
         # up from the cache by that key and build the training tensor.
         max_seq_len = sequences.shape[1]
         full_sequences = [list(p) + list(r) for p, r in zip(prompt_token_ids, responses)]
-        per_sample = [cache_backend._routed_experts_cache.get(tuple(fs)) for fs in full_sequences]
+        per_sample = [
+            cache_backend._routed_experts_cache.get(_routing_cache_key(model_id, fs)) for fs in full_sequences
+        ]
         assert any(r is not None for r in per_sample), "no cached routing matched the training sequences"
         rii_tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len)
         assert rii_tensor is not None

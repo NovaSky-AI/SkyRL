@@ -1,6 +1,7 @@
 """SkyRL-Train backend for TinkerEngine."""
 
 import asyncio
+import hashlib
 import io
 import math
 import os
@@ -46,6 +47,19 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
+
+
+def _routing_cache_key(model_id: str, token_ids) -> tuple[str, bytes]:
+    """R3 cache key: ``(model_id, 16-byte blake2b digest of the token ids)``.
+
+    Hashing the sequence keeps the key a fixed ~16 bytes regardless of length (vs
+    a per-token Python tuple), and one C-level digest is far cheaper than hashing
+    a large tuple. ``model_id`` disambiguates tenants whose samples share token
+    ids but route differently under their own adapter weights. Token ids are
+    hashed as int64 bytes so the digest is order- and value-exact.
+    """
+    buf = np.asarray(token_ids, dtype=np.int64).tobytes()
+    return model_id, hashlib.blake2b(buf, digest_size=16).digest()
 
 
 def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_len: int):
@@ -232,12 +246,14 @@ class SkyRLTrainBackend(AbstractBackend):
         self._base_lora_signature: tuple | None = None
 
         # Rollout Routing Replay (R3): per-token routed experts captured at
-        # sample time, keyed by the full sampled token sequence (prompt +
-        # response). forward_backward looks routing up by the training sequence
-        # and replays it, so R3 stays a server-side launch flag and never
-        # touches the client-facing Tinker types. Bounded FIFO to cap memory;
-        # the cap is configurable via backend_config.routed_experts_cache_cap.
-        self._routed_experts_cache: "OrderedDict[tuple[int, ...], np.ndarray]" = OrderedDict()
+        # sample time, keyed by (model_id, digest of the full sampled token
+        # sequence). forward_backward reconstructs the same key from the training
+        # sequence and replays the routing, so R3 stays a server-side launch flag
+        # and never touches the client-facing Tinker types. The digest key keeps
+        # the entry tiny regardless of sequence length; ``model_id`` disambiguates
+        # tenants that sample identical tokens. Bounded FIFO to cap memory; the
+        # cap is configurable via backend_config.routed_experts_cache_cap.
+        self._routed_experts_cache: "OrderedDict[tuple[str, bytes], np.ndarray]" = OrderedDict()
         self._routed_experts_cache_cap = getattr(config, "routed_experts_cache_cap", 8192)
         self._routed_experts_missing_warned = False
 
@@ -272,20 +288,22 @@ class SkyRLTrainBackend(AbstractBackend):
             return False
         return bool(getattr(self._cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False))
 
-    def _store_routed_experts(self, prompt_ids: list[int], response_tokens: list[int], routed_experts) -> None:
-        """Cache one sample's rollout routing (R3), keyed by its full token sequence.
+    def _store_routed_experts(
+        self, model_id: str, prompt_ids: list[int], response_tokens: list[int], routed_experts
+    ) -> None:
+        """Cache one sample's rollout routing (R3), keyed by (model_id, sequence digest).
 
-        The key is ``prompt_ids + response_tokens`` — exactly the sequence
+        The digest is over ``prompt_ids + response_tokens`` — exactly the sequence
         forward_backward reconstructs — so replay is a dict lookup with no
-        client-facing plumbing. Stored narrow (uint8/int16) to bound memory;
-        the cache is a bounded FIFO.
+        client-facing plumbing. Stored narrow (uint8/int16) to bound memory; the
+        cache is a bounded FIFO.
         """
         arr = np.asarray(routed_experts)
         if arr.ndim != 3:
             return
         max_expert = int(arr.max()) if arr.size else 0
         arr = arr.astype(np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32)
-        key = tuple(int(t) for t in prompt_ids) + tuple(int(t) for t in response_tokens)
+        key = _routing_cache_key(model_id, list(prompt_ids) + list(response_tokens))
         cache = self._routed_experts_cache
         cache[key] = arr
         cache.move_to_end(key)
@@ -920,13 +938,16 @@ class SkyRLTrainBackend(AbstractBackend):
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
         # Rollout Routing Replay (R3): look up the routing captured at sample
-        # time by the full sampled token sequence (prompt + response, which is
-        # exactly ``full_sequences[i]``) and assemble it into a left-padded
+        # time by (model_id, digest of the full sampled sequence) — the sequence
+        # is exactly ``full_sequences[i]`` — and assemble it into a left-padded
         # [batch, max_seq_len, num_layers, topk] tensor aligned with
         # ``sequences``. Keeping the routing server-side means R3 needs no new
         # client-facing Tinker fields.
         if self._router_replay_enabled():
-            per_sample_routing = [self._routed_experts_cache.get(tuple(seq)) for seq in full_sequences]
+            per_sample_routing = [
+                self._routed_experts_cache.get(_routing_cache_key(mid, seq))
+                for mid, seq in zip(prepared_batch.all_model_ids, full_sequences)
+            ]
             self._warn_on_missing_routing(per_sample_routing)
             rollout_expert_indices = _build_rollout_expert_indices(full_sequences, per_sample_routing, max_seq_len)
             if rollout_expert_indices is not None:
@@ -1530,10 +1551,10 @@ class SkyRLTrainBackend(AbstractBackend):
                         logprobs = [0.0] * len(tokens)
 
                     # Rollout Routing Replay (R3): stash routing server-side keyed
-                    # by the full sampled sequence so forward_backward can replay
-                    # it without any new client-facing fields.
+                    # by (model_id, sampled-sequence digest) so forward_backward
+                    # can replay it without any new client-facing fields.
                     if routed_experts is not None:
-                        self._store_routed_experts(prompt_ids, tokens, routed_experts)
+                        self._store_routed_experts(model_id, prompt_ids, tokens, routed_experts)
 
                     sequences.append(
                         types.GeneratedSequence(

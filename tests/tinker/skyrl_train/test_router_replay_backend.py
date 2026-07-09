@@ -25,6 +25,7 @@ from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
 
 _build_rollout_expert_indices = skyrl_train_backend._build_rollout_expert_indices
+_routing_cache_key = skyrl_train_backend._routing_cache_key
 SkyRLTrainBackend = skyrl_train_backend.SkyRLTrainBackend
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -43,44 +44,70 @@ def _cache_backend():
     return SimpleNamespace(_routed_experts_cache=OrderedDict(), _routed_experts_cache_cap=4)
 
 
-def test_store_and_lookup_roundtrip_by_full_sequence():
+def test_store_and_lookup_roundtrip_by_model_and_sequence():
     fake = _cache_backend()
-    prompt, response = [10, 11, 12], [20, 21]
+    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
     # Routing covers every forwarded token (prompt + response minus last): 4 rows.
     routing = _routing(seq_len=4, num_layers=2, topk=3)
-    SkyRLTrainBackend._store_routed_experts(fake, prompt, response, routing)
+    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, routing)
 
-    # forward_backward reconstructs the key as prompt + response.
-    key = tuple(prompt + response)
+    # forward_backward reconstructs the key from (model_id, prompt + response).
+    key = _routing_cache_key(model_id, prompt + response)
     assert key in fake._routed_experts_cache
     got = fake._routed_experts_cache[key]
     assert got.shape == (4, 2, 3)
     assert int(got[3, 1, 2]) == 3 * 1000 + 1 * 10 + 2
 
 
+def test_key_is_compact_and_hashed():
+    """The key is (model_id, 16-byte digest), not a per-token tuple."""
+    key = _routing_cache_key("model_a", list(range(4096)))
+    assert isinstance(key, tuple) and len(key) == 2
+    assert key[0] == "model_a"
+    assert isinstance(key[1], bytes) and len(key[1]) == 16
+    # Digest is exact over order + values.
+    assert key[1] == _routing_cache_key("model_a", list(range(4096)))[1]
+    assert key[1] != _routing_cache_key("model_a", list(range(4096))[::-1])[1]
+
+
+def test_multi_tenant_same_tokens_do_not_collide():
+    """Two adapters that sample identical tokens must not share a cache entry."""
+    fake = _cache_backend()
+    prompt, response = [10, 11, 12], [20, 21]
+    routing_a = _routing(seq_len=4, num_layers=2, topk=3)
+    routing_b = routing_a + 1
+    SkyRLTrainBackend._store_routed_experts(fake, "model_a", prompt, response, routing_a)
+    SkyRLTrainBackend._store_routed_experts(fake, "model_b", prompt, response, routing_b)
+
+    assert len(fake._routed_experts_cache) == 2
+    got_a = fake._routed_experts_cache[_routing_cache_key("model_a", prompt + response)]
+    got_b = fake._routed_experts_cache[_routing_cache_key("model_b", prompt + response)]
+    assert int(got_a[0, 0, 0]) + 1 == int(got_b[0, 0, 0])
+
+
 def test_store_downcasts_dtype_and_ignores_non_3d():
     fake = _cache_backend()
-    SkyRLTrainBackend._store_routed_experts(fake, [1], [2], _routing(1, 1, 2))  # small ids -> uint8
+    SkyRLTrainBackend._store_routed_experts(fake, "m", [1], [2], _routing(1, 1, 2))  # small ids -> uint8
     assert next(iter(fake._routed_experts_cache.values())).dtype == np.uint8
 
     fake2 = _cache_backend()
     big = _routing(1, 1, 2) + 300  # > 255 -> int16
-    SkyRLTrainBackend._store_routed_experts(fake2, [1], [2], big)
+    SkyRLTrainBackend._store_routed_experts(fake2, "m", [1], [2], big)
     assert next(iter(fake2._routed_experts_cache.values())).dtype == np.int16
 
     fake3 = _cache_backend()
-    SkyRLTrainBackend._store_routed_experts(fake3, [1], [2], np.zeros((3, 4)))  # 2-D -> skipped
+    SkyRLTrainBackend._store_routed_experts(fake3, "m", [1], [2], np.zeros((3, 4)))  # 2-D -> skipped
     assert len(fake3._routed_experts_cache) == 0
 
 
 def test_cache_is_bounded_fifo():
     fake = _cache_backend()  # cap = 4
     for i in range(6):
-        SkyRLTrainBackend._store_routed_experts(fake, [i], [i + 100], _routing(1, 1, 2))
+        SkyRLTrainBackend._store_routed_experts(fake, "m", [i], [i + 100], _routing(1, 1, 2))
     assert len(fake._routed_experts_cache) == 4
     # Oldest two keys evicted.
-    assert (0, 100) not in fake._routed_experts_cache
-    assert (5, 105) in fake._routed_experts_cache
+    assert _routing_cache_key("m", [0, 100]) not in fake._routed_experts_cache
+    assert _routing_cache_key("m", [5, 105]) in fake._routed_experts_cache
 
 
 def test_build_rollout_expert_indices_left_pads_and_aligns():
@@ -122,13 +149,13 @@ def test_build_rollout_expert_indices_downcasts_dtype():
 def test_end_to_end_cache_to_tensor_alignment():
     """Store at sample time, then rebuild the training tensor via a cache lookup."""
     fake = _cache_backend()
-    prompt, response = [10, 11, 12], [20, 21]  # full sampled sequence len 5
+    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]  # full sampled sequence len 5
     routing = _routing(seq_len=4, num_layers=2, topk=3)  # forwarded tokens = 4
-    SkyRLTrainBackend._store_routed_experts(fake, prompt, response, routing)
+    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, routing)
 
-    # forward_backward: full_sequences[i] == prompt + response.
+    # forward_backward: full_sequences[i] == prompt + response, keyed by model_id.
     full_sequences = [prompt + response]
-    per_sample = [fake._routed_experts_cache.get(tuple(fs)) for fs in full_sequences]
+    per_sample = [fake._routed_experts_cache.get(_routing_cache_key(model_id, fs)) for fs in full_sequences]
     tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
     assert tuple(tensor.shape) == (1, 5, 2, 3)
     # Routing occupies positions [0,4); the final token has none.
