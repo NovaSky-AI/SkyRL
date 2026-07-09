@@ -5,12 +5,9 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-import base64
-import io
 from datetime import datetime, timezone
 
 import httpx
-import numpy as np
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
@@ -20,21 +17,6 @@ from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
-
-
-def _decode_routed_experts(raw) -> list | None:
-    """Decode vLLM's ``routed_experts`` field into nested lists (R3).
-
-    vLLM's OpenAI ``/v1/completions`` returns routing as a base64-encoded ``.npy``
-    byte stream (shape ``[num_tokens - 1, num_layers, topk]``); other transports
-    may already send nested lists. Returns ``None`` when routing is absent.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        arr = np.load(io.BytesIO(base64.b64decode(raw)))
-        return arr.tolist()
-    return raw
 
 
 class SkyRLTrainInferenceForwardingClient:
@@ -254,7 +236,6 @@ class SkyRLTrainInferenceForwardingClient:
                     tokens=tokens,
                     logprobs=logprobs,
                     stop_reason=stop_reason,
-                    routed_experts=_decode_routed_experts(choice.get("routed_experts")),
                 )
             )
 

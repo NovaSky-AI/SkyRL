@@ -121,33 +121,6 @@ def prepare_sample_batch(
     )
 
 
-def _reshape_routed_experts(routed_experts: types.TensorData | None) -> list[list[list[int]]] | None:
-    """Reshape a flattened R3 routing ``TensorData`` into ``[seq_len, num_layers, topk]``.
-
-    Returns ``None`` when routing is absent. The ``data`` is always flattened
-    (matching the Tinker SDK's ``TensorData``), so ``shape`` is required to
-    recover the 3-D structure; a missing ``shape`` on non-empty data is an error
-    because the routing layout cannot be inferred.
-    """
-    if routed_experts is None or not routed_experts.data:
-        return None
-    shape = routed_experts.shape
-    if not shape or len(shape) != 3:
-        raise ValueError(f"routed_experts requires a 3-D shape [seq_len, num_layers, topk], got shape={shape}")
-    seq_len, num_layers, topk = shape
-    flat = [int(x) for x in routed_experts.data]
-    if len(flat) != seq_len * num_layers * topk:
-        raise ValueError(f"routed_experts data length {len(flat)} does not match shape {shape}")
-    per_layer_stride = num_layers * topk
-    return [
-        [
-            flat[t * per_layer_stride + layer * topk : t * per_layer_stride + (layer + 1) * topk]
-            for layer in range(num_layers)
-        ]
-        for t in range(seq_len)
-    ]
-
-
 def prepare_model_pass_batch(
     requests: dict[str, tuple[str, types.ForwardBackwardInput]],
 ) -> types.PreparedModelPassBatch:
@@ -170,7 +143,6 @@ def prepare_model_pass_batch(
     all_advantages = []
     all_values = []
     all_returns = []
-    all_routed_experts = []
     all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
@@ -190,7 +162,6 @@ def prepare_model_pass_batch(
             all_advantages.append(loss_fn_inputs.advantages.data)
             all_values.append(loss_fn_inputs.values.data)
             all_returns.append(loss_fn_inputs.returns.data)
-            all_routed_experts.append(_reshape_routed_experts(loss_fn_inputs.routed_experts))
             all_model_ids.append(model_id)
             all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
@@ -205,7 +176,6 @@ def prepare_model_pass_batch(
         all_advantages=all_advantages,
         all_values=all_values,
         all_returns=all_returns,
-        all_routed_experts=all_routed_experts,
         all_model_ids=all_model_ids,
         all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,

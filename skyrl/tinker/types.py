@@ -142,12 +142,6 @@ class RenderedModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
-    # Optional shape metadata. Absent (``None``) means a 1-D tensor of
-    # ``len(data)``. Carried so multi-dimensional payloads (e.g. R3 routed
-    # experts, shape ``[seq_len, num_layers, topk]``) survive the round-trip
-    # through ``data`` (which is always flattened, matching the Tinker SDK's
-    # ``TensorData.from_torch``).
-    shape: list[int] | None = None
 
 
 class LossFnInputs(BaseModel):
@@ -157,10 +151,6 @@ class LossFnInputs(BaseModel):
     logprobs: TensorData
     values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
-    # Rollout Routing Replay (R3): per-token expert selections captured by the
-    # inference engine, flattened to ``data`` with ``shape=[seq_len, num_layers,
-    # topk]``. Only populated for MoE models sampled with routing capture on.
-    routed_experts: TensorData | None = None
 
 
 class Datum(BaseModel):
@@ -277,11 +267,6 @@ class GeneratedSequence(BaseModel):
     stop_reason: Literal["length", "stop"]
     tokens: list[int]
     logprobs: list[float]
-    # Rollout Routing Replay (R3): per-token expert selections from the
-    # inference engine, shape ``[num_tokens - 1, num_layers, topk]`` (routing
-    # for every forwarded token; the last sampled token has no routing).
-    # ``None`` unless routing capture was requested (MoE models only).
-    routed_experts: list[list[list[int]]] | None = None
 
 
 class SampleOutput(BaseModel):
@@ -319,8 +304,6 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
-    # Per-example R3 routing, each ``[seq_len, num_layers, topk]`` or ``None``.
-    all_routed_experts: list[list[list[list[int]]] | None]
 
     # Per-example scalars
     all_model_ids: list[str]

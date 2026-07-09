@@ -1,23 +1,24 @@
-"""GPU test: Rollout Routing Replay (R3) through the Tinker data path on Qwen3.6-35B-A3B.
+"""GPU test: Rollout Routing Replay (R3) through the Tinker/Megatron path on Qwen3.6-35B-A3B.
 
 R3 records the MoE expert selections vLLM makes during rollout and replays them in
 the Megatron training forward, so training activates the same experts inference did.
 This removes the routing-driven component of the train-vs-rollout logprob mismatch
 that destabilizes RL on MoE models.
 
-This test exercises the Tinker exposure specifically: the routing captured at
-sampling time is round-tripped through the Tinker serialization (a flat
-``TensorData`` + shape, decoded by ``_reshape_routed_experts``) and the Tinker
-SkyRL-Train backend tensor assembly (``_build_rollout_expert_indices``) before it
-reaches the Megatron worker — the same code path a Tinker ``forward_backward``
-request takes. It then asserts R3 lowers the mean |vLLM logprob - Megatron logprob|
-versus the same batch with replay disabled.
+R3 is enabled purely by a launch flag (``moe_enable_routing_replay``); the SkyRL-Train
+backend caches the captured routing server-side keyed by the full sampled sequence and
+replays it on forward_backward, with no client-facing Tinker fields. This test drives
+that exact path: it captures routing during sampling, stores it via the backend's cache
+helper, rebuilds the training tensor via a cache lookup keyed by the training sequence,
+and asserts R3 lowers the mean |vLLM logprob - Megatron logprob| versus replay disabled.
 
-Runs on 1 node of 8xH200. The ``tinker`` extra is needed because the test drives
-the Tinker serialization/backend helpers. Run with:
+Runs on 1 node of 8xH200. Run with:
   NVTE_FLASH_ATTN=0 uv run --isolated --extra dev --extra megatron --extra tinker -- \
     pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay_tinker_qwen36.py
 """
+
+from collections import OrderedDict
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -32,9 +33,7 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train_backend import _build_rollout_expert_indices
-from skyrl.tinker import types
-from skyrl.tinker.engine import _reshape_routed_experts
+from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, _build_rollout_expert_indices
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.train.generators.base import GeneratorInput
@@ -87,26 +86,14 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def _tinker_roundtrip_routing(sample_indices):
-    """Round-trip one sample's routing through the Tinker serialization.
-
-    Mirrors what a Tinker client does: flatten the ``[seq_len, layers, topk]``
-    routing into a ``TensorData`` (data + shape), which the engine then decodes
-    back to nested lists in ``_reshape_routed_experts``.
-    """
-    if not sample_indices:
-        return None
-    seq_len = len(sample_indices)
-    num_layers = len(sample_indices[0])
-    topk = len(sample_indices[0][0])
-    flat = [int(x) for row in sample_indices for layer in row for x in layer]
-    td = types.TensorData(data=flat, shape=[seq_len, num_layers, topk])
-    return _reshape_routed_experts(td)
+def _cache_backend():
+    """Stand-in exposing just the cache attributes the R3 store helper touches."""
+    return SimpleNamespace(_routed_experts_cache=OrderedDict(), _routed_experts_cache_cap=1 << 20)
 
 
 @pytest.mark.megatron
 def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
-    """R3 (replayed through the Tinker data path) lowers train-vs-rollout logprob mismatch."""
+    """R3 (server-side routing cache + Megatron replay) lowers train-vs-rollout logprob mismatch."""
     try:
         cfg = get_test_actor_config()
         cfg.generator.sampling_params = SamplingParams(
@@ -164,13 +151,18 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
 
             indices = generator_output["rollout_expert_indices"]
             responses = generator_output["response_ids"]
+            prompt_token_ids = generator_output["prompt_token_ids"]
             assert indices is not None, "rollout_expert_indices is None; vLLM routing capture failed for Qwen3.6"
             assert len(indices) == len(responses)
             asyncio.run(client.sleep())
 
-        # Round-trip each sample's routing through the Tinker serialization so this
-        # test covers the exact decode a Tinker forward_backward request performs.
-        tinker_indices = [_tinker_roundtrip_routing(s) for s in indices]
+        # Exercise the real server-side cache: store each sample's routing keyed by
+        # its full sampled sequence (prompt + response), exactly as the backend does
+        # in _aggregate_sample_results.
+        cache_backend = _cache_backend()
+        for prompt_ids, response, sample_routing in zip(prompt_token_ids, responses, indices):
+            if sample_routing:
+                SkyRLTrainBackend._store_routed_experts(cache_backend, prompt_ids, response, sample_routing)
 
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
@@ -180,7 +172,7 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
         sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
             convert_prompts_responses_to_batch_tensors(
                 tokenizer=tokenizer,
-                prompts=generator_output["prompt_token_ids"],
+                prompts=prompt_token_ids,
                 responses=responses,
                 rewards=rewards,
                 loss_masks=generator_output["loss_masks"],
@@ -189,13 +181,14 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
         )
         assert logprobs_t is not None
 
-        # Build rollout_expert_indices via the Tinker backend helper, aligning each
-        # sample's routing to its full (prompt + response) sequence exactly as
-        # SkyRLTrainBackend._to_training_batch does for a forward_backward request.
+        # forward_backward reconstructs the sequence as prompt + response; look routing
+        # up from the cache by that key and build the training tensor.
         max_seq_len = sequences.shape[1]
-        full_sequences = [list(p) + list(r) for p, r in zip(generator_output["prompt_token_ids"], responses)]
-        rii_tensor = _build_rollout_expert_indices(full_sequences, tinker_indices, max_seq_len)
-        assert rii_tensor is not None, "Tinker backend produced no routing tensor from captured experts"
+        full_sequences = [list(p) + list(r) for p, r in zip(prompt_token_ids, responses)]
+        per_sample = [cache_backend._routed_experts_cache.get(tuple(fs)) for fs in full_sequences]
+        assert any(r is not None for r in per_sample), "no cached routing matched the training sequences"
+        rii_tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len)
+        assert rii_tensor is not None
 
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]

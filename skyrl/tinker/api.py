@@ -648,14 +648,9 @@ class ModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
-    # Optional shape (see types.TensorData). The Tinker SDK's
-    # ``TensorData.from_torch`` sets this for multi-dimensional tensors; we
-    # forward it so e.g. R3 routed experts keep their [seq_len, layers, topk]
-    # shape after the flattened ``data`` round-trip.
-    shape: list[int] | None = None
 
     def to_types(self) -> types.TensorData:
-        return types.TensorData(data=self.data, shape=self.shape)
+        return types.TensorData(data=self.data)
 
 
 class Datum(BaseModel):
@@ -678,7 +673,6 @@ class Datum(BaseModel):
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
                 values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
                 returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
-                routed_experts=inp["routed_experts"].to_types() if "routed_experts" in inp else None,
             ),
             model_input=self.model_input.to_types(),
         )

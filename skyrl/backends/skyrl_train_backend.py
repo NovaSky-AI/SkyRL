@@ -6,8 +6,10 @@ import math
 import os
 import tarfile
 import tempfile
+from collections import OrderedDict
 from typing import Callable
 
+import numpy as np
 import ray
 import torch
 from pydantic import BaseModel
@@ -57,23 +59,24 @@ def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_le
 
     Args:
         full_sequences: list of per-sample token id lists (prompt + last target).
-        all_routed_experts: list of per-sample ``[seq_len, num_layers, topk]``
-            nested lists (or ``None`` entries).
+        all_routed_experts: list of per-sample ``np.ndarray`` of shape
+            ``[num_forwarded_tokens, num_layers, topk]`` (or ``None`` entries).
         max_seq_len: padded sequence length the batch is aligned to.
     """
-    if not all_routed_experts or not any(r for r in all_routed_experts):
+    if not all_routed_experts or all(r is None for r in all_routed_experts):
         return None
 
-    ref = next(r for r in all_routed_experts if r)
-    num_layers = len(ref[0])
-    topk = len(ref[0][0]) if num_layers > 0 else 0
+    ref = next(r for r in all_routed_experts if r is not None)
+    num_layers, topk = int(ref.shape[1]), int(ref.shape[2])
     rollout_expert_indices = torch.zeros((len(full_sequences), max_seq_len, num_layers, topk), dtype=torch.int32)
     for i, (seq, sample_routing) in enumerate(zip(full_sequences, all_routed_experts)):
-        if not sample_routing:
+        if sample_routing is None or sample_routing.shape[0] == 0:
             continue
         left_pad = max_seq_len - len(seq)
-        n = min(len(sample_routing), max_seq_len - left_pad)
-        rollout_expert_indices[i, left_pad : left_pad + n] = torch.tensor(sample_routing[:n], dtype=torch.int32)
+        n = min(sample_routing.shape[0], max_seq_len - left_pad)
+        rollout_expert_indices[i, left_pad : left_pad + n] = torch.as_tensor(
+            np.asarray(sample_routing[:n]), dtype=torch.int32
+        )
 
     # Downcast to save memory (worker upcasts to int32 before replay).
     max_expert = int(rollout_expert_indices.max().item())
@@ -215,6 +218,15 @@ class SkyRLTrainBackend(AbstractBackend):
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
 
+        # Rollout Routing Replay (R3): per-token routed experts captured at
+        # sample time, keyed by the full sampled token sequence (prompt +
+        # response). forward_backward looks routing up by the training sequence
+        # and replays it, so R3 stays a server-side launch flag and never
+        # touches the client-facing Tinker types. Bounded FIFO to cap memory.
+        self._routed_experts_cache: "OrderedDict[tuple[int, ...], np.ndarray]" = OrderedDict()
+        self._routed_experts_cache_cap = 8192
+        self._routed_experts_missing_warned = False
+
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
@@ -245,6 +257,44 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._cfg is None or self._cfg.trainer.strategy != "megatron":
             return False
         return bool(getattr(self._cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False))
+
+    def _store_routed_experts(self, prompt_ids: list[int], response_tokens: list[int], routed_experts) -> None:
+        """Cache one sample's rollout routing (R3), keyed by its full token sequence.
+
+        The key is ``prompt_ids + response_tokens`` — exactly the sequence
+        forward_backward reconstructs — so replay is a dict lookup with no
+        client-facing plumbing. Stored narrow (uint8/int16) to bound memory;
+        the cache is a bounded FIFO.
+        """
+        arr = np.asarray(routed_experts)
+        if arr.ndim != 3:
+            return
+        max_expert = int(arr.max()) if arr.size else 0
+        arr = arr.astype(np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32)
+        key = tuple(int(t) for t in prompt_ids) + tuple(int(t) for t in response_tokens)
+        cache = self._routed_experts_cache
+        cache[key] = arr
+        cache.move_to_end(key)
+        while len(cache) > self._routed_experts_cache_cap:
+            cache.popitem(last=False)
+
+    def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
+        """Warn once if R3 is on but some forward_backward samples have no cached routing.
+
+        Missing entries fall back to Megatron's own router for those samples (an
+        R3-off result), which usually means sampling ran without capture or the
+        sequence was altered between sample and train.
+        """
+        if self._routed_experts_missing_warned:
+            return
+        if any(r is None for r in per_sample_routing):
+            logger.warning(
+                "Router replay (R3) is enabled but %d/%d forward_backward samples had no cached rollout "
+                "routing; those samples fall back to Megatron's router.",
+                sum(1 for r in per_sample_routing if r is None),
+                len(per_sample_routing),
+            )
+            self._routed_experts_missing_warned = True
 
     def _get_role(self, model_id: str) -> str:
         try:
@@ -283,7 +333,6 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_advantages",
             "all_values",
             "all_returns",
-            "all_routed_experts",
             "all_model_ids",
             "all_loss_fns",
             "all_loss_fn_configs",
@@ -856,14 +905,18 @@ class SkyRLTrainBackend(AbstractBackend):
                 placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
-        # Rollout Routing Replay (R3): assemble per-token routed experts into a
-        # left-padded [batch, max_seq_len, num_layers, topk] tensor aligned with
-        # ``sequences``.
-        rollout_expert_indices = _build_rollout_expert_indices(
-            full_sequences, getattr(prepared_batch, "all_routed_experts", None), max_seq_len
-        )
-        if rollout_expert_indices is not None:
-            batch_dict["rollout_expert_indices"] = rollout_expert_indices
+        # Rollout Routing Replay (R3): look up the routing captured at sample
+        # time by the full sampled token sequence (prompt + response, which is
+        # exactly ``full_sequences[i]``) and assemble it into a left-padded
+        # [batch, max_seq_len, num_layers, topk] tensor aligned with
+        # ``sequences``. Keeping the routing server-side means R3 needs no new
+        # client-facing Tinker fields.
+        if self._router_replay_enabled():
+            per_sample_routing = [self._routed_experts_cache.get(tuple(seq)) for seq in full_sequences]
+            self._warn_on_missing_routing(per_sample_routing)
+            rollout_expert_indices = _build_rollout_expert_indices(full_sequences, per_sample_routing, max_seq_len)
+            if rollout_expert_indices is not None:
+                batch_dict["rollout_expert_indices"] = rollout_expert_indices
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
@@ -1370,8 +1423,8 @@ class SkyRLTrainBackend(AbstractBackend):
                 prompt_logprobs_at[start_idx] = topk
 
         # Rollout Routing Replay (R3): when replay is enabled on the Megatron
-        # policy, capture per-token routed experts during sampling so the client
-        # can feed them back through forward_backward.
+        # policy, request per-token routed experts so we can cache them
+        # server-side (keyed by the sampled sequence) for forward_backward.
         return_routed_experts = self._router_replay_enabled()
 
         async def sample_all():
@@ -1449,6 +1502,9 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
+                # Prompt token ids for this sample, used only to key R3 routing.
+                prompt_ids = render_model_input([prepared_batch.all_model_inputs[i]])[0].prompt_ids
+
                 for tokens, logprobs_raw, stop_reason_raw, routed_experts in _extract_sequences(output):
                     # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
@@ -1459,12 +1515,17 @@ class SkyRLTrainBackend(AbstractBackend):
                         logger.warning("No logprobs returned - filling with zeros")
                         logprobs = [0.0] * len(tokens)
 
+                    # Rollout Routing Replay (R3): stash routing server-side keyed
+                    # by the full sampled sequence so forward_backward can replay
+                    # it without any new client-facing fields.
+                    if routed_experts is not None:
+                        self._store_routed_experts(prompt_ids, tokens, routed_experts)
+
                     sequences.append(
                         types.GeneratedSequence(
                             tokens=tokens,
                             logprobs=logprobs,
                             stop_reason=stop_reason,
-                            routed_experts=routed_experts,
                         )
                     )
 
