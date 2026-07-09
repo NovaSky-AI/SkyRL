@@ -46,6 +46,44 @@ from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
 
+def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_len: int):
+    """Build the left-padded R3 routing tensor aligned with ``sequences``.
+
+    The inference engine returns routing for every forwarded token (prompt +
+    response minus the last sampled token), so each sample's routing lands in the
+    leftmost real-token positions; the final token (the appended last target) has
+    no routing and stays zero. Mirrors ``convert_prompts_responses_to_batch_tensors``
+    on the native RL path. Returns ``None`` when no routing is present.
+
+    Args:
+        full_sequences: list of per-sample token id lists (prompt + last target).
+        all_routed_experts: list of per-sample ``[seq_len, num_layers, topk]``
+            nested lists (or ``None`` entries).
+        max_seq_len: padded sequence length the batch is aligned to.
+    """
+    if not all_routed_experts or not any(r for r in all_routed_experts):
+        return None
+
+    ref = next(r for r in all_routed_experts if r)
+    num_layers = len(ref[0])
+    topk = len(ref[0][0]) if num_layers > 0 else 0
+    rollout_expert_indices = torch.zeros((len(full_sequences), max_seq_len, num_layers, topk), dtype=torch.int32)
+    for i, (seq, sample_routing) in enumerate(zip(full_sequences, all_routed_experts)):
+        if not sample_routing:
+            continue
+        left_pad = max_seq_len - len(seq)
+        n = min(len(sample_routing), max_seq_len - left_pad)
+        rollout_expert_indices[i, left_pad : left_pad + n] = torch.tensor(sample_routing[:n], dtype=torch.int32)
+
+    # Downcast to save memory (worker upcasts to int32 before replay).
+    max_expert = int(rollout_expert_indices.max().item())
+    if max_expert < 2**8:
+        rollout_expert_indices = rollout_expert_indices.to(torch.uint8)
+    elif max_expert < 2**15:
+        rollout_expert_indices = rollout_expert_indices.to(torch.int16)
+    return rollout_expert_indices
+
+
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
 
@@ -129,6 +167,13 @@ def _build_skyrl_train_config(
     cfg.trainer.critic.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.critic.optimizer_config.num_warmup_steps = 0
 
+    # Rollout Routing Replay (R3): enabling replay on the Megatron policy
+    # requires the inference engine to return per-token routed experts, so the
+    # two flags are kept in lockstep here (the operator only sets the replay
+    # flag). No-op for FSDP / non-MoE models.
+    if getattr(cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False):
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
@@ -190,6 +235,17 @@ class SkyRLTrainBackend(AbstractBackend):
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
 
+    def _router_replay_enabled(self) -> bool:
+        """Whether Rollout Routing Replay (R3) is active for this backend.
+
+        Reads the single source of truth on the built config. Only the Megatron
+        policy exposes ``moe_enable_routing_replay``; returns False otherwise
+        (FSDP, or before the config is built).
+        """
+        if self._cfg is None or self._cfg.trainer.strategy != "megatron":
+            return False
+        return bool(getattr(self._cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False))
+
     def _get_role(self, model_id: str) -> str:
         try:
             return self._model_ids_to_role[model_id]
@@ -227,6 +283,7 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_advantages",
             "all_values",
             "all_returns",
+            "all_routed_experts",
             "all_model_ids",
             "all_loss_fns",
             "all_loss_fn_configs",
@@ -799,6 +856,15 @@ class SkyRLTrainBackend(AbstractBackend):
                 placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
+        # Rollout Routing Replay (R3): assemble per-token routed experts into a
+        # left-padded [batch, max_seq_len, num_layers, topk] tensor aligned with
+        # ``sequences``.
+        rollout_expert_indices = _build_rollout_expert_indices(
+            full_sequences, getattr(prepared_batch, "all_routed_experts", None), max_seq_len
+        )
+        if rollout_expert_indices is not None:
+            batch_dict["rollout_expert_indices"] = rollout_expert_indices
+
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
@@ -1303,6 +1369,11 @@ class SkyRLTrainBackend(AbstractBackend):
             if prompt_logprobs_requested and start_idx < num_samples_total:
                 prompt_logprobs_at[start_idx] = topk
 
+        # Rollout Routing Replay (R3): when replay is enabled on the Megatron
+        # policy, capture per-token routed experts during sampling so the client
+        # can feed them back through forward_backward.
+        return_routed_experts = self._router_replay_enabled()
+
         async def sample_all():
             tasks = []
             for i in range(num_samples_total):
@@ -1314,6 +1385,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     "prompt": model_input.model_dump(),
                     "num_samples": 1,
                     "sampling_params": sampling_params.model_dump(),
+                    "return_routed_experts": return_routed_experts,
                 }
 
                 if i in prompt_logprobs_at:
@@ -1345,9 +1417,9 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.debug(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
-            """Yield (tokens, logprobs, stop_reason) from a single sample output."""
+            """Yield (tokens, logprobs, stop_reason, routed_experts) from a single sample output."""
             for seq in output["sequences"]:
-                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
+                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason"), seq.get("routed_experts")
 
         results = {}
         for (
@@ -1377,7 +1449,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
+                for tokens, logprobs_raw, stop_reason_raw, routed_experts in _extract_sequences(output):
                     # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
                     logprobs = logprobs_raw or []
@@ -1392,6 +1464,7 @@ class SkyRLTrainBackend(AbstractBackend):
                             tokens=tokens,
                             logprobs=logprobs,
                             stop_reason=stop_reason,
+                            routed_experts=routed_experts,
                         )
                     )
 

@@ -756,6 +756,71 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         return final_token_ids, adjusted_features
 
+    async def _sample_with_routed_experts(
+        self,
+        token_ids: List[int],
+        model: str,
+        num_samples: int,
+        base_sampling_params: Dict[str, Any],
+        session_id: Optional[str],
+        mm_features: Optional[MultiModalFeatures],
+    ) -> SampleResponse:
+        """Sample via ``/skyrl/v1/generate`` so per-token routed experts are returned (R3).
+
+        Issues one request per sample (the endpoint returns a single choice),
+        offsetting the seed so ``num_samples > 1`` stays diverse. Each returned
+        sequence carries ``routed_experts`` of shape
+        ``[num_tokens - 1, num_layers, topk]`` covering prompt + generated tokens.
+        """
+        url = f"{self.proxy_url}/skyrl/v1/generate"
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        base_seed = base_sampling_params.get("seed")
+
+        async def _one(sample_idx: int) -> Dict[str, Any]:
+            sp = dict(base_sampling_params)
+            sp["n"] = 1
+            sp["prompt_logprobs"] = None
+            if base_seed is not None:
+                sp["seed"] = base_seed + sample_idx
+            payload: Dict[str, Any] = {"sampling_params": sp, "model": model, "token_ids": token_ids}
+            if mm_features is not None:
+                payload["features"] = mm_features
+            gen_sem, _ = self._get_semaphores()
+            if gen_sem is None:
+                return await self._post(url, json=payload, headers=headers)
+            async with gen_sem:
+                return await self._post(url, json=payload, headers=headers)
+
+        responses = await asyncio.gather(*[_one(i) for i in range(num_samples)])
+
+        sequences = []
+        for response in responses:
+            choice = response["choices"][0]
+            seq_logprobs: Optional[List[float]] = None
+            logprobs_data = choice.get("logprobs")
+            if logprobs_data is not None:
+                logprobs_content = logprobs_data.get("content", [])
+                if logprobs_content:
+                    seq_logprobs = [lp["logprob"] for lp in logprobs_content]
+            sequences.append(
+                {
+                    "tokens": choice["token_ids"],
+                    "logprobs": seq_logprobs,
+                    "stop_reason": choice.get("finish_reason"),
+                    "routed_experts": choice.get("routed_experts"),
+                }
+            )
+
+        return {
+            "type": "sample",
+            "sequences": sequences,
+            "prompt_logprobs": None,
+            "topk_prompt_logprobs": None,
+        }
+
     async def sample(
         self,
         request_payload: SampleRequestPayload,
@@ -782,6 +847,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         prompt = body.get("prompt", {})
         num_samples = body.get("num_samples", 1)
         tinker_params = body.get("sampling_params", {})
+        # Rollout Routing Replay (R3): only capture routing when the caller asks
+        # for it AND the server was launched with routed-experts return enabled.
+        return_routed_experts = bool(body.get("return_routed_experts", False)) and self.enable_return_routed_experts
 
         # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
         # SamplingClient.sample() uses "include_prompt_logprobs".
@@ -809,6 +877,21 @@ class RemoteInferenceClient(InferenceEngineInterface):
             val = tinker_params.get(tinker_key)
             if val is not None:
                 sampling_params[vllm_key] = val
+
+        # Rollout Routing Replay (R3): the OpenAI-compatible router endpoint does
+        # not surface routed experts, so route through the SkyRL generate
+        # endpoint which does. It returns a single choice per call, so we fan out
+        # one request per sample (offsetting the seed for diversity). This branch
+        # does not populate prompt_logprobs (unused for R3).
+        if return_routed_experts:
+            return await self._sample_with_routed_experts(
+                token_ids=token_ids,
+                model=model,
+                num_samples=num_samples,
+                base_sampling_params=sampling_params,
+                session_id=session_id,
+                mm_features=mm_features,
+            )
 
         payload: Dict[str, Any] = {
             "sampling_params": sampling_params,
