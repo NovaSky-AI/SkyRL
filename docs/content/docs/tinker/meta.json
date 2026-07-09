@@ -6,7 +6,6 @@
     "architecture",
     "multi_tenancy",
     "session_based_routing",
-    "router_replay",
     "cookbook",
     "configuration",
     "limitations"
