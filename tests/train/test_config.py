@@ -16,11 +16,7 @@ from skyrl.train.config.config import (
     _resolve_class_type,
     build_nested_dataclass,
 )
-from skyrl.train.utils.utils import (
-    validate_cfg,
-    validate_fake_int4_qat_cfg,
-    validate_inference_engine_cfg,
-)
+from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
 from tests.train.util import example_dummy_config
 
 
@@ -373,46 +369,31 @@ def test_fake_int4_qat_cli_overrides():
     assert fq.bf16_base_path == "/data/bf16-dump"
 
 
-def test_fake_int4_qat_model_config_requires_lora():
+def test_fake_int4_qat_requires_lora():
     with pytest.raises(AssertionError, match="currently requires LoRA"):
         SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.fake_int4_qat.enabled=true"])
 
 
-def _make_valid_fake_int4_qat_config():
-    cfg = _make_validated_test_config()
-    cfg.trainer.strategy = "megatron"
-    cfg.trainer.policy.model.lora.rank = 32
-    cfg.trainer.policy.model.fake_int4_qat.enabled = True
-    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
-    return cfg
-
-
-def test_validate_cfg_fake_int4_qat_requires_megatron():
-    cfg = _make_valid_fake_int4_qat_config()
-    cfg.trainer.strategy = "fsdp"
-
+def test_fake_int4_qat_requires_megatron():
     with pytest.raises(AssertionError, match="strategy=megatron"):
-        validate_fake_int4_qat_cfg(cfg)
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+            ]
+        )
 
 
-def test_validate_cfg_fake_int4_qat_requires_lora():
-    cfg = _make_valid_fake_int4_qat_config()
-    cfg.trainer.policy.model.lora.rank = 0
-
-    with pytest.raises(AssertionError, match="currently requires LoRA"):
-        validate_fake_int4_qat_cfg(cfg)
-
-
-def test_validate_cfg_fake_int4_qat_requires_unmerged_lora_sync():
-    cfg = _make_valid_fake_int4_qat_config()
-    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
-
+def test_fake_int4_qat_requires_unmerged_lora_sync():
     with pytest.raises(AssertionError, match="merge_lora=False"):
-        validate_fake_int4_qat_cfg(cfg)
-
-
-def test_validate_cfg_allows_fake_int4_qat_with_unmerged_megatron_lora():
-    validate_fake_int4_qat_cfg(_make_valid_fake_int4_qat_config())
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+            ]
+        )
 
 
 class TestTrainerUseSamplePackingAlias:

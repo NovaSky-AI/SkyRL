@@ -845,6 +845,16 @@ class TrainerConfig(BaseConfig):
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
 
+        if self.policy.model.fake_int4_qat.enabled:
+            assert (
+                self.strategy == "megatron"
+            ), "`trainer.policy.model.fake_int4_qat.enabled=True` is only supported with `trainer.strategy=megatron`."
+            assert not self.policy.megatron_config.lora_config.merge_lora, (
+                "`trainer.policy.model.fake_int4_qat.enabled=True` currently requires "
+                "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
+                "sync preserves the inference engine's INT4 base weights."
+            )
+
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
         ):
