@@ -28,10 +28,10 @@ uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
-    "train_datasets=[allenai/tulu-3-sft-mixture]" \
-    "train_dataset_splits=[train[:50000]]" \
-    "eval_datasets=[allenai/tulu-3-sft-mixture]" \
-    "eval_dataset_splits=[train[-500:]]" \
+    "train_datasets=['allenai/tulu-3-sft-mixture']" \
+    "train_dataset_splits=['train[:50000]']" \
+    "eval_datasets=['allenai/tulu-3-sft-mixture']" \
+    "eval_dataset_splits=['train[-500:]']" \
     messages_key=messages \
     max_length=4096 \
     num_steps=4166 \

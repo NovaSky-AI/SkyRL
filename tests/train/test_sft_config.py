@@ -319,6 +319,20 @@ class TestDatasetConfigNormalization:
 class TestMultiDatasetValidation:
     """List-shaped dataset fields are validated for lengths, weights and names."""
 
+    def test_bracketed_splits_parse_with_inner_quotes(self):
+        # HF slice syntax nests brackets inside the OmegaConf list, so each
+        # element must be quoted on the CLI: "train_dataset_splits=['train[:2000]']".
+        # (Unquoted elements with brackets are a YAML parse error.)
+        cfg = _sft_cfg_from_overrides(
+            [
+                "train_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']",
+                "train_dataset_splits=['train[:50000]','train[:10000]']",
+            ]
+        )
+        _normalize_dataset_cfg(cfg)
+        assert list(cfg.train_datasets) == ["allenai/tulu-3-sft-mixture", "yahma/alpaca-cleaned"]
+        assert list(cfg.train_dataset_splits) == ["train[:50000]", "train[:10000]"]
+
     def test_default_weights_are_equal_mixing(self):
         cfg = _sft_cfg_from_overrides(["train_datasets=[a,b,c,d]", "train_dataset_splits=[s,s,s,s]"])
         _normalize_dataset_cfg(cfg)
