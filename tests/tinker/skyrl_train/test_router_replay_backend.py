@@ -3,14 +3,15 @@
 R3 stays a server-side launch flag: routing captured at sample time is cached on
 the backend keyed by the full sampled token sequence, and forward_backward looks
 it up by the training sequence. Nothing is exposed through the client-facing
-Tinker types. These tests cover that cache roundtrip, the left-padded tensor
-assembly, and the sample-time gating — no GPU or inference engine needed. Run:
+Tinker types. These tests cover that cache roundtrip, the lifecycle eviction
+(consumed entries at weight sync, never-trained entries after the staleness
+window), the left-padded tensor assembly, and the sample-time gating — no GPU or
+inference engine needed. Run:
   uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_router_replay_backend.py
 """
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,7 @@ from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
 
 _build_rollout_expert_indices = skyrl_train_backend._build_rollout_expert_indices
 _routing_cache_key = skyrl_train_backend._routing_cache_key
+RoutedExpertsCache = skyrl_train_backend.RoutedExpertsCache
 SkyRLTrainBackend = skyrl_train_backend.SkyRLTrainBackend
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -40,8 +42,14 @@ def _routing(seq_len: int, num_layers: int, topk: int) -> np.ndarray:
 
 
 def _cache_backend():
-    """A stand-in exposing just the cache attributes the R3 helpers touch."""
-    return SimpleNamespace(_routed_experts_cache=OrderedDict(), _routed_experts_cache_cap=4)
+    """A stand-in exposing just the cache attribute the R3 helpers touch."""
+    return SimpleNamespace(_routed_experts_cache=RoutedExpertsCache(cap=4))
+
+
+def _peek(cache: "RoutedExpertsCache", model_id: str, token_ids: list[int]) -> np.ndarray | None:
+    """Presence check that does NOT mark the entry consumed (unlike get)."""
+    entry = cache._entries.get(_routing_cache_key(model_id, token_ids))
+    return None if entry is None else entry.routing
 
 
 def test_store_and_lookup_roundtrip_by_model_and_sequence():
@@ -52,9 +60,8 @@ def test_store_and_lookup_roundtrip_by_model_and_sequence():
     SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, routing)
 
     # forward_backward reconstructs the key from (model_id, prompt + response).
-    key = _routing_cache_key(model_id, prompt + response)
-    assert key in fake._routed_experts_cache
-    got = fake._routed_experts_cache[key]
+    got = fake._routed_experts_cache.get(model_id, prompt + response)
+    assert got is not None
     assert got.shape == (4, 2, 3)
     assert int(got[3, 1, 2]) == 3 * 1000 + 1 * 10 + 2
 
@@ -80,20 +87,20 @@ def test_multi_tenant_same_tokens_do_not_collide():
     SkyRLTrainBackend._store_routed_experts(fake, "model_b", prompt, response, routing_b)
 
     assert len(fake._routed_experts_cache) == 2
-    got_a = fake._routed_experts_cache[_routing_cache_key("model_a", prompt + response)]
-    got_b = fake._routed_experts_cache[_routing_cache_key("model_b", prompt + response)]
+    got_a = fake._routed_experts_cache.get("model_a", prompt + response)
+    got_b = fake._routed_experts_cache.get("model_b", prompt + response)
     assert int(got_a[0, 0, 0]) + 1 == int(got_b[0, 0, 0])
 
 
 def test_store_downcasts_dtype_and_ignores_non_3d():
     fake = _cache_backend()
     SkyRLTrainBackend._store_routed_experts(fake, "m", [1], [2], _routing(1, 1, 2))  # small ids -> uint8
-    assert next(iter(fake._routed_experts_cache.values())).dtype == np.uint8
+    assert fake._routed_experts_cache.get("m", [1, 2]).dtype == np.uint8
 
     fake2 = _cache_backend()
     big = _routing(1, 1, 2) + 300  # > 255 -> int16
     SkyRLTrainBackend._store_routed_experts(fake2, "m", [1], [2], big)
-    assert next(iter(fake2._routed_experts_cache.values())).dtype == np.int16
+    assert fake2._routed_experts_cache.get("m", [1, 2]).dtype == np.int16
 
     fake3 = _cache_backend()
     SkyRLTrainBackend._store_routed_experts(fake3, "m", [1], [2], np.zeros((3, 4)))  # 2-D -> skipped
@@ -106,8 +113,103 @@ def test_cache_is_bounded_fifo():
         SkyRLTrainBackend._store_routed_experts(fake, "m", [i], [i + 100], _routing(1, 1, 2))
     assert len(fake._routed_experts_cache) == 4
     # Oldest two keys evicted.
-    assert _routing_cache_key("m", [0, 100]) not in fake._routed_experts_cache
-    assert _routing_cache_key("m", [5, 105]) in fake._routed_experts_cache
+    assert fake._routed_experts_cache.get("m", [0, 100]) is None
+    assert fake._routed_experts_cache.get("m", [5, 105]) is not None
+
+
+def test_consumed_entries_evicted_at_next_weight_sync():
+    """Routing that made it through the trainer is dropped once the model syncs weights."""
+    cache = RoutedExpertsCache(cap=64)
+    cache.put("m", [1, 2], _routing(1, 1, 2))
+    cache.put("m", [3, 4], _routing(1, 1, 2))
+
+    # forward_backward replays [1, 2]; [3, 4] was filtered out client-side.
+    assert cache.get("m", [1, 2]) is not None
+    # Consumption alone must not evict: minibatches/epochs re-read the entry.
+    assert cache.get("m", [1, 2]) is not None
+
+    cache.on_weight_sync("m")
+    assert _peek(cache, "m", [1, 2]) is None  # trained -> evicted
+    assert _peek(cache, "m", [3, 4]) is not None  # not yet stale -> kept
+
+
+def test_never_trained_entries_expire_after_staleness_window():
+    """Entries the trainer never read (client-side filtered) expire after max_staleness + 1 syncs."""
+    cache = RoutedExpertsCache(cap=64, max_staleness=1)
+    cache.put("m", [1, 2], _routing(1, 1, 2))
+
+    cache.on_weight_sync("m")  # first sync after storage: within staleness window
+    assert _peek(cache, "m", [1, 2]) is not None
+    cache.on_weight_sync("m")  # second sync: abandoned -> evicted
+    assert _peek(cache, "m", [1, 2]) is None
+
+
+def test_zero_staleness_expires_unconsumed_entries_at_first_sync():
+    cache = RoutedExpertsCache(cap=64, max_staleness=0)
+    cache.put("m", [1, 2], _routing(1, 1, 2))
+    cache.on_weight_sync("m")
+    assert len(cache) == 0
+
+
+def test_entries_stored_after_a_sync_age_from_that_sync():
+    """The staleness clock starts at the entry's storage generation, not at zero."""
+    cache = RoutedExpertsCache(cap=64, max_staleness=1)
+    cache.on_weight_sync("m")  # gen 1
+    cache.put("m", [1, 2], _routing(1, 1, 2))  # stored at gen 1
+
+    cache.on_weight_sync("m")  # gen 2: entry one sync old -> kept
+    assert _peek(cache, "m", [1, 2]) is not None
+    cache.on_weight_sync("m")  # gen 3: entry two syncs old -> evicted
+    assert _peek(cache, "m", [1, 2]) is None
+
+
+def test_weight_sync_is_scoped_per_model():
+    """Syncs for one adapter must not consume or age another adapter's entries."""
+    cache = RoutedExpertsCache(cap=64, max_staleness=1)
+    cache.put("model_a", [1, 2], _routing(1, 1, 2))
+    cache.put("model_b", [1, 2], _routing(1, 1, 2))
+    assert cache.get("model_a", [1, 2]) is not None  # trained on model_a only
+
+    for _ in range(3):
+        cache.on_weight_sync("model_a")
+
+    assert _peek(cache, "model_a", [1, 2]) is None
+    assert _peek(cache, "model_b", [1, 2]) is not None
+
+
+def test_restore_resets_consumption_and_age():
+    """Re-sampling the same sequence refreshes the entry for the new rollout round."""
+    cache = RoutedExpertsCache(cap=64, max_staleness=1)
+    cache.put("m", [1, 2], _routing(1, 1, 2))
+    assert cache.get("m", [1, 2]) is not None  # consumed in round 1
+    cache.put("m", [1, 2], _routing(1, 1, 2))  # sampled again before the sync
+
+    cache.on_weight_sync("m")
+    assert _peek(cache, "m", [1, 2]) is not None  # fresh entry survives
+
+
+def test_evict_model_and_clear():
+    cache = RoutedExpertsCache(cap=64)
+    cache.put("model_a", [1, 2], _routing(1, 1, 2))
+    cache.put("model_b", [1, 2], _routing(1, 1, 2))
+
+    assert cache.evict_model("model_a") == 1
+    assert _peek(cache, "model_a", [1, 2]) is None
+    assert _peek(cache, "model_b", [1, 2]) is not None
+
+    cache.clear()
+    assert len(cache) == 0
+    assert cache.nbytes == 0
+
+
+def test_nbytes_tracks_stored_routing():
+    cache = RoutedExpertsCache(cap=64)
+    routing = _routing(4, 2, 3)
+    cache.put("m", [1, 2], routing)
+    assert cache.nbytes == routing.nbytes
+    cache.get("m", [1, 2])
+    cache.on_weight_sync("m")
+    assert cache.nbytes == 0
 
 
 def test_build_rollout_expert_indices_left_pads_and_aligns():
@@ -155,7 +257,7 @@ def test_end_to_end_cache_to_tensor_alignment():
 
     # forward_backward: full_sequences[i] == prompt + response, keyed by model_id.
     full_sequences = [prompt + response]
-    per_sample = [fake._routed_experts_cache.get(_routing_cache_key(model_id, fs)) for fs in full_sequences]
+    per_sample = [fake._routed_experts_cache.get(model_id, fs) for fs in full_sequences]
     tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
     assert tuple(tensor.shape) == (1, 5, 2, 3)
     # Routing occupies positions [0,4); the final token has none.
@@ -187,31 +289,45 @@ class _SpyClient:
         pass
 
 
-def test_routed_experts_cache_cap_is_declared_not_forwarded():
-    """The cap is a declared backend-config field, so it must not leak into model_extra.
+def test_routed_experts_cache_config_is_declared_not_forwarded():
+    """Cache knobs are declared backend-config fields, so they must not leak into model_extra.
 
     ``_build_skyrl_train_config`` forwards ``model_extra`` as SkyRL-Train config
     overrides; a leaked key would be applied to SkyRLTrainConfig and error out.
     """
     overrides = skyrl_train_backend.MegatronBackendOverrides(
-        routed_experts_cache_cap=123, **{"trainer.micro_train_batch_size_per_gpu": 2}
+        routed_experts_cache_cap=123,
+        routed_experts_cache_max_staleness=3,
+        **{"trainer.micro_train_batch_size_per_gpu": 2},
     )
     assert overrides.routed_experts_cache_cap == 123
+    assert overrides.routed_experts_cache_max_staleness == 3
     assert "routed_experts_cache_cap" not in overrides.model_extra
+    assert "routed_experts_cache_max_staleness" not in overrides.model_extra
     assert overrides.model_extra.get("trainer.micro_train_batch_size_per_gpu") == 2
-    # Default preserved when unset; must be positive.
-    assert skyrl_train_backend.MegatronBackendOverrides().routed_experts_cache_cap == 8192
+    # Defaults preserved when unset; cap must be positive, staleness non-negative.
+    defaults = skyrl_train_backend.MegatronBackendOverrides()
+    assert defaults.routed_experts_cache_cap == 8192
+    assert defaults.routed_experts_cache_max_staleness == 1
     with pytest.raises(Exception):
         skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_cap=0)
+    with pytest.raises(Exception):
+        skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_max_staleness=-1)
 
 
-def test_backend_honors_configured_cache_cap():
-    """The configured cap reaches the backend's live cache bound (no ray init in __init__)."""
-    backend = SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_cap=321))
-    assert backend._routed_experts_cache_cap == 321
-    assert (
-        SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides())._routed_experts_cache_cap == 8192
+def test_backend_honors_configured_cache_settings():
+    """The configured knobs reach the backend's live cache (no ray init in __init__)."""
+    backend = SkyRLTrainBackend(
+        BASE_MODEL,
+        skyrl_train_backend.MegatronBackendOverrides(
+            routed_experts_cache_cap=321, routed_experts_cache_max_staleness=2
+        ),
     )
+    assert backend._routed_experts_cache.cap == 321
+    assert backend._routed_experts_cache.max_staleness == 2
+    default_cache = SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides())._routed_experts_cache
+    assert default_cache.cap == 8192
+    assert default_cache.max_staleness == 1
 
 
 @pytest.mark.parametrize("replay_enabled", [True, False])

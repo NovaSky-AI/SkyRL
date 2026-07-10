@@ -8,6 +8,7 @@ import os
 import tarfile
 import tempfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -101,6 +102,128 @@ def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_le
     return rollout_expert_indices
 
 
+@dataclass
+class _RoutedExpertsEntry:
+    """One sample's rollout routing plus the state that drives its eviction."""
+
+    routing: np.ndarray
+    stored_gen: int
+    consumed: bool = False
+
+
+class RoutedExpertsCache:
+    """Rollout Routing Replay (R3) cache with trainer-consumption-aware eviction.
+
+    Holds per-sample rollout routing between sampling and forward_backward,
+    keyed by ``(model_id, digest of the full sampled token sequence)``. Eviction
+    runs per model at its weight-sync boundaries (``save_weights_for_sampler``)
+    — the only server-visible event separating one rollout round from the next;
+    training on a rollout batch completes before the loop syncs weights for the
+    next one. Rules, applied on each sync for that model:
+
+    - **Consumed entries** (returned by :meth:`get` at least once, i.e. the
+      routing made it through the trainer) are evicted: their training batch is
+      done.
+    - **Unconsumed entries** older than ``max_staleness`` syncs are evicted:
+      the client sampled them but never trained on them (filtered out
+      client-side, e.g. all-zero-reward groups, or eval rollouts).
+
+    Insertion-order FIFO eviction at ``cap`` remains the backstop, bounding
+    memory even for clients that never sync weights.
+
+    ``max_staleness`` is the number of weight syncs an unconsumed entry may
+    outlive before it is considered abandoned; it must cover how many syncs a
+    rollout batch can stay in flight before training. The default of 1 covers
+    on-policy and one-step-async loops. Loops that run multiple epochs per
+    batch *and* sync weights mid-batch can see consumed entries evicted between
+    epochs; affected samples fall back to the live router with a warning.
+    """
+
+    def __init__(self, cap: int = 8192, max_staleness: int = 1):
+        self.cap = cap
+        self.max_staleness = max_staleness
+        self._entries: "OrderedDict[tuple[str, bytes], _RoutedExpertsEntry]" = OrderedDict()
+        self._sync_gens: dict[str, int] = {}
+        self._nbytes = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def nbytes(self) -> int:
+        """Total bytes of cached routing arrays (metadata excluded)."""
+        return self._nbytes
+
+    def put(self, model_id: str, token_ids: list[int], routing: np.ndarray) -> None:
+        """Insert (or refresh) one sample's routing under the current sync generation."""
+        key = _routing_cache_key(model_id, token_ids)
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self._nbytes -= old.routing.nbytes
+        self._entries[key] = _RoutedExpertsEntry(routing=routing, stored_gen=self._sync_gens.get(model_id, 0))
+        self._nbytes += routing.nbytes
+        while len(self._entries) > self.cap:
+            _, evicted = self._entries.popitem(last=False)
+            self._nbytes -= evicted.routing.nbytes
+
+    def get(self, model_id: str, token_ids: list[int]) -> np.ndarray | None:
+        """Look up routing for a training sequence, marking the entry consumed.
+
+        Consumption does not evict immediately — the same routing is replayed
+        for every minibatch/epoch of the training batch — it schedules the
+        entry for eviction at the model's next weight sync.
+        """
+        entry = self._entries.get(_routing_cache_key(model_id, token_ids))
+        if entry is None:
+            return None
+        entry.consumed = True
+        return entry.routing
+
+    def on_weight_sync(self, model_id: str) -> None:
+        """Advance the model's sync generation and evict its dead entries."""
+        new_gen = self._sync_gens.get(model_id, 0) + 1
+        self._sync_gens[model_id] = new_gen
+        stale_cutoff = new_gen - 1 - self.max_staleness
+
+        consumed = stale = 0
+        for key in [k for k in self._entries if k[0] == model_id]:
+            entry = self._entries[key]
+            if entry.consumed:
+                consumed += 1
+            elif entry.stored_gen <= stale_cutoff:
+                stale += 1
+            else:
+                continue
+            self._nbytes -= entry.routing.nbytes
+            del self._entries[key]
+
+        if consumed or stale:
+            logger.info(
+                "R3 cache: weight sync for %s (gen %d) evicted %d trained and %d never-trained entries; "
+                "%d entries (%.1f MB) remain.",
+                model_id,
+                new_gen,
+                consumed,
+                stale,
+                len(self._entries),
+                self._nbytes / 2**20,
+            )
+
+    def evict_model(self, model_id: str) -> int:
+        """Drop all entries (and the sync generation) for a deleted model."""
+        keys = [k for k in self._entries if k[0] == model_id]
+        for key in keys:
+            self._nbytes -= self._entries[key].routing.nbytes
+            del self._entries[key]
+        self._sync_gens.pop(model_id, None)
+        return len(keys)
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._sync_gens.clear()
+        self._nbytes = 0
+
+
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
 
@@ -125,11 +248,28 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
         gt=0,
         description=(
             "Rollout Routing Replay (R3): max number of samples whose rollout routing is cached "
-            "on the backend (host RAM) between sampling and forward_backward. Size it to at least "
-            "the number of samples generated per training step so routing isn't evicted before it "
+            "on the backend (host RAM) between sampling and forward_backward. Entries are "
+            "normally evicted at weight-sync boundaries (trained entries at the next sync, "
+            "never-trained entries after routed_experts_cache_max_staleness further syncs); the "
+            "cap is a FIFO backstop for loops that never sync weights. Size it to at least the "
+            "number of samples generated per training step so routing isn't evicted before it "
             "is replayed. Memory per entry is roughly seq_len * num_layers * top_k bytes "
             "(uint8 when num_experts<=256, else int16), so long sequences or large caps cost "
             "several GB. Ignored unless moe_enable_routing_replay is set."
+        ),
+    )
+
+    routed_experts_cache_max_staleness: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Rollout Routing Replay (R3): number of weight syncs (save_weights_for_sampler) a "
+            "cached routing entry that never reached the trainer may outlive before it is "
+            "evicted as abandoned (e.g. the client filtered the sample out for all-zero "
+            "rewards). Entries survive max_staleness + 1 syncs after storage. Must cover how "
+            "many syncs a rollout batch can stay in flight before training: the default of 1 "
+            "is safe for on-policy and one-step-async loops; increase it for deeper async "
+            "pipelines. Ignored unless moe_enable_routing_replay is set."
         ),
     )
 
@@ -251,10 +391,15 @@ class SkyRLTrainBackend(AbstractBackend):
         # sequence and replays the routing, so R3 stays a server-side launch flag
         # and never touches the client-facing Tinker types. The digest key keeps
         # the entry tiny regardless of sequence length; ``model_id`` disambiguates
-        # tenants that sample identical tokens. Bounded FIFO to cap memory; the
-        # cap is configurable via backend_config.routed_experts_cache_cap.
-        self._routed_experts_cache: "OrderedDict[tuple[str, bytes], np.ndarray]" = OrderedDict()
-        self._routed_experts_cache_cap = getattr(config, "routed_experts_cache_cap", 8192)
+        # tenants that sample identical tokens. Eviction is lifecycle-driven (see
+        # RoutedExpertsCache): entries the trainer consumed are dropped at the
+        # model's next weight sync, entries that never reached the trainer (e.g.
+        # filtered out client-side) expire after a configurable number of syncs,
+        # and a FIFO cap bounds worst-case memory.
+        self._routed_experts_cache = RoutedExpertsCache(
+            cap=getattr(config, "routed_experts_cache_cap", 8192),
+            max_staleness=getattr(config, "routed_experts_cache_max_staleness", 1),
+        )
         self._routed_experts_missing_warned = False
 
         # New inference infrastructure
@@ -295,20 +440,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
         The digest is over ``prompt_ids + response_tokens`` — exactly the sequence
         forward_backward reconstructs — so replay is a dict lookup with no
-        client-facing plumbing. Stored narrow (uint8/int16) to bound memory; the
-        cache is a bounded FIFO.
+        client-facing plumbing. Stored narrow (uint8/int16) to bound memory;
+        eviction is handled by the cache (see :class:`RoutedExpertsCache`).
         """
         arr = np.asarray(routed_experts)
         if arr.ndim != 3:
             return
         max_expert = int(arr.max()) if arr.size else 0
         arr = arr.astype(np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32)
-        key = _routing_cache_key(model_id, list(prompt_ids) + list(response_tokens))
-        cache = self._routed_experts_cache
-        cache[key] = arr
-        cache.move_to_end(key)
-        while len(cache) > self._routed_experts_cache_cap:
-            cache.popitem(last=False)
+        self._routed_experts_cache.put(model_id, list(prompt_ids) + list(response_tokens), arr)
 
     def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
         """Warn once if R3 is on but some forward_backward samples have no cached routing.
@@ -779,6 +919,8 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
+                # R3: cached routing for a deleted adapter can never be replayed.
+                self._routed_experts_cache.evict_model(model_id)
                 logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
@@ -816,6 +958,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
+        # R3: no model can replay the cached routing after teardown.
+        self._routed_experts_cache.clear()
         # Local state is fully reset above. Notify the host last so a
         # publisher failure can't leave the controller half-torn-down.
         # Next _create_new_inference_client repopulates.
@@ -942,10 +1086,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # is exactly ``full_sequences[i]`` — and assemble it into a left-padded
         # [batch, max_seq_len, num_layers, topk] tensor aligned with
         # ``sequences``. Keeping the routing server-side means R3 needs no new
-        # client-facing Tinker fields.
+        # client-facing Tinker fields. The lookup marks each entry consumed so
+        # the cache can evict it at the model's next weight sync.
         if self._router_replay_enabled():
             per_sample_routing = [
-                self._routed_experts_cache.get(_routing_cache_key(mid, seq))
+                self._routed_experts_cache.get(mid, seq)
                 for mid, seq in zip(prepared_batch.all_model_ids, full_sequences)
             ]
             self._warn_on_missing_routing(per_sample_routing)
@@ -1709,6 +1854,11 @@ class SkyRLTrainBackend(AbstractBackend):
             # so delete_model can unload it.
             self._inference_adapter_ids.add(model_id)
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
+
+        # Rollout Routing Replay (R3): a weight sync starts the next rollout
+        # round for this model, so evict routing the trainer already consumed
+        # and expire entries that never reached it (filtered out client-side).
+        self._routed_experts_cache.on_weight_sync(model_id)
 
         if persist:
             if adapter_only_sync:
