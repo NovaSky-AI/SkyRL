@@ -16,8 +16,8 @@ set -x
 
 # INT4 actor served by vLLM; BF16 masters loaded by the trainer (Megatron-Bridge
 # can't load compressed-tensors, so it reads BF16 from FAKE_QUANT_BF16_PATH).
-MODEL_NAME="${MODEL_NAME:-/data/qwen36-int4/Qwen3.6-35B-A3B-INT4-RTN}"
-FAKE_QUANT_BF16_PATH="${FAKE_QUANT_BF16_PATH:-/data/qwen36-int4/Qwen3.6-35B-A3B}"
+MODEL_NAME="${MODEL_NAME:-casperhansen/Qwen3.6-35B-A3B-INT4-RTN}"
+FAKE_QUANT_BF16_PATH="${FAKE_QUANT_BF16_PATH:-Qwen/Qwen3.6-35B-A3B}"
 
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"

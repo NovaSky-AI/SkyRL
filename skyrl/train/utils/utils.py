@@ -217,6 +217,24 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+def validate_fake_int4_qat_cfg(cfg: SkyRLTrainConfig) -> None:
+    fake_int4_qat = cfg.trainer.policy.model.fake_int4_qat
+    if fake_int4_qat.enabled:
+        assert (
+            cfg.trainer.strategy == "megatron"
+        ), "`trainer.policy.model.fake_int4_qat.enabled=True` is only supported with `trainer.strategy=megatron`."
+        assert cfg.trainer.policy.model.lora.rank > 0, (
+            "`trainer.policy.model.fake_int4_qat.enabled=True` currently requires LoRA "
+            "(`trainer.policy.model.lora.rank > 0`) because full-weight sync exports "
+            "dense expert weights."
+        )
+        assert not cfg.trainer.policy.megatron_config.lora_config.merge_lora, (
+            "`trainer.policy.model.fake_int4_qat.enabled=True` currently requires "
+            "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
+            "sync preserves the inference engine's INT4 base weights."
+        )
+
+
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
@@ -228,6 +246,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             stacklevel=2,
         )
         cfg.trainer.strategy = "fsdp"
+
+    validate_fake_int4_qat_cfg(cfg)
 
     if cfg.trainer.max_training_steps is not None:
         if cfg.trainer.max_training_steps <= 0:

@@ -128,10 +128,10 @@ class FakeInt4QatConfig(BaseConfig):
     bf16_base_path: Optional[str] = None
     """Megatron-Bridge cannot load a compressed-tensors INT4 checkpoint, so when
     ``model.path`` points at the INT4 model the trainer loads its BF16 master
-    weights from this path instead (the Miles ``--ref-load`` pattern). The INT4
-    ``model.path`` remains what the inference engine serves and the logical name.
-    When None, the trainer loads weights from ``model.path`` directly (only valid
-    if that path is already a BF16 checkpoint)."""
+    weights from this path instead. The INT4 ``model.path`` remains what the
+    inference engine serves and the logical name. When None, the trainer loads
+    weights from ``model.path`` directly (only valid if that path is already a
+    BF16 checkpoint)."""
 
 
 @dataclass
@@ -139,6 +139,14 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
+
+    def __post_init__(self) -> None:
+        if self.fake_int4_qat.enabled:
+            assert self.lora.rank > 0, (
+                "`trainer.policy.model.fake_int4_qat.enabled=True` currently requires LoRA "
+                "(`trainer.policy.model.lora.rank > 0`) because full-weight sync exports "
+                "dense expert weights."
+            )
 
 
 # ---------------------------------------------------------------------------
