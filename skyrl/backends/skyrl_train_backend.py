@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import math
 import os
 import tarfile
 import tempfile
@@ -23,6 +24,12 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+)
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
@@ -591,6 +598,14 @@ class SkyRLTrainBackend(AbstractBackend):
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
             batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            # Tinker datums carry the *sampling* (rollout-engine) logprobs.
+            # Mirror them into `rollout_logprobs` so the policy workers emit
+            # the train-vs-rollout logprob-gap metrics
+            # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
+            # `_extract_metrics` below.  Loss behaviour only changes when
+            # `trainer.algorithm.off_policy_correction` is explicitly
+            # configured (rollout logprobs are its intended input).
+            batch_dict["rollout_logprobs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
@@ -681,6 +696,31 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["policy_lr:last"] = float(data["policy_lr"])
         if "critic_lr" in data:
             metrics["critic_lr:last"] = float(data["critic_lr"])
+
+        # Train-vs-rollout logprob gap, computed by the policy workers per
+        # micro-batch (masked |logp_train - logp_rollout| over action tokens)
+        # and reduced across micro-batches / DP ranks.  Reconstruct the std
+        # from the reduced first/second moments (std itself cannot be
+        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std)
+        # and surface the family under skyrl-train's familiar
+        # `policy/rollout_train_logprobs_abs_diff_*` names.  The `:mean` /
+        # `:max` / `:min` suffixes drive the Tinker SDK's cross-chunk
+        # reduction when a request is split into multiple chunks.
+        if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY in data:
+            mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY])
+            metrics["policy/rollout_train_logprobs_abs_diff_mean:mean"] = mean
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY in data:
+                sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY])
+                # max(0, ...) guards tiny negatives from float round-off.
+                metrics["policy/rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_max:max"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY]
+                )
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_min:min"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY]
+                )
 
         return metrics
 
