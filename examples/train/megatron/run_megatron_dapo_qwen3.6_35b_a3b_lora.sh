@@ -46,6 +46,9 @@ LR=1e-5 # LoRA: higher LR for adapters (matches reference lora script; full-FT u
 # lora config (rank 32 per request; alpha=rank 1:1 as in reference lora script)
 LORA_RANK=32
 LORA_ALPHA=32
+# Shared-outer grouped-expert LoRA: fc1 (gate_up) lora_A and fc2 (down) lora_B are
+# shared across all 256 experts; the inner matrices are trained per expert.
+EXPERTS_SHARED_OUTER_LORAS=true
 
 # megatron config
 MEGATRON_TP=4
@@ -66,6 +69,7 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 # Qwen3.6 flags
 LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
+REMOVE_MICROBATCH_PADDING=true # sample packing via the native GDN thd path
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY"}}' # auto prefill backend can crash
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
@@ -109,6 +113,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
+  trainer.policy.megatron_config.lora_config.experts_shared_outer_loras=$EXPERTS_SHARED_OUTER_LORAS \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \

@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     freeze_moe_router,
     get_model_config,
     get_moe_metrics,
+    patch_packed_per_expert_sharded_state_dict,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -444,7 +445,9 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
-    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
+        if experts_shared_outer_loras:
+            patch_packed_per_expert_sharded_state_dict()
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
@@ -459,8 +462,11 @@ class MegatronWorker:
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+                experts_shared_outer_loras=experts_shared_outer_loras,
             )
         elif lora_type == "canonical_lora":
+            if experts_shared_outer_loras:
+                raise ValueError("experts_shared_outer_loras is only supported with lora_type='lora'")
             self.lora_cls = CanonicalLoRA(
                 target_modules=(
                     [
@@ -489,6 +495,7 @@ class MegatronWorker:
         ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
         lora_config: Optional[Dict[str, Any]] = None,
         lora_type: Optional[str] = "lora",
+        experts_shared_outer_loras: bool = False,
         bf16: bool = True,
     ) -> List[nn.Module]:
         """
@@ -499,7 +506,7 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            self.configure_lora(lora_config, lora_type)
+            self.configure_lora(lora_config, lora_type, experts_shared_outer_loras=experts_shared_outer_loras)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
@@ -821,6 +828,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ddp_config=self.cfg.policy.megatron_config.ddp_config if wrap_with_ddp else None,
             lora_config=self.cfg.policy.model.lora if self._is_lora else None,
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
+            experts_shared_outer_loras=self.cfg.policy.megatron_config.lora_config.experts_shared_outer_loras,
             bf16=self.cfg.bf16,
         )
 
@@ -1276,9 +1284,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         from safetensors.torch import save_file
 
-        adapter_state = {}
+        # Shared-outer grouped-expert LoRA emits the per-expert side of packed-HF
+        # models (e.g. Qwen3.5/3.6 MoE) as one 2D slice per expert under the same
+        # expert-agnostic name; collect repeats in emission order (expert 0..E-1)
+        # and stack them back into the (E, out, in) layout the converter expects.
+        adapter_tensor_lists: Dict[str, List[torch.Tensor]] = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+            adapter_tensor_lists.setdefault(f"base_model.model.{name}", []).append(tensor.clone().float())
+        adapter_state = {
+            name: tensors[0] if len(tensors) == 1 else torch.stack(tensors, dim=0)
+            for name, tensors in adapter_tensor_lists.items()
+        }
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
@@ -1287,7 +1303,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # merge_lora=False on-policy sync is accepted (otherwise
             # load_lora_adapter rejects `experts.down_proj`). See
             # _convert_moe_experts_lora_to_vllm for the layout details.
-            adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+            adapter_state = _convert_moe_experts_lora_to_vllm(
+                adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
+            )
 
             target_modules = sorted(
                 set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}

@@ -183,6 +183,13 @@ megatron_config:
   lora_config:
     # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
     lora_type: "lora"
+    # merge LoRA deltas into the base weights on weight sync (full-weight sync); set to false
+    # to sync adapter safetensors to the inference engine via load_lora_adapter instead
+    merge_lora: true
+    # shared-outer grouped-expert LoRA for MoE models: fc1 (gate_up) lora_A and fc2 (down)
+    # lora_B are shared across all experts while the inner matrices are per expert.
+    # Only supported with lora_type "lora".
+    experts_shared_outer_loras: false
   # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
   # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
   empty_cuda_cache: true

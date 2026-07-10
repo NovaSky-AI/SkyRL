@@ -385,6 +385,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if megatron_lora_cfg.experts_shared_outer_loras and megatron_lora_cfg.lora_type != "lora":
+            raise ValueError(
+                "`megatron_config.lora_config.experts_shared_outer_loras` is only supported with "
+                f'`lora_type="lora"`, got lora_type="{megatron_lora_cfg.lora_type}"'
+            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:

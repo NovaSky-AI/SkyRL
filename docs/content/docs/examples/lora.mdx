@@ -119,6 +119,28 @@ bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
 
 ```
 
+## MoE Models: Grouped-Expert LoRA (Megatron)
+
+On the Megatron backend, `target_modules: "all-linear"` also adapts the grouped MoE expert
+projections (`linear_fc1` / `linear_fc2`). By default one adapter is shared across all local
+experts on each expert-parallel rank. For per-expert adaptation, enable shared-outer
+grouped-expert LoRA, where the fc1 (gate_up) lora_A and fc2 (down) lora_B matrices are shared
+across all experts while the inner matrices (fc1 lora_B, fc2 lora_A) are trained per expert:
+
+```yaml
+trainer:
+  policy:
+    megatron_config:
+      lora_config:
+        experts_shared_outer_loras: true  # requires lora_type "lora"
+```
+
+This works with both weight-sync modes: the default merged sync (`merge_lora: true`) and
+adapter sync (`merge_lora: false`, where the shared side is expanded per expert to match
+vLLM's fused-MoE LoRA layout). See
+`examples/train/megatron/run_megatron_dapo_qwen3.6_35b_a3b_lora.sh` for a full example on
+Qwen3.6-35B-A3B.
+
 ## Configuration Tips
 
 We recommend looking at the blog [LoRA Without Regret](https://thinkingmachines.ai/blog/lora/) for more details and practical guidance on setting LoRA hyperparameters. Here are the key takeaways:
