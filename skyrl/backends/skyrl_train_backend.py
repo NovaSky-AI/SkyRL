@@ -597,7 +597,8 @@ class SkyRLTrainBackend(AbstractBackend):
         has_values = any(len(v) > 0 for v in prepared_batch.all_values)
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
-            batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            batch_dict["action_log_probs"] = action_log_probs_tensor
             # Tinker datums carry the *sampling* (rollout-engine) logprobs.
             # Mirror them into `rollout_logprobs` so the policy workers emit
             # the train-vs-rollout logprob-gap metrics
@@ -605,7 +606,7 @@ class SkyRLTrainBackend(AbstractBackend):
             # `_extract_metrics` below.  Loss behaviour only changes when
             # `trainer.algorithm.off_policy_correction` is explicitly
             # configured (rollout logprobs are its intended input).
-            batch_dict["rollout_logprobs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
