@@ -131,19 +131,21 @@ short-circuits, `chat.rollout_details` stays empty, and
 "empty/missing rollout_details". The bridge emits all three; a
 standalone LiteLLM round-trip test in the run log verifies the shape.
 
-### Qwen3 tokenization subtleties
+### What the shim deliberately does *not* touch
 
-1. **`_sanitize_assistant_text`** — Qwen3's BPE fuses three consecutive
-   `\n` into token `1406`. If the raw completion starts with `\n\n`,
-   then concatenated with the chat template's trailing `\n` after
-   `<|im_start|>assistant` the assistant message re-tokenizes with the
-   fused token instead of `[198, ...]`. That trips SkyRL's
-   `get_response_ids_and_loss_mask_from_messages` assertion at training
-   time. `.lstrip()` suppresses that path.
-2. **`reasoning_content: None` on every choice.message dict.** LiteLLM's
-   `_parse_content_for_reasoning` will otherwise strip a
-   `<think>...</think>` prefix out of `content` and leave a bare
-   `\n\n{JSON}`, which re-triggers the same three-newline fusion.
+`HarborGenerator` reads `completion_token_ids` / `prompt_token_ids` /
+`logprobs` straight out of `rollout_details` — it never re-tokenizes
+the response text. That means anything the shim does to `content`
+(strip whitespace, inject `reasoning_content: None`, etc.) is invisible
+to the trainer: gradients depend only on the token IDs vLLM's sampler
+emitted, which the shim forwards verbatim from
+`arctic_client.generate()`. The FSDP baseline runs the same recipe
+with vLLM's native OpenAI endpoint and the same LiteLLM
+`<think>`-stripping behavior; it trains fine without any of those
+mutations, and so does the Arctic path. Keeping the shim thin means
+every future SkyRL integration on top of Arctic inherits a bridge that
+just shape-shifts, not one that carries workarounds for one caller's
+quirks.
 
 ## `harbor_entrypoint.py` — `ArcticHarborExp` + `main()`
 

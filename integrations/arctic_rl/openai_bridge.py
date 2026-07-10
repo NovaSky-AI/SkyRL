@@ -76,23 +76,6 @@ def _map_finish_reason(reason: Optional[str]) -> str:
     return "stop"
 
 
-def _sanitize_assistant_text(text: str) -> str:
-    """Drop leading whitespace on the raw model completion.
-
-    If a plain (non-thinking) response starts with ``\\n\\n``, concatenating
-    with the chat template's trailing ``\\n`` after ``<|im_start|>assistant``
-    produces three consecutive newlines. Qwen3's BPE then fuses those into
-    token 1406 (``\\n\\n\\n``) rather than the expected ``[198, ...]``, which
-    trips SkyRL's assertion in ``get_response_ids_and_loss_mask_from_messages``
-    that assistant messages start with the generation prompt tokens.
-
-    Thinking-mode responses (``<think>...</think>\\n\\n{content}``) round-trip
-    cleanly once ``reasoning_content=None`` is set on the choice (see
-    ``chat_completion``).
-    """
-    return text.lstrip()
-
-
 def _build_sampling_params_from_openai(
     body: Dict[str, Any],
     *,
@@ -118,51 +101,23 @@ def _openai_logprobs_from_arctic(
     token_ids: List[int],
     tokenizer: PreTrainedTokenizerBase,
 ) -> Optional[Dict[str, Any]]:
-    """Convert Arctic's per-token logprob payload to OpenAI chat.logprobs.
-
-    Terminus-2 only reads ``choices[0].logprobs.content[i].logprob``; the other
-    fields (``token``, ``bytes``, ``top_logprobs``) are populated defensively
-    since Pydantic-strict clients may reject a missing key.
+    """Translate ``arctic_client.generate()``'s logprob payload to OpenAI
+    ``chat.logprobs``. Assumes vLLM's canonical
+    ``list[dict[token_id, {"logprob": float, ...}]]`` shape from
+    ``SamplingOutput.logprobs``; anything else falls through to zeros.
     """
-    raw = arctic_result.get("logprobs")
-    if not raw and not token_ids:
+    if not token_ids:
         return None
 
-    # vLLM's SamplingOutput.logprobs is ``list[dict[int, Logprob]]`` where each
-    # position maps sampled/top-k token_ids -> ``{"logprob": float, "rank": int,
-    # "decoded_token": str}``. Arctic's wire format may hand us either that
-    # (already-JSON) shape, a flat ``list[float]``, or a ``dict`` keyed by
-    # position — normalize all three to ``list[float]`` of the sampled token's
-    # logprob per position.
-    flat_lp: List[float] = []
-
-    def _pick(pos_entry: Any) -> float:
-        if isinstance(pos_entry, dict):
-            if not pos_entry:
-                return 0.0
-            first_val = next(iter(pos_entry.values()))
-            if isinstance(first_val, dict):
-                return float(first_val.get("logprob", 0.0))
-            try:
-                return float(first_val)
-            except (TypeError, ValueError):
-                return 0.0
-        try:
-            return float(pos_entry)
-        except (TypeError, ValueError):
-            return 0.0
-
-    if isinstance(raw, list):
-        flat_lp = [_pick(pos) for pos in raw]
-    elif isinstance(raw, dict):
-        flat_lp = [_pick(pos) for pos in raw.values()]
-    if not flat_lp:
-        flat_lp = [0.0] * len(token_ids)
-
+    raw = arctic_result.get("logprobs") or []
     content: List[Dict[str, Any]] = []
     for i, tid in enumerate(token_ids):
         tok = tokenizer.decode([tid], skip_special_tokens=False)
-        lp = flat_lp[i] if i < len(flat_lp) else 0.0
+        lp = 0.0
+        if i < len(raw) and isinstance(raw[i], dict) and raw[i]:
+            entry = raw[i].get(tid) or next(iter(raw[i].values()))
+            if isinstance(entry, dict):
+                lp = float(entry.get("logprob", 0.0))
         content.append(
             {
                 "token": tok,
@@ -319,34 +274,24 @@ class ArcticInferenceEngineAdapter(InferenceEngineInterface):
         )
         choices = []
         for i, r in enumerate(results):
-            text = _sanitize_assistant_text(r.get("text", ""))
+            text = r.get("text", "")
             token_ids = list(r.get("token_ids") or [])
             if not token_ids and text:
                 token_ids = self.tokenizer.encode(text, add_special_tokens=False)
 
-            # ``reasoning_content: None`` short-circuits LiteLLM's
-            # ``_extract_reasoning_content`` regex which would otherwise split
-            # ``<think>x</think>\n\n{JSON}`` into (reasoning=``x``,
-            # content=``\n\n{JSON}``) and leave a stray ``\n\n`` prefix that
-            # re-tokenizes to Qwen3's fused ``\n\n\n`` token 1406.
+            # ``token_ids`` sits directly on the choice — matches vLLM's
+            # ``ChatCompletionResponseChoice``. LiteLLM's ``convert_dict_to_response``
+            # folds non-``_CHOICES_FIELDS`` keys into ``provider_specific_fields``,
+            # which is where Harbor's ``_extract_token_ids`` reads them.
             choice: Dict[str, Any] = {
                 "index": i,
-                "message": {
-                    "role": "assistant",
-                    "content": text,
-                    "reasoning_content": None,
-                },
+                "message": {"role": "assistant", "content": text},
                 "finish_reason": _map_finish_reason(r.get("finish_reason")),
                 "logprobs": _openai_logprobs_from_arctic(
                     r, token_ids, self.tokenizer
                 )
                 if want_logprobs
                 else None,
-                # vLLM emits ``token_ids`` DIRECTLY on the choice (see
-                # ``ChatCompletionResponseChoice`` in vllm.entrypoints.openai.
-                # protocol). LiteLLM's convert_dict_to_response then folds any
-                # non-``_CHOICES_FIELDS`` key into ``provider_specific_fields``,
-                # which is exactly where Harbor's ``_extract_token_ids`` looks.
                 "token_ids": token_ids,
             }
             choices.append(choice)
@@ -408,7 +353,7 @@ class ArcticInferenceEngineAdapter(InferenceEngineInterface):
             logger.error("completion arctic_client.generate failed: %s", exc)
             return _server_error(f"arctic_client.generate failed: {exc}")
 
-        texts = [_sanitize_assistant_text(r.get("text", "")) for r in results]
+        texts = [r.get("text", "") for r in results]
         finish_reasons = [_map_finish_reason(r.get("finish_reason")) for r in results]
         prompt_tokens = int(sum(r.get("prompt_len", 0) or 0 for r in results)) or sum(
             self._count_tokens(p) for p in prompts
@@ -484,7 +429,7 @@ class ArcticInferenceEngineAdapter(InferenceEngineInterface):
         response_ids: List[List[int]] = []
         stop_reasons: List[str] = []
         for r in results:
-            text = _sanitize_assistant_text(r.get("text", ""))
+            text = r.get("text", "")
             token_ids = r.get("token_ids") or self.tokenizer.encode(
                 text, add_special_tokens=False
             )
