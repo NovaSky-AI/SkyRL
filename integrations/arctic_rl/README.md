@@ -115,7 +115,35 @@ fields):
 | `ARCTIC_HARBOR_SHIM_PORT`            | `8000`     | starting port; auto-bumps if busy                          |
 | `ARCTIC_HARBOR_SHIM_ADVERTISED_HOST` | `127.0.0.1`| host clients (sandbox) should call; set to the driver node IP if the sandbox runs off-node |
 
-Reference launcher: [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh) (Qwen3-8B, 8 GPUs, CodeContests). Full design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
+### Quick smoke — Harbor CodeContests
+
+Reference launcher: [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh). All knobs are env vars; defaults smoke on Qwen3-0.6B / 4 GPUs so first-launch feedback lands in ~5 min from a cold uv cache.
+
+```bash
+# 1. Set provider credentials
+export WANDB_API_KEY=...            # any wandb host (Snowflake instance auto-selected)
+export DAYTONA_API_KEY=...          # or MODAL_TOKEN_ID / MODAL_TOKEN_SECRET / E2B_API_KEY
+
+# 2. Prep the Harbor task cache (once per dataset; hydrated to $HOME/data/harbor)
+uv run --extra harbor examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests \
+    --output_dir /data/skyrl-runs/arctic_harbor/data/CodeContests
+
+# 3. Launch. Defaults smoke on Qwen3-0.6B / 4 GPUs; scale up via env vars.
+bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
+```
+
+Scale up to the 8B / 8-GPU / colocated CUDA-IPC configuration by exporting
+the topology knobs (all env-overridable in the launcher):
+
+```bash
+NUM_GPUS=8 MODEL=Qwen/Qwen3-8B MAX_MODEL_LEN=16384 \
+    TRAIN_BATCH_SIZE=2 N_SAMPLES_PER_PROMPT=4 MAX_CONCURRENCY=6 \
+    COLOCATE=true ZERO_STAGE=3 CUDA_IPC_WEIGHT_SYNC=true \
+    bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
+```
+
+Full design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
 
 Sandbox tier caveats: Harbor spins one sandbox per trial. Daytona's free tier caps concurrent sandboxes at 10 CPUs; keep `MAX_CONCURRENCY ≤ 8` and prefer smaller batches (`train_batch_size × n_samples_per_prompt ≤ 16`) until you upgrade the tier.
 
