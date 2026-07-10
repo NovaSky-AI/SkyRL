@@ -49,14 +49,14 @@ Any Harbor recipe can be routed through the Arctic RL server (ZoRRo / FCA / Arct
 trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint
 ```
 
-A ready-to-run companion to `run_codecontest.sh` lives next to it — same Qwen3-8B recipe, Arctic backend:
+`run_codecontest_arctic.sh` next to `run_codecontest.sh` is that flag applied to the CodeContests recipe:
 
 ```bash
-export WANDB_API_KEY=your_wandb_api_key
-export DAYTONA_API_KEY=your_daytona_api_key
+export WANDB_API_KEY=... DAYTONA_API_KEY=...
 bash examples/train_integrations/harbor/run_codecontest_arctic.sh
+# smaller smoke:
+NUM_POLICY_GPUS=4 MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 \
+    bash examples/train_integrations/harbor/run_codecontest_arctic.sh
 ```
 
-Override any knob on the CLI (e.g. `NUM_POLICY_GPUS=4 bash examples/train_integrations/harbor/run_codecontest_arctic.sh` for a 4-GPU smoke, or append `trainer.train_batch_size=64 generator.n_samples_per_prompt=16`). The launcher validates credentials up front, exports `ARCTIC_HARBOR_SHIM_HOST/_PORT` for the OpenAI shim, and layers Arctic's pinned stack (vLLM 0.18 + torch 2.10 + FA2) on top of `--extra harbor` without touching `pyproject.toml`.
-
-Batteries-included variant (env-var driven, includes a smaller-model smoke path): [`integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`](../../../integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh). Setup, tier caveats, and the design overview live in [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).
+Setup, `trainer.arctic_rl.*` knobs, and design notes: [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).

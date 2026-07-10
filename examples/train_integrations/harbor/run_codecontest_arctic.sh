@@ -1,39 +1,22 @@
 set -ex
 
-# Companion to run_codecontest.sh — same Harbor recipe, routed through the
-# Arctic RL backend by adding one flag to Harbor's own entrypoint:
-#     trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint
-# Everything else that changes below is mechanical fallout of routing through
-# the Arctic (DeepSpeed + vLLM) stack instead of FSDP + SkyRL's own inference
-# engines: different uv extras, disaggregated placement, and a handful of
-# `trainer.arctic_rl.*` topology knobs. Full design + tier caveats:
-# integrations/arctic_rl/docs/HARBOR_DESIGN.md.
+# run_codecontest.sh with the Arctic RL backend spliced in. Diff versus the
+# FSDP baseline: swap uv extras, add `trainer.override_entrypoint=...`, add
+# `trainer.arctic_rl.*`. See integrations/arctic_rl/docs/HARBOR_DESIGN.md.
 
-# wandb api key.
-# export WANDB_API_KEY=YOUR_KEY_HERE
-
-# Pick the sandbox provider and provide the credentials.
-# export DAYTONA_API_KEY=YOUR_KEY_HERE
-# export MODAL_TOKEN_ID=YOUR_KEY_HERE
-# export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
-
+# export WANDB_API_KEY=...
+# export DAYTONA_API_KEY=...        # or MODAL_TOKEN_ID/_SECRET, E2B_API_KEY
 : "${WANDB_API_KEY:?WANDB_API_KEY not set}"
 : "${DAYTONA_API_KEY:?DAYTONA_API_KEY not set (or pick another sandbox provider)}"
 
-# Bypass any global gitconfig url.insteadOf HTTPS->SSH rewrites — the target
-# training env firewalls SSH, and uv needs plain HTTPS to clone
-# arctic-platform / arctic-inference / megatron-core.
+# Some envs firewall SSH; force plain HTTPS for uv git clones.
 export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
 
-# The Arctic OpenAI shim (integrations/arctic_rl/openai_bridge.py) binds here
-# and Harbor's LiteLLM client calls it. Upstream removed SkyRL's HTTP-endpoint
-# config keys, so host/port flow through env vars to avoid new config surface.
+# Bind + advertise addresses for the Arctic OpenAI shim (openai_bridge.py).
 export ARCTIC_HARBOR_SHIM_HOST="${ARCTIC_HARBOR_SHIM_HOST:-0.0.0.0}"
 export ARCTIC_HARBOR_SHIM_PORT="${ARCTIC_HARBOR_SHIM_PORT:-8000}"
 
-# integrations.arctic_rl.* imports must resolve inside the Ray driver task
-# (uv+ray plugin replays this same invocation on workers, but PYTHONPATH from
-# the launcher makes the first import succeed before the plugin kicks in).
+# Repo root on PYTHONPATH so the driver Ray task can import integrations.arctic_rl.*.
 _REPO_ROOT="$(cd "$(dirname "$0")"/../../.. && pwd)"
 export PYTHONPATH="${_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -60,10 +43,8 @@ LOG_DIR="$STORAGE_ROOT/logs"
 #-----------------------
 # Training setup
 #-----------------------
-# All knobs below accept env-var overrides so you can do e.g.
-#     NUM_POLICY_GPUS=4 MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 \
-#         bash examples/train_integrations/harbor/run_codecontest_arctic.sh
-# for a fast smoke without editing the file.
+# Env-overridable knobs. Smoke on a smaller model with e.g.
+#   NUM_POLICY_GPUS=4 MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 bash $0
 : "${MODEL:=Qwen/Qwen3-8B}"
 : "${SERVED_MODEL_NAME:=$(basename "${MODEL}")}"
 : "${N_SAMPLES_PER_PROMPT:=8}"
@@ -90,46 +71,30 @@ TIS_IMP_RATIO_CAP=2.0
 # Infrastructure setup
 #----------------
 : "${NUM_POLICY_GPUS:=8}"
-: "${NUM_INFERENCE_ENGINES:=${NUM_POLICY_GPUS}}"   # arctic disaggregates: one vLLM replica per GPU
+: "${NUM_INFERENCE_ENGINES:=${NUM_POLICY_GPUS}}"  # arctic runs one vLLM replica per GPU
 : "${TP_SIZE:=1}"
-: "${ENABLE_RATE_LIMITING:=true}"        # Enable rate/concurrency limiting for trajectory submissions
-: "${TRAJECTORIES_PER_SECOND:=5}"        # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
-: "${MAX_CONCURRENCY:=512}"              # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
+: "${ENABLE_RATE_LIMITING:=true}"
+: "${TRAJECTORIES_PER_SECOND:=5}"
+: "${MAX_CONCURRENCY:=512}"
 
 #----------------
-# Arctic RL knobs (defaults match integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh)
+# Arctic RL knobs — see integrations/arctic_rl/README.md for the full table.
 #----------------
-COLOCATE=true                    # share GPUs between DeepSpeed trainer + vLLM inference
-ZERO_STAGE=3                     # 8B under colocation needs ZeRO-3
+COLOCATE=true
+ZERO_STAGE=3
 USE_LIGER=true
-USE_ARCTIC_INFERENCE=true        # Forest Cascade Attention on the rollout
-USE_ZORRO=false                  # prompt-group dedup; leave off for Harbor's non-prefix-shared prompts
-CUDA_IPC_WEIGHT_SYNC=true        # near-zero-copy weight transfer in colocated mode
+USE_ARCTIC_INFERENCE=true
+USE_ZORRO=false                  # off for Harbor: prompts don't share the (problem x N samples) prefix ZoRRo dedupes on
+CUDA_IPC_WEIGHT_SYNC=true
 LOW_MEM_WEIGHT_SYNC=false
-VLLM_ENFORCE_EAGER=false         # graph-compile pays off after step 1
+VLLM_ENFORCE_EAGER=false
 VLLM_GPU_MEM_UTIL=0.7
-ATTN_IMPL=flash_attention_2      # FA3 requires the FA3 wheel; FA2 is safe on Hopper
+ATTN_IMPL=flash_attention_2
 
-# arctic-inference pins vLLM 0.18 + torch 2.10; the default flash-attn wheel
-# in SkyRL's lock targets torch 2.11, so we override with a matching wheel.
+# torch-2.10 flash-attn wheel matching arctic-inference's vLLM 0.18 pin
+# (SkyRL's default lock ships a torch-2.11 wheel).
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
-# uv env swap notes (why this differs from the FSDP launcher):
-#   * `--isolated` bypasses the project lock: arctic-inference[vllm] needs
-#     vLLM 0.18 + torch 2.10, which conflict with the fsdp/megatron pins.
-#   * `--extra skyrl-train --extra harbor` pulls the base training deps +
-#     harbor[daytona,modal]. No `--extra fsdp`: Arctic ships its own trainer.
-#   * `--with arctic-platform arctic-inference[vllm] liger-kernel` provides
-#     the arctic stack.
-#   * `--with 'transformers==4.57.6'` is exact-pinned (not `<5`): raylet
-#     re-spawns workers via `bash -c`, and the shell would parse the
-#     unquoted `<5` as a redirect from fd 5 and kill the worker.
-#   * `--with "flash-attn@..."` overrides SkyRL's default torch-2.11 flash-
-#     attn wheel to match arctic-inference's torch 2.10 pin.
-# SkyRL's uv+ray plugin replays this exact invocation on every Ray worker via
-# `py_executable`, so workers get the same env automatically.
-
-# Run SkyRL command
 uv run --isolated --extra skyrl-train --extra harbor \
   --with arctic-platform \
   --with 'arctic-inference[vllm]' \

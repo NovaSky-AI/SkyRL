@@ -115,30 +115,25 @@ fields):
 | `ARCTIC_HARBOR_SHIM_PORT`            | `8000`     | starting port; auto-bumps if busy                          |
 | `ARCTIC_HARBOR_SHIM_ADVERTISED_HOST` | `127.0.0.1`| host clients (sandbox) should call; set to the driver node IP if the sandbox runs off-node |
 
-### Quick smoke — Harbor CodeContests
+### Harbor CodeContests recipe
 
-Two launchers are provided:
+Two launchers, same underlying entrypoint:
 
-1. **Under Harbor** — [`examples/train_integrations/harbor/run_codecontest_arctic.sh`](../../examples/train_integrations/harbor/run_codecontest_arctic.sh). Line-for-line companion to Harbor's FSDP `run_codecontest.sh`; same Qwen3-8B / 8-GPU recipe with `trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint` and Arctic's uv extras layered in. Use this when you already know the Harbor recipe you want and just want to flip the backend.
-
-2. **Under `integrations/arctic_rl`** — [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh). Env-var-driven, defaults smoke on Qwen3-0.6B / 4 GPUs so first-launch feedback lands in ~5 min from a cold uv cache; scale up via `NUM_GPUS=... MODEL=...`.
+- [`examples/train_integrations/harbor/run_codecontest_arctic.sh`](../../examples/train_integrations/harbor/run_codecontest_arctic.sh) — Qwen3-8B / 8-GPU, mirrors Harbor's FSDP `run_codecontest.sh`.
+- [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh) — env-driven, defaults to a Qwen3-0.6B / 4-GPU smoke (~5 min from a cold uv cache).
 
 ```bash
-# 1. Set provider credentials
-export WANDB_API_KEY=...            # any wandb host (Snowflake instance auto-selected)
-export DAYTONA_API_KEY=...          # or MODAL_TOKEN_ID / MODAL_TOKEN_SECRET / E2B_API_KEY
+export WANDB_API_KEY=...            # WANDB_BASE_URL auto-selects the Snowflake host
+export DAYTONA_API_KEY=...          # or MODAL_TOKEN_ID/_SECRET, E2B_API_KEY
 
-# 2. Prep the Harbor task cache (once per dataset; hydrated to $HOME/data/harbor)
 uv run --extra harbor examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests \
     --output_dir /data/skyrl-runs/arctic_harbor/data/CodeContests
 
-# 3. Launch. Defaults smoke on Qwen3-0.6B / 4 GPUs; scale up via env vars.
 bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
 ```
 
-Scale up to the 8B / 8-GPU / colocated CUDA-IPC configuration by exporting
-the topology knobs (all env-overridable in the launcher):
+Scale up via env vars:
 
 ```bash
 NUM_GPUS=8 MODEL=Qwen/Qwen3-8B MAX_MODEL_LEN=16384 \
@@ -147,9 +142,9 @@ NUM_GPUS=8 MODEL=Qwen/Qwen3-8B MAX_MODEL_LEN=16384 \
     bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
 ```
 
-Full design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
+Design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
 
-Sandbox tier caveats: Harbor spins one sandbox per trial. Daytona's free tier caps concurrent sandboxes at 10 CPUs; keep `MAX_CONCURRENCY ≤ 8` and prefer smaller batches (`train_batch_size × n_samples_per_prompt ≤ 16`) until you upgrade the tier.
+Sandbox concurrency: Harbor spins one sandbox per trial. On Daytona's free tier (10 CPUs total), keep `MAX_CONCURRENCY ≤ 8` and `train_batch_size × n_samples_per_prompt ≤ 16`.
 
 ### `trainer.arctic_rl.*` knobs
 

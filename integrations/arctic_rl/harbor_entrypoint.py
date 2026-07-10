@@ -52,14 +52,8 @@ from .entrypoint import ArcticRLExp
 from .openai_bridge import ArcticInferenceEngineAdapter
 from .trainer import _ArcticInferenceEngineStub
 
-# Env-var knobs (no new config fields; keeps the Harbor recipe surface intact):
-#
-#   ARCTIC_HARBOR_SHIM_HOST         bind address (default 0.0.0.0)
-#   ARCTIC_HARBOR_SHIM_PORT         starting port (default 8000; auto-bumps if busy)
-#   ARCTIC_HARBOR_SHIM_ADVERTISED_HOST
-#                                   host clients (Harbor sandbox) should call
-#                                   (default 127.0.0.1; set to the driver node IP
-#                                    if the sandbox is off-node)
+# Shim bind address env vars. Kept out of the config schema so this recipe
+# adds no new SkyRL config fields. Full table lives in the arctic README.
 _SHIM_HOST_ENV = "ARCTIC_HARBOR_SHIM_HOST"
 _SHIM_PORT_ENV = "ARCTIC_HARBOR_SHIM_PORT"
 

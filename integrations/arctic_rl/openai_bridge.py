@@ -79,17 +79,16 @@ def _map_finish_reason(reason: Optional[str]) -> str:
 def _sanitize_assistant_text(text: str) -> str:
     """Drop leading whitespace on the raw model completion.
 
-    Covers the residual case where a plain (non-thinking) response starts with
-    ``\\n\\n``: concatenated with the chat template's trailing ``\\n`` after
-    ``<|im_start|>assistant`` this becomes three consecutive newlines, which
-    Qwen3's BPE fuses into token 1406 (``\\n\\n\\n``) rather than the expected
-    ``[198, ...]``. That trips SkyRL's assertion in
-    ``get_response_ids_and_loss_mask_from_messages`` that each assistant
-    message starts with the generation prompt tokens.
+    If a plain (non-thinking) response starts with ``\\n\\n``, concatenating
+    with the chat template's trailing ``\\n`` after ``<|im_start|>assistant``
+    produces three consecutive newlines. Qwen3's BPE then fuses those into
+    token 1406 (``\\n\\n\\n``) rather than the expected ``[198, ...]``, which
+    trips SkyRL's assertion in ``get_response_ids_and_loss_mask_from_messages``
+    that assistant messages start with the generation prompt tokens.
 
-    Thinking-mode responses (``<think>...</think>\\n\\n{content}``) already
-    round-trip cleanly once we emit ``reasoning_content=None`` below (see the
-    ``chat_completion`` implementation).
+    Thinking-mode responses (``<think>...</think>\\n\\n{content}``) round-trip
+    cleanly once ``reasoning_content=None`` is set on the choice (see
+    ``chat_completion``).
     """
     return text.lstrip()
 
@@ -202,14 +201,10 @@ def _pick_port(start_port: int, host: str = "0.0.0.0") -> Tuple[int, socket.sock
 class ArcticInferenceEngineAdapter(InferenceEngineInterface):
     """Adapts ``arctic_client`` to SkyRL's ``InferenceEngineInterface``.
 
-    - Serves an OpenAI-compatible HTTP endpoint (FastAPI + uvicorn) that
-      Harbor's LiteLLM agent (inside the Daytona/Modal sandbox) can reach.
-    - Duck-types the interface so ``HarborGenerator`` can call
-      ``get_endpoint_url()`` / ``finish_session()`` on this object directly.
-
-    Weight-sync and other server-side operations bypass this class — the
-    trainer talks to the Arctic RL server through ``arctic_client``, and the
-    server owns the vLLM engine that the shim forwards user requests to.
+    Serves an OpenAI-compatible HTTP endpoint (FastAPI + uvicorn) that
+    Harbor's LiteLLM agent (inside the Daytona/Modal sandbox) can reach.
+    Weight-sync and other server-side operations bypass this class —
+    ``arctic_client`` owns those paths and the vLLM engine the shim forwards to.
     """
 
     def __init__(
@@ -442,9 +437,8 @@ class ArcticInferenceEngineAdapter(InferenceEngineInterface):
     ) -> Dict[str, Any]:
         """Apply the chat template + tokenize without generating.
 
-        HarborGenerator uses this in the multimodal path only; text-only
-        Harbor recipes don't hit it. Kept simple: mirrors what vLLM's own
-        renderer returns.
+        Only used on HarborGenerator's multimodal path; mirrors vLLM's
+        renderer output shape.
         """
         body = request_payload["json"] if "json" in request_payload else request_payload
         messages = body.get("messages", [])
@@ -461,9 +455,8 @@ class ArcticInferenceEngineAdapter(InferenceEngineInterface):
         input_batch: InferenceEngineInput,
         model: Optional[str] = None,
     ) -> InferenceEngineOutput:
-        """Not exercised on the Harbor path (rollouts flow through HTTP), but
-        implemented for interface completeness so anything else that reuses
-        this adapter (e.g. eval, dry-run) still works.
+        """Interface method — unused on the Harbor path (rollouts go over
+        HTTP), implemented so eval / dry-run callers still work.
         """
         prompts = input_batch.get("prompts") or []
         prompt_texts: List[str] = []
