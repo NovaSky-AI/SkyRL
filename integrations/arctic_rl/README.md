@@ -83,6 +83,24 @@ uv run --isolated --extra skyrl-train \
 
 Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to enable Arctic speculative decoding.
 
+## Harbor recipes
+
+The same override flag routes any Harbor recipe through Arctic RL — target the Harbor entrypoint and point `override_entrypoint` at `harbor_entrypoint`:
+
+```
+uv run --isolated --extra skyrl-train --extra harbor \
+    --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel \
+    --with 'transformers==4.57.6' \
+    --with "flash-attn@${FLASH_ATTN_WHL}" \
+    -- python -m examples.train_integrations.harbor.entrypoints.main_harbor \
+        trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint \
+        <existing Harbor recipe overrides>
+```
+
+Reference launcher: [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh) (Qwen3-8B, 8 GPUs, CodeContests). Full design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
+
+Sandbox tier caveats: Harbor spins one sandbox per trial. Daytona's free tier caps concurrent sandboxes at 10 CPUs; keep `MAX_CONCURRENCY ≤ 8` and prefer smaller batches (`train_batch_size × n_samples_per_prompt ≤ 16`) until you upgrade the tier.
+
 ### `trainer.arctic_rl.*` knobs
 
 | Knob | Default | Effect |
@@ -157,17 +175,22 @@ GPU layout:
 ```
 integrations/arctic_rl/
 ├── README.md
-├── trainer.py         ArcticPPOTrainer — routes training to Arctic server actors
-├── generator.py       ArcticGenerator — routes generation to vLLM, scores via skyrl-gym
-├── config.py          ArcticRLTrainerConfig + build_rl_config
-├── entrypoint.py      Dispatched from main_base via trainer.override_entrypoint
+├── trainer.py             ArcticPPOTrainer — routes training to Arctic server actors
+├── generator.py           ArcticGenerator — routes generation to vLLM, scores via skyrl-gym
+├── config.py              ArcticRLTrainerConfig + build_rl_config
+├── entrypoint.py          Dispatched from main_base via trainer.override_entrypoint
+├── harbor_entrypoint.py   Same, dispatched from main_harbor — Harbor rollouts + Arctic training
+├── openai_bridge.py       OpenAI-compatible HTTP shim over arctic_client.generate()
+├── docs/
+│   └── HARBOR_DESIGN.md
 ├── envs/
 │   ├── bird.py
 │   ├── bird_reward.py
 │   └── preprocess_bird.py
 └── examples/
     ├── run_gsm8k_grpo_4gpu.sh
-    └── run_bird_grpo_*.sh      (BIRD recipes — manual data prep today)
+    ├── run_bird_grpo_*.sh                (BIRD recipes — manual data prep today)
+    └── run_codecontest_arctic_harbor.sh  (Harbor recipe — Qwen3-8B, 8 GPUs, CodeContests)
 ```
 
 ## BIRD-SQL: 32B Qwen3 on 32 × H200

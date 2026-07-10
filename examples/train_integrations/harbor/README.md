@@ -39,3 +39,13 @@ uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
 # 3. Launch training
 bash examples/train_integrations/harbor/run_codecontest.sh
 ```
+
+### Arctic RL backend
+
+Any Harbor recipe can be routed through the Arctic RL server (ZoRRo / FCA / Arctic speculative decoding) by adding one CLI flag to `main_harbor`:
+
+```
+trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint
+```
+
+Reference launcher: [`integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`](../../../integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh). Setup, tier caveats, and the design overview live in [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).
