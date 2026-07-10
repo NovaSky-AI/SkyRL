@@ -117,7 +117,11 @@ fields):
 
 ### Quick smoke — Harbor CodeContests
 
-Reference launcher: [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh). All knobs are env vars; defaults smoke on Qwen3-0.6B / 4 GPUs so first-launch feedback lands in ~5 min from a cold uv cache.
+Two launchers are provided:
+
+1. **Under Harbor** — [`examples/train_integrations/harbor/run_codecontest_arctic.sh`](../../examples/train_integrations/harbor/run_codecontest_arctic.sh). Line-for-line companion to Harbor's FSDP `run_codecontest.sh`; same Qwen3-8B / 8-GPU recipe with `trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint` and Arctic's uv extras layered in. Use this when you already know the Harbor recipe you want and just want to flip the backend.
+
+2. **Under `integrations/arctic_rl`** — [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh). Env-var-driven, defaults smoke on Qwen3-0.6B / 4 GPUs so first-launch feedback lands in ~5 min from a cold uv cache; scale up via `NUM_GPUS=... MODEL=...`.
 
 ```bash
 # 1. Set provider credentials
@@ -236,7 +240,14 @@ integrations/arctic_rl/
 └── examples/
     ├── run_gsm8k_grpo_4gpu.sh
     ├── run_bird_grpo_*.sh                (BIRD recipes — manual data prep today)
-    └── run_codecontest_arctic_harbor.sh  (Harbor recipe — Qwen3-8B, 8 GPUs, CodeContests)
+    └── run_codecontest_arctic_harbor.sh  (Harbor recipe — env-driven, 0.6B smoke -> 8B)
+```
+
+Harbor's own recipe folder also carries a fixed-config companion:
+
+```
+examples/train_integrations/harbor/
+    └── run_codecontest_arctic.sh         (Qwen3-8B / 8-GPU parity with run_codecontest.sh)
 ```
 
 ## BIRD-SQL: 32B Qwen3 on 32 × H200

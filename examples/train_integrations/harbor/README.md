@@ -14,7 +14,8 @@ examples/train_integrations/harbor/
   entrypoints/
     main_harbor.py                 # Full training entrypoint
     main_harbor_generate.py        # Generation-only debug entrypoint
-  run_codecontest.sh               # Code contest training (Qwen3-8B)
+  run_codecontest.sh               # Code contest training (Qwen3-8B, FSDP baseline)
+  run_codecontest_arctic.sh        # Same recipe, routed through the Arctic RL backend
   run_harbor_gen.sh                # Debug generation-only
 ```
 
@@ -48,4 +49,14 @@ Any Harbor recipe can be routed through the Arctic RL server (ZoRRo / FCA / Arct
 trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint
 ```
 
-Reference launcher: [`integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`](../../../integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh). Setup, tier caveats, and the design overview live in [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).
+A ready-to-run companion to `run_codecontest.sh` lives next to it — same Qwen3-8B recipe, Arctic backend:
+
+```bash
+export WANDB_API_KEY=your_wandb_api_key
+export DAYTONA_API_KEY=your_daytona_api_key
+bash examples/train_integrations/harbor/run_codecontest_arctic.sh
+```
+
+Override any knob on the CLI (e.g. `NUM_POLICY_GPUS=4 bash examples/train_integrations/harbor/run_codecontest_arctic.sh` for a 4-GPU smoke, or append `trainer.train_batch_size=64 generator.n_samples_per_prompt=16`). The launcher validates credentials up front, exports `ARCTIC_HARBOR_SHIM_HOST/_PORT` for the OpenAI shim, and layers Arctic's pinned stack (vLLM 0.18 + torch 2.10 + FA2) on top of `--extra harbor` without touching `pyproject.toml`.
+
+Batteries-included variant (env-var driven, includes a smaller-model smoke path): [`integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`](../../../integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh). Setup, tier caveats, and the design overview live in [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).

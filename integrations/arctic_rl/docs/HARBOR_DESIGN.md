@@ -43,11 +43,16 @@ on an internal SkyRL module that can move again.
 + integrations/arctic_rl/openai_bridge.py        NEW   InferenceEngineInterface
                                                        + self-contained FastAPI shim
 + integrations/arctic_rl/examples/
-      run_codecontest_arctic_harbor.sh           NEW   reference launcher
+      run_codecontest_arctic_harbor.sh           NEW   env-driven launcher
+                                                       (0.6B smoke -> 8B)
 + integrations/arctic_rl/docs/HARBOR_DESIGN.md   NEW   THIS FILE
++ examples/train_integrations/harbor/
+      run_codecontest_arctic.sh                  NEW   Qwen3-8B / 8-GPU parity
+                                                       with run_codecontest.sh
 ~ examples/train_integrations/harbor/entrypoints/
       main_harbor.py                             +13   override_entrypoint peek
-~ examples/train_integrations/harbor/README.md   +12   cross-link + one-liner
+~ examples/train_integrations/harbor/README.md   +18   Arctic RL backend +
+                                                       companion launcher
 ~ integrations/arctic_rl/README.md               +20   Harbor recipes section
 ```
 
@@ -209,17 +214,33 @@ branch's fork was already dropped in upstream's own arctic_rl refactor
 ### README updates
 
 - `integrations/arctic_rl/README.md`: new "Harbor recipes" section
-  pointing at the reference launcher + this design doc; updated
+  pointing at both reference launchers + this design doc; updated
   file-layout block.
 - `examples/train_integrations/harbor/README.md`: new "Arctic RL
-  backend" subsection cross-linking the arctic_rl README.
+  backend" subsection cross-linking the arctic_rl README and the
+  Harbor-side companion launcher.
 
-## Reference launcher
+## Reference launchers
 
-`integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`
-reproduces the FSDP2 Harbor CodeContests recipe with the Arctic
-backend. Structure mirrors `run_gsm8k_grpo_4gpu.sh` and
-`run_bird_grpo_*.sh`:
+Two launchers are provided; both invoke Harbor's own `main_harbor`
+with the override flag, they only differ in packaging:
+
+1. **Harbor-side companion** —
+   `examples/train_integrations/harbor/run_codecontest_arctic.sh`.
+   Line-for-line parity with the FSDP baseline
+   `examples/train_integrations/harbor/run_codecontest.sh`: same
+   Qwen3-8B / 8-GPU recipe, same knob layout, drop-in comparison
+   for reviewers. Discoverable from the Harbor folder next to the
+   FSDP script.
+
+2. **Env-driven variant** —
+   `integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh`.
+   Structure mirrors `run_gsm8k_grpo_4gpu.sh` /
+   `run_bird_grpo_*.sh`; defaults smoke on Qwen3-0.6B / 4 GPUs so
+   first-launch feedback lands in ~5 min from a cold uv cache, scale
+   up via `NUM_GPUS=... MODEL=...`.
+
+Both use the same uv incantation:
 
 - `uv run --isolated --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel --with 'transformers==4.57.6' --with '<flash-attn wheel>'` — no `uv sync` required.
 - Every knob is a shell variable with a safe default, so a user's own
