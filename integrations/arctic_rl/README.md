@@ -85,10 +85,10 @@ Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to enable Arctic specu
 
 ## Harbor recipes
 
-The same override flag routes any Harbor recipe through Arctic RL — target the Harbor entrypoint and point `override_entrypoint` at `harbor_entrypoint`:
+The same override flag routes any Harbor recipe through Arctic RL. Target Harbor's own entrypoint and point `trainer.override_entrypoint` at `integrations.arctic_rl.harbor_entrypoint`:
 
 ```
-uv run --isolated --extra skyrl-train --extra harbor \
+uv run --isolated --extra harbor \
     --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel \
     --with 'transformers==4.57.6' \
     --with "flash-attn@${FLASH_ATTN_WHL}" \
@@ -96,6 +96,24 @@ uv run --isolated --extra skyrl-train --extra harbor \
         trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint \
         <existing Harbor recipe overrides>
 ```
+
+`harbor_entrypoint` spins up a small OpenAI-compatible FastAPI shim
+(`openai_bridge.ArcticInferenceEngineAdapter`) in front of
+`arctic_client.generate()` before constructing `HarborGenerator`, so
+Harbor's `terminus-2` agent inside the sandbox reaches the exact same
+model weights the trainer is updating — the shim is served in-process
+on the driver and reachable at `http://127.0.0.1:8000/v1` by default.
+Weight sync (NCCL or CUDA-IPC in colocated mode) still flows through
+the Arctic RL server, not through the shim.
+
+The shim's bind/advertise addresses are env-only (no new SkyRL config
+fields):
+
+| env var                              | default    | notes                                                      |
+|--------------------------------------|------------|------------------------------------------------------------|
+| `ARCTIC_HARBOR_SHIM_HOST`            | `0.0.0.0`  | bind address (needed on `0.0.0.0` for off-driver sandboxes)|
+| `ARCTIC_HARBOR_SHIM_PORT`            | `8000`     | starting port; auto-bumps if busy                          |
+| `ARCTIC_HARBOR_SHIM_ADVERTISED_HOST` | `127.0.0.1`| host clients (sandbox) should call; set to the driver node IP if the sandbox runs off-node |
 
 Reference launcher: [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh) (Qwen3-8B, 8 GPUs, CodeContests). Full design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
 

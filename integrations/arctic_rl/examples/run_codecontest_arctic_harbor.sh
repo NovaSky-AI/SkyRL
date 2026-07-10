@@ -92,7 +92,10 @@ mkdir -p "${TRIALS_DIR}" "${CKPTS_DIR}" "${EXPORTS_DIR}" "${LOG_DIR}"
 : "${ATTN_IMPL:=flash_attention_2}"     # FA3 requires the FA3 wheel; FA2 is safe on Hopper
 
 # ---------- Dr. GRPO / loss knobs (parity with the FSDP baseline recipe) ----------
-: "${LOSS_REDUCTION:=seq_mean_token_sum_norm}"
+# Note: with step-wise Harbor training, upstream's run_codecontest.sh uses
+# ``token_mean`` for prefix-merge invariance. If you flip this on your own
+# launcher, keep it consistent with generator.merge_stepwise_output below.
+: "${LOSS_REDUCTION:=token_mean}"
 : "${GRPO_NORM_BY_STD:=false}"
 : "${USE_KL_LOSS:=false}"
 : "${APPLY_OVERLONG_FILTERING:=true}"
@@ -100,10 +103,13 @@ mkdir -p "${TRIALS_DIR}" "${CKPTS_DIR}" "${EXPORTS_DIR}" "${LOG_DIR}"
 : "${MICRO_TRAIN_BATCH_PER_GPU:=1}"
 
 # ---------- Harbor HTTP endpoint (Arctic OpenAI shim serves here) ----------
-# Bind to 0.0.0.0 so the Daytona sandbox can reach us; port 8000 matches
-# the FSDP baseline launcher for parity.
+# The shim binds on HTTP_ENDPOINT_HOST and starts port-searching from
+# HTTP_ENDPOINT_PORT (upstream removed the corresponding SkyRL config keys;
+# these now flow through env vars so we don't add new config surface).
 : "${HTTP_ENDPOINT_HOST:=0.0.0.0}"
 : "${HTTP_ENDPOINT_PORT:=8000}"
+export ARCTIC_HARBOR_SHIM_HOST="${HTTP_ENDPOINT_HOST}"
+export ARCTIC_HARBOR_SHIM_PORT="${HTTP_ENDPOINT_PORT}"
 
 # Chat template — use SkyRL's bundled Qwen3 thinking template for parity with
 # the FSDP Harbor baseline (see examples/train_integrations/harbor/run_codecontest.sh).
@@ -194,15 +200,13 @@ exec uv run --isolated --extra skyrl-train --extra harbor \
     generator.inference_engine.backend=vllm \
     generator.inference_engine.run_engines_locally=true \
     generator.inference_engine.weight_sync_backend=nccl \
-    generator.inference_engine.async_engine=true \
     generator.inference_engine.enforce_eager="${VLLM_ENFORCE_EAGER}" \
-    generator.inference_engine.enable_http_endpoint=true \
-    generator.inference_engine.http_endpoint_host="${HTTP_ENDPOINT_HOST}" \
-    generator.inference_engine.http_endpoint_port="${HTTP_ENDPOINT_PORT}" \
     generator.inference_engine.engine_init_kwargs.chat_template="${CHAT_TEMPLATE_PATH}" \
     generator.inference_engine.engine_init_kwargs.max_model_len="${MAX_MODEL_LEN}" \
     generator.inference_engine.engine_init_kwargs.enable_log_requests=false \
     generator.batched=false \
+    generator.step_wise_trajectories=true \
+    generator.merge_stepwise_output=true \
     generator.n_samples_per_prompt="${N_SAMPLES_PER_PROMPT}" \
     generator.eval_n_samples_per_prompt=1 \
     generator.apply_overlong_filtering="${APPLY_OVERLONG_FILTERING}" \
