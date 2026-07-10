@@ -18,8 +18,8 @@ uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
-    dataset_name=yahma/alpaca-cleaned \
-    dataset_split="train[:100]" \
+    "train_datasets=[yahma/alpaca-cleaned]" \
+    "train_dataset_splits=[train[:100]]" \
     messages_key=messages \
     max_length=512 \
     num_steps=10 \

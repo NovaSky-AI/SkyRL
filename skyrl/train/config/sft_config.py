@@ -147,8 +147,23 @@ class SFTConfig(BaseConfig):
 
     # ---- SFT-specific flat fields ----
     strategy: str = "megatron"  # "megatron" or "fsdp"
-    dataset_name: str = "yahma/alpaca-cleaned"
-    dataset_split: str = "train[:100]"
+    dataset_name: Optional[str] = None
+    """Deprecated: use ``train_datasets`` instead. Translated to ``train_datasets=[dataset_name]``
+    with a DeprecationWarning. Cannot be combined with ``train_datasets``."""
+    dataset_split: Optional[str] = None
+    """Deprecated: use ``train_dataset_splits`` instead."""
+    train_datasets: Optional[List[str]] = None
+    """HuggingFace dataset names (or paths) to train on. With multiple datasets, batches are
+    mixed per-source by :class:`~skyrl.train.dataset.samplers.DataMixingSampler` according to
+    ``train_dataset_weights``. Defaults to ``["yahma/alpaca-cleaned"]``. All datasets must share
+    the same ``messages_key``/``tools_key``/``system_key`` columns and modality."""
+    train_dataset_splits: Optional[List[str]] = None
+    """Split to load for each entry of ``train_datasets`` (e.g. ``"train[:50000]"``). Must match
+    ``train_datasets`` in length. Defaults to ``["train[:100]"]``."""
+    train_dataset_weights: Optional[List[float]] = None
+    """Per-dataset sampling weights: the approximate per-batch ratio of samples drawn from each
+    dataset, independent of dataset sizes. Only supported with ``sampler="random"`` (custom
+    samplers receive ratios via ``sampler_kwargs``). Defaults to equal mixing (``1/N`` each)."""
     messages_key: str = "messages"  # column name for chat-format datasets
     tools_key: str = "tools"
     """Column name holding per-row tool/function schemas for tool-calling datasets
@@ -158,12 +173,22 @@ class SFTConfig(BaseConfig):
     """Column name holding a per-row system prompt to prepend when ``messages``
     does not already start with a system turn. Ignored if absent."""
 
-    # ---- Evaluation dataset ----
+    # ---- Evaluation datasets ----
     eval_dataset_name: Optional[str] = None
-    """HuggingFace dataset name (or path) used to compute eval loss during training.
-    When ``None`` (default), eval is disabled."""
-    eval_dataset_split: str = "validation"
-    """Split of the eval dataset to load (e.g. ``"validation"``, ``"test[:500]"``)."""
+    """Deprecated: use ``eval_datasets`` instead. Translated to ``eval_datasets=[eval_dataset_name]``
+    with a DeprecationWarning. Cannot be combined with ``eval_datasets``."""
+    eval_dataset_split: Optional[str] = None
+    """Deprecated: use ``eval_dataset_splits`` instead."""
+    eval_datasets: Optional[List[str]] = None
+    """HuggingFace dataset names (or paths) used to compute eval loss during training.
+    When ``None`` (default), eval is disabled. Metrics are logged per dataset under
+    ``eval/{name}/`` (nested even with a single eval dataset)."""
+    eval_dataset_splits: Optional[List[str]] = None
+    """Split to load for each entry of ``eval_datasets`` (e.g. ``"validation"``, ``"test[:500]"``).
+    Must match ``eval_datasets`` in length. Defaults to ``["validation"]`` on the deprecated path."""
+    eval_dataset_names: Optional[List[str]] = None
+    """Optional shorthand names used only for logging (``eval/{name}/loss``). Must be unique and
+    match ``eval_datasets`` in length. Defaults to each dataset name with ``/`` replaced by ``_``."""
     eval_interval: int = 0
     """Run eval every N training steps. Eval also runs once at the end of training
     when an eval dataset is configured. ``0`` disables periodic eval."""
@@ -286,6 +311,125 @@ class SFTConfig(BaseConfig):
 _VALID_STRATEGIES = ("megatron", "fsdp")
 _VALID_SAMPLERS = ("random", "sequential", "custom")
 
+_DEFAULT_TRAIN_DATASET = "yahma/alpaca-cleaned"
+_DEFAULT_TRAIN_SPLIT = "train[:100]"
+_DEFAULT_EVAL_SPLIT = "validation"
+
+
+def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
+    """Translate the deprecated single-dataset fields into the list-based fields
+    and validate the dataset configuration.
+
+    Idempotent, so it is safe to call from both ``validate_sft_cfg`` and
+    ``SFTTrainer.__init__`` (the latter covers trainers constructed with a
+    pre-built ``skyrl_cfg``, which bypass ``build_skyrl_config_for_sft``).
+
+    Post-conditions:
+
+    - ``train_datasets``/``train_dataset_splits`` are equal-length non-empty lists;
+      ``train_dataset_weights`` too when ``sampler="random"`` (``None`` otherwise).
+    - ``eval_datasets`` is ``None`` (eval disabled) or an equal-length triple with
+      ``eval_dataset_splits``/``eval_dataset_names`` (names unique).
+    - The deprecated ``dataset_name``/``dataset_split``/``eval_dataset_name``/
+      ``eval_dataset_split`` fields are ``None``.
+    """
+    import warnings
+
+    # ---- Train datasets ----
+    if cfg.train_datasets is not None and (cfg.dataset_name is not None or cfg.dataset_split is not None):
+        raise ValueError(
+            "Specify only one of train_datasets/train_dataset_splits and the deprecated "
+            "dataset_name/dataset_split, not both."
+        )
+    if cfg.train_datasets is None:
+        if cfg.dataset_name is not None or cfg.dataset_split is not None:
+            warnings.warn(
+                "dataset_name/dataset_split are deprecated; use train_datasets/train_dataset_splits instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        cfg.train_datasets = [cfg.dataset_name if cfg.dataset_name is not None else _DEFAULT_TRAIN_DATASET]
+        if cfg.train_dataset_splits is None:
+            cfg.train_dataset_splits = [cfg.dataset_split if cfg.dataset_split is not None else _DEFAULT_TRAIN_SPLIT]
+    cfg.dataset_name = None
+    cfg.dataset_split = None
+
+    if len(cfg.train_datasets) == 0:
+        raise ValueError("train_datasets must be a non-empty list.")
+    if cfg.train_dataset_splits is None or len(cfg.train_dataset_splits) != len(cfg.train_datasets):
+        raise ValueError(
+            f"train_dataset_splits must specify one split per entry of train_datasets "
+            f"({len(cfg.train_datasets)} datasets), got {cfg.train_dataset_splits}."
+        )
+    if cfg.train_dataset_weights is not None:
+        if cfg.sampler != "random":
+            raise ValueError(
+                f"train_dataset_weights is only supported with sampler='random' (weighted mixing via "
+                f"DataMixingSampler), got sampler='{cfg.sampler}'. Pass mixing ratios to a custom "
+                f"sampler via sampler_kwargs instead."
+            )
+        if len(cfg.train_dataset_weights) != len(cfg.train_datasets):
+            raise ValueError(
+                f"train_dataset_weights must specify one weight per entry of train_datasets "
+                f"({len(cfg.train_datasets)} datasets), got {cfg.train_dataset_weights}."
+            )
+        if any(w <= 0 for w in cfg.train_dataset_weights):
+            raise ValueError(f"train_dataset_weights must all be > 0, got {cfg.train_dataset_weights}.")
+    elif cfg.sampler == "random":
+        # Default: equal mixing. Left as None for other samplers (sequential
+        # ignores mixing; custom samplers take ratios via sampler_kwargs).
+        cfg.train_dataset_weights = [1.0 / len(cfg.train_datasets)] * len(cfg.train_datasets)
+
+    # ---- Eval datasets ----
+    if cfg.eval_datasets is not None and (cfg.eval_dataset_name is not None or cfg.eval_dataset_split is not None):
+        raise ValueError(
+            "Specify only one of eval_datasets/eval_dataset_splits and the deprecated "
+            "eval_dataset_name/eval_dataset_split, not both."
+        )
+    if cfg.eval_datasets is None and cfg.eval_dataset_name is not None:
+        warnings.warn(
+            "eval_dataset_name/eval_dataset_split are deprecated; use eval_datasets/eval_dataset_splits instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cfg.eval_datasets = [cfg.eval_dataset_name]
+        if cfg.eval_dataset_splits is None:
+            cfg.eval_dataset_splits = [
+                cfg.eval_dataset_split if cfg.eval_dataset_split is not None else _DEFAULT_EVAL_SPLIT
+            ]
+    cfg.eval_dataset_name = None
+    cfg.eval_dataset_split = None
+
+    if cfg.eval_datasets is None:
+        if cfg.eval_dataset_splits is not None or cfg.eval_dataset_names is not None:
+            raise ValueError("eval_dataset_splits/eval_dataset_names require eval_datasets to be set.")
+        return
+    if len(cfg.eval_datasets) == 0:
+        raise ValueError("eval_datasets must be a non-empty list when set.")
+    if cfg.eval_dataset_splits is None or len(cfg.eval_dataset_splits) != len(cfg.eval_datasets):
+        raise ValueError(
+            f"eval_dataset_splits must specify one split per entry of eval_datasets "
+            f"({len(cfg.eval_datasets)} datasets), got {cfg.eval_dataset_splits}."
+        )
+    if cfg.eval_dataset_names is None:
+        names = [name.replace("/", "_") for name in cfg.eval_datasets]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Default eval dataset names collide ({names}), e.g. the same dataset with two "
+                f"different splits. Set eval_dataset_names explicitly to disambiguate."
+            )
+        cfg.eval_dataset_names = names
+    else:
+        if len(cfg.eval_dataset_names) != len(cfg.eval_datasets):
+            raise ValueError(
+                f"eval_dataset_names must specify one name per entry of eval_datasets "
+                f"({len(cfg.eval_datasets)} datasets), got {cfg.eval_dataset_names}."
+            )
+        if any(not name for name in cfg.eval_dataset_names):
+            raise ValueError(f"eval_dataset_names must be non-empty strings, got {cfg.eval_dataset_names}.")
+        if len(set(cfg.eval_dataset_names)) != len(cfg.eval_dataset_names):
+            raise ValueError(f"eval_dataset_names must be unique, got {cfg.eval_dataset_names}.")
+
 
 def validate_sft_cfg(cfg: SFTConfig) -> None:
     """Validate SFT-specific configuration.
@@ -293,6 +437,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     Only checks fields that are relevant to SFT training, unlike
     ``validate_cfg`` which includes RL-specific validations.
     """
+    _normalize_dataset_cfg(cfg)
     if cfg.strategy == "fsdp2":
         import warnings
 
@@ -335,10 +480,10 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     # Eval config
     if cfg.eval_interval < 0:
         raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
-    if cfg.eval_interval > 0 and not cfg.eval_dataset_name:
-        raise ValueError("eval_interval > 0 requires eval_dataset_name to be set")
-    if cfg.eval_before_train and cfg.eval_dataset_name is None:
-        raise ValueError("eval_before_train=True requires eval_dataset_name to be set")
+    if cfg.eval_interval > 0 and not cfg.eval_datasets:
+        raise ValueError("eval_interval > 0 requires eval_datasets to be set")
+    if cfg.eval_before_train and cfg.eval_datasets is None:
+        raise ValueError("eval_before_train=True requires eval_datasets to be set")
 
     #  checks for megatron
     if cfg.strategy == "megatron":

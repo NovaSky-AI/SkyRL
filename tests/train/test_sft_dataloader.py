@@ -1,6 +1,6 @@
-"""CPU tests for the SFT stateful dataloader and custom samplers.
+"""CPU tests for the SFT stateful dataloader and samplers.
 
-Covers the RFC test plan:
+Covers the stateful-dataloader RFC test plan:
   - default random dataloader order is deterministic for identical seeds
   - random dataloader order differs across different seeds
   - sequential sampler yields examples in order
@@ -8,10 +8,18 @@ Covers the RFC test plan:
   - custom sampler state is included in the dataloader checkpoint
   - data-mixing / curriculum samplers resume correctly
 
-The custom-sampler path is exercised with a small test-local sampler (the core
-library ships only ``StatefulSequentialSampler``; curriculum learning is a
-user-supplied example under ``examples/train/sft/curriculum_sampler.py``, which
-is loaded by file path here to keep it covered).
+and the multi-dataset RFC (#1875) test plan:
+  - user-specified train_dataset_weights: per-batch source representation
+    tracks the weights
+  - default weights: equal mixing across datasets
+  - mixing ratios are independent of the individual dataset sizes
+  - DataMixingSampler draws a fresh plan every epoch and resumes exactly
+    (mid-epoch and across epoch boundaries) via its RNG state
+
+The custom-sampler path is exercised with small test-local samplers (curriculum
+learning remains a user-supplied example under
+``examples/train/sft/curriculum_sampler.py``, loaded by file path here to keep
+it covered).
 
 Run::
 
@@ -27,7 +35,11 @@ import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.config import SFTConfig
-from skyrl.train.dataset.samplers import StatefulSequentialSampler, import_sampler_class
+from skyrl.train.dataset.samplers import (
+    DataMixingSampler,
+    StatefulSequentialSampler,
+    import_sampler_class,
+)
 from skyrl.train.sft_trainer import SFTTrainer
 
 # ---------------------------------------------------------------------------
@@ -72,6 +84,18 @@ class _ExampleKwargSampler(torch.utils.data.Sampler[int]):
 
 
 _CUSTOM_SAMPLER_PATH = f"{__name__}._ExampleKwargSampler"
+
+
+class _LengthsAwareSampler(_ExampleKwargSampler):
+    """Test-local custom sampler that accepts the ``lengths`` kwarg the trainer
+    injects when multiple training datasets are configured."""
+
+    def __init__(self, data_source, lengths=None, num_samples=None, seed=0):
+        super().__init__(data_source, num_samples=num_samples, seed=seed)
+        self.lengths = lengths
+
+
+_LENGTHS_SAMPLER_PATH = f"{__name__}._LengthsAwareSampler"
 
 
 def _load_example_cls(filename: str, class_name: str):
@@ -202,6 +226,55 @@ class TestBuildTrainSampler:
         trainer = _make_trainer(sampler="bogus")
         with pytest.raises(ValueError, match="Unknown sampler"):
             trainer.build_train_sampler(list(range(10)))
+
+    def test_random_single_source_lengths_returns_none(self):
+        trainer = _make_trainer(sampler="random")
+        assert trainer.build_train_sampler(list(range(10)), dataset_lengths=[10]) is None
+
+    def test_random_multi_dataset_returns_mixing_sampler(self):
+        trainer = _make_trainer(sampler="random", train_dataset_weights=[0.8, 0.2], seed=11)
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[10, 10])
+        assert isinstance(sampler, DataMixingSampler)
+        assert len(sampler) == 20
+        # Seeded from the config so runs are reproducible.
+        other = _make_trainer(sampler="random", train_dataset_weights=[0.8, 0.2], seed=11).build_train_sampler(
+            list(range(20)), dataset_lengths=[10, 10]
+        )
+        assert list(sampler) == list(other)
+
+    def test_random_multi_dataset_defaults_to_equal_weights(self):
+        # Bare trainers skip config normalization; equal mixing is the fallback.
+        trainer = _make_trainer(sampler="random")
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[10, 10])
+        assert isinstance(sampler, DataMixingSampler)
+
+    def test_custom_multi_dataset_injects_lengths(self):
+        trainer = _make_trainer(
+            sampler="custom",
+            sampler_class_path=_LENGTHS_SAMPLER_PATH,
+            sampler_kwargs={"num_samples": 8},
+        )
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[12, 8])
+        assert isinstance(sampler, _LengthsAwareSampler)
+        assert sampler.lengths == [12, 8]
+
+    def test_custom_multi_dataset_user_lengths_win(self):
+        trainer = _make_trainer(
+            sampler="custom",
+            sampler_class_path=_LENGTHS_SAMPLER_PATH,
+            sampler_kwargs={"num_samples": 8, "lengths": [1, 19]},
+        )
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[12, 8])
+        assert sampler.lengths == [1, 19]
+
+    def test_custom_single_dataset_does_not_inject_lengths(self):
+        trainer = _make_trainer(
+            sampler="custom",
+            sampler_class_path=_LENGTHS_SAMPLER_PATH,
+            sampler_kwargs={"num_samples": 8},
+        )
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[20])
+        assert sampler.lengths is None
 
 
 # ---------------------------------------------------------------------------
@@ -451,99 +524,143 @@ class TestCurriculumExample:
 
 
 # ---------------------------------------------------------------------------
-# Example: DataMixingSampler (WeightedRandomSampler-based, loaded by path)
+# DataMixingSampler (core)
 # ---------------------------------------------------------------------------
 
 
-class TestDataMixingExample:
+class TestDataMixingSampler:
     # data = two sources of 10 each: indices [0,10) = source 0, [10,20) = source 1.
     DATA = list(range(20))
     LENGTHS = [10, 10]
 
+    def _make(self, weights=(0.7, 0.3), num_samples=40, seed=3, data=None, lengths=None):
+        return DataMixingSampler(
+            data if data is not None else self.DATA,
+            lengths=lengths if lengths is not None else self.LENGTHS,
+            weights=list(weights),
+            num_samples=num_samples,
+            seed=seed,
+        )
+
     def test_len_matches_num_samples(self):
-        cls = _load_data_mixing_cls()
-        sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5], num_samples=64)
+        sampler = self._make(weights=[0.5, 0.5], num_samples=64)
         assert len(sampler) == 64
 
+    def test_num_samples_defaults_to_dataset_length(self):
+        sampler = DataMixingSampler(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5])
+        assert len(sampler) == 20
+
+    def test_example_file_reexports_core_class(self):
+        assert _load_data_mixing_cls() is DataMixingSampler
+
     def test_validates_lengths_sum(self):
-        cls = _load_data_mixing_cls()
         with pytest.raises(ValueError, match="must equal len"):
-            cls(self.DATA, lengths=[10, 5], weights=[0.5, 0.5])
+            DataMixingSampler(self.DATA, lengths=[10, 5], weights=[0.5, 0.5])
 
     def test_validates_weights_align(self):
-        cls = _load_data_mixing_cls()
         with pytest.raises(ValueError, match="must align"):
-            cls(self.DATA, lengths=self.LENGTHS, weights=[1.0])
+            DataMixingSampler(self.DATA, lengths=self.LENGTHS, weights=[1.0])
 
     def test_rejects_degenerate_weights(self):
-        cls = _load_data_mixing_cls()
         with pytest.raises(ValueError, match="non-negative with a positive sum"):
-            cls(self.DATA, lengths=self.LENGTHS, weights=[0.0, 0.0])
+            DataMixingSampler(self.DATA, lengths=self.LENGTHS, weights=[0.0, 0.0])
 
     def test_deterministic_for_same_seed(self):
-        cls = _load_data_mixing_cls()
-        a = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
-        b = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
+        a = list(self._make(weights=[0.8, 0.2], num_samples=200, seed=1))
+        b = list(self._make(weights=[0.8, 0.2], num_samples=200, seed=1))
         assert a == b
 
     def test_differs_for_different_seed(self):
-        cls = _load_data_mixing_cls()
-        a = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=1))
-        b = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=200, seed=2))
+        a = list(self._make(weights=[0.8, 0.2], num_samples=200, seed=1))
+        b = list(self._make(weights=[0.8, 0.2], num_samples=200, seed=2))
         assert a != b
 
     def test_weighting_biases_the_mix(self):
-        cls = _load_data_mixing_cls()
         # Source 0 weighted 4x source 1 -> ~80% of draws from indices [0,10).
-        plan = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.8, 0.2], num_samples=4000, seed=7))
+        plan = list(self._make(weights=[0.8, 0.2], num_samples=4000, seed=7))
         frac_source0 = sum(1 for idx in plan if idx < 10) / len(plan)
         assert 0.75 < frac_source0 < 0.85, frac_source0
 
     def test_equal_weights_balanced(self):
-        cls = _load_data_mixing_cls()
-        plan = list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5], num_samples=4000, seed=7))
+        plan = list(self._make(weights=[0.5, 0.5], num_samples=4000, seed=7))
         frac_source0 = sum(1 for idx in plan if idx < 10) / len(plan)
         assert 0.45 < frac_source0 < 0.55, frac_source0
 
     def test_size_imbalance_still_matches_weights(self):
-        cls = _load_data_mixing_cls()
         # Source 0 is tiny (2 examples) but weighted equally; source-level mix
         # should still be ~50/50 because weight is divided across examples.
         data = list(range(12))  # source 0: [0,2), source 1: [2,12)
-        plan = list(cls(data, lengths=[2, 10], weights=[0.5, 0.5], num_samples=4000, seed=9))
+        plan = list(self._make(data=data, lengths=[2, 10], weights=[0.5, 0.5], num_samples=4000, seed=9))
         frac_source0 = sum(1 for idx in plan if idx < 2) / len(plan)
         assert 0.45 < frac_source0 < 0.55, frac_source0
 
+    def test_fresh_plan_each_epoch(self):
+        sampler = self._make()
+        epoch1, epoch2 = list(sampler), list(sampler)
+        assert epoch1 != epoch2, "each epoch must draw a fresh plan"
+        # ...but the whole multi-epoch stream is reproducible from the seed.
+        other = self._make()
+        assert [list(other), list(other)] == [epoch1, epoch2]
+
     def test_state_dict_resume(self):
-        cls = _load_data_mixing_cls()
-        sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3)
+        sampler = self._make()
         it = iter(sampler)
         consumed = [next(it) for _ in range(11)]
         state = sampler.state_dict()
-        assert state == {"position": 11}
+        assert state["position"] == 11
+        assert "generator_state" in state
         rest = list(it)
 
-        resumed = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3)
+        # A different construction seed: the checkpointed generator state alone
+        # must determine the restored plan.
+        resumed = self._make(seed=999)
         resumed.load_state_dict(state)
         assert list(resumed) == rest
-        assert consumed + rest == list(cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=3))
+        assert consumed + rest == list(self._make())
+
+    def test_mid_epoch_resume_matches_across_epoch_boundary(self):
+        sampler = self._make()
+        it = iter(sampler)
+        [next(it) for _ in range(11)]
+        state = sampler.state_dict()
+        # Uninterrupted: rest of the current epoch, then the full next epoch.
+        expected = list(it) + list(sampler)
+
+        resumed = self._make(seed=999)
+        resumed.load_state_dict(state)
+        assert list(resumed) + list(resumed) == expected
+
+    def test_between_epoch_resume_draws_same_next_epoch(self):
+        sampler = self._make()
+        list(sampler)  # exhaust epoch 1
+        state = sampler.state_dict()
+        epoch2 = list(sampler)
+
+        resumed = self._make(seed=999)
+        resumed.load_state_dict(state)
+        assert list(resumed) == epoch2
+
+    def test_old_format_position_only_state_loads(self):
+        # Checkpoints from the old example sampler carry only the position.
+        sampler = self._make()
+        sampler.load_state_dict({"position": 5})
+        assert sampler.position == 5
+        assert len(list(sampler)) == 35  # resumes the cursor best-effort
+
+    def _make_dl(self):
+        sampler = self._make(num_samples=40, seed=5)
+        return StatefulDataLoader(
+            self.DATA,
+            batch_size=4,
+            sampler=sampler,
+            shuffle=False,
+            drop_last=True,
+            collate_fn=lambda x: list(x),
+        )
 
     def test_resume_through_stateful_dataloader(self):
         """The sampler's state is captured in the dataloader checkpoint and resumes."""
-        cls = _load_data_mixing_cls()
-
-        def make_dl():
-            sampler = cls(self.DATA, lengths=self.LENGTHS, weights=[0.7, 0.3], num_samples=40, seed=5)
-            return StatefulDataLoader(
-                self.DATA,
-                batch_size=4,
-                sampler=sampler,
-                shuffle=False,
-                drop_last=True,
-                collate_fn=lambda x: list(x),
-            )
-
-        dl = make_dl()
+        dl = self._make_dl()
         it = iter(dl)
         next(it)
         next(it)
@@ -551,7 +668,62 @@ class TestDataMixingExample:
         assert "_sampler_iter_state" in state
         rest_full = [b for b in it]
 
-        dl2 = make_dl()
+        dl2 = self._make_dl()
         dl2.load_state_dict(state)
         rest_resumed = [b for b in dl2]
         assert rest_full == rest_resumed
+
+    def test_dataloader_epochs_differ_and_resume_after_boundary(self):
+        """Fresh plans survive the trainer's epoch-boundary iter() re-creation,
+        and a checkpoint taken in a later epoch resumes exactly."""
+        dl = self._make_dl()
+        epoch1 = list(dl)
+        it = iter(dl)  # epoch 2: the sampler re-plans on the fresh iterator
+        first_batch = next(it)
+        state = dl.state_dict()
+        rest_full = [b for b in it]
+        assert [first_batch] + rest_full != epoch1, "epoch 2 must be a fresh plan"
+
+        dl2 = self._make_dl()
+        dl2.load_state_dict(state)
+        rest_resumed = [b for b in dl2]
+        assert rest_full == rest_resumed
+
+
+# ---------------------------------------------------------------------------
+# Multi-dataset mixing through build_train_dataloader (RFC #1875 test plan)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiDatasetMixing:
+    """Per-batch source representation tracks ``train_dataset_weights``,
+    independent of the individual dataset sizes."""
+
+    @staticmethod
+    def _source0_fraction(trainer, data, dataset_lengths, boundary, epochs=10):
+        dl = trainer.build_train_dataloader(data, dataset_lengths=dataset_lengths)
+        drawn = []
+        for _ in range(epochs):
+            drawn.extend(_flatten(dl))
+        return sum(1 for idx in drawn if idx < boundary) / len(drawn)
+
+    def test_user_weights_reflected_in_batches(self):
+        # Two sources of 100 each, weighted 80/20.
+        data = list(range(200))
+        trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.8, 0.2])
+        frac = self._source0_fraction(trainer, data, [100, 100], boundary=100)
+        assert 0.75 < frac < 0.85, frac
+
+    def test_default_weights_mix_equally(self):
+        data = list(range(200))
+        trainer = _make_trainer(sampler="random", batch_size=20, seed=3)
+        frac = self._source0_fraction(trainer, data, [100, 100], boundary=100)
+        assert 0.45 < frac < 0.55, frac
+
+    def test_mixing_independent_of_dataset_sizes(self):
+        # Source 0 has 20 examples, source 1 has 180; equal weights should
+        # still yield ~50/50 representation in batches.
+        data = list(range(200))
+        trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.5, 0.5])
+        frac = self._source0_fraction(trainer, data, [20, 180], boundary=20)
+        assert 0.45 < frac < 0.55, frac
