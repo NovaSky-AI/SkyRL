@@ -46,9 +46,9 @@ LR=1e-5 # LoRA: higher LR for adapters (matches reference lora script; full-FT u
 # lora config (rank 32 per request; alpha=rank 1:1 as in reference lora script)
 LORA_RANK=32
 LORA_ALPHA=32
-# Shared-outer grouped-expert LoRA: fc1 (gate_up) lora_A and fc2 (down) lora_B are
-# shared across all 256 experts; the inner matrices are trained per expert.
-EXPERTS_SHARED_OUTER_LORAS=true
+# Set to true for shared-outer grouped-expert LoRA: fc1 (gate_up) lora_A and fc2 (down)
+# lora_B are shared across all 256 experts; the inner matrices are trained per expert.
+EXPERTS_SHARED_OUTER_LORAS=false
 
 # megatron config
 MEGATRON_TP=4
