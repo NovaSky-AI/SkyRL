@@ -211,6 +211,42 @@ prefix-merge invariance holds.
 Shim host/port + `trainer.arctic_rl.*` knob tables live in the arctic
 [`README.md`](../README.md) — no duplication here.
 
+### Launcher invariants
+
+Two settings are locked to non-default values in both launchers; changing
+either without understanding the interaction below will crash Harbor
+training under Arctic on any multi-turn dataset.
+
+- **`APPLY_OVERLONG_FILTERING=false`.** Upstream
+  `arctic_platform.rl.utils.batch.split_dict` raises
+  `IndexError: list index out of range` when the surviving batch shrinks
+  below `num_workers` (== `NUM_GPUS` under colocation). Overlong-filtering
+  strips trajectories that exceed the context budget, and CodeContests
+  routinely produces enough of them to trigger the split. Keeping overlong
+  trajectories in the batch (as zero-reward samples) is the right learning
+  signal *and* sidesteps the upstream bug — no arctic-platform patch
+  required.
+- **`harbor_trial_config.agent.kwargs.model_info.max_input_tokens` and
+  `max_output_tokens` point at `MAX_PROMPT_LENGTH` / `MAX_GENERATE_LENGTH`,
+  not `MAX_MODEL_LEN`.** Otherwise Harbor packs a full-context prompt and
+  then requests another full-context response, so any 2+ turn trial
+  eventually blows past the vLLM engine's `max_model_len` and gets rejected
+  with `VLLMValidationError: input N > max_model_len`. Enough rejections in
+  one batch → same `split_dict` crash. The Harbor-side companion launcher
+  matches the FSDP baseline recipe and simply omits these overrides so
+  Harbor's own defaults apply.
+
+### Preflight
+
+Both launchers do a non-destructive preflight before spinning up the uv
+env: (a) fail with an actionable message if the Arctic OpenAI shim port
+is already bound, (b) warn (don't fail) if any GPU has >1 GiB in use, and
+(c) print the exact `pkill` incantation to free stale
+`InferenceWorker` / `DeepSpeedWorker` / `VLLM::` / `ArcticRLRayServerState`
+processes from a previous crashed run. Turns the failure mode from a
+cryptic `EADDRINUSE` five minutes into engine init into an actionable
+one-line error.
+
 ## Smoke result — Qwen3-8B, 8×H100, CodeContests
 
 The end-to-end smoke on `upstream/main + this PR` (`arctic_smoke_*.log`):

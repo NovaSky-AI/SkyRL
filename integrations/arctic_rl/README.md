@@ -133,18 +133,17 @@ uv run --extra harbor examples/train_integrations/harbor/prepare_harbor_dataset.
 bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
 ```
 
-Scale up via env vars:
+Scale up via env vars (defaults already match the FSDP baseline recipe — Qwen3-8B, 32K context, colocated CUDA-IPC):
 
 ```bash
-NUM_GPUS=8 MODEL=Qwen/Qwen3-8B MAX_MODEL_LEN=16384 \
-    TRAIN_BATCH_SIZE=2 N_SAMPLES_PER_PROMPT=4 MAX_CONCURRENCY=6 \
-    COLOCATE=true ZERO_STAGE=3 CUDA_IPC_WEIGHT_SYNC=true \
+NUM_GPUS=8 MODEL=Qwen/Qwen3-8B \
+    TRAIN_BATCH_SIZE=4 N_SAMPLES_PER_PROMPT=8 MAX_CONCURRENCY=32 \
     bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
 ```
 
-Design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md).
+Design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md) (see **Launcher invariants** for the two settings — `APPLY_OVERLONG_FILTERING=false` and `max_input_tokens`/`max_output_tokens` sourcing — that must not be casually flipped).
 
-Sandbox concurrency: Harbor spins one sandbox per trial. On Daytona's free tier (10 CPUs total), keep `MAX_CONCURRENCY ≤ 8` and `train_batch_size × n_samples_per_prompt ≤ 16`.
+Sandbox concurrency: Harbor spins one sandbox per trial. On Daytona's free tier (10 CPUs total), keep `MAX_CONCURRENCY ≤ 8` and `train_batch_size × n_samples_per_prompt ≤ 16`. If a launcher crashes mid-run, the preflight tells you exactly which port / GPUs are stuck and prints the `pkill` line to free them.
 
 ### `trainer.arctic_rl.*` knobs
 

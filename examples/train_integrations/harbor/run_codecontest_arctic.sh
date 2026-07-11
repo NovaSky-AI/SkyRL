@@ -55,7 +55,11 @@ LOG_DIR="$STORAGE_ROOT/logs"
 LOSS_REDUCTION="token_mean"  # with step-wise training, we have to use token_mean to be prefix-merge-invariant
 GRPO_NORM_BY_STD=false
 USE_KL_LOSS=false
-APPLY_OVERLONG_FILTERING=true
+# Keep overlong trajectories in the batch under Arctic. Upstream
+# arctic_platform.rl.utils.batch.split_dict raises IndexError if the surviving
+# batch shrinks below num_workers, so we can't afford to drop samples. Overlong
+# trajectories still contribute a zero-reward learning signal.
+APPLY_OVERLONG_FILTERING=false
 
 # Essentially achieves interleaved thinking (does not strip thinking tokens). Allows our step-wise
 # training to be able to merge more step-wise outputs and hence speed up training.
@@ -95,6 +99,23 @@ ATTN_IMPL=flash_attention_2
 # (SkyRL's default lock ships a torch-2.11 wheel).
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
+# Preflight: surface leaked ports / busy GPUs from a previous crashed run so we
+# don't fail 5 minutes into engine init with a cryptic EADDRINUSE.
+if command -v ss >/dev/null 2>&1 && ss -Hltn "sport = :${ARCTIC_HARBOR_SHIM_PORT}" 2>/dev/null | grep -q .; then
+    echo "!! Port ${ARCTIC_HARBOR_SHIM_PORT} (Arctic OpenAI shim) is already in use." >&2
+    echo "   Rerun with ARCTIC_HARBOR_SHIM_PORT=<free port>, or clean stale workers:" >&2
+    echo "     pkill -9 -f 'InferenceWorker|DeepSpeedWorker|VLLM::|ArcticRLRayServerState|skyrl_entrypoint' && sleep 5" >&2
+    exit 1
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    busy=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk '$1 > 1024' | wc -l)
+    if [[ "${busy}" -gt 0 ]]; then
+        echo "!! WARNING: ${busy} GPU(s) already have >1 GiB memory used." >&2
+        echo "   If a previous Arctic run crashed, free them with:" >&2
+        echo "     pkill -9 -f 'InferenceWorker|DeepSpeedWorker|VLLM::|ArcticRLRayServerState|skyrl_entrypoint' && sleep 5" >&2
+    fi
+fi
+
 uv run --isolated --extra skyrl-train --extra harbor \
   --with arctic-platform \
   --with 'arctic-inference[vllm]' \
@@ -108,8 +129,6 @@ uv run --isolated --extra skyrl-train --extra harbor \
   trainer.policy.model.path=$MODEL \
   generator.inference_engine.served_model_name=$SERVED_MODEL_NAME \
   harbor_trial_config.trials_dir=$TRIALS_DIR \
-  harbor_trial_config.agent.kwargs.model_info.max_input_tokens=$MAX_MODEL_LEN \
-  harbor_trial_config.agent.kwargs.model_info.max_output_tokens=$MAX_MODEL_LEN \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.log_path=$LOG_DIR \

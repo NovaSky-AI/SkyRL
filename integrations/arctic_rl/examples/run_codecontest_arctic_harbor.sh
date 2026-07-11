@@ -129,6 +129,26 @@ if [[ ! -d "${DATA_DIR}/CodeContests" ]]; then
     exit 1
 fi
 
+# ---------- preflight ----------
+# vLLM / Ray / OpenAI shim all bind ports on startup; if a previous run crashed
+# they leak. Surface that up-front (with the exact cleanup command) instead of
+# failing 5 minutes into engine init with a cryptic EADDRINUSE.
+if command -v ss >/dev/null 2>&1 && ss -Hltn "sport = :${HTTP_ENDPOINT_PORT}" 2>/dev/null | grep -q .; then
+    echo "!! Port ${HTTP_ENDPOINT_PORT} (Arctic OpenAI shim) is already in use." >&2
+    echo "   Rerun with HTTP_ENDPOINT_PORT=<free port>, or clean stale workers:" >&2
+    echo "     pkill -9 -f 'InferenceWorker|DeepSpeedWorker|VLLM::|ArcticRLRayServerState|skyrl_entrypoint' && sleep 5" >&2
+    exit 1
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    busy=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk '$1 > 1024' | wc -l)
+    if [[ "${busy}" -gt 0 ]]; then
+        echo "!! WARNING: ${busy}/8 GPU(s) already have >1 GiB memory used." >&2
+        echo "   If a previous Arctic run crashed, free them with:" >&2
+        echo "     pkill -9 -f 'InferenceWorker|DeepSpeedWorker|VLLM::|ArcticRLRayServerState|skyrl_entrypoint' && sleep 5" >&2
+        echo "   Continuing anyway; vLLM will fail if it can't fit the ${MODEL} weights." >&2
+    fi
+fi
+
 echo "==> Launching Arctic RL + Harbor CodeContests"
 echo "    RUN_NAME=${RUN_NAME}"
 echo "    MODEL=${MODEL} (served as '${SERVED_MODEL_NAME}')"
