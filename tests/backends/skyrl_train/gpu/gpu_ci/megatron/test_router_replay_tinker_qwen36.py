@@ -5,20 +5,20 @@ the Megatron training forward, so training activates the same experts inference 
 This removes the routing-driven component of the train-vs-rollout logprob mismatch
 that destabilizes RL on MoE models.
 
-R3 is enabled purely by a launch flag (``moe_enable_routing_replay``); the SkyRL-Train
-backend caches the captured routing server-side keyed by the full sampled sequence and
-replays it on forward_backward, with no client-facing Tinker fields. This test drives
-that exact path: it captures routing during sampling, stores it via the backend's cache
-helper, rebuilds the training tensor via a cache lookup keyed by the training sequence,
-and asserts R3 lowers the mean |vLLM logprob - Megatron logprob| versus replay disabled.
+R3 is enabled purely by a launch flag (``moe_enable_routing_replay``); routing is
+stashed on the vLLM servers keyed by the full sampled sequence, and forward_backward
+pulls it back by digest, with no client-facing Tinker fields. This test drives that
+exact data path: it captures routing during sampling, stores it in the server-side
+``RoutedExpertsStash``, rebuilds the training tensor via a digest fetch keyed by the
+training sequence, and asserts R3 lowers the mean |vLLM logprob - Megatron logprob|
+versus replay disabled.
 
 Runs on 1 node of 8xH200. Run with:
   NVTE_FLASH_ATTN=0 uv run --isolated --extra dev --extra megatron --extra tinker -- \
     pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay_tinker_qwen36.py
 """
 
-from types import SimpleNamespace
-
+import numpy as np
 import pytest
 import ray
 import torch
@@ -31,11 +31,14 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+    RoutedExpertsStash,
+    sequence_digest,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train_backend import (
-    RoutedExpertsCache,
-    SkyRLTrainBackend,
     _build_rollout_expert_indices,
+    _narrow_routing_dtype,
 )
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
@@ -89,14 +92,9 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def _cache_backend():
-    """Stand-in exposing just the cache attribute the R3 store helper touches."""
-    return SimpleNamespace(_routed_experts_cache=RoutedExpertsCache(cap=1 << 20))
-
-
 @pytest.mark.megatron
 def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
-    """R3 (server-side routing cache + Megatron replay) lowers train-vs-rollout logprob mismatch."""
+    """R3 (server-side routing stash + Megatron replay) lowers train-vs-rollout logprob mismatch."""
     try:
         cfg = get_test_actor_config()
         cfg.generator.sampling_params = SamplingParams(
@@ -159,14 +157,14 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
             assert len(indices) == len(responses)
             asyncio.run(client.sleep())
 
-        # Exercise the real server-side cache: store each sample's routing keyed by
-        # (model_id, digest of the full sampled sequence), exactly as the backend
-        # does in _aggregate_sample_results.
-        model_id = "r3_test_model"
-        cache_backend = _cache_backend()
+        # Exercise the real server-side stash: store each sample's routing keyed by
+        # (model, digest of the full sampled sequence), exactly as the vLLM server's
+        # /skyrl/v1/completions endpoint does at sample time.
+        model_name = "r3_test_model"
+        stash = RoutedExpertsStash(max_entries=1 << 20)
         for prompt_ids, response, sample_routing in zip(prompt_token_ids, responses, indices):
             if sample_routing:
-                SkyRLTrainBackend._store_routed_experts(cache_backend, model_id, prompt_ids, response, sample_routing)
+                stash.put(model_name, list(prompt_ids) + list(response), np.asarray(sample_routing))
 
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
@@ -185,12 +183,15 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
         )
         assert logprobs_t is not None
 
-        # forward_backward reconstructs the sequence as prompt + response; look routing
-        # up from the cache by that key and build the training tensor.
+        # forward_backward reconstructs the sequence as prompt + response; fetch
+        # routing from the stash by digest and build the training tensor,
+        # mirroring the backend's _fetch_rollout_routing.
         max_seq_len = sequences.shape[1]
         full_sequences = [list(p) + list(r) for p, r in zip(prompt_token_ids, responses)]
-        per_sample = [cache_backend._routed_experts_cache.get(model_id, fs) for fs in full_sequences]
-        assert any(r is not None for r in per_sample), "no cached routing matched the training sequences"
+        digest_hexes = [sequence_digest(fs).hex() for fs in full_sequences]
+        fetched = stash.get_many(model_name, digest_hexes)
+        per_sample = [_narrow_routing_dtype(fetched[h]) if h in fetched else None for h in digest_hexes]
+        assert any(r is not None for r in per_sample), "no stashed routing matched the training sequences"
         rii_tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len)
         assert rii_tensor is not None
 

@@ -1,19 +1,19 @@
 """CPU tests for the SkyRL-Train backend side of Rollout Routing Replay (R3).
 
-R3 stays a server-side launch flag: routing captured at sample time is cached on
-the backend keyed by the full sampled token sequence, and forward_backward looks
-it up by the training sequence. Nothing is exposed through the client-facing
-Tinker types. These tests cover that cache roundtrip, the lifecycle eviction
-(consumed entries at weight sync, never-trained entries after the staleness
-window), the left-padded tensor assembly, the sample-time gating, and the
-on-disk spool fallback used when sampling is forwarded by the API process
-(non-colocated mode) — no GPU or inference engine needed. Run:
+R3 stays a server-side launch flag with a single store: rollout routing is
+stashed on the vLLM servers at sample time (keyed by the model name and the
+digest of the full sampled token sequence), and forward_backward pulls it back
+by reconstructing the digests from the training sequences. Nothing is exposed
+through the client-facing Tinker types, and the backend itself holds no
+routing state. These tests cover the digest fetch (grouping, dedupe, dtype
+narrowing, shape validation, live-router fallback), the model-name resolution
+used for stash keys, the sample-time gating, the lifecycle fan-outs, and the
+left-padded replay tensor assembly — no GPU or inference engine needed. Run:
   uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_router_replay_backend.py
 """
 
 from __future__ import annotations
 
-import io
 from types import SimpleNamespace
 
 import pytest
@@ -24,13 +24,14 @@ skyrl_train_backend = pytest.importorskip("skyrl.backends.skyrl_train_backend")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (  # noqa: E402
+    sequence_digest,
+)
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
-from skyrl.tinker.routed_experts_spool import RoutedExpertsSpool  # noqa: E402
 
 _build_rollout_expert_indices = skyrl_train_backend._build_rollout_expert_indices
-_routing_cache_key = skyrl_train_backend._routing_cache_key
-RoutedExpertsCache = skyrl_train_backend.RoutedExpertsCache
+_narrow_routing_dtype = skyrl_train_backend._narrow_routing_dtype
 SkyRLTrainBackend = skyrl_train_backend.SkyRLTrainBackend
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -44,190 +45,180 @@ def _routing(seq_len: int, num_layers: int, topk: int) -> np.ndarray:
     )
 
 
-def _cache_backend():
-    """A stand-in exposing just the cache attribute the R3 helpers touch."""
-    return SimpleNamespace(_routed_experts_cache=RoutedExpertsCache(cap=4), _routed_experts_spool=None)
+class _SpyStashClient:
+    """Fake RemoteInferenceClient exposing only the R3 stash methods."""
+
+    def __init__(self, stashed: dict[str, dict[str, np.ndarray]] | None = None):
+        # {model_name: {digest_hex: routing}}
+        self.stashed = stashed or {}
+        self.fetch_calls: list[tuple[str, list[str]]] = []
+        self.weight_sync_calls: list[tuple[str, int]] = []
+        self.clear_calls: list[str] = []
+
+    async def fetch_routed_experts(self, model, digest_hexes):
+        self.fetch_calls.append((model, list(digest_hexes)))
+        hits = self.stashed.get(model, {})
+        return {h: hits[h] for h in digest_hexes if h in hits}
+
+    async def routed_experts_weight_sync(self, model, max_staleness=1):
+        self.weight_sync_calls.append((model, max_staleness))
+        return {}
+
+    async def clear_routed_experts(self, model):
+        self.clear_calls.append(model)
+        return {}
+
+    async def aclose(self):
+        pass
 
 
-def _spool_backend(tmp_path, cap: int = 64):
-    """A stand-in with both the in-memory cache and an on-disk spool wired."""
+def _fetch_backend(stashed=None, *, lora=False, model_ids_to_role=None):
+    """Stand-in with the attributes the R3 fetch/lifecycle helpers touch."""
     return SimpleNamespace(
-        _routed_experts_cache=RoutedExpertsCache(cap=cap),
-        _routed_experts_spool=RoutedExpertsSpool(str(tmp_path / "spool")),
+        _inference_engine_client=_SpyStashClient(stashed),
+        _base_lora_signature=(8, 16) if lora else None,
+        _model_ids_to_role=model_ids_to_role or {},
+        _cfg=None,
+        _resolve_inference_model_name=None,  # bound below
+        _routed_experts_missing_warned=False,
+        config=SimpleNamespace(routed_experts_stash_max_staleness=1),
     )
 
 
-def _npy_bytes(arr: np.ndarray) -> bytes:
-    """Serialize an array the way the API-side spool writer receives it (.npy)."""
-    buf = io.BytesIO()
-    np.save(buf, arr)
-    return buf.getvalue()
+def _bind(fake):
+    """Bind the real backend methods onto the stand-in."""
+    fake._resolve_inference_model_name = SkyRLTrainBackend._resolve_inference_model_name.__get__(fake)
+    fake._fetch_rollout_routing = SkyRLTrainBackend._fetch_rollout_routing.__get__(fake)
+    fake._notify_routed_experts_weight_sync = SkyRLTrainBackend._notify_routed_experts_weight_sync.__get__(fake)
+    fake._clear_routed_experts_for_model = SkyRLTrainBackend._clear_routed_experts_for_model.__get__(fake)
+    fake._warn_on_missing_routing = SkyRLTrainBackend._warn_on_missing_routing.__get__(fake)
+    return fake
 
 
-def _peek(cache: "RoutedExpertsCache", model_id: str, token_ids: list[int]) -> np.ndarray | None:
-    """Presence check that does NOT mark the entry consumed (unlike get)."""
-    entry = cache._entries.get(_routing_cache_key(model_id, token_ids))
-    return None if entry is None else entry.routing
+def test_resolve_inference_model_name(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+
+    # Multi-LoRA: the adapter registered on vLLM IS the Tinker model_id.
+    fake = _bind(_fetch_backend(lora=True, model_ids_to_role={"model_a": "policy"}))
+    assert fake._resolve_inference_model_name("model_a") == "model_a"
+    # Unknown / empty ids and non-LoRA setups fall back to the policy name.
+    assert fake._resolve_inference_model_name("unknown") == BASE_MODEL
+    assert fake._resolve_inference_model_name("") == BASE_MODEL
+    assert _bind(_fetch_backend(lora=False))._resolve_inference_model_name("model_a") == BASE_MODEL
 
 
-def test_store_and_lookup_roundtrip_by_model_and_sequence():
-    fake = _cache_backend()
-    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
-    # Routing covers every forwarded token (prompt + response minus last): 4 rows.
-    routing = _routing(seq_len=4, num_layers=2, topk=3)
-    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, routing)
+def test_fetch_maps_digests_back_to_samples(monkeypatch):
+    """Each training sequence gets the routing stashed under its own digest."""
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
 
-    # forward_backward reconstructs the key from (model_id, prompt + response).
-    got = fake._routed_experts_cache.get(model_id, prompt + response)
-    assert got is not None
-    assert got.shape == (4, 2, 3)
-    assert int(got[3, 1, 2]) == 3 * 1000 + 1 * 10 + 2
+    seq_a, seq_b = [10, 11, 12, 20, 21], [10, 11, 12, 30, 31, 32]
+    routing_a, routing_b = _routing(4, 2, 3), _routing(5, 2, 3) + 1
+    stashed = {
+        BASE_MODEL: {
+            sequence_digest(seq_a).hex(): routing_a,
+            sequence_digest(seq_b).hex(): routing_b,
+        }
+    }
+    fake = _bind(_fetch_backend(stashed))
 
+    per_sample = fake._fetch_rollout_routing(["m", "m"], [seq_a, seq_b])
+    np.testing.assert_array_equal(np.asarray(per_sample[0], dtype=np.int64), routing_a.astype(np.int64))
+    np.testing.assert_array_equal(np.asarray(per_sample[1], dtype=np.int64), routing_b.astype(np.int64))
 
-def test_key_is_compact_and_hashed():
-    """The key is (model_id, 16-byte digest), not a per-token tuple."""
-    key = _routing_cache_key("model_a", list(range(4096)))
-    assert isinstance(key, tuple) and len(key) == 2
-    assert key[0] == "model_a"
-    assert isinstance(key[1], bytes) and len(key[1]) == 16
-    # Digest is exact over order + values.
-    assert key[1] == _routing_cache_key("model_a", list(range(4096)))[1]
-    assert key[1] != _routing_cache_key("model_a", list(range(4096))[::-1])[1]
-
-
-def test_multi_tenant_same_tokens_do_not_collide():
-    """Two adapters that sample identical tokens must not share a cache entry."""
-    fake = _cache_backend()
-    prompt, response = [10, 11, 12], [20, 21]
-    routing_a = _routing(seq_len=4, num_layers=2, topk=3)
-    routing_b = routing_a + 1
-    SkyRLTrainBackend._store_routed_experts(fake, "model_a", prompt, response, routing_a)
-    SkyRLTrainBackend._store_routed_experts(fake, "model_b", prompt, response, routing_b)
-
-    assert len(fake._routed_experts_cache) == 2
-    got_a = fake._routed_experts_cache.get("model_a", prompt + response)
-    got_b = fake._routed_experts_cache.get("model_b", prompt + response)
-    assert int(got_a[0, 0, 0]) + 1 == int(got_b[0, 0, 0])
+    # One fan-out per resolved model name, digests deduplicated and sorted.
+    assert len(fake._inference_engine_client.fetch_calls) == 1
+    model, digests = fake._inference_engine_client.fetch_calls[0]
+    assert model == BASE_MODEL
+    assert digests == sorted({sequence_digest(seq_a).hex(), sequence_digest(seq_b).hex()})
 
 
-def test_store_downcasts_dtype_and_ignores_non_3d():
-    fake = _cache_backend()
-    SkyRLTrainBackend._store_routed_experts(fake, "m", [1], [2], _routing(1, 1, 2))  # small ids -> uint8
-    assert fake._routed_experts_cache.get("m", [1, 2]).dtype == np.uint8
+def test_fetch_deduplicates_repeated_sequences(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    seq = [1, 2, 3]
+    stashed = {BASE_MODEL: {sequence_digest(seq).hex(): _routing(2, 1, 2)}}
+    fake = _bind(_fetch_backend(stashed))
 
-    fake2 = _cache_backend()
-    big = _routing(1, 1, 2) + 300  # > 255 -> int16
-    SkyRLTrainBackend._store_routed_experts(fake2, "m", [1], [2], big)
-    assert fake2._routed_experts_cache.get("m", [1, 2]).dtype == np.int16
-
-    fake3 = _cache_backend()
-    SkyRLTrainBackend._store_routed_experts(fake3, "m", [1], [2], np.zeros((3, 4)))  # 2-D -> skipped
-    assert len(fake3._routed_experts_cache) == 0
+    per_sample = fake._fetch_rollout_routing(["m", "m", "m"], [seq, seq, seq])
+    assert all(r is not None for r in per_sample)
+    _, digests = fake._inference_engine_client.fetch_calls[0]
+    assert len(digests) == 1
 
 
-def test_cache_is_bounded_fifo():
-    fake = _cache_backend()  # cap = 4
-    for i in range(6):
-        SkyRLTrainBackend._store_routed_experts(fake, "m", [i], [i + 100], _routing(1, 1, 2))
-    assert len(fake._routed_experts_cache) == 4
-    # Oldest two keys evicted.
-    assert fake._routed_experts_cache.get("m", [0, 100]) is None
-    assert fake._routed_experts_cache.get("m", [5, 105]) is not None
+def test_fetch_groups_by_resolved_model_name(monkeypatch):
+    """Multi-LoRA: each adapter's digests are fetched under its own stash key."""
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    seq = [1, 2, 3]
+    digest_hex = sequence_digest(seq).hex()
+    routing_a, routing_b = _routing(2, 1, 2), _routing(2, 1, 2) + 1
+    stashed = {"model_a": {digest_hex: routing_a}, "model_b": {digest_hex: routing_b}}
+    fake = _bind(
+        _fetch_backend(stashed, lora=True, model_ids_to_role={"model_a": "policy", "model_b": "policy"}),
+    )
+
+    per_sample = fake._fetch_rollout_routing(["model_a", "model_b"], [seq, seq])
+    # Identical tokens, but each adapter gets its own routing (no collision).
+    assert int(per_sample[0][0, 0, 0]) + 1 == int(per_sample[1][0, 0, 0])
+    assert sorted(m for m, _ in fake._inference_engine_client.fetch_calls) == ["model_a", "model_b"]
 
 
-def test_consumed_entries_evicted_at_next_weight_sync():
-    """Routing that made it through the trainer is dropped once the model syncs weights."""
-    cache = RoutedExpertsCache(cap=64)
-    cache.put("m", [1, 2], _routing(1, 1, 2))
-    cache.put("m", [3, 4], _routing(1, 1, 2))
+def test_fetch_missing_digests_fall_back_to_none_with_warning(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    seq_hit, seq_miss = [1, 2, 3], [4, 5, 6]
+    stashed = {BASE_MODEL: {sequence_digest(seq_hit).hex(): _routing(2, 1, 2)}}
+    fake = _bind(_fetch_backend(stashed))
 
-    # forward_backward replays [1, 2]; [3, 4] was filtered out client-side.
-    assert cache.get("m", [1, 2]) is not None
-    # Consumption alone must not evict: minibatches/epochs re-read the entry.
-    assert cache.get("m", [1, 2]) is not None
+    per_sample = fake._fetch_rollout_routing(["m", "m"], [seq_hit, seq_miss])
+    assert per_sample[0] is not None and per_sample[1] is None
 
-    cache.on_weight_sync("m")
-    assert _peek(cache, "m", [1, 2]) is None  # trained -> evicted
-    assert _peek(cache, "m", [3, 4]) is not None  # not yet stale -> kept
+    fake._warn_on_missing_routing(per_sample)
+    assert fake._routed_experts_missing_warned is True
 
 
-def test_never_trained_entries_expire_after_staleness_window():
-    """Entries the trainer never read (client-side filtered) expire after max_staleness + 1 syncs."""
-    cache = RoutedExpertsCache(cap=64, max_staleness=1)
-    cache.put("m", [1, 2], _routing(1, 1, 2))
+def test_fetch_narrows_dtype_and_rejects_non_3d(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    seq_small, seq_big, seq_bad = [1], [2], [3]
+    stashed = {
+        BASE_MODEL: {
+            sequence_digest(seq_small).hex(): np.ones((2, 1, 2), dtype=np.uint16),  # < 256 -> uint8
+            sequence_digest(seq_big).hex(): np.full((2, 1, 2), 300, dtype=np.uint16),  # torch-unsafe -> int16
+            sequence_digest(seq_bad).hex(): np.zeros((3, 4), dtype=np.int32),  # non-3D -> dropped
+        }
+    }
+    fake = _bind(_fetch_backend(stashed))
 
-    cache.on_weight_sync("m")  # first sync after storage: within staleness window
-    assert _peek(cache, "m", [1, 2]) is not None
-    cache.on_weight_sync("m")  # second sync: abandoned -> evicted
-    assert _peek(cache, "m", [1, 2]) is None
-
-
-def test_zero_staleness_expires_unconsumed_entries_at_first_sync():
-    cache = RoutedExpertsCache(cap=64, max_staleness=0)
-    cache.put("m", [1, 2], _routing(1, 1, 2))
-    cache.on_weight_sync("m")
-    assert len(cache) == 0
-
-
-def test_entries_stored_after_a_sync_age_from_that_sync():
-    """The staleness clock starts at the entry's storage generation, not at zero."""
-    cache = RoutedExpertsCache(cap=64, max_staleness=1)
-    cache.on_weight_sync("m")  # gen 1
-    cache.put("m", [1, 2], _routing(1, 1, 2))  # stored at gen 1
-
-    cache.on_weight_sync("m")  # gen 2: entry one sync old -> kept
-    assert _peek(cache, "m", [1, 2]) is not None
-    cache.on_weight_sync("m")  # gen 3: entry two syncs old -> evicted
-    assert _peek(cache, "m", [1, 2]) is None
+    per_sample = fake._fetch_rollout_routing(["m", "m", "m"], [seq_small, seq_big, seq_bad])
+    assert per_sample[0].dtype == np.uint8
+    assert per_sample[1].dtype == np.int16
+    assert per_sample[2] is None
 
 
-def test_weight_sync_is_scoped_per_model():
-    """Syncs for one adapter must not consume or age another adapter's entries."""
-    cache = RoutedExpertsCache(cap=64, max_staleness=1)
-    cache.put("model_a", [1, 2], _routing(1, 1, 2))
-    cache.put("model_b", [1, 2], _routing(1, 1, 2))
-    assert cache.get("model_a", [1, 2]) is not None  # trained on model_a only
+def test_weight_sync_notification_carries_staleness_and_is_best_effort(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    fake = _bind(_fetch_backend(lora=True, model_ids_to_role={"model_a": "policy"}))
+    fake.config = SimpleNamespace(routed_experts_stash_max_staleness=3)
 
-    for _ in range(3):
-        cache.on_weight_sync("model_a")
+    fake._notify_routed_experts_weight_sync("model_a")
+    assert fake._inference_engine_client.weight_sync_calls == [("model_a", 3)]
 
-    assert _peek(cache, "model_a", [1, 2]) is None
-    assert _peek(cache, "model_b", [1, 2]) is not None
+    # A failing fan-out must not raise out of the weight sync.
+    async def _boom(model, max_staleness=1):
+        raise RuntimeError("server down")
 
-
-def test_restore_resets_consumption_and_age():
-    """Re-sampling the same sequence refreshes the entry for the new rollout round."""
-    cache = RoutedExpertsCache(cap=64, max_staleness=1)
-    cache.put("m", [1, 2], _routing(1, 1, 2))
-    assert cache.get("m", [1, 2]) is not None  # consumed in round 1
-    cache.put("m", [1, 2], _routing(1, 1, 2))  # sampled again before the sync
-
-    cache.on_weight_sync("m")
-    assert _peek(cache, "m", [1, 2]) is not None  # fresh entry survives
+    fake._inference_engine_client.routed_experts_weight_sync = _boom
+    fake._notify_routed_experts_weight_sync("model_a")  # no exception
 
 
-def test_evict_model_and_clear():
-    cache = RoutedExpertsCache(cap=64)
-    cache.put("model_a", [1, 2], _routing(1, 1, 2))
-    cache.put("model_b", [1, 2], _routing(1, 1, 2))
+def test_clear_on_model_delete_is_best_effort(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    fake = _bind(_fetch_backend())
+    fake._clear_routed_experts_for_model("model_a")
+    assert fake._inference_engine_client.clear_calls == ["model_a"]
 
-    assert cache.evict_model("model_a") == 1
-    assert _peek(cache, "model_a", [1, 2]) is None
-    assert _peek(cache, "model_b", [1, 2]) is not None
+    async def _boom(model):
+        raise RuntimeError("server down")
 
-    cache.clear()
-    assert len(cache) == 0
-    assert cache.nbytes == 0
-
-
-def test_nbytes_tracks_stored_routing():
-    cache = RoutedExpertsCache(cap=64)
-    routing = _routing(4, 2, 3)
-    cache.put("m", [1, 2], routing)
-    assert cache.nbytes == routing.nbytes
-    cache.get("m", [1, 2])
-    cache.on_weight_sync("m")
-    assert cache.nbytes == 0
+    fake._inference_engine_client.clear_routed_experts = _boom
+    fake._clear_routed_experts_for_model("model_a")  # no exception
 
 
 def test_build_rollout_expert_indices_left_pads_and_aligns():
@@ -266,106 +257,21 @@ def test_build_rollout_expert_indices_downcasts_dtype():
     assert _build_rollout_expert_indices(full_sequences, [big], 3).dtype == torch.int16
 
 
-def test_end_to_end_cache_to_tensor_alignment():
-    """Store at sample time, then rebuild the training tensor via a cache lookup."""
-    fake = _cache_backend()
-    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]  # full sampled sequence len 5
+def test_end_to_end_stash_fetch_to_tensor_alignment(monkeypatch):
+    """Stash at sample time (as the server does), fetch by the training
+    sequence, and assemble the same left-padded replay tensor."""
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    prompt, response = [10, 11, 12], [20, 21]  # full sampled sequence len 5
     routing = _routing(seq_len=4, num_layers=2, topk=3)  # forwarded tokens = 4
-    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, routing)
+    stashed = {BASE_MODEL: {sequence_digest(prompt + response).hex(): routing}}
+    fake = _bind(_fetch_backend(stashed))
 
-    # forward_backward: full_sequences[i] == prompt + response, keyed by model_id.
+    # forward_backward: full_sequences[i] == prompt + response.
     full_sequences = [prompt + response]
-    per_sample = [fake._routed_experts_cache.get(model_id, fs) for fs in full_sequences]
+    per_sample = fake._fetch_rollout_routing(["m"], full_sequences)
     tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
     assert tuple(tensor.shape) == (1, 5, 2, 3)
     # Routing occupies positions [0,4); the final token has none.
-    assert tensor[0, 3, 1, 2].item() == 3 * 1000 + 1 * 10 + 2
-    assert tensor[0, 4].sum().item() == 0
-
-
-def test_lookup_falls_back_to_spool_and_promotes_to_cache(tmp_path):
-    """Routing spooled by the API process (non-colocated) is found by the
-    training-sequence lookup, promoted into the in-memory cache for later
-    epochs, and evicted at the model's next weight sync like any consumed entry."""
-    fake = _spool_backend(tmp_path)
-    model_id, seq = "model_a", [10, 11, 12, 20, 21]
-    routing = _routing(seq_len=4, num_layers=2, topk=3)
-    # API side: raw .npy bytes keyed by the full sampled sequence.
-    fake._routed_experts_spool.write(model_id, seq, _npy_bytes(routing))
-
-    lookup = SkyRLTrainBackend._lookup_rollout_routing
-    got = lookup(fake, model_id, seq)
-    assert got is not None and got.shape == (4, 2, 3)
-    np.testing.assert_array_equal(np.asarray(got, dtype=np.int64), routing.astype(np.int64))
-
-    # The spool file was consumed, but later epochs replay from the cache.
-    assert fake._routed_experts_spool.consume(model_id, seq) is None
-    assert lookup(fake, model_id, seq) is not None
-
-    # Promoted entries follow the cache's consumed-at-sync eviction.
-    fake._routed_experts_cache.on_weight_sync(model_id)
-    assert _peek(fake._routed_experts_cache, model_id, seq) is None
-    assert lookup(fake, model_id, seq) is None
-
-
-def test_lookup_without_spool_is_cache_only():
-    """With no spool wired (colocated mode, unit tests) the lookup is exactly the cache."""
-    fake = _cache_backend()
-    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
-    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, _routing(4, 2, 3))
-
-    lookup = SkyRLTrainBackend._lookup_rollout_routing
-    assert lookup(fake, model_id, prompt + response) is not None
-    assert lookup(fake, model_id, [99]) is None
-
-
-def test_spooled_routing_is_narrowed_like_local_capture(tmp_path):
-    """Spooled int32 routing is downcast on consume exactly like locally-captured routing."""
-    fake = _spool_backend(tmp_path)
-    seq = [1, 2, 3]
-    fake._routed_experts_spool.write("m", seq, _npy_bytes(np.ones((2, 1, 2), dtype=np.int32)))
-    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", seq).dtype == np.uint8
-
-    big_seq = [4, 5, 6]
-    fake._routed_experts_spool.write("m", big_seq, _npy_bytes(np.full((2, 1, 2), 300, dtype=np.int32)))
-    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", big_seq).dtype == np.int16
-
-
-def test_spooled_routing_rejects_non_3d(tmp_path):
-    fake = _spool_backend(tmp_path)
-    seq = [1, 2, 3]
-    fake._routed_experts_spool.write("m", seq, _npy_bytes(np.zeros((3, 4), dtype=np.int32)))
-    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", seq) is None
-    assert len(fake._routed_experts_cache) == 0
-
-
-def test_set_spool_dir_wipes_leftovers_and_none_disables(tmp_path):
-    """Backend startup wipes files left by a previous server run; None turns the fallback off."""
-    spool_dir = tmp_path / "spool"
-    leftover = RoutedExpertsSpool(str(spool_dir))
-    leftover.write("dead_model", [1, 2], _npy_bytes(_routing(1, 1, 2)))
-
-    fake = SimpleNamespace(_routed_experts_spool=None, _routed_experts_cache=RoutedExpertsCache(cap=4))
-    SkyRLTrainBackend.set_routed_experts_spool_dir(fake, str(spool_dir))
-    assert fake._routed_experts_spool is not None
-    assert not spool_dir.exists()
-
-    SkyRLTrainBackend.set_routed_experts_spool_dir(fake, None)
-    assert fake._routed_experts_spool is None
-
-
-def test_end_to_end_spool_to_tensor_alignment(tmp_path):
-    """Non-colocated flow: routing spooled by the API process is looked up by the
-    training sequence and assembled into the same left-padded replay tensor."""
-    fake = _spool_backend(tmp_path)
-    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
-    routing = _routing(seq_len=4, num_layers=2, topk=3)  # forwarded tokens = 4
-    fake._routed_experts_spool.write(model_id, prompt + response, _npy_bytes(routing))
-
-    full_sequences = [prompt + response]
-    per_sample = [SkyRLTrainBackend._lookup_rollout_routing(fake, model_id, fs) for fs in full_sequences]
-    tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
-    assert tuple(tensor.shape) == (1, 5, 2, 3)
     assert tensor[0, 3, 1, 2].item() == 3 * 1000 + 1 * 10 + 2
     assert tensor[0, 4].sum().item() == 0
 
@@ -394,50 +300,28 @@ class _SpyClient:
         pass
 
 
-def test_routed_experts_cache_config_is_declared_not_forwarded():
-    """Cache knobs are declared backend-config fields, so they must not leak into model_extra.
+def test_stash_staleness_config_is_declared_not_forwarded():
+    """The staleness knob is a declared backend-config field, so it must not leak into model_extra.
 
     ``_build_skyrl_train_config`` forwards ``model_extra`` as SkyRL-Train config
     overrides; a leaked key would be applied to SkyRLTrainConfig and error out.
     """
     overrides = skyrl_train_backend.MegatronBackendOverrides(
-        routed_experts_cache_cap=123,
-        routed_experts_cache_max_staleness=3,
+        routed_experts_stash_max_staleness=3,
         **{"trainer.micro_train_batch_size_per_gpu": 2},
     )
-    assert overrides.routed_experts_cache_cap == 123
-    assert overrides.routed_experts_cache_max_staleness == 3
-    assert "routed_experts_cache_cap" not in overrides.model_extra
-    assert "routed_experts_cache_max_staleness" not in overrides.model_extra
+    assert overrides.routed_experts_stash_max_staleness == 3
+    assert "routed_experts_stash_max_staleness" not in overrides.model_extra
     assert overrides.model_extra.get("trainer.micro_train_batch_size_per_gpu") == 2
-    # Defaults preserved when unset; cap must be positive, staleness non-negative.
-    defaults = skyrl_train_backend.MegatronBackendOverrides()
-    assert defaults.routed_experts_cache_cap == 8192
-    assert defaults.routed_experts_cache_max_staleness == 1
+    # Default preserved when unset; staleness must be non-negative.
+    assert skyrl_train_backend.MegatronBackendOverrides().routed_experts_stash_max_staleness == 1
     with pytest.raises(Exception):
-        skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_cap=0)
-    with pytest.raises(Exception):
-        skyrl_train_backend.MegatronBackendOverrides(routed_experts_cache_max_staleness=-1)
-
-
-def test_backend_honors_configured_cache_settings():
-    """The configured knobs reach the backend's live cache (no ray init in __init__)."""
-    backend = SkyRLTrainBackend(
-        BASE_MODEL,
-        skyrl_train_backend.MegatronBackendOverrides(
-            routed_experts_cache_cap=321, routed_experts_cache_max_staleness=2
-        ),
-    )
-    assert backend._routed_experts_cache.cap == 321
-    assert backend._routed_experts_cache.max_staleness == 2
-    default_cache = SkyRLTrainBackend(BASE_MODEL, skyrl_train_backend.MegatronBackendOverrides())._routed_experts_cache
-    assert default_cache.cap == 8192
-    assert default_cache.max_staleness == 1
+        skyrl_train_backend.MegatronBackendOverrides(routed_experts_stash_max_staleness=-1)
 
 
 @pytest.mark.parametrize("replay_enabled", [True, False])
-def test_sample_requests_routed_experts_gated_on_replay(monkeypatch, replay_enabled):
-    """The sample body sets return_routed_experts iff R3 is enabled on the backend."""
+def test_sample_requests_stash_gated_on_replay(monkeypatch, replay_enabled):
+    """The sample body sets stash_routed_experts iff R3 is enabled on the backend."""
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
 
     spy = _SpyClient()
@@ -449,10 +333,11 @@ def test_sample_requests_routed_experts_gated_on_replay(monkeypatch, replay_enab
         _router_replay_enabled=lambda: replay_enabled,
         _aggregate_sample_results=lambda prepared_batch, outputs: {},
     )
+    fake_self._resolve_inference_model_name = SkyRLTrainBackend._resolve_inference_model_name.__get__(fake_self)
     sample = SkyRLTrainBackend._sample_with_remote_client
 
     batch = prepare_sample_batch({"req": ("", _sample_input())})
     sample(fake_self, batch)
 
     assert len(spy.payloads) == 1
-    assert spy.payloads[0]["json"]["return_routed_experts"] is replay_enabled
+    assert spy.payloads[0]["json"]["stash_routed_experts"] is replay_enabled

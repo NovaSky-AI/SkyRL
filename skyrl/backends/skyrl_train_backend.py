@@ -6,8 +6,6 @@ import math
 import os
 import tarfile
 import tempfile
-from collections import OrderedDict
-from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -22,6 +20,9 @@ from skyrl.backends.renderer import (
     RendererClientProtocol,
     VLLMRenderer,
     render_model_input,
+)
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+    sequence_digest,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
@@ -39,7 +40,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
-from skyrl.tinker.routed_experts_spool import RoutedExpertsSpool, sequence_digest
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -50,21 +50,12 @@ from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
 
-def _routing_cache_key(model_id: str, token_ids) -> tuple[str, bytes]:
-    """R3 cache key: ``(model_id, 16-byte blake2b digest of the token ids)``.
-
-    Hashing the sequence keeps the key a fixed ~16 bytes regardless of length (vs
-    a per-token Python tuple), and one C-level digest is far cheaper than hashing
-    a large tuple. ``model_id`` disambiguates tenants whose samples share token
-    ids but route differently under their own adapter weights. The digest is
-    shared with the on-disk R3 spool (``skyrl.tinker.routed_experts_spool``) so
-    routing captured in the API process is addressable from here.
-    """
-    return model_id, sequence_digest(token_ids)
-
-
 def _narrow_routing_dtype(arr: np.ndarray) -> np.ndarray:
-    """Downcast routing expert ids to the narrowest integer dtype that fits."""
+    """Downcast routing expert ids to the narrowest torch-safe integer dtype.
+
+    Also converts ``uint16`` (which torch cannot represent) coming from the
+    inference servers into ``int16``/``int32`` by value.
+    """
     max_expert = int(arr.max()) if arr.size else 0
     dtype = np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32
     return arr.astype(dtype, copy=False)
@@ -109,128 +100,6 @@ def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_le
     return rollout_expert_indices
 
 
-@dataclass
-class _RoutedExpertsEntry:
-    """One sample's rollout routing plus the state that drives its eviction."""
-
-    routing: np.ndarray
-    stored_gen: int
-    consumed: bool = False
-
-
-class RoutedExpertsCache:
-    """Rollout Routing Replay (R3) cache with trainer-consumption-aware eviction.
-
-    Holds per-sample rollout routing between sampling and forward_backward,
-    keyed by ``(model_id, digest of the full sampled token sequence)``. Eviction
-    runs per model at its weight-sync boundaries (``save_weights_for_sampler``)
-    — the only server-visible event separating one rollout round from the next;
-    training on a rollout batch completes before the loop syncs weights for the
-    next one. Rules, applied on each sync for that model:
-
-    - **Consumed entries** (returned by :meth:`get` at least once, i.e. the
-      routing made it through the trainer) are evicted: their training batch is
-      done.
-    - **Unconsumed entries** older than ``max_staleness`` syncs are evicted:
-      the client sampled them but never trained on them (filtered out
-      client-side, e.g. all-zero-reward groups, or eval rollouts).
-
-    Insertion-order FIFO eviction at ``cap`` remains the backstop, bounding
-    memory even for clients that never sync weights.
-
-    ``max_staleness`` is the number of weight syncs an unconsumed entry may
-    outlive before it is considered abandoned; it must cover how many syncs a
-    rollout batch can stay in flight before training. The default of 1 covers
-    on-policy and one-step-async loops. Loops that run multiple epochs per
-    batch *and* sync weights mid-batch can see consumed entries evicted between
-    epochs; affected samples fall back to the live router with a warning.
-    """
-
-    def __init__(self, cap: int = 8192, max_staleness: int = 1):
-        self.cap = cap
-        self.max_staleness = max_staleness
-        self._entries: "OrderedDict[tuple[str, bytes], _RoutedExpertsEntry]" = OrderedDict()
-        self._sync_gens: dict[str, int] = {}
-        self._nbytes = 0
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    @property
-    def nbytes(self) -> int:
-        """Total bytes of cached routing arrays (metadata excluded)."""
-        return self._nbytes
-
-    def put(self, model_id: str, token_ids: list[int], routing: np.ndarray) -> None:
-        """Insert (or refresh) one sample's routing under the current sync generation."""
-        key = _routing_cache_key(model_id, token_ids)
-        old = self._entries.pop(key, None)
-        if old is not None:
-            self._nbytes -= old.routing.nbytes
-        self._entries[key] = _RoutedExpertsEntry(routing=routing, stored_gen=self._sync_gens.get(model_id, 0))
-        self._nbytes += routing.nbytes
-        while len(self._entries) > self.cap:
-            _, evicted = self._entries.popitem(last=False)
-            self._nbytes -= evicted.routing.nbytes
-
-    def get(self, model_id: str, token_ids: list[int]) -> np.ndarray | None:
-        """Look up routing for a training sequence, marking the entry consumed.
-
-        Consumption does not evict immediately — the same routing is replayed
-        for every minibatch/epoch of the training batch — it schedules the
-        entry for eviction at the model's next weight sync.
-        """
-        entry = self._entries.get(_routing_cache_key(model_id, token_ids))
-        if entry is None:
-            return None
-        entry.consumed = True
-        return entry.routing
-
-    def on_weight_sync(self, model_id: str) -> None:
-        """Advance the model's sync generation and evict its dead entries."""
-        new_gen = self._sync_gens.get(model_id, 0) + 1
-        self._sync_gens[model_id] = new_gen
-        stale_cutoff = new_gen - 1 - self.max_staleness
-
-        consumed = stale = 0
-        for key in [k for k in self._entries if k[0] == model_id]:
-            entry = self._entries[key]
-            if entry.consumed:
-                consumed += 1
-            elif entry.stored_gen <= stale_cutoff:
-                stale += 1
-            else:
-                continue
-            self._nbytes -= entry.routing.nbytes
-            del self._entries[key]
-
-        if consumed or stale:
-            logger.info(
-                "R3 cache: weight sync for %s (gen %d) evicted %d trained and %d never-trained entries; "
-                "%d entries (%.1f MB) remain.",
-                model_id,
-                new_gen,
-                consumed,
-                stale,
-                len(self._entries),
-                self._nbytes / 2**20,
-            )
-
-    def evict_model(self, model_id: str) -> int:
-        """Drop all entries (and the sync generation) for a deleted model."""
-        keys = [k for k in self._entries if k[0] == model_id]
-        for key in keys:
-            self._nbytes -= self._entries[key].routing.nbytes
-            del self._entries[key]
-        self._sync_gens.pop(model_id, None)
-        return len(keys)
-
-    def clear(self) -> None:
-        self._entries.clear()
-        self._sync_gens.clear()
-        self._nbytes = 0
-
-
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
 
@@ -250,33 +119,18 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
 
-    routed_experts_cache_cap: int = Field(
-        default=8192,
-        gt=0,
-        description=(
-            "Rollout Routing Replay (R3): max number of samples whose rollout routing is cached "
-            "on the backend (host RAM) between sampling and forward_backward. Entries are "
-            "normally evicted at weight-sync boundaries (trained entries at the next sync, "
-            "never-trained entries after routed_experts_cache_max_staleness further syncs); the "
-            "cap is a FIFO backstop for loops that never sync weights. Size it to at least the "
-            "number of samples generated per training step so routing isn't evicted before it "
-            "is replayed. Memory per entry is roughly seq_len * num_layers * top_k bytes "
-            "(uint8 when num_experts<=256, else int16), so long sequences or large caps cost "
-            "several GB. Ignored unless moe_enable_routing_replay is set."
-        ),
-    )
-
-    routed_experts_cache_max_staleness: int = Field(
+    routed_experts_stash_max_staleness: int = Field(
         default=1,
         ge=0,
         description=(
-            "Rollout Routing Replay (R3): number of weight syncs (save_weights_for_sampler) a "
-            "cached routing entry that never reached the trainer may outlive before it is "
-            "evicted as abandoned (e.g. the client filtered the sample out for all-zero "
-            "rewards). Entries survive max_staleness + 1 syncs after storage. Must cover how "
-            "many syncs a rollout batch can stay in flight before training: the default of 1 "
-            "is safe for on-policy and one-step-async loops; increase it for deeper async "
-            "pipelines. Ignored unless moe_enable_routing_replay is set."
+            "Rollout Routing Replay (R3): number of weight syncs (save_weights_for_sampler) an "
+            "entry in the inference servers' routing stash may outlive before it is dropped. "
+            "Rollout routing is stashed on the vLLM servers at sample time and pulled by the "
+            "trainer at forward_backward; a weight sync starts the model's next rollout round, "
+            "so entries stashed more than max_staleness syncs ago can no longer be trained on. "
+            "The default of 1 covers on-policy and one-step-async loops; increase it for deeper "
+            "async pipelines. Forwarded to the servers on each sync. Ignored unless "
+            "moe_enable_routing_replay is set."
         ),
     )
 
@@ -392,27 +246,14 @@ class SkyRLTrainBackend(AbstractBackend):
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
 
-        # Rollout Routing Replay (R3): per-token routed experts captured at
-        # sample time, keyed by (model_id, digest of the full sampled token
-        # sequence). forward_backward reconstructs the same key from the training
-        # sequence and replays the routing, so R3 stays a server-side launch flag
-        # and never touches the client-facing Tinker types. The digest key keeps
-        # the entry tiny regardless of sequence length; ``model_id`` disambiguates
-        # tenants that sample identical tokens. Eviction is lifecycle-driven (see
-        # RoutedExpertsCache): entries the trainer consumed are dropped at the
-        # model's next weight sync, entries that never reached the trainer (e.g.
-        # filtered out client-side) expire after a configurable number of syncs,
-        # and a FIFO cap bounds worst-case memory.
-        self._routed_experts_cache = RoutedExpertsCache(
-            cap=getattr(config, "routed_experts_cache_cap", 8192),
-            max_staleness=getattr(config, "routed_experts_cache_max_staleness", 1),
-        )
-        # R3 in non-colocated mode: samples are forwarded to vLLM by the API
-        # process, so their routing never passes through this backend. The host
-        # wires a shared on-disk spool via set_routed_experts_spool_dir and
-        # forward_backward falls back to it on cache misses. None when running
-        # outside a host that forwards samples (colocated mode, unit tests).
-        self._routed_experts_spool: RoutedExpertsSpool | None = None
+        # Rollout Routing Replay (R3): rollout routing never passes through
+        # this backend (or any client). Sampling goes through the vLLM servers'
+        # /skyrl/v1/completions endpoint, which stashes each sample's routing
+        # server-side keyed by (model name, digest of the full sampled token
+        # sequence); forward_backward reconstructs the digests from the
+        # training sequences and pulls the routing back with a fan-out fetch.
+        # The stash lifecycle is driven from here: a weight-sync notification
+        # after each save_weights_for_sampler and a clear on adapter deletion.
         self._routed_experts_missing_warned = False
 
         # New inference infrastructure
@@ -446,72 +287,112 @@ class SkyRLTrainBackend(AbstractBackend):
             return False
         return bool(getattr(self._cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False))
 
-    def _store_routed_experts(
-        self, model_id: str, prompt_ids: list[int], response_tokens: list[int], routed_experts
-    ) -> None:
-        """Cache one sample's rollout routing (R3), keyed by (model_id, sequence digest).
+    def _resolve_inference_model_name(self, model_id: str | None) -> str:
+        """The name vLLM knows this Tinker model by.
 
-        The digest is over ``prompt_ids + response_tokens`` — exactly the sequence
-        forward_backward reconstructs — so replay is a dict lookup with no
-        client-facing plumbing. Stored narrow (uint8/int16) to bound memory;
-        eviction is handled by the cache (see :class:`RoutedExpertsCache`).
+        With multi-LoRA the adapter registered on vLLM IS the Tinker model_id
+        (registered by save_sampler_checkpoint via load_lora_adapter). The
+        single-tenant / FFT path falls back to ``resolve_policy_model_name``.
+        An empty model_id is base-model sampling and must target the served
+        base model directly: resolve_policy_model_name would return the LoRA
+        adapter alias under LoRA weight sync, which (a) does not exist on the
+        engines until the first sampler-weight save and (b) would wrongly
+        apply adapter deltas to a base-model request.
+        Single source of truth for sampling requests and R3 stash keys.
         """
-        arr = np.asarray(routed_experts)
-        if arr.ndim != 3:
-            return
-        self._routed_experts_cache.put(model_id, list(prompt_ids) + list(response_tokens), _narrow_routing_dtype(arr))
+        if not model_id:
+            return self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
+        if self._base_lora_signature is not None and model_id in self._model_ids_to_role:
+            return model_id
+        return resolve_policy_model_name(self._cfg)
 
-    def set_routed_experts_spool_dir(self, spool_dir: str | None) -> None:
-        """Wire the on-disk R3 handoff written by the sample-forwarding process.
+    def _fetch_rollout_routing(self, model_ids: list[str], full_sequences: list[list[int]]) -> list:
+        """Pull each training sequence's rollout routing from the servers' R3 stash.
 
-        Called by the host (the Tinker engine) at startup with the directory the
-        API process spools rollout routing into when it forwards sample requests
-        directly to vLLM (non-colocated mode). The directory is wiped here:
-        leftovers can only come from a previous server run, whose models (and
-        thus replay opportunities) died with it. ``None`` disables the fallback.
+        The stash keys routing by (vLLM model name, digest of the full sampled
+        token sequence); ``full_sequences[i]`` reconstructs exactly the sampled
+        sequence, so the digests address it directly. Digests are deduplicated
+        and grouped per resolved model name (sub-batches are single-model, but
+        group defensively), fetched with one fan-out per model, and mapped back
+        per sample. Missing digests yield ``None`` (live-router fallback).
         """
-        if spool_dir is None:
-            self._routed_experts_spool = None
-            return
-        self._routed_experts_spool = RoutedExpertsSpool(spool_dir)
-        self._routed_experts_spool.wipe()
+        digest_hexes = [sequence_digest(seq).hex() for seq in full_sequences]
+        by_model: dict[str, set[str]] = {}
+        for mid, digest_hex in zip(model_ids, digest_hexes):
+            by_model.setdefault(self._resolve_inference_model_name(mid), set()).add(digest_hex)
 
-    def _lookup_rollout_routing(self, model_id: str, token_ids: list[int]) -> np.ndarray | None:
-        """Fetch one training sequence's rollout routing (R3), marking it consumed.
+        async def _fetch_all():
+            try:
+                results = await asyncio.gather(
+                    *[
+                        self._inference_engine_client.fetch_routed_experts(model_name, sorted(digests))
+                        for model_name, digests in by_model.items()
+                    ]
+                )
+            finally:
+                await self._inference_engine_client.aclose()
+            return dict(zip(by_model, results))
 
-        Checks the in-memory cache first (populated directly when this backend
-        handled the sample), then the on-disk spool (populated by the API
-        process when sampling was forwarded in non-colocated mode). Spooled
-        routing is promoted into the in-memory cache so later epochs of the
-        same training batch replay it without touching disk, and from then on
-        it follows the cache's normal weight-sync eviction.
+        fetched_by_model = asyncio.run(_fetch_all())
+
+        per_sample_routing = []
+        for mid, digest_hex in zip(model_ids, digest_hexes):
+            arr = fetched_by_model[self._resolve_inference_model_name(mid)].get(digest_hex)
+            if arr is not None and arr.ndim != 3:
+                logger.warning("R3: stashed routing has shape %s (expected 3-D); ignoring.", arr.shape)
+                arr = None
+            per_sample_routing.append(_narrow_routing_dtype(arr) if arr is not None else None)
+        return per_sample_routing
+
+    def _notify_routed_experts_weight_sync(self, model_id: str) -> None:
+        """R3 lifecycle fan-out after a weight sync (best-effort).
+
+        Tells every server that this model's next rollout round has started so
+        its stash can drop routing that is past the staleness window. A failed
+        notification only delays memory reclaim on the servers, so it must not
+        fail the weight sync itself.
         """
-        routing = self._routed_experts_cache.get(model_id, token_ids)
-        if routing is not None or self._routed_experts_spool is None:
-            return routing
-        arr = self._routed_experts_spool.consume(model_id, token_ids)
-        if arr is None:
-            return None
-        if arr.ndim != 3:
-            logger.warning(
-                "R3: spooled routing for model %s has shape %s (expected 3-D); ignoring.", model_id, arr.shape
-            )
-            return None
-        self._routed_experts_cache.put(model_id, token_ids, _narrow_routing_dtype(arr))
-        return self._routed_experts_cache.get(model_id, token_ids)
+        model_name = self._resolve_inference_model_name(model_id)
+        max_staleness = getattr(self.config, "routed_experts_stash_max_staleness", 1)
+
+        async def _notify():
+            try:
+                await self._inference_engine_client.routed_experts_weight_sync(model_name, max_staleness=max_staleness)
+            finally:
+                await self._inference_engine_client.aclose()
+
+        try:
+            asyncio.run(_notify())
+        except Exception as e:
+            logger.warning("R3: weight-sync stash notification for %s failed: %s", model_name, e)
+
+    def _clear_routed_experts_for_model(self, model_name: str) -> None:
+        """R3 lifecycle fan-out on model deletion (best-effort)."""
+
+        async def _clear():
+            try:
+                await self._inference_engine_client.clear_routed_experts(model_name)
+            finally:
+                await self._inference_engine_client.aclose()
+
+        try:
+            asyncio.run(_clear())
+        except Exception as e:
+            logger.warning("R3: stash clear for deleted model %s failed: %s", model_name, e)
 
     def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
-        """Warn once if R3 is on but some forward_backward samples have no cached routing.
+        """Warn once if R3 is on but some forward_backward samples have no stashed routing.
 
         Missing entries fall back to Megatron's own router for those samples (an
-        R3-off result), which usually means sampling ran without capture or the
-        sequence was altered between sample and train.
+        R3-off result), which usually means sampling ran without capture, the
+        sequence was altered between sample and train, or the stash entry aged
+        out past the staleness window.
         """
         if self._routed_experts_missing_warned:
             return
         if any(r is None for r in per_sample_routing):
             logger.warning(
-                "Router replay (R3) is enabled but %d/%d forward_backward samples had no cached rollout "
+                "Router replay (R3) is enabled but %d/%d forward_backward samples had no stashed rollout "
                 "routing; those samples fall back to Megatron's router.",
                 sum(1 for r in per_sample_routing if r is None),
                 len(per_sample_routing),
@@ -969,10 +850,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
-                # R3: cached/spooled routing for a deleted adapter can never be replayed.
-                self._routed_experts_cache.evict_model(model_id)
-                if self._routed_experts_spool is not None:
-                    self._routed_experts_spool.evict_model(model_id)
+                # R3: stashed routing for a deleted adapter can never be
+                # replayed. The adapter is registered on vLLM under model_id.
+                if self._router_replay_enabled() and self._inference_engines_initialized:
+                    self._clear_routed_experts_for_model(model_id)
                 logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
@@ -1010,10 +891,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
-        # R3: no model can replay the cached/spooled routing after teardown.
-        self._routed_experts_cache.clear()
-        if self._routed_experts_spool is not None:
-            self._routed_experts_spool.wipe()
+        # R3: the routing stash lives on the vLLM servers and died with them.
         # Local state is fully reset above. Notify the host last so a
         # publisher failure can't leave the controller half-torn-down.
         # Next _create_new_inference_client repopulates.
@@ -1135,19 +1013,15 @@ class SkyRLTrainBackend(AbstractBackend):
                 placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
-        # Rollout Routing Replay (R3): look up the routing captured at sample
-        # time by (model_id, digest of the full sampled sequence) — the sequence
-        # is exactly ``full_sequences[i]`` — and assemble it into a left-padded
-        # [batch, max_seq_len, num_layers, topk] tensor aligned with
-        # ``sequences``. Keeping the routing server-side means R3 needs no new
-        # client-facing Tinker fields. The lookup checks the in-memory cache and
-        # then the on-disk spool (routing captured by the API process when
-        # sampling is forwarded in non-colocated mode), marking each entry
-        # consumed so the cache can evict it at the model's next weight sync.
+        # Rollout Routing Replay (R3): pull the routing captured at sample time
+        # from the inference servers' stash by (model name, digest of the full
+        # sampled sequence) — the sequence is exactly ``full_sequences[i]`` —
+        # and assemble it into a left-padded [batch, max_seq_len, num_layers,
+        # topk] tensor aligned with ``sequences``. Routing lives on the servers
+        # until fetched here, so R3 needs no client-facing Tinker fields and no
+        # state outside the inference servers.
         if self._router_replay_enabled():
-            per_sample_routing = [
-                self._lookup_rollout_routing(mid, seq) for mid, seq in zip(prepared_batch.all_model_ids, full_sequences)
-            ]
+            per_sample_routing = self._fetch_rollout_routing(prepared_batch.all_model_ids, full_sequences)
             self._warn_on_missing_routing(per_sample_routing)
             rollout_expert_indices = _build_rollout_expert_indices(full_sequences, per_sample_routing, max_seq_len)
             if rollout_expert_indices is not None:
@@ -1627,25 +1501,7 @@ class SkyRLTrainBackend(AbstractBackend):
         persistent loop and reuses the session across requests instead.
         """
 
-        # Resolve the inference-engine model name per request. With multi-LoRA
-        # the adapter name on vLLM IS the Tinker model_id (registered by
-        # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
-        # FFT path falls back to resolve_policy_model_name(cfg). An empty
-        # model_id is base-model sampling and must target the served base
-        # model directly: resolve_policy_model_name would return the LoRA
-        # adapter alias under LoRA weight sync, which (a) does not exist on
-        # the engines until the first sampler-weight save and (b) would wrongly
-        # apply adapter deltas to a base-model request.
-        fallback_model_name = resolve_policy_model_name(self._cfg)
-        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
-        per_request_models = []
-        for mid in prepared_batch.all_model_ids:
-            if not mid:
-                per_request_models.append(base_model_name)
-            elif self._base_lora_signature is not None and mid in self._model_ids_to_role:
-                per_request_models.append(mid)
-            else:
-                per_request_models.append(fallback_model_name)
+        per_request_models = [self._resolve_inference_model_name(mid) for mid in prepared_batch.all_model_ids]
 
         # Prompt logprobs are a property of the prompt, and all `num_samples`
         # samples of a request share one prompt, so only ask for them on the
@@ -1658,9 +1514,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 prompt_logprobs_at[start_idx] = topk
 
         # Rollout Routing Replay (R3): when replay is enabled on the Megatron
-        # policy, request per-token routed experts so we can cache them
-        # server-side (keyed by the sampled sequence) for forward_backward.
-        return_routed_experts = self._router_replay_enabled()
+        # policy, sample through the stash endpoint so the servers keep each
+        # sample's routing (keyed by the sampled sequence) for forward_backward
+        # to fetch later. Responses carry no routing either way.
+        stash_routed_experts = self._router_replay_enabled()
 
         async def sample_all():
             tasks = []
@@ -1673,7 +1530,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     "prompt": model_input.model_dump(),
                     "num_samples": 1,
                     "sampling_params": sampling_params.model_dump(),
-                    "return_routed_experts": return_routed_experts,
+                    "stash_routed_experts": stash_routed_experts,
                 }
 
                 if i in prompt_logprobs_at:
@@ -1705,9 +1562,9 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.debug(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
-            """Yield (tokens, logprobs, stop_reason, routed_experts) from a single sample output."""
+            """Yield (tokens, logprobs, stop_reason) from a single sample output."""
             for seq in output["sequences"]:
-                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason"), seq.get("routed_experts")
+                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
 
         results = {}
         for (
@@ -1737,10 +1594,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                # Prompt token ids for this sample, used only to key R3 routing.
-                prompt_ids = render_model_input([prepared_batch.all_model_inputs[i]])[0].prompt_ids
-
-                for tokens, logprobs_raw, stop_reason_raw, routed_experts in _extract_sequences(output):
+                for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
                     # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
                     logprobs = logprobs_raw or []
@@ -1749,12 +1603,6 @@ class SkyRLTrainBackend(AbstractBackend):
                     if not logprobs and tokens:
                         logger.warning("No logprobs returned - filling with zeros")
                         logprobs = [0.0] * len(tokens)
-
-                    # Rollout Routing Replay (R3): stash routing server-side keyed
-                    # by (model_id, sampled-sequence digest) so forward_backward
-                    # can replay it without any new client-facing fields.
-                    if routed_experts is not None:
-                        self._store_routed_experts(model_id, prompt_ids, tokens, routed_experts)
 
                     sequences.append(
                         types.GeneratedSequence(
@@ -1911,13 +1759,10 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         # Rollout Routing Replay (R3): a weight sync starts the next rollout
-        # round for this model, so evict routing the trainer already consumed
-        # and expire entries that never reached it (filtered out client-side).
-        # The on-disk spool prunes its never-consumed files by the same
-        # staleness rule (consumed files are already deleted at lookup time).
-        self._routed_experts_cache.on_weight_sync(model_id)
-        if self._routed_experts_spool is not None:
-            self._routed_experts_spool.on_weight_sync(model_id, max_staleness=self._routed_experts_cache.max_staleness)
+        # round for this model, so tell the servers' routing stash to drop
+        # entries past the staleness window (they can't be trained on anymore).
+        if self._router_replay_enabled():
+            self._notify_routed_experts_weight_sync(model_id)
 
         if persist:
             if adapter_only_sync:

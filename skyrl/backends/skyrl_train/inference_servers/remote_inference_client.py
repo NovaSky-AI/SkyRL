@@ -148,6 +148,8 @@ class SampleRequestBody(TypedDict, total=False):
     include_prompt_logprobs: bool
     prompt_logprobs: bool
     topk_prompt_logprobs: int
+    stash_routed_experts: bool
+    """R3: sample via /skyrl/v1/completions so the server stashes rollout routing."""
 
 
 class SampleRequestPayload(TypedDict):
@@ -756,61 +758,56 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         return final_token_ids, adjusted_features
 
-    async def _sample_with_routed_experts(
+    async def _sample_via_stash_completions(
         self,
         token_ids: List[int],
         model: str,
         num_samples: int,
-        base_sampling_params: Dict[str, Any],
+        tinker_params: Dict[str, Any],
         session_id: Optional[str],
-        mm_features: Optional[MultiModalFeatures],
     ) -> SampleResponse:
-        """Sample via ``/skyrl/v1/generate`` so per-token routed experts are returned (R3).
+        """Sample via ``/skyrl/v1/completions`` so rollout routing stays server-side (R3).
 
-        Issues one request per sample (the endpoint returns a single choice),
-        offsetting the seed so ``num_samples > 1`` stays diverse. Each returned
-        sequence carries ``routed_experts`` of shape
-        ``[num_tokens - 1, num_layers, topk]`` covering prompt + generated tokens.
+        The endpoint wraps vLLM's completions handler, stashes each choice's
+        routing on the server keyed by (model, prompt + response tokens), and
+        strips it from the response — the trainer later pulls it by digest via
+        :meth:`fetch_routed_experts`. Supports LoRA adapters and ``n > 1``
+        natively, unlike ``/skyrl/v1/generate``.
         """
-        url = f"{self.proxy_url}/skyrl/v1/generate"
+        payload: Dict[str, Any] = {
+            "model": model,
+            "prompt": token_ids,
+            "n": num_samples,
+            # 1 = return the chosen token's logprob (required for RL).
+            "logprobs": 1,
+            "stream": False,
+            "return_token_ids": True,
+        }
+        for tinker_key, openai_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
+            val = tinker_params.get(tinker_key)
+            if val is not None:
+                payload[openai_key] = val
+
         headers = {"Content-Type": "application/json"}
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
-        base_seed = base_sampling_params.get("seed")
-
-        async def _one(sample_idx: int) -> Dict[str, Any]:
-            sp = dict(base_sampling_params)
-            sp["n"] = 1
-            sp["prompt_logprobs"] = None
-            if base_seed is not None:
-                sp["seed"] = base_seed + sample_idx
-            payload: Dict[str, Any] = {"sampling_params": sp, "model": model, "token_ids": token_ids}
-            if mm_features is not None:
-                payload["features"] = mm_features
-            gen_sem, _ = self._get_semaphores()
-            if gen_sem is None:
-                return await self._post(url, json=payload, headers=headers)
+        url = f"{self.proxy_url}/skyrl/v1/completions"
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            response = await self._post(url, json=payload, headers=headers)
+        else:
             async with gen_sem:
-                return await self._post(url, json=payload, headers=headers)
-
-        responses = await asyncio.gather(*[_one(i) for i in range(num_samples)])
+                response = await self._post(url, json=payload, headers=headers)
 
         sequences = []
-        for response in responses:
-            choice = response["choices"][0]
-            seq_logprobs: Optional[List[float]] = None
-            logprobs_data = choice.get("logprobs")
-            if logprobs_data is not None:
-                logprobs_content = logprobs_data.get("content", [])
-                if logprobs_content:
-                    seq_logprobs = [lp["logprob"] for lp in logprobs_content]
+        for choice in response.get("choices", []):
+            lp = choice.get("logprobs") or {}
             sequences.append(
                 {
-                    "tokens": choice["token_ids"],
-                    "logprobs": seq_logprobs,
+                    "tokens": choice.get("token_ids", []),
+                    "logprobs": lp.get("token_logprobs") or None,
                     "stop_reason": choice.get("finish_reason"),
-                    "routed_experts": choice.get("routed_experts"),
                 }
             )
 
@@ -847,9 +844,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         prompt = body.get("prompt", {})
         num_samples = body.get("num_samples", 1)
         tinker_params = body.get("sampling_params", {})
-        # Rollout Routing Replay (R3): only capture routing when the caller asks
-        # for it AND the server was launched with routed-experts return enabled.
-        return_routed_experts = bool(body.get("return_routed_experts", False)) and self.enable_return_routed_experts
+        # Rollout Routing Replay (R3): only stash routing when the caller asks
+        # for it AND the server was launched with routed-experts capture enabled.
+        stash_routed_experts = bool(body.get("stash_routed_experts", False)) and self.enable_return_routed_experts
 
         # Note: Tinker SampleRequest uses "prompt_logprobs" (bool), while
         # SamplingClient.sample() uses "include_prompt_logprobs".
@@ -865,6 +862,22 @@ class RemoteInferenceClient(InferenceEngineInterface):
         # call the render endpoint to get placeholder tokens + features.
         token_ids, mm_features = await self._render_for_sample(prompt, session_id, model=model)
 
+        # Rollout Routing Replay (R3): sample through /skyrl/v1/completions so
+        # the server stashes each choice's routing for the trainer to pull by
+        # digest later; the response itself carries no routing. This branch does
+        # not populate prompt_logprobs (unused for R3) or multimodal features
+        # (R3 targets text MoE models).
+        if stash_routed_experts:
+            if mm_features is not None:
+                raise ValueError("R3 sampling (stash_routed_experts) does not support multimodal prompts")
+            return await self._sample_via_stash_completions(
+                token_ids=token_ids,
+                model=model,
+                num_samples=num_samples,
+                tinker_params=tinker_params,
+                session_id=session_id,
+            )
+
         # Map Tinker SamplingParams → vLLM format
         sampling_params: Dict[str, Any] = {
             "n": num_samples,
@@ -877,21 +890,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
             val = tinker_params.get(tinker_key)
             if val is not None:
                 sampling_params[vllm_key] = val
-
-        # Rollout Routing Replay (R3): the OpenAI-compatible router endpoint does
-        # not surface routed experts, so route through the SkyRL generate
-        # endpoint which does. It returns a single choice per call, so we fan out
-        # one request per sample (offsetting the seed for diversity). This branch
-        # does not populate prompt_logprobs (unused for R3).
-        if return_routed_experts:
-            return await self._sample_with_routed_experts(
-                token_ids=token_ids,
-                model=model,
-                num_samples=num_samples,
-                base_sampling_params=sampling_params,
-                session_id=session_id,
-                mm_features=mm_features,
-            )
 
         payload: Dict[str, Any] = {
             "sampling_params": sampling_params,
@@ -1304,6 +1302,70 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "/collective_rpc",
             {"method": "skyrl_wake_for_weight_sync", "kwargs": {"tags": tags}},
         )
+
+    # ---------------------------
+    # Rollout Routing Replay (R3) stash (control plane - fan-out)
+    # ---------------------------
+
+    async def fetch_routed_experts(self, model: str, digest_hexes: List[str]) -> Dict[str, Any]:
+        """Pull stashed rollout routing for the given sequence digests (R3).
+
+        The router load-balances sampling, so any server may hold a given
+        sample's routing; the query fans out to all ``server_urls`` and merges
+        the per-server hits. Digests absent everywhere are simply missing from
+        the result (the trainer falls back to the live router for those
+        samples). Reads are non-destructive so multi-epoch training can fetch
+        the same digests again.
+
+        Args:
+            model: Model name the samples targeted on vLLM (LoRA adapter name
+                or base/served model name) — part of the stash key.
+            digest_hexes: Hex digests of the full sampled token sequences
+                (see ``routed_experts_stash.sequence_digest``).
+
+        Returns:
+            Dict mapping digest hex to the routing ``np.ndarray``.
+        """
+        from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+            load_arrays_npz,
+        )
+
+        session = await self._get_session()
+        payload = {"model": model, "digests": list(digest_hexes)}
+
+        async def _fetch_one(server_url: str) -> Dict[str, Any]:
+            url = f"{server_url}/skyrl/v1/routed_experts/fetch"
+            async with session.post(url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = None
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception:
+                        pass
+                    raise_for_status(resp, body)
+                return load_arrays_npz(await resp.read())
+
+        results = await asyncio.gather(*[_fetch_one(url) for url in self.server_urls])
+        merged: Dict[str, Any] = {}
+        for hits in results:
+            merged.update(hits)
+        return merged
+
+    async def routed_experts_weight_sync(self, model: str, max_staleness: int = 1) -> Dict[str, Any]:
+        """Notify all servers that ``model``'s weights were synced (R3 lifecycle).
+
+        A sync starts the model's next rollout round: servers drop routing
+        stashed more than ``max_staleness`` syncs ago, since it can no longer
+        be trained on.
+        """
+        return await self._call_all_servers(
+            "/skyrl/v1/routed_experts/weight_sync",
+            {"model": model, "max_staleness": max_staleness},
+        )
+
+    async def clear_routed_experts(self, model: str) -> Dict[str, Any]:
+        """Drop all stashed routing for a deleted model on all servers (R3 lifecycle)."""
+        return await self._call_all_servers("/skyrl/v1/routed_experts/clear", {"model": model})
 
     async def reset_prefix_cache(
         self,

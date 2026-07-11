@@ -1,0 +1,172 @@
+"""CPU tests for the server-side R3 routing stash (`routed_experts_stash.py`).
+
+The stash is the single store for Rollout Routing Replay: each vLLM server
+keeps the routing it produced, keyed by (model, digest of prompt + response
+tokens), and the trainer pulls it by digest at forward_backward time. These
+tests cover the key/digest, read-only bulk lookup, weight-sync staleness
+eviction, model eviction, the FIFO entry cap, and the npz/base64 transport
+helpers. No vLLM or GPU needed. Run:
+  uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/inference_servers/test_routed_experts_stash.py
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+
+import numpy as np
+
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+    RoutedExpertsStash,
+    decode_routed_experts_b64,
+    dump_arrays_npz,
+    load_arrays_npz,
+    sequence_digest,
+)
+
+
+def _routing(seq_len: int = 4, num_layers: int = 2, topk: int = 3) -> np.ndarray:
+    return np.arange(seq_len * num_layers * topk, dtype=np.uint8).reshape(seq_len, num_layers, topk)
+
+
+def test_sequence_digest_is_exact_and_fixed_size():
+    assert len(sequence_digest([1, 2, 3])) == 16
+    assert sequence_digest([1, 2, 3]) == sequence_digest([1, 2, 3])
+    assert sequence_digest([1, 2, 3]) != sequence_digest([3, 2, 1])
+    # Hashed as int64 bytes: matches a manual digest.
+    manual = hashlib.blake2b(np.asarray([1, 2, 3], dtype=np.int64).tobytes(), digest_size=16).digest()
+    assert sequence_digest([1, 2, 3]) == manual
+
+
+def test_put_get_many_roundtrip_is_read_only():
+    stash = RoutedExpertsStash()
+    routing = _routing()
+    tokens = [10, 11, 12, 20, 21]
+    stash.put("model_a", tokens, routing)
+
+    digest_hex = sequence_digest(tokens).hex()
+    hits = stash.get_many("model_a", [digest_hex, sequence_digest([9, 9]).hex()])
+    assert set(hits) == {digest_hex}
+    np.testing.assert_array_equal(hits[digest_hex], routing)
+
+    # Reads are non-destructive: multi-epoch training fetches again.
+    assert stash.get_many("model_a", [digest_hex])
+    assert len(stash) == 1
+
+
+def test_keys_are_scoped_per_model():
+    """Two adapters that sample identical tokens must not share an entry."""
+    stash = RoutedExpertsStash()
+    routing_a = _routing()
+    routing_b = routing_a + 1
+    stash.put("model_a", [1, 2], routing_a)
+    stash.put("model_b", [1, 2], routing_b)
+
+    digest_hex = sequence_digest([1, 2]).hex()
+    assert int(stash.get_many("model_a", [digest_hex])[digest_hex][0, 0, 0]) + 1 == int(
+        stash.get_many("model_b", [digest_hex])[digest_hex][0, 0, 0]
+    )
+
+
+def test_put_same_key_refreshes_entry_and_nbytes():
+    stash = RoutedExpertsStash()
+    stash.put("m", [1, 2], _routing())
+    newer = _routing(seq_len=8)
+    stash.put("m", [1, 2], newer)
+    assert len(stash) == 1
+    assert stash.nbytes == newer.nbytes
+    digest_hex = sequence_digest([1, 2]).hex()
+    np.testing.assert_array_equal(stash.get_many("m", [digest_hex])[digest_hex], newer)
+
+
+def test_fifo_cap_bounds_entries():
+    stash = RoutedExpertsStash(max_entries=4)
+    for i in range(6):
+        stash.put("m", [i], _routing())
+    assert len(stash) == 4
+    assert not stash.get_many("m", [sequence_digest([0]).hex()])  # oldest evicted
+    assert stash.get_many("m", [sequence_digest([5]).hex()])
+
+
+def test_weight_sync_drops_entries_past_staleness_window():
+    """An entry stashed at generation g dies at the sync producing generation
+    g + max_staleness + 1 — training on its rollout round is over by then."""
+    stash = RoutedExpertsStash()
+    stash.put("m", [1, 2], _routing())  # stashed at gen 0
+    digest_hex = sequence_digest([1, 2]).hex()
+
+    assert stash.on_weight_sync("m", max_staleness=1) == 0  # gen 1: within window
+    assert stash.get_many("m", [digest_hex])
+    assert stash.on_weight_sync("m", max_staleness=1) == 1  # gen 2: 0 <= 2 - 1 - 1
+    assert not stash.get_many("m", [digest_hex])
+    assert stash.nbytes == 0
+
+
+def test_zero_staleness_drops_at_first_sync():
+    stash = RoutedExpertsStash()
+    stash.put("m", [1, 2], _routing())
+    assert stash.on_weight_sync("m", max_staleness=0) == 1
+    assert len(stash) == 0
+
+
+def test_entries_stashed_after_a_sync_age_from_that_sync():
+    stash = RoutedExpertsStash()
+    stash.on_weight_sync("m", max_staleness=1)  # gen 1
+    stash.put("m", [1, 2], _routing())  # stashed at gen 1
+    digest_hex = sequence_digest([1, 2]).hex()
+
+    assert stash.on_weight_sync("m", max_staleness=1) == 0  # gen 2: one sync old
+    assert stash.get_many("m", [digest_hex])
+    assert stash.on_weight_sync("m", max_staleness=1) == 1  # gen 3: two syncs old
+    assert not stash.get_many("m", [digest_hex])
+
+
+def test_weight_sync_is_scoped_per_model():
+    stash = RoutedExpertsStash()
+    stash.put("model_a", [1, 2], _routing())
+    stash.put("model_b", [1, 2], _routing())
+
+    for _ in range(3):
+        stash.on_weight_sync("model_a", max_staleness=1)
+
+    digest_hex = sequence_digest([1, 2]).hex()
+    assert not stash.get_many("model_a", [digest_hex])
+    assert stash.get_many("model_b", [digest_hex])
+
+
+def test_evict_model():
+    stash = RoutedExpertsStash()
+    stash.put("model_a", [1, 2], _routing())
+    stash.put("model_a", [3, 4], _routing())
+    stash.put("model_b", [1, 2], _routing())
+
+    assert stash.evict_model("model_a") == 2
+    assert len(stash) == 1
+    assert stash.nbytes == _routing().nbytes
+    # The sync generation resets with the model.
+    stash.put("model_a", [5, 6], _routing())
+    assert stash.on_weight_sync("model_a", max_staleness=0) == 1
+
+
+def test_npz_transport_roundtrip():
+    arrays = {
+        sequence_digest([1, 2]).hex(): _routing(),
+        sequence_digest([3, 4]).hex(): _routing(seq_len=7).astype(np.uint16),
+    }
+    payload = dump_arrays_npz(arrays)
+    loaded = load_arrays_npz(payload)
+    assert set(loaded) == set(arrays)
+    for name, arr in arrays.items():
+        np.testing.assert_array_equal(loaded[name], arr)
+        assert loaded[name].dtype == arr.dtype
+    assert load_arrays_npz(dump_arrays_npz({})) == {}
+
+
+def test_decode_routed_experts_b64_matches_vllm_encoding():
+    """Decode the exact transport vLLM's completions endpoint uses (base64 .npy)."""
+    arr = _routing()
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    np.testing.assert_array_equal(decode_routed_experts_b64(payload), arr)

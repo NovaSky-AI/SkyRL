@@ -16,6 +16,8 @@ import orjson
 import uvicorn
 import vllm.envs as envs
 from fastapi import HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -24,6 +26,8 @@ from vllm.entrypoints.openai.api_server import (
     create_server_socket,
     init_app_state,
 )
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse as OpenAIErrorResponse
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import FlatLogprobs
 from vllm.lora.request import LoRARequest
@@ -48,6 +52,11 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+    RoutedExpertsStash,
+    decode_routed_experts_b64,
+    dump_arrays_npz,
+)
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_PADDING,
@@ -461,6 +470,15 @@ class VLLMServerActor(ServerActorProtocol):
         # adds /fetch_weights because checkpoint-delta pulls and applies
         # payloads before the paused /update_weights reload.
 
+        # Rollout Routing Replay (R3): this server keeps the routing it produced
+        # in an in-process stash keyed by (model, digest of prompt + response
+        # tokens); the trainer pulls what it needs at forward_backward time via
+        # /skyrl/v1/routed_experts/fetch. Populated by /skyrl/v1/completions
+        # below. None when the engine wasn't launched with routing capture, in
+        # which case all R3 endpoints are no-ops / passthroughs.
+        stash = RoutedExpertsStash() if getattr(cli_args, "enable_return_routed_experts", False) else None
+        app.state.skyrl_routed_experts_stash = stash
+
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
             """Reset the prefix cache, optionally resetting in-flight requests too."""
@@ -620,6 +638,78 @@ class VLLMServerActor(ServerActorProtocol):
                 ]
             }
             return Response(content=orjson.dumps(payload), media_type="application/json")
+
+        # Rollout Routing Replay (R3): OpenAI-compatible completions that keep
+        # routing server-side. Wraps vLLM's own completions handler, moves each
+        # choice's routing into the stash (keyed by the model name and the full
+        # prompt + response token sequence), and strips it from the response —
+        # so callers get plain completions and the trainer later pulls the
+        # routing by digest. Unlike /skyrl/v1/generate this supports LoRA
+        # (adapter resolution happens in the standard handler) and n > 1.
+        # Pure passthrough when the engine runs without routing capture.
+        @app.post("/skyrl/v1/completions")
+        async def _skyrl_completions(raw_request: Request):
+            handler = raw_request.app.state.openai_serving_completion
+            if handler is None:
+                raise HTTPException(status_code=400, detail="The model does not support the Completions API.")
+
+            body = await raw_request.json()
+            if body.get("stream"):
+                raise HTTPException(status_code=400, detail="/skyrl/v1/completions does not support streaming.")
+            # Token ids are required to key the stash by prompt + response.
+            body["return_token_ids"] = True
+            try:
+                completion_request = CompletionRequest(**body)
+            except ValidationError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            result = await handler.create_completion(completion_request, raw_request)
+            if isinstance(result, OpenAIErrorResponse):
+                return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+            model_name = completion_request.model or ""
+            for choice in result.choices:
+                payload = choice.routed_experts
+                choice.routed_experts = None
+                if stash is None or not payload:
+                    continue
+                try:
+                    routing = decode_routed_experts_b64(payload)
+                    stash.put(model_name, list(choice.prompt_token_ids or []) + list(choice.token_ids or []), routing)
+                except Exception as e:
+                    logger.warning("R3: failed to stash rollout routing for model %s: %s", model_name, e)
+            return JSONResponse(content=result.model_dump())
+
+        # R3 data plane for the trainer: bulk digest lookup, returned as an
+        # uncompressed .npz keyed by digest hex. Read-only (multi-epoch training
+        # re-fetches); entries are dropped by the lifecycle endpoints below.
+        @app.post("/skyrl/v1/routed_experts/fetch")
+        async def _skyrl_routed_experts_fetch(request: Request):
+            body = await request.json()
+            model = body.get("model") or ""
+            digests = body.get("digests") or []
+            hits = stash.get_many(model, digests) if stash is not None else {}
+            return Response(content=dump_arrays_npz(hits), media_type="application/octet-stream")
+
+        # R3 lifecycle: a weight sync for a model starts its next rollout
+        # round, so routing stashed more than max_staleness syncs ago can no
+        # longer be trained on. Called (fan-out) by the trainer right after it
+        # broadcasts weights.
+        @app.post("/skyrl/v1/routed_experts/weight_sync")
+        async def _skyrl_routed_experts_weight_sync(request: Request):
+            body = await request.json()
+            if stash is None:
+                return {"removed": 0}
+            removed = stash.on_weight_sync(body.get("model") or "", max_staleness=int(body.get("max_staleness", 1)))
+            return {"removed": removed}
+
+        # R3 lifecycle: drop all routing for a deleted model.
+        @app.post("/skyrl/v1/routed_experts/clear")
+        async def _skyrl_routed_experts_clear(request: Request):
+            body = await request.json()
+            if stash is None:
+                return {"removed": 0}
+            return {"removed": stash.evict_model(body.get("model") or "")}
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""
