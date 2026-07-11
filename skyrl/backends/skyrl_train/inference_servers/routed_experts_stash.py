@@ -1,45 +1,25 @@
 """Server-side store for Rollout Routing Replay (R3) rollout routing.
 
-With R3, training must replay the MoE expert choices vLLM made during
-rollout. Routing is produced on the inference servers, so it stays there:
-each vLLM server actor holds a :class:`RoutedExpertsStash` populated at
-generation time (see the ``/skyrl/v1/completions`` and ``/skyrl/v1/generate``
-endpoints in ``vllm_server_actor.py``), and the training backend pulls the
-routing it needs at ``forward_backward`` time by fanning a digest query out
-to all servers (``/skyrl/v1/routed_experts/fetch``).
+Routing is produced on the inference servers, so it stays there: each vLLM
+server actor holds a :class:`RoutedExpertsStash` populated at generation time
+(``/skyrl/v1/completions`` in ``vllm_server_actor.py``), and the trainer
+pulls what it needs at forward_backward time by fanning a digest query out to
+all servers (``/skyrl/v1/routed_experts/fetch``). Sampling responses never
+carry routing to any client, and the flow is identical in colocated and
+non-colocated mode. The stash survives engine sleep (only GPU state is
+offloaded) and dies with the server on teardown.
 
-This makes R3 a single system with one store and one lifecycle, identical in
-colocated and non-colocated mode: sampling responses never carry routing to
-any client, and no state crosses process boundaries except through these
-HTTP endpoints. The stash survives engine sleep (only GPU state is offloaded;
-the HTTP app keeps serving) and dies with the server on teardown, so there is
-nothing to wipe.
+Entries are keyed by ``(model name on vLLM, blake2b digest of prompt +
+response tokens)`` — exactly what the trainer reconstructs from a training
+sample. Fetches never delete (multi-epoch training re-fetches after each
+optim_step) but mark entries consumed. Deletion is lifecycle-driven: at a
+model's weight sync (the event that starts its next rollout round), consumed
+entries are deleted immediately and never-fetched ones (client-filtered
+samples, eval rollouts) once they are more than ``max_staleness`` syncs old.
+A FIFO cap on entries bounds memory for loops that never sync weights.
 
-Entries are keyed by ``(model, blake2b digest of the full token sequence)``,
-where ``model`` is the name the request targeted on vLLM (a LoRA adapter
-name in multi-tenant serving, the base/served model name otherwise) and the
-sequence is prompt + response tokens — exactly what the trainer can
-reconstruct from a training sample. Fetches never delete (multi-epoch
-training re-fetches the same routing after each optim_step) but do mark
-entries consumed; eviction is lifecycle-driven:
-
-- ``on_weight_sync(model, max_staleness)``: a weight sync starts the next
-  rollout round for that model. **Consumed** entries (fetched by the trainer
-  at least once) are deleted — their training batch is done. Entries the
-  trainer never fetched (filtered out client-side, e.g. all-zero-reward
-  groups, or eval rollouts) are deleted once they are more than
-  ``max_staleness`` syncs old. ``max_staleness=1`` (the trainer's default)
-  covers on-policy and one-step-async loops.
-- ``evict_model(model)``: the model was deleted; its routing is dead.
-- Insertion-order FIFO at ``max_entries`` (``SKYRL_ROUTED_EXPERTS_STASH_MAX_ENTRIES``,
-  default 16384) bounds memory for loops that never sync weights.
-
-Loops that run multiple epochs per batch *and* sync weights mid-batch can
-see consumed entries deleted between epochs; affected samples fall back to
-the live router with a warning (same caveat at every point in R3's design).
-
-This module is imported by the vLLM server actor and the training backend;
-keep it light (numpy + stdlib only).
+Imported by the vLLM server actor and the training backend; keep it light
+(numpy + stdlib only).
 """
 
 from __future__ import annotations
@@ -61,12 +41,7 @@ SKYRL_ROUTED_EXPERTS_STASH_MAX_ENTRIES = int(os.environ.get("SKYRL_ROUTED_EXPERT
 
 
 def sequence_digest(token_ids: Sequence[int]) -> bytes:
-    """16-byte blake2b digest of the token ids, hashed as int64 bytes.
-
-    The R3 key: fixed-size regardless of sequence length, and order- and
-    value-exact. The trainer computes the same digest from a training sample's
-    full sequence (prompt + response) to address the stash.
-    """
+    """16-byte blake2b digest of the token ids (as int64 bytes): the R3 key."""
     buf = np.asarray(token_ids, dtype=np.int64).tobytes()
     return hashlib.blake2b(buf, digest_size=16).digest()
 
@@ -126,12 +101,10 @@ class RoutedExpertsStash:
             self._nbytes -= evicted.routing.nbytes
 
     def get_many(self, model: str, digest_hexes: Iterable[str]) -> Dict[str, np.ndarray]:
-        """Bulk lookup; returns only the digests present on this server.
+        """Bulk lookup of the digests present on this server.
 
-        Marks hits consumed so the model's next weight sync deletes them (the
-        sync is what ends their training batch's rollout round). Never deletes
-        directly: multi-epoch training re-fetches the same routing after each
-        optim_step, so consumption must not evict mid-batch.
+        Marks hits consumed (deleted at the model's next weight sync) but never
+        deletes directly: multi-epoch training re-fetches mid-batch.
         """
         hits: Dict[str, np.ndarray] = {}
         for digest_hex in digest_hexes:
@@ -144,17 +117,10 @@ class RoutedExpertsStash:
     def on_weight_sync(self, model: str, max_staleness: int) -> int:
         """Advance the model's sync generation and delete its dead entries.
 
-        A weight sync starts the model's next rollout round, so two kinds of
-        entries are deleted here:
-
-        - **Consumed** entries (fetched by the trainer at least once): their
-          training batch finished before this sync.
-        - **Never-consumed** entries stashed at generation ``g`` when
-          ``g <= n - 1 - max_staleness`` (``n`` being the new generation): the
-          trainer never asked for them (filtered out client-side, eval
-          rollouts) and their round is too old to still be trained on.
-
-        Returns the number of entries deleted.
+        Deletes consumed entries (their training batch finished before this
+        sync) and never-consumed entries stashed at generation
+        ``g <= new_gen - 1 - max_staleness`` (their round is too old to still
+        be trained on). Returns the number of entries deleted.
         """
         new_gen = self._sync_gens.get(model, 0) + 1
         self._sync_gens[model] = new_gen

@@ -1,11 +1,7 @@
-"""CPU tests for the server-side R3 routing stash (`routed_experts_stash.py`).
-
-The stash is the single store for Rollout Routing Replay: each vLLM server
-keeps the routing it produced, keyed by (model, digest of prompt + response
-tokens), and the trainer pulls it by digest at forward_backward time. These
-tests cover the key/digest, read-only bulk lookup, weight-sync staleness
-eviction, model eviction, the FIFO entry cap, and the npz/base64 transport
-helpers. No vLLM or GPU needed. Run:
+"""CPU tests for the server-side R3 routing stash (`routed_experts_stash.py`):
+key/digest, bulk lookup with consumption, weight-sync eviction, model
+eviction, the FIFO entry cap, and the npz/base64 transport helpers. No vLLM
+or GPU needed. Run:
   uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/inference_servers/test_routed_experts_stash.py
 """
 

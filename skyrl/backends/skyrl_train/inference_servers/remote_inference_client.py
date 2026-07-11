@@ -766,14 +766,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         tinker_params: Dict[str, Any],
         session_id: Optional[str],
     ) -> SampleResponse:
-        """Sample via ``/skyrl/v1/completions`` so rollout routing stays server-side (R3).
-
-        The endpoint wraps vLLM's completions handler, stashes each choice's
-        routing on the server keyed by (model, prompt + response tokens), and
-        strips it from the response — the trainer later pulls it by digest via
-        :meth:`fetch_routed_experts`. Supports LoRA adapters and ``n > 1``
-        natively, unlike ``/skyrl/v1/generate``.
-        """
+        """Sample via ``/skyrl/v1/completions`` so rollout routing stays
+        server-side (R3): the endpoint stashes each choice's routing and strips
+        it from the response; the trainer later pulls it by digest."""
         payload: Dict[str, Any] = {
             "model": model,
             "prompt": token_ids,
@@ -1310,22 +1305,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def fetch_routed_experts(self, model: str, digest_hexes: List[str]) -> Dict[str, Any]:
         """Pull stashed rollout routing for the given sequence digests (R3).
 
-        The router load-balances sampling, so any server may hold a given
-        sample's routing; the query fans out to all ``server_urls`` and merges
-        the per-server hits. Digests absent everywhere are simply missing from
-        the result (the trainer falls back to the live router for those
-        samples). Fetches don't delete — multi-epoch training re-fetches the
-        same digests — but they mark entries consumed, so the model's next
-        weight sync (:meth:`routed_experts_weight_sync`) deletes them.
-
-        Args:
-            model: Model name the samples targeted on vLLM (LoRA adapter name
-                or base/served model name) — part of the stash key.
-            digest_hexes: Hex digests of the full sampled token sequences
-                (see ``routed_experts_stash.sequence_digest``).
-
-        Returns:
-            Dict mapping digest hex to the routing ``np.ndarray``.
+        Any server may hold a given sample's routing (the router load-balances
+        sampling), so the query fans out to all ``server_urls`` and merges the
+        hits into a dict mapping digest hex to routing ``np.ndarray``; digests
+        absent everywhere are missing from the result. Fetches mark entries
+        consumed but don't delete (multi-epoch training re-fetches); the
+        model's next weight sync deletes them.
         """
         from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
             load_arrays_npz,
@@ -1353,13 +1338,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return merged
 
     async def routed_experts_weight_sync(self, model: str, max_staleness: int = 1) -> Dict[str, Any]:
-        """Notify all servers that ``model``'s weights were synced (R3 lifecycle).
-
-        A sync starts the model's next rollout round: servers delete routing
-        the trainer already fetched (its training batch is done) and routing
-        that was never fetched once it is more than ``max_staleness`` syncs
-        old (it can no longer be trained on).
-        """
+        """Notify all servers that ``model``'s weights were synced, so their R3
+        stash evicts entries whose rollout round is over (see
+        ``RoutedExpertsStash.on_weight_sync``)."""
         return await self._call_all_servers(
             "/skyrl/v1/routed_experts/weight_sync",
             {"model": model, "max_staleness": max_staleness},

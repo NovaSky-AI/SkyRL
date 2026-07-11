@@ -1,14 +1,11 @@
 """CPU tests for the SkyRL-Train backend side of Rollout Routing Replay (R3).
 
-R3 stays a server-side launch flag with a single store: rollout routing is
-stashed on the vLLM servers at sample time (keyed by the model name and the
-digest of the full sampled token sequence), and forward_backward pulls it back
-by reconstructing the digests from the training sequences. Nothing is exposed
-through the client-facing Tinker types, and the backend itself holds no
-routing state. These tests cover the digest fetch (grouping, dedupe, dtype
-narrowing, shape validation, live-router fallback), the model-name resolution
-used for stash keys, the sample-time gating, the lifecycle fan-outs, and the
-left-padded replay tensor assembly — no GPU or inference engine needed. Run:
+Routing is stashed on the vLLM servers at sample time and forward_backward
+pulls it back by digest (see routed_experts_stash.py); the backend holds no
+routing state and nothing is exposed through the client-facing Tinker types.
+Covers the digest fetch (dedupe, dtype narrowing, shape validation,
+live-router fallback), stash-key model-name resolution, sample-time gating,
+the lifecycle fan-outs, and the replay tensor assembly. No GPU needed. Run:
   uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_router_replay_backend.py
 """
 
@@ -79,7 +76,6 @@ def _fetch_backend(stashed=None, *, lora=False, model_ids_to_role=None):
         _base_lora_signature=(8, 16) if lora else None,
         _model_ids_to_role=model_ids_to_role or {},
         _cfg=None,
-        _resolve_inference_model_name=None,  # bound below
         _routed_experts_missing_warned=False,
         config=SimpleNamespace(routed_experts_stash_max_staleness=1),
     )
@@ -87,11 +83,15 @@ def _fetch_backend(stashed=None, *, lora=False, model_ids_to_role=None):
 
 def _bind(fake):
     """Bind the real backend methods onto the stand-in."""
-    fake._resolve_inference_model_name = SkyRLTrainBackend._resolve_inference_model_name.__get__(fake)
-    fake._fetch_rollout_routing = SkyRLTrainBackend._fetch_rollout_routing.__get__(fake)
-    fake._notify_routed_experts_weight_sync = SkyRLTrainBackend._notify_routed_experts_weight_sync.__get__(fake)
-    fake._clear_routed_experts_for_model = SkyRLTrainBackend._clear_routed_experts_for_model.__get__(fake)
-    fake._warn_on_missing_routing = SkyRLTrainBackend._warn_on_missing_routing.__get__(fake)
+    for name in (
+        "_resolve_inference_model_name",
+        "_run_client_call",
+        "_fetch_rollout_routing",
+        "_notify_routed_experts_weight_sync",
+        "_clear_routed_experts_for_model",
+        "_warn_on_missing_routing",
+    ):
+        setattr(fake, name, getattr(SkyRLTrainBackend, name).__get__(fake))
     return fake
 
 
@@ -108,7 +108,8 @@ def test_resolve_inference_model_name(monkeypatch):
 
 
 def test_fetch_maps_digests_back_to_samples(monkeypatch):
-    """Each training sequence gets the routing stashed under its own digest."""
+    """Each training sequence gets the routing stashed under its own digest,
+    with one fan-out per (single-model) batch and duplicates deduplicated."""
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
 
     seq_a, seq_b = [10, 11, 12, 20, 21], [10, 11, 12, 30, 31, 32]
@@ -121,44 +122,28 @@ def test_fetch_maps_digests_back_to_samples(monkeypatch):
     }
     fake = _bind(_fetch_backend(stashed))
 
-    per_sample = fake._fetch_rollout_routing(["m", "m"], [seq_a, seq_b])
+    per_sample = fake._fetch_rollout_routing(["m", "m", "m"], [seq_a, seq_b, seq_a])
     np.testing.assert_array_equal(np.asarray(per_sample[0], dtype=np.int64), routing_a.astype(np.int64))
     np.testing.assert_array_equal(np.asarray(per_sample[1], dtype=np.int64), routing_b.astype(np.int64))
+    np.testing.assert_array_equal(np.asarray(per_sample[2], dtype=np.int64), routing_a.astype(np.int64))
 
-    # One fan-out per resolved model name, digests deduplicated and sorted.
-    assert len(fake._inference_engine_client.fetch_calls) == 1
-    model, digests = fake._inference_engine_client.fetch_calls[0]
-    assert model == BASE_MODEL
-    assert digests == sorted({sequence_digest(seq_a).hex(), sequence_digest(seq_b).hex()})
-
-
-def test_fetch_deduplicates_repeated_sequences(monkeypatch):
-    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
-    seq = [1, 2, 3]
-    stashed = {BASE_MODEL: {sequence_digest(seq).hex(): _routing(2, 1, 2)}}
-    fake = _bind(_fetch_backend(stashed))
-
-    per_sample = fake._fetch_rollout_routing(["m", "m", "m"], [seq, seq, seq])
-    assert all(r is not None for r in per_sample)
-    _, digests = fake._inference_engine_client.fetch_calls[0]
-    assert len(digests) == 1
+    # One fan-out under the resolved model name, digests deduplicated.
+    assert fake._inference_engine_client.fetch_calls == [
+        (BASE_MODEL, sorted({sequence_digest(seq_a).hex(), sequence_digest(seq_b).hex()}))
+    ]
 
 
-def test_fetch_groups_by_resolved_model_name(monkeypatch):
-    """Multi-LoRA: each adapter's digests are fetched under its own stash key."""
+def test_fetch_uses_adapter_name_for_multi_lora(monkeypatch):
+    """Multi-LoRA: the stash is addressed by the adapter name (== model_id)."""
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
     seq = [1, 2, 3]
     digest_hex = sequence_digest(seq).hex()
-    routing_a, routing_b = _routing(2, 1, 2), _routing(2, 1, 2) + 1
-    stashed = {"model_a": {digest_hex: routing_a}, "model_b": {digest_hex: routing_b}}
-    fake = _bind(
-        _fetch_backend(stashed, lora=True, model_ids_to_role={"model_a": "policy", "model_b": "policy"}),
-    )
+    stashed = {"model_a": {digest_hex: _routing(2, 1, 2)}}
+    fake = _bind(_fetch_backend(stashed, lora=True, model_ids_to_role={"model_a": "policy"}))
 
-    per_sample = fake._fetch_rollout_routing(["model_a", "model_b"], [seq, seq])
-    # Identical tokens, but each adapter gets its own routing (no collision).
-    assert int(per_sample[0][0, 0, 0]) + 1 == int(per_sample[1][0, 0, 0])
-    assert sorted(m for m, _ in fake._inference_engine_client.fetch_calls) == ["model_a", "model_b"]
+    per_sample = fake._fetch_rollout_routing(["model_a"], [seq])
+    assert per_sample[0] is not None
+    assert fake._inference_engine_client.fetch_calls == [("model_a", [digest_hex])]
 
 
 def test_fetch_missing_digests_fall_back_to_none_with_warning(monkeypatch):

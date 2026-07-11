@@ -470,12 +470,10 @@ class VLLMServerActor(ServerActorProtocol):
         # adds /fetch_weights because checkpoint-delta pulls and applies
         # payloads before the paused /update_weights reload.
 
-        # Rollout Routing Replay (R3): this server keeps the routing it produced
-        # in an in-process stash keyed by (model, digest of prompt + response
-        # tokens); the trainer pulls what it needs at forward_backward time via
-        # /skyrl/v1/routed_experts/fetch. Populated by /skyrl/v1/completions
-        # below. None when the engine wasn't launched with routing capture, in
-        # which case all R3 endpoints are no-ops / passthroughs.
+        # Rollout Routing Replay (R3): this server keeps the routing it
+        # produced (see routed_experts_stash.py). None when the engine wasn't
+        # launched with routing capture; the R3 endpoints below are then
+        # no-ops / passthroughs.
         stash = RoutedExpertsStash() if getattr(cli_args, "enable_return_routed_experts", False) else None
         app.state.skyrl_routed_experts_stash = stash
 
@@ -639,13 +637,10 @@ class VLLMServerActor(ServerActorProtocol):
             }
             return Response(content=orjson.dumps(payload), media_type="application/json")
 
-        # Rollout Routing Replay (R3): OpenAI-compatible completions that keep
-        # routing server-side. Wraps vLLM's own completions handler, moves each
-        # choice's routing into the stash (keyed by the model name and the full
-        # prompt + response token sequence), and strips it from the response —
-        # so callers get plain completions and the trainer later pulls the
-        # routing by digest. Unlike /skyrl/v1/generate this supports LoRA
-        # (adapter resolution happens in the standard handler) and n > 1.
+        # Rollout Routing Replay (R3): vLLM's completions handler plus
+        # server-side routing capture — each choice's routing is moved into the
+        # stash (keyed by model name + prompt + response tokens) and stripped
+        # from the response. Supports LoRA and n > 1, unlike /skyrl/v1/generate.
         # Pure passthrough when the engine runs without routing capture.
         @app.post("/skyrl/v1/completions")
         async def _skyrl_completions(raw_request: Request):
@@ -680,10 +675,8 @@ class VLLMServerActor(ServerActorProtocol):
                     logger.warning("R3: failed to stash rollout routing for model %s: %s", model_name, e)
             return JSONResponse(content=result.model_dump())
 
-        # R3 data plane for the trainer: bulk digest lookup, returned as an
-        # uncompressed .npz keyed by digest hex. Never deletes (multi-epoch
-        # training re-fetches) but marks hits consumed so the next weight_sync
-        # below deletes them.
+        # R3: bulk digest lookup for the trainer, returned as uncompressed
+        # .npz keyed by digest hex.
         @app.post("/skyrl/v1/routed_experts/fetch")
         async def _skyrl_routed_experts_fetch(request: Request):
             body = await request.json()
@@ -692,11 +685,8 @@ class VLLMServerActor(ServerActorProtocol):
             hits = stash.get_many(model, digests) if stash is not None else {}
             return Response(content=dump_arrays_npz(hits), media_type="application/octet-stream")
 
-        # R3 lifecycle: a weight sync for a model starts its next rollout
-        # round, so routing the trainer consumed is deleted now, and routing
-        # it never asked for is deleted once more than max_staleness syncs
-        # old. Called (fan-out) by the trainer right after it broadcasts
-        # weights.
+        # R3 lifecycle: called (fan-out) by the trainer right after it
+        # broadcasts weights; evicts entries whose rollout round is over.
         @app.post("/skyrl/v1/routed_experts/weight_sync")
         async def _skyrl_routed_experts_weight_sync(request: Request):
             body = await request.json()

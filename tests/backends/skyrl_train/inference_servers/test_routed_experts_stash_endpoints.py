@@ -1,11 +1,7 @@
-"""CPU tests for the R3 stash endpoints on the vLLM server actor.
-
-Exercises the custom FastAPI endpoints (`/skyrl/v1/completions`,
-`/skyrl/v1/routed_experts/{fetch,weight_sync,clear}`) against a fake
-completions handler, without starting a vLLM engine: the wrapper must stash
-each choice's routing keyed by (model, prompt + response tokens), strip it
-from the response, and the fetch endpoint must return exactly the requested
-digests as an npz payload. Requires vLLM importable (no GPU). Run:
+"""CPU tests for the R3 stash endpoints on the vLLM server actor
+(`/skyrl/v1/completions` and `/skyrl/v1/routed_experts/*`), driven against a
+fake completions handler without starting a vLLM engine. Requires vLLM
+importable (no GPU). Run:
   uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/inference_servers/test_routed_experts_stash_endpoints.py
 """
 
