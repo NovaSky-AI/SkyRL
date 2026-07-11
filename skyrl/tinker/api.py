@@ -333,6 +333,9 @@ async def lifespan(app: FastAPI):
     #   2. backend in (megatron, fsdp) and colocate_all=False: install
     #      SkyRLTrainInferenceForwardingClient so sample requests go directly
     #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
+    #      When R3 (moe_enable_routing_replay) is active, the client also
+    #      spools the rollout routing vLLM returns to a shared local directory
+    #      the engine's backend replays from (skyrl.tinker.routed_experts_spool).
     #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
     #      through the engine subprocess.
     #

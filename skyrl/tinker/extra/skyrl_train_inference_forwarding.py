@@ -5,6 +5,7 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
+import base64
 from datetime import datetime, timezone
 
 import httpx
@@ -16,6 +17,7 @@ from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore
+from skyrl.tinker.routed_experts_spool import RoutedExpertsSpool, resolve_spool_dir
 from skyrl.utils.log import logger
 
 
@@ -36,6 +38,16 @@ class SkyRLTrainInferenceForwardingClient:
         self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
+        # Rollout Routing Replay (R3): the engine-managed vLLM attaches
+        # per-sample rollout routing to /v1/completions choices when it was
+        # launched with routing capture (which the backend enables in lockstep
+        # with moe_enable_routing_replay). Since samples forwarded here never
+        # touch the engine process, the routing is handed off through a spool
+        # directory the training backend reads at forward_backward time. The
+        # backend resolves the identical path from the same EngineConfig.
+        self._routing_spool = RoutedExpertsSpool(
+            resolve_spool_dir(engine_config.routed_experts_spool_dir, engine_config.database_url)
+        )
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
         # Default `forwarding_inference_max_connections=None` is unlimited;
         # the only cost is file descriptors (raise `ulimit -n` accordingly).
@@ -219,6 +231,7 @@ class SkyRLTrainInferenceForwardingClient:
             prompt_logprobs, topk = convert_vllm_prompt_logprobs(prompt_tokens, raw, topk=topk_prompt_logprobs)
 
         sequences = []
+        routing_items: list[tuple[list[int], str]] = []
         for choice in result.get("choices", []):
             tokens = choice.get("token_ids", [])
             lp = choice.get("logprobs") or {}
@@ -231,6 +244,11 @@ class SkyRLTrainInferenceForwardingClient:
             # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
             finish_reason = choice.get("finish_reason")
             stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
+            # Rollout Routing Replay (R3): vLLM attaches routing (base64 .npy)
+            # per choice iff the server was launched with routing capture on.
+            routed_experts_b64 = choice.get("routed_experts")
+            if routed_experts_b64:
+                routing_items.append((tokens, routed_experts_b64))
             sequences.append(
                 types.GeneratedSequence(
                     tokens=tokens,
@@ -239,8 +257,35 @@ class SkyRLTrainInferenceForwardingClient:
                 )
             )
 
+        # Spool the routing before completing the future so the file exists by
+        # the time the client submits forward_backward for these sequences.
+        # Base-model samples (no model_id) can never be replayed — skip them.
+        # File I/O runs off the event loop; failures must not fail the sample.
+        if model_id and routing_items:
+            await asyncio.to_thread(self._spool_routed_experts, model_id, prompt_tokens, routing_items)
+
         return types.SampleOutput(
             sequences=sequences,
             prompt_logprobs=prompt_logprobs,
             topk_prompt_logprobs=topk,
         )
+
+    def _spool_routed_experts(
+        self,
+        model_id: str,
+        prompt_tokens: list[int],
+        routing_items: list[tuple[list[int], str]],
+    ) -> None:
+        """Write each choice's rollout routing to the R3 spool (best-effort).
+
+        Keys files by ``(model_id, prompt + response tokens)`` — exactly the
+        sequence the training backend reconstructs in forward_backward. The
+        base64 payload is written as raw ``.npy`` bytes without parsing; the
+        backend validates shape/dtype when it consumes the file.
+        """
+        for tokens, routed_experts_b64 in routing_items:
+            try:
+                npy_bytes = base64.b64decode(routed_experts_b64)
+                self._routing_spool.write(model_id, list(prompt_tokens) + list(tokens), npy_bytes)
+            except Exception as e:
+                logger.warning("R3: failed to spool rollout routing for model %s: %s", model_id, e)

@@ -71,6 +71,20 @@ class EngineConfig(BaseModel):
             "env_var": "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC",
         },
     )
+    routed_experts_spool_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory for the Rollout Routing Replay (R3) spool: when sampling is "
+            "forwarded by the API process (non-colocated SkyRL-Train backends) and "
+            "moe_enable_routing_replay is active, per-sample rollout routing is handed "
+            "off to the training backend as .npy files in this directory. The API and "
+            "engine processes always run on the same host, and by default the directory "
+            "is derived from database_url under the system temp dir so both sides agree "
+            "without coordination. Set it explicitly if your temp dir is a small tmpfs "
+            "(routing for a large rollout batch can reach several GB)."
+        ),
+        json_schema_extra={"argparse_type": str},
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",

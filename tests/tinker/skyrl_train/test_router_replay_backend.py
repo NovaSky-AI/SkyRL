@@ -5,13 +5,15 @@ the backend keyed by the full sampled token sequence, and forward_backward looks
 it up by the training sequence. Nothing is exposed through the client-facing
 Tinker types. These tests cover that cache roundtrip, the lifecycle eviction
 (consumed entries at weight sync, never-trained entries after the staleness
-window), the left-padded tensor assembly, and the sample-time gating — no GPU or
-inference engine needed. Run:
+window), the left-padded tensor assembly, the sample-time gating, and the
+on-disk spool fallback used when sampling is forwarded by the API process
+(non-colocated mode) — no GPU or inference engine needed. Run:
   uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_router_replay_backend.py
 """
 
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +26,7 @@ import torch  # noqa: E402
 
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
+from skyrl.tinker.routed_experts_spool import RoutedExpertsSpool  # noqa: E402
 
 _build_rollout_expert_indices = skyrl_train_backend._build_rollout_expert_indices
 _routing_cache_key = skyrl_train_backend._routing_cache_key
@@ -43,7 +46,22 @@ def _routing(seq_len: int, num_layers: int, topk: int) -> np.ndarray:
 
 def _cache_backend():
     """A stand-in exposing just the cache attribute the R3 helpers touch."""
-    return SimpleNamespace(_routed_experts_cache=RoutedExpertsCache(cap=4))
+    return SimpleNamespace(_routed_experts_cache=RoutedExpertsCache(cap=4), _routed_experts_spool=None)
+
+
+def _spool_backend(tmp_path, cap: int = 64):
+    """A stand-in with both the in-memory cache and an on-disk spool wired."""
+    return SimpleNamespace(
+        _routed_experts_cache=RoutedExpertsCache(cap=cap),
+        _routed_experts_spool=RoutedExpertsSpool(str(tmp_path / "spool")),
+    )
+
+
+def _npy_bytes(arr: np.ndarray) -> bytes:
+    """Serialize an array the way the API-side spool writer receives it (.npy)."""
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    return buf.getvalue()
 
 
 def _peek(cache: "RoutedExpertsCache", model_id: str, token_ids: list[int]) -> np.ndarray | None:
@@ -261,6 +279,93 @@ def test_end_to_end_cache_to_tensor_alignment():
     tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
     assert tuple(tensor.shape) == (1, 5, 2, 3)
     # Routing occupies positions [0,4); the final token has none.
+    assert tensor[0, 3, 1, 2].item() == 3 * 1000 + 1 * 10 + 2
+    assert tensor[0, 4].sum().item() == 0
+
+
+def test_lookup_falls_back_to_spool_and_promotes_to_cache(tmp_path):
+    """Routing spooled by the API process (non-colocated) is found by the
+    training-sequence lookup, promoted into the in-memory cache for later
+    epochs, and evicted at the model's next weight sync like any consumed entry."""
+    fake = _spool_backend(tmp_path)
+    model_id, seq = "model_a", [10, 11, 12, 20, 21]
+    routing = _routing(seq_len=4, num_layers=2, topk=3)
+    # API side: raw .npy bytes keyed by the full sampled sequence.
+    fake._routed_experts_spool.write(model_id, seq, _npy_bytes(routing))
+
+    lookup = SkyRLTrainBackend._lookup_rollout_routing
+    got = lookup(fake, model_id, seq)
+    assert got is not None and got.shape == (4, 2, 3)
+    np.testing.assert_array_equal(np.asarray(got, dtype=np.int64), routing.astype(np.int64))
+
+    # The spool file was consumed, but later epochs replay from the cache.
+    assert fake._routed_experts_spool.consume(model_id, seq) is None
+    assert lookup(fake, model_id, seq) is not None
+
+    # Promoted entries follow the cache's consumed-at-sync eviction.
+    fake._routed_experts_cache.on_weight_sync(model_id)
+    assert _peek(fake._routed_experts_cache, model_id, seq) is None
+    assert lookup(fake, model_id, seq) is None
+
+
+def test_lookup_without_spool_is_cache_only():
+    """With no spool wired (colocated mode, unit tests) the lookup is exactly the cache."""
+    fake = _cache_backend()
+    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
+    SkyRLTrainBackend._store_routed_experts(fake, model_id, prompt, response, _routing(4, 2, 3))
+
+    lookup = SkyRLTrainBackend._lookup_rollout_routing
+    assert lookup(fake, model_id, prompt + response) is not None
+    assert lookup(fake, model_id, [99]) is None
+
+
+def test_spooled_routing_is_narrowed_like_local_capture(tmp_path):
+    """Spooled int32 routing is downcast on consume exactly like locally-captured routing."""
+    fake = _spool_backend(tmp_path)
+    seq = [1, 2, 3]
+    fake._routed_experts_spool.write("m", seq, _npy_bytes(np.ones((2, 1, 2), dtype=np.int32)))
+    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", seq).dtype == np.uint8
+
+    big_seq = [4, 5, 6]
+    fake._routed_experts_spool.write("m", big_seq, _npy_bytes(np.full((2, 1, 2), 300, dtype=np.int32)))
+    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", big_seq).dtype == np.int16
+
+
+def test_spooled_routing_rejects_non_3d(tmp_path):
+    fake = _spool_backend(tmp_path)
+    seq = [1, 2, 3]
+    fake._routed_experts_spool.write("m", seq, _npy_bytes(np.zeros((3, 4), dtype=np.int32)))
+    assert SkyRLTrainBackend._lookup_rollout_routing(fake, "m", seq) is None
+    assert len(fake._routed_experts_cache) == 0
+
+
+def test_set_spool_dir_wipes_leftovers_and_none_disables(tmp_path):
+    """Backend startup wipes files left by a previous server run; None turns the fallback off."""
+    spool_dir = tmp_path / "spool"
+    leftover = RoutedExpertsSpool(str(spool_dir))
+    leftover.write("dead_model", [1, 2], _npy_bytes(_routing(1, 1, 2)))
+
+    fake = SimpleNamespace(_routed_experts_spool=None, _routed_experts_cache=RoutedExpertsCache(cap=4))
+    SkyRLTrainBackend.set_routed_experts_spool_dir(fake, str(spool_dir))
+    assert fake._routed_experts_spool is not None
+    assert not spool_dir.exists()
+
+    SkyRLTrainBackend.set_routed_experts_spool_dir(fake, None)
+    assert fake._routed_experts_spool is None
+
+
+def test_end_to_end_spool_to_tensor_alignment(tmp_path):
+    """Non-colocated flow: routing spooled by the API process is looked up by the
+    training sequence and assembled into the same left-padded replay tensor."""
+    fake = _spool_backend(tmp_path)
+    model_id, prompt, response = "model_a", [10, 11, 12], [20, 21]
+    routing = _routing(seq_len=4, num_layers=2, topk=3)  # forwarded tokens = 4
+    fake._routed_experts_spool.write(model_id, prompt + response, _npy_bytes(routing))
+
+    full_sequences = [prompt + response]
+    per_sample = [SkyRLTrainBackend._lookup_rollout_routing(fake, model_id, fs) for fs in full_sequences]
+    tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
+    assert tuple(tensor.shape) == (1, 5, 2, 3)
     assert tensor[0, 3, 1, 2].item() == 3 * 1000 + 1 * 10 + 2
     assert tensor[0, 4].sum().item() == 0
 

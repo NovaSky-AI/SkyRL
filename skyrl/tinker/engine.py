@@ -32,6 +32,7 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
 )
+from skyrl.tinker.routed_experts_spool import resolve_spool_dir
 from skyrl.utils.log import logger
 
 _MAX_IDS_PER_QUERY = 500
@@ -368,6 +369,16 @@ class TinkerEngine:
         # DB-free; only the engine owns the connection.
         if hasattr(self.backend, "set_inference_state_publisher"):
             self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
+
+        # Rollout Routing Replay (R3): when the API process forwards sample
+        # requests directly to vLLM (non-colocated), the routing vLLM returns
+        # surfaces in the API process while forward_backward replays it here.
+        # Both processes resolve the same spool directory from the shared
+        # EngineConfig, so the backend can pick up routing spooled by the API.
+        if hasattr(self.backend, "set_routed_experts_spool_dir"):
+            self.backend.set_routed_experts_spool_dir(
+                resolve_spool_dir(config.routed_experts_spool_dir, config.database_url)
+            )
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()

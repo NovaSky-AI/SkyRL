@@ -1,7 +1,6 @@
 """SkyRL-Train backend for TinkerEngine."""
 
 import asyncio
-import hashlib
 import io
 import math
 import os
@@ -40,6 +39,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
+from skyrl.tinker.routed_experts_spool import RoutedExpertsSpool, sequence_digest
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -56,11 +56,18 @@ def _routing_cache_key(model_id: str, token_ids) -> tuple[str, bytes]:
     Hashing the sequence keeps the key a fixed ~16 bytes regardless of length (vs
     a per-token Python tuple), and one C-level digest is far cheaper than hashing
     a large tuple. ``model_id`` disambiguates tenants whose samples share token
-    ids but route differently under their own adapter weights. Token ids are
-    hashed as int64 bytes so the digest is order- and value-exact.
+    ids but route differently under their own adapter weights. The digest is
+    shared with the on-disk R3 spool (``skyrl.tinker.routed_experts_spool``) so
+    routing captured in the API process is addressable from here.
     """
-    buf = np.asarray(token_ids, dtype=np.int64).tobytes()
-    return model_id, hashlib.blake2b(buf, digest_size=16).digest()
+    return model_id, sequence_digest(token_ids)
+
+
+def _narrow_routing_dtype(arr: np.ndarray) -> np.ndarray:
+    """Downcast routing expert ids to the narrowest integer dtype that fits."""
+    max_expert = int(arr.max()) if arr.size else 0
+    dtype = np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32
+    return arr.astype(dtype, copy=False)
 
 
 def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_len: int):
@@ -400,6 +407,12 @@ class SkyRLTrainBackend(AbstractBackend):
             cap=getattr(config, "routed_experts_cache_cap", 8192),
             max_staleness=getattr(config, "routed_experts_cache_max_staleness", 1),
         )
+        # R3 in non-colocated mode: samples are forwarded to vLLM by the API
+        # process, so their routing never passes through this backend. The host
+        # wires a shared on-disk spool via set_routed_experts_spool_dir and
+        # forward_backward falls back to it on cache misses. None when running
+        # outside a host that forwards samples (colocated mode, unit tests).
+        self._routed_experts_spool: RoutedExpertsSpool | None = None
         self._routed_experts_missing_warned = False
 
         # New inference infrastructure
@@ -446,9 +459,46 @@ class SkyRLTrainBackend(AbstractBackend):
         arr = np.asarray(routed_experts)
         if arr.ndim != 3:
             return
-        max_expert = int(arr.max()) if arr.size else 0
-        arr = arr.astype(np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32)
-        self._routed_experts_cache.put(model_id, list(prompt_ids) + list(response_tokens), arr)
+        self._routed_experts_cache.put(model_id, list(prompt_ids) + list(response_tokens), _narrow_routing_dtype(arr))
+
+    def set_routed_experts_spool_dir(self, spool_dir: str | None) -> None:
+        """Wire the on-disk R3 handoff written by the sample-forwarding process.
+
+        Called by the host (the Tinker engine) at startup with the directory the
+        API process spools rollout routing into when it forwards sample requests
+        directly to vLLM (non-colocated mode). The directory is wiped here:
+        leftovers can only come from a previous server run, whose models (and
+        thus replay opportunities) died with it. ``None`` disables the fallback.
+        """
+        if spool_dir is None:
+            self._routed_experts_spool = None
+            return
+        self._routed_experts_spool = RoutedExpertsSpool(spool_dir)
+        self._routed_experts_spool.wipe()
+
+    def _lookup_rollout_routing(self, model_id: str, token_ids: list[int]) -> np.ndarray | None:
+        """Fetch one training sequence's rollout routing (R3), marking it consumed.
+
+        Checks the in-memory cache first (populated directly when this backend
+        handled the sample), then the on-disk spool (populated by the API
+        process when sampling was forwarded in non-colocated mode). Spooled
+        routing is promoted into the in-memory cache so later epochs of the
+        same training batch replay it without touching disk, and from then on
+        it follows the cache's normal weight-sync eviction.
+        """
+        routing = self._routed_experts_cache.get(model_id, token_ids)
+        if routing is not None or self._routed_experts_spool is None:
+            return routing
+        arr = self._routed_experts_spool.consume(model_id, token_ids)
+        if arr is None:
+            return None
+        if arr.ndim != 3:
+            logger.warning(
+                "R3: spooled routing for model %s has shape %s (expected 3-D); ignoring.", model_id, arr.shape
+            )
+            return None
+        self._routed_experts_cache.put(model_id, token_ids, _narrow_routing_dtype(arr))
+        return self._routed_experts_cache.get(model_id, token_ids)
 
     def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
         """Warn once if R3 is on but some forward_backward samples have no cached routing.
@@ -919,8 +969,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
-                # R3: cached routing for a deleted adapter can never be replayed.
+                # R3: cached/spooled routing for a deleted adapter can never be replayed.
                 self._routed_experts_cache.evict_model(model_id)
+                if self._routed_experts_spool is not None:
+                    self._routed_experts_spool.evict_model(model_id)
                 logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
@@ -958,8 +1010,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
-        # R3: no model can replay the cached routing after teardown.
+        # R3: no model can replay the cached/spooled routing after teardown.
         self._routed_experts_cache.clear()
+        if self._routed_experts_spool is not None:
+            self._routed_experts_spool.wipe()
         # Local state is fully reset above. Notify the host last so a
         # publisher failure can't leave the controller half-torn-down.
         # Next _create_new_inference_client repopulates.
@@ -1086,12 +1140,13 @@ class SkyRLTrainBackend(AbstractBackend):
         # is exactly ``full_sequences[i]`` — and assemble it into a left-padded
         # [batch, max_seq_len, num_layers, topk] tensor aligned with
         # ``sequences``. Keeping the routing server-side means R3 needs no new
-        # client-facing Tinker fields. The lookup marks each entry consumed so
-        # the cache can evict it at the model's next weight sync.
+        # client-facing Tinker fields. The lookup checks the in-memory cache and
+        # then the on-disk spool (routing captured by the API process when
+        # sampling is forwarded in non-colocated mode), marking each entry
+        # consumed so the cache can evict it at the model's next weight sync.
         if self._router_replay_enabled():
             per_sample_routing = [
-                self._routed_experts_cache.get(mid, seq)
-                for mid, seq in zip(prepared_batch.all_model_ids, full_sequences)
+                self._lookup_rollout_routing(mid, seq) for mid, seq in zip(prepared_batch.all_model_ids, full_sequences)
             ]
             self._warn_on_missing_routing(per_sample_routing)
             rollout_expert_indices = _build_rollout_expert_indices(full_sequences, per_sample_routing, max_seq_len)
@@ -1858,7 +1913,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # Rollout Routing Replay (R3): a weight sync starts the next rollout
         # round for this model, so evict routing the trainer already consumed
         # and expire entries that never reached it (filtered out client-side).
+        # The on-disk spool prunes its never-consumed files by the same
+        # staleness rule (consumed files are already deleted at lookup time).
         self._routed_experts_cache.on_weight_sync(model_id)
+        if self._routed_experts_spool is not None:
+            self._routed_experts_spool.on_weight_sync(model_id, max_staleness=self._routed_experts_cache.max_staleness)
 
         if persist:
             if adapter_only_sync:

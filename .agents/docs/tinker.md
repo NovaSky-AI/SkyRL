@@ -10,6 +10,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
 - **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
 - **`skyrl/tinker/db_models.py`** -- SQLModel tables: `FutureDB`, `ModelDB`, `CheckpointDB`, `SessionDB`, `SamplingSessionDB`.
+- **`skyrl/tinker/routed_experts_spool.py`** -- On-disk handoff for Rollout Routing Replay (R3): in non-colocated mode the API process spools per-sample rollout routing (returned by vLLM) to a shared local directory; the SkyRL-Train backend replays it in `forward_backward`. Kept import-light (no ray/torch/vllm) because both processes import it.
 - **`skyrl/tinker/loss_fns.py`** -- JAX loss function implementations (cross_entropy, importance_sampling, ppo, cispo). Only used by the JAX backend.
 - **`skyrl/tinker/extra/`** -- `ExternalInferenceClient` for offloading sampling to external vLLM.
 - **`skyrl-agent/skyrl_agent/integrations/tinker/`** -- Agent-side Tinker integration (separate package).
