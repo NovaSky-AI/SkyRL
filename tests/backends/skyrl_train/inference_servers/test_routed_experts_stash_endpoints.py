@@ -175,34 +175,16 @@ def test_fetch_returns_requested_digests_as_npz():
 
 
 def test_weight_sync_and_clear_endpoints_drive_stash_lifecycle():
+    """JSON plumbing for the lifecycle endpoints; the eviction semantics
+    themselves are pinned by the RoutedExpertsStash unit tests."""
     routing = _routing(4)
     result = _completion_response("model_a", [_choice(0, [20, 21], _npy_b64(routing))])
     client, app = _make_client(result)
-    client.post("/skyrl/v1/completions", json={"model": "model_a", "prompt": PROMPT_TOKENS})
     digest_hex = sequence_digest(PROMPT_TOKENS + [20, 21]).hex()
 
-    # Never-fetched entry with max_staleness=1: survives the first sync,
-    # dropped at the second.
-    resp = client.post("/skyrl/v1/routed_experts/weight_sync", json={"model": "model_a", "max_staleness": 1})
-    assert resp.json() == {"removed": 0}
-    resp = client.post("/skyrl/v1/routed_experts/weight_sync", json={"model": "model_a", "max_staleness": 1})
-    assert resp.json() == {"removed": 1}
-    assert (
-        load_arrays_npz(
-            client.post("/skyrl/v1/routed_experts/fetch", json={"model": "model_a", "digests": [digest_hex]}).content
-        )
-        == {}
-    )
-
-    # Fetched (trained-on) entry: deleted at the very next sync, well within
-    # the staleness window. The fetch itself must not delete (multi-epoch
-    # training re-fetches after each optim_step).
+    # A fetched (trained-on) entry is deleted at the next weight sync.
     client.post("/skyrl/v1/completions", json={"model": "model_a", "prompt": PROMPT_TOKENS})
-    for _ in range(2):  # two epochs fetch the same digest
-        hits = load_arrays_npz(
-            client.post("/skyrl/v1/routed_experts/fetch", json={"model": "model_a", "digests": [digest_hex]}).content
-        )
-        assert set(hits) == {digest_hex}
+    client.post("/skyrl/v1/routed_experts/fetch", json={"model": "model_a", "digests": [digest_hex]})
     resp = client.post("/skyrl/v1/routed_experts/weight_sync", json={"model": "model_a", "max_staleness": 1})
     assert resp.json() == {"removed": 1}
 

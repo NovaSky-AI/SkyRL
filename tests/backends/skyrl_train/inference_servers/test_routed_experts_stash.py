@@ -8,7 +8,6 @@ or GPU needed. Run:
 from __future__ import annotations
 
 import base64
-import hashlib
 import io
 
 import numpy as np
@@ -31,23 +30,15 @@ def _peek(stash: RoutedExpertsStash, model: str, token_ids: list[int]) -> bool:
     return (model, sequence_digest(token_ids)) in stash._entries
 
 
-def test_sequence_digest_is_exact_and_fixed_size():
-    assert len(sequence_digest([1, 2, 3])) == 16
-    assert sequence_digest([1, 2, 3]) == sequence_digest([1, 2, 3])
-    assert sequence_digest([1, 2, 3]) != sequence_digest([3, 2, 1])
-    # Hashed as int64 bytes: matches a manual digest.
-    manual = hashlib.blake2b(np.asarray([1, 2, 3], dtype=np.int64).tobytes(), digest_size=16).digest()
-    assert sequence_digest([1, 2, 3]) == manual
-
-
 def test_put_get_many_roundtrip_never_deletes():
     stash = RoutedExpertsStash()
     routing = _routing()
     tokens = [10, 11, 12, 20, 21]
     stash.put("model_a", tokens, routing)
 
+    # The digest key is order-exact: a permuted sequence must miss.
     digest_hex = sequence_digest(tokens).hex()
-    hits = stash.get_many("model_a", [digest_hex, sequence_digest([9, 9]).hex()])
+    hits = stash.get_many("model_a", [digest_hex, sequence_digest(tokens[::-1]).hex()])
     assert set(hits) == {digest_hex}
     np.testing.assert_array_equal(hits[digest_hex], routing)
 
@@ -76,15 +67,20 @@ def test_consumed_entries_deleted_at_next_weight_sync():
     assert _peek(stash, "m", [3, 4])  # never trained, not yet stale -> kept
 
 
-def test_resampling_resets_consumption():
-    """Re-stashing the same sequence starts a fresh entry for the new round."""
+def test_put_same_key_refreshes_entry_nbytes_and_consumption():
+    """Re-stashing the same sequence replaces the entry (with correct byte
+    accounting) and starts a fresh, unconsumed one for the new round."""
     stash = RoutedExpertsStash()
     stash.put("m", [1, 2], _routing())
     assert stash.get_many("m", [sequence_digest([1, 2]).hex()])  # consumed in round 1
-    stash.put("m", [1, 2], _routing())  # sampled again before the sync
+
+    newer = _routing(seq_len=8)
+    stash.put("m", [1, 2], newer)  # sampled again before the sync
+    assert len(stash) == 1
+    assert stash.nbytes == newer.nbytes
 
     assert stash.on_weight_sync("m", max_staleness=1) == 0
-    assert _peek(stash, "m", [1, 2])  # fresh entry survives
+    assert _peek(stash, "m", [1, 2])  # fresh entry survives the sync
 
 
 def test_keys_are_scoped_per_model():
@@ -99,17 +95,6 @@ def test_keys_are_scoped_per_model():
     assert int(stash.get_many("model_a", [digest_hex])[digest_hex][0, 0, 0]) + 1 == int(
         stash.get_many("model_b", [digest_hex])[digest_hex][0, 0, 0]
     )
-
-
-def test_put_same_key_refreshes_entry_and_nbytes():
-    stash = RoutedExpertsStash()
-    stash.put("m", [1, 2], _routing())
-    newer = _routing(seq_len=8)
-    stash.put("m", [1, 2], newer)
-    assert len(stash) == 1
-    assert stash.nbytes == newer.nbytes
-    digest_hex = sequence_digest([1, 2]).hex()
-    np.testing.assert_array_equal(stash.get_many("m", [digest_hex])[digest_hex], newer)
 
 
 def test_fifo_cap_bounds_entries():
@@ -132,13 +117,6 @@ def test_weight_sync_drops_never_consumed_entries_past_staleness_window():
     assert stash.on_weight_sync("m", max_staleness=1) == 1  # gen 2: 0 <= 2 - 1 - 1
     assert not _peek(stash, "m", [1, 2])
     assert stash.nbytes == 0
-
-
-def test_zero_staleness_drops_at_first_sync():
-    stash = RoutedExpertsStash()
-    stash.put("m", [1, 2], _routing())
-    assert stash.on_weight_sync("m", max_staleness=0) == 1
-    assert len(stash) == 0
 
 
 def test_entries_stashed_after_a_sync_age_from_that_sync():

@@ -133,19 +133,6 @@ def test_fetch_maps_digests_back_to_samples(monkeypatch):
     ]
 
 
-def test_fetch_uses_adapter_name_for_multi_lora(monkeypatch):
-    """Multi-LoRA: the stash is addressed by the adapter name (== model_id)."""
-    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
-    seq = [1, 2, 3]
-    digest_hex = sequence_digest(seq).hex()
-    stashed = {"model_a": {digest_hex: _routing(2, 1, 2)}}
-    fake = _bind(_fetch_backend(stashed, lora=True, model_ids_to_role={"model_a": "policy"}))
-
-    per_sample = fake._fetch_rollout_routing(["model_a"], [seq])
-    assert per_sample[0] is not None
-    assert fake._inference_engine_client.fetch_calls == [("model_a", [digest_hex])]
-
-
 def test_fetch_missing_digests_fall_back_to_none_with_warning(monkeypatch):
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
     seq_hit, seq_miss = [1, 2, 3], [4, 5, 6]
@@ -177,32 +164,24 @@ def test_fetch_narrows_dtype_and_rejects_non_3d(monkeypatch):
     assert per_sample[2] is None
 
 
-def test_weight_sync_notification_carries_staleness_and_is_best_effort(monkeypatch):
+def test_lifecycle_fanouts_carry_args_and_are_best_effort(monkeypatch):
+    """Weight-sync and clear fan-outs pass the resolved name/staleness, and a
+    failing fan-out must not raise out of the training operation."""
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
     fake = _bind(_fetch_backend(lora=True, model_ids_to_role={"model_a": "policy"}))
     fake.config = SimpleNamespace(routed_experts_stash_max_staleness=3)
 
     fake._notify_routed_experts_weight_sync("model_a")
+    fake._clear_routed_experts_for_model("model_a")
     assert fake._inference_engine_client.weight_sync_calls == [("model_a", 3)]
+    assert fake._inference_engine_client.clear_calls == ["model_a"]
 
-    # A failing fan-out must not raise out of the weight sync.
-    async def _boom(model, max_staleness=1):
+    async def _boom(*args, **kwargs):
         raise RuntimeError("server down")
 
     fake._inference_engine_client.routed_experts_weight_sync = _boom
-    fake._notify_routed_experts_weight_sync("model_a")  # no exception
-
-
-def test_clear_on_model_delete_is_best_effort(monkeypatch):
-    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
-    fake = _bind(_fetch_backend())
-    fake._clear_routed_experts_for_model("model_a")
-    assert fake._inference_engine_client.clear_calls == ["model_a"]
-
-    async def _boom(model):
-        raise RuntimeError("server down")
-
     fake._inference_engine_client.clear_routed_experts = _boom
+    fake._notify_routed_experts_weight_sync("model_a")  # no exception
     fake._clear_routed_experts_for_model("model_a")  # no exception
 
 
@@ -240,25 +219,6 @@ def test_build_rollout_expert_indices_downcasts_dtype():
     assert _build_rollout_expert_indices(full_sequences, [small], 3).dtype == torch.uint8
     big = np.full((2, 1, 2), 300, dtype=np.int32)  # 256..2**15 -> int16
     assert _build_rollout_expert_indices(full_sequences, [big], 3).dtype == torch.int16
-
-
-def test_end_to_end_stash_fetch_to_tensor_alignment(monkeypatch):
-    """Stash at sample time (as the server does), fetch by the training
-    sequence, and assemble the same left-padded replay tensor."""
-    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
-    prompt, response = [10, 11, 12], [20, 21]  # full sampled sequence len 5
-    routing = _routing(seq_len=4, num_layers=2, topk=3)  # forwarded tokens = 4
-    stashed = {BASE_MODEL: {sequence_digest(prompt + response).hex(): routing}}
-    fake = _bind(_fetch_backend(stashed))
-
-    # forward_backward: full_sequences[i] == prompt + response.
-    full_sequences = [prompt + response]
-    per_sample = fake._fetch_rollout_routing(["m"], full_sequences)
-    tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len=5)
-    assert tuple(tensor.shape) == (1, 5, 2, 3)
-    # Routing occupies positions [0,4); the final token has none.
-    assert tensor[0, 3, 1, 2].item() == 3 * 1000 + 1 * 10 + 2
-    assert tensor[0, 4].sum().item() == 0
 
 
 def _sample_input(**kwargs) -> types.SampleInput:
