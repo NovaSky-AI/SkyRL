@@ -18,7 +18,7 @@ For training-to-inference weight transfer (`NewInferenceWorkerWrap`, broadcast v
 
 - With `enable_return_routed_experts=true`, each `VLLMServerActor` holds a `RoutedExpertsStash` (`inference_servers/routed_experts_stash.py`) keyed by `(model name, digest of prompt + response tokens)`.
 - `/skyrl/v1/completions` wraps vLLM's completions handler: it stashes each choice's routing server-side and strips it from the response, so no client ever carries routing. Used by both the Tinker engine's sample path and the Tinker API's non-colocated forwarding client.
-- The trainer pulls routing at `forward_backward` time via `/skyrl/v1/routed_experts/fetch` (control-plane fan-out, `.npz` payload). Lifecycle: `/skyrl/v1/routed_experts/weight_sync` (staleness-based drop, called after each `save_weights_for_sampler`) and `/skyrl/v1/routed_experts/clear` (model deletion).
+- The trainer pulls routing at `forward_backward` time via `/skyrl/v1/routed_experts/fetch` (control-plane fan-out, `.npz` payload); fetches mark entries consumed but never delete (multi-epoch re-fetches). Lifecycle: `/skyrl/v1/routed_experts/weight_sync` (called after each `save_weights_for_sampler`; deletes consumed entries immediately, never-fetched entries after the staleness window) and `/skyrl/v1/routed_experts/clear` (model deletion).
 - `/skyrl/v1/generate` still returns routing inline for the native RL path (`skyrl_gym_generator`).
 
 ## PD Disaggregation

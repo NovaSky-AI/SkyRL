@@ -123,14 +123,15 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
         default=1,
         ge=0,
         description=(
-            "Rollout Routing Replay (R3): number of weight syncs (save_weights_for_sampler) an "
-            "entry in the inference servers' routing stash may outlive before it is dropped. "
-            "Rollout routing is stashed on the vLLM servers at sample time and pulled by the "
-            "trainer at forward_backward; a weight sync starts the model's next rollout round, "
-            "so entries stashed more than max_staleness syncs ago can no longer be trained on. "
-            "The default of 1 covers on-policy and one-step-async loops; increase it for deeper "
-            "async pipelines. Forwarded to the servers on each sync. Ignored unless "
-            "moe_enable_routing_replay is set."
+            "Rollout Routing Replay (R3): number of weight syncs (save_weights_for_sampler) a "
+            "never-trained entry in the inference servers' routing stash may outlive before it "
+            "is deleted. Rollout routing is stashed on the vLLM servers at sample time and "
+            "pulled by the trainer at forward_backward; entries the trainer fetched are deleted "
+            "at the model's very next weight sync (their training batch is done), while entries "
+            "it never fetched (filtered out client-side, eval rollouts) expire after "
+            "max_staleness further syncs. The default of 1 covers on-policy and one-step-async "
+            "loops; increase it for deeper async pipelines. Forwarded to the servers on each "
+            "sync. Ignored unless moe_enable_routing_replay is set."
         ),
     )
 
@@ -317,6 +318,8 @@ class SkyRLTrainBackend(AbstractBackend):
         per sample. Missing digests yield ``None`` (live-router fallback).
         """
         digest_hexes = [sequence_digest(seq).hex() for seq in full_sequences]
+        # The fetch marks stash entries consumed, so the model's next weight
+        # sync deletes them (multi-epoch re-fetches still work until then).
         by_model: dict[str, set[str]] = {}
         for mid, digest_hex in zip(model_ids, digest_hexes):
             by_model.setdefault(self._resolve_inference_model_name(mid), set()).add(digest_hex)
@@ -348,9 +351,10 @@ class SkyRLTrainBackend(AbstractBackend):
         """R3 lifecycle fan-out after a weight sync (best-effort).
 
         Tells every server that this model's next rollout round has started so
-        its stash can drop routing that is past the staleness window. A failed
-        notification only delays memory reclaim on the servers, so it must not
-        fail the weight sync itself.
+        its stash can delete routing the trainer already consumed and expire
+        never-trained routing past the staleness window. A failed notification
+        only delays memory reclaim on the servers, so it must not fail the
+        weight sync itself.
         """
         model_name = self._resolve_inference_model_name(model_id)
         max_staleness = getattr(self.config, "routed_experts_stash_max_staleness", 1)
@@ -1759,8 +1763,9 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         # Rollout Routing Replay (R3): a weight sync starts the next rollout
-        # round for this model, so tell the servers' routing stash to drop
-        # entries past the staleness window (they can't be trained on anymore).
+        # round for this model, so tell the servers' routing stash to delete
+        # entries the trainer consumed and expire never-trained entries past
+        # the staleness window.
         if self._router_replay_enabled():
             self._notify_routed_experts_weight_sync(model_id)
 

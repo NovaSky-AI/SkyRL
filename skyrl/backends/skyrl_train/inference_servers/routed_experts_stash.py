@@ -19,17 +19,24 @@ Entries are keyed by ``(model, blake2b digest of the full token sequence)``,
 where ``model`` is the name the request targeted on vLLM (a LoRA adapter
 name in multi-tenant serving, the base/served model name otherwise) and the
 sequence is prompt + response tokens — exactly what the trainer can
-reconstruct from a training sample. Fetches are read-only so multi-epoch
-training can re-fetch; eviction is lifecycle-driven instead:
+reconstruct from a training sample. Fetches never delete (multi-epoch
+training re-fetches the same routing after each optim_step) but do mark
+entries consumed; eviction is lifecycle-driven:
 
 - ``on_weight_sync(model, max_staleness)``: a weight sync starts the next
-  rollout round for that model, so entries stashed more than
-  ``max_staleness`` syncs ago can no longer be trained on and are dropped.
-  ``max_staleness=1`` (the trainer's default) covers on-policy and
-  one-step-async loops.
+  rollout round for that model. **Consumed** entries (fetched by the trainer
+  at least once) are deleted — their training batch is done. Entries the
+  trainer never fetched (filtered out client-side, e.g. all-zero-reward
+  groups, or eval rollouts) are deleted once they are more than
+  ``max_staleness`` syncs old. ``max_staleness=1`` (the trainer's default)
+  covers on-policy and one-step-async loops.
 - ``evict_model(model)``: the model was deleted; its routing is dead.
 - Insertion-order FIFO at ``max_entries`` (``SKYRL_ROUTED_EXPERTS_STASH_MAX_ENTRIES``,
   default 16384) bounds memory for loops that never sync weights.
+
+Loops that run multiple epochs per batch *and* sync weights mid-batch can
+see consumed entries deleted between epochs; affected samples fall back to
+the live router with a warning (same caveat at every point in R3's design).
 
 This module is imported by the vLLM server actor and the training backend;
 keep it light (numpy + stdlib only).
@@ -86,6 +93,7 @@ def load_arrays_npz(payload: bytes) -> Dict[str, np.ndarray]:
 class _StashEntry:
     routing: np.ndarray
     stored_gen: int
+    consumed: bool = False
 
 
 class RoutedExpertsStash:
@@ -118,47 +126,63 @@ class RoutedExpertsStash:
             self._nbytes -= evicted.routing.nbytes
 
     def get_many(self, model: str, digest_hexes: Iterable[str]) -> Dict[str, np.ndarray]:
-        """Read-only bulk lookup; returns only the digests present on this server.
+        """Bulk lookup; returns only the digests present on this server.
 
-        Read-only so multi-epoch training can fetch the same routing again;
-        entries are dropped by the lifecycle hooks below, not by consumption.
+        Marks hits consumed so the model's next weight sync deletes them (the
+        sync is what ends their training batch's rollout round). Never deletes
+        directly: multi-epoch training re-fetches the same routing after each
+        optim_step, so consumption must not evict mid-batch.
         """
         hits: Dict[str, np.ndarray] = {}
         for digest_hex in digest_hexes:
             entry = self._entries.get((model, bytes.fromhex(digest_hex)))
             if entry is not None:
+                entry.consumed = True
                 hits[digest_hex] = entry.routing
         return hits
 
     def on_weight_sync(self, model: str, max_staleness: int) -> int:
-        """Advance the model's sync generation and drop entries past the staleness window.
+        """Advance the model's sync generation and delete its dead entries.
 
-        An entry stashed at generation ``g`` is dropped at the sync producing
-        generation ``n`` when ``g <= n - 1 - max_staleness``: training on the
-        rollout round it belongs to has finished by then (rounds are separated
-        by weight syncs), or the round was abandoned. Returns the drop count.
+        A weight sync starts the model's next rollout round, so two kinds of
+        entries are deleted here:
+
+        - **Consumed** entries (fetched by the trainer at least once): their
+          training batch finished before this sync.
+        - **Never-consumed** entries stashed at generation ``g`` when
+          ``g <= n - 1 - max_staleness`` (``n`` being the new generation): the
+          trainer never asked for them (filtered out client-side, eval
+          rollouts) and their round is too old to still be trained on.
+
+        Returns the number of entries deleted.
         """
         new_gen = self._sync_gens.get(model, 0) + 1
         self._sync_gens[model] = new_gen
         stale_cutoff = new_gen - 1 - max_staleness
 
-        removed = 0
+        consumed = stale = 0
         for key in [k for k in self._entries if k[0] == model]:
             entry = self._entries[key]
-            if entry.stored_gen <= stale_cutoff:
-                self._nbytes -= entry.routing.nbytes
-                del self._entries[key]
-                removed += 1
-        if removed:
+            if entry.consumed:
+                consumed += 1
+            elif entry.stored_gen <= stale_cutoff:
+                stale += 1
+            else:
+                continue
+            self._nbytes -= entry.routing.nbytes
+            del self._entries[key]
+        if consumed or stale:
             logger.info(
-                "R3 stash: weight sync for %s (gen %d) dropped %d entries; %d entries (%.1f MB) remain.",
+                "R3 stash: weight sync for %s (gen %d) deleted %d trained and %d never-trained entries; "
+                "%d entries (%.1f MB) remain.",
                 model,
                 new_gen,
-                removed,
+                consumed,
+                stale,
                 len(self._entries),
                 self._nbytes / 2**20,
             )
-        return removed
+        return consumed + stale
 
     def evict_model(self, model: str) -> int:
         """Drop all entries (and the sync generation) for a deleted model."""

@@ -1314,8 +1314,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         sample's routing; the query fans out to all ``server_urls`` and merges
         the per-server hits. Digests absent everywhere are simply missing from
         the result (the trainer falls back to the live router for those
-        samples). Reads are non-destructive so multi-epoch training can fetch
-        the same digests again.
+        samples). Fetches don't delete — multi-epoch training re-fetches the
+        same digests — but they mark entries consumed, so the model's next
+        weight sync (:meth:`routed_experts_weight_sync`) deletes them.
 
         Args:
             model: Model name the samples targeted on vLLM (LoRA adapter name
@@ -1354,9 +1355,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def routed_experts_weight_sync(self, model: str, max_staleness: int = 1) -> Dict[str, Any]:
         """Notify all servers that ``model``'s weights were synced (R3 lifecycle).
 
-        A sync starts the model's next rollout round: servers drop routing
-        stashed more than ``max_staleness`` syncs ago, since it can no longer
-        be trained on.
+        A sync starts the model's next rollout round: servers delete routing
+        the trainer already fetched (its training batch is done) and routing
+        that was never fetched once it is more than ``max_staleness`` syncs
+        old (it can no longer be trained on).
         """
         return await self._call_all_servers(
             "/skyrl/v1/routed_experts/weight_sync",

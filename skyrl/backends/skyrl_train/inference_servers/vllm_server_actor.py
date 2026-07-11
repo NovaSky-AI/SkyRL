@@ -681,8 +681,9 @@ class VLLMServerActor(ServerActorProtocol):
             return JSONResponse(content=result.model_dump())
 
         # R3 data plane for the trainer: bulk digest lookup, returned as an
-        # uncompressed .npz keyed by digest hex. Read-only (multi-epoch training
-        # re-fetches); entries are dropped by the lifecycle endpoints below.
+        # uncompressed .npz keyed by digest hex. Never deletes (multi-epoch
+        # training re-fetches) but marks hits consumed so the next weight_sync
+        # below deletes them.
         @app.post("/skyrl/v1/routed_experts/fetch")
         async def _skyrl_routed_experts_fetch(request: Request):
             body = await request.json()
@@ -692,9 +693,10 @@ class VLLMServerActor(ServerActorProtocol):
             return Response(content=dump_arrays_npz(hits), media_type="application/octet-stream")
 
         # R3 lifecycle: a weight sync for a model starts its next rollout
-        # round, so routing stashed more than max_staleness syncs ago can no
-        # longer be trained on. Called (fan-out) by the trainer right after it
-        # broadcasts weights.
+        # round, so routing the trainer consumed is deleted now, and routing
+        # it never asked for is deleted once more than max_staleness syncs
+        # old. Called (fan-out) by the trainer right after it broadcasts
+        # weights.
         @app.post("/skyrl/v1/routed_experts/weight_sync")
         async def _skyrl_routed_experts_weight_sync(request: Request):
             body = await request.json()
