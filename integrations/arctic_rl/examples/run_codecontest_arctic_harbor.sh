@@ -40,9 +40,13 @@ export PYTHONPATH="${_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 : "${NUM_GPUS:=4}"
 : "${MODEL:=Qwen/Qwen3-0.6B}"
 : "${SERVED_MODEL_NAME:=$(basename "${MODEL}")}"
-: "${MAX_MODEL_LEN:=8192}"
-: "${MAX_PROMPT_LENGTH:=4096}"
-: "${MAX_GENERATE_LENGTH:=4096}"
+# Match the Harbor FSDP baseline recipe (examples/train_integrations/harbor/
+# run_codecontest.sh): 32K vLLM context, with 24K reserved for the packed
+# multi-turn prompt and 8K for the response so Harbor's agent never
+# overshoots the vLLM engine's max_model_len mid-trial.
+: "${MAX_MODEL_LEN:=32768}"
+: "${MAX_PROMPT_LENGTH:=24576}"
+: "${MAX_GENERATE_LENGTH:=8192}"
 
 # ---------- run + data layout ----------
 RUN_NAME="${RUN_NAME:-arctic_harbor_codecontest_$(basename "${MODEL}")_$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -98,7 +102,11 @@ mkdir -p "${TRIALS_DIR}" "${CKPTS_DIR}" "${EXPORTS_DIR}" "${LOG_DIR}"
 : "${LOSS_REDUCTION:=token_mean}"
 : "${GRPO_NORM_BY_STD:=false}"
 : "${USE_KL_LOSS:=false}"
-: "${APPLY_OVERLONG_FILTERING:=true}"
+# Keep overlong trajectories in the batch under Arctic: upstream
+# arctic_platform.rl.utils.batch.split_dict raises IndexError if the surviving
+# batch shrinks below num_workers, so we can't afford to drop samples. Trajectories
+# that overflow still get a zero reward, which is the right learning signal.
+: "${APPLY_OVERLONG_FILTERING:=false}"
 : "${MICRO_FWD_BATCH_PER_GPU:=1}"
 : "${MICRO_TRAIN_BATCH_PER_GPU:=1}"
 
@@ -227,8 +235,8 @@ exec uv run --isolated --extra skyrl-train --extra harbor \
     trainer.arctic_rl.vllm_enable_prefix_caching=true \
     \
     harbor_trial_config.trials_dir="${TRIALS_DIR}" \
-    harbor_trial_config.agent.kwargs.model_info.max_input_tokens="${MAX_MODEL_LEN}" \
-    harbor_trial_config.agent.kwargs.model_info.max_output_tokens="${MAX_MODEL_LEN}" \
+    harbor_trial_config.agent.kwargs.model_info.max_input_tokens="${MAX_PROMPT_LENGTH}" \
+    harbor_trial_config.agent.kwargs.model_info.max_output_tokens="${MAX_GENERATE_LENGTH}" \
     \
     trainer.logger=wandb \
     trainer.project_name="${WANDB_PROJECT}" \
