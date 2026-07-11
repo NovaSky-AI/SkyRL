@@ -4,6 +4,7 @@ This module implements the CUDA IPC transfer strategy for synchronizing model we
 from training workers to inference engines using CUDA IPC handles.
 """
 
+import asyncio
 import base64
 import copy
 import pickle
@@ -14,6 +15,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -34,7 +35,6 @@ from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightTransferSender,
     WeightTransferStrategy,
 )
-from skyrl.train.utils.utils import str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor
 IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
@@ -164,93 +164,66 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
     ) -> None:
-        """Send weights chunk-by-chunk via vLLM native IPC (new inference path).
+        """Send weights via vLLM's native CUDA IPC weight transfer.
 
-        Uses the start/update/finish lifecycle to enable chunked transfers.
-        Per chunk, all tensors are packed into a single contiguous CUDA buffer
-        (one dtype per chunk, guaranteed by the weight extractor) and one IPC
-        handle is created for the packed buffer per rank.
+        vLLM 0.23.0 receives weights natively: the inference worker's
+        ``weight_transfer_engine`` (``weight_transfer_config.backend="ipc"``)
+        unpacks the packed CUDA-IPC payload via ``packed_ipc_consumer`` and
+        loads it. We delegate the trainer side to vLLM's own
+        ``IPCWeightTransferEngine.trainer_send_weights`` (packed mode), which
+        handles uint8 packing, the cross-rank IPC-handle all-gather, bounded
+        per-chunk buffers, and barriers. We drive the lifecycle over the
+        inference client: ``/start_weight_update`` -> ``/update_weights``
+        (invoked by the ``send_mode`` callback, once per packed chunk) ->
+        ``/finish_weight_update``.
 
-        All ranks iterate chunks (weight extraction may use collective ops).
-        Per chunk, each rank packs + creates one IPC handle, handles are
-        all_gather_object'd into a single {gpu_uuid: handle} dict, and rank 0
-        sends the dict (plus per-param `sizes` metadata) via
-        update_weights_ipc. The receiver rebuilds the packed tensor, slices
-        it per param, and loads into vLLM.
-
-        TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands,
-        replace update_weights_ipc with the native /update_weights endpoint
-        and start/finish with /start_weight_update and /finish_weight_update.
+        ``trainer_send_weights`` is synchronous; we run it in a worker thread
+        and bridge its rank-0 ``send_mode`` callback back to this event loop so
+        the native ``IPCWeightTransferUpdateInfo`` payload is fanned out to all
+        inference servers via the (async) client.
         """
+        from vllm.distributed.weight_transfer.ipc_engine import (
+            IPCTrainerSendWeightsArgs,
+            IPCWeightTransferEngine,
+        )
+
+        loop = asyncio.get_running_loop()
         rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
-        device = torch.cuda.current_device()
-        gpu_uuid = str(torch.cuda.get_device_properties(device).uuid)
-        dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
-        dtype_name = self._init_info.model_dtype_str.split(".")[-1]
+
+        def weight_iterator() -> Iterator[Tuple[str, torch.Tensor]]:
+            for chunk in chunks:
+                yield from zip(chunk.names, chunk.tensors)
+
+        def send_update(update_info: Any) -> None:
+            # Called by trainer_send_weights on rank 0 (inside the worker
+            # thread). Build the HTTP-friendly native update payload (IPC
+            # handles base64-pickled, mirroring vLLM's own 'http' send_mode)
+            # and fan out to all servers via the async client, blocking until
+            # done. We read fields off update_info directly rather than
+            # asdict() to avoid deep-copying the IPC handle args.
+            fields = {
+                "update_kind": update_info.update_kind,
+                "names": update_info.names,
+                "dtype_names": update_info.dtype_names,
+                "shapes": update_info.shapes,
+                "tensor_sizes": update_info.tensor_sizes,
+                "packed": update_info.packed,
+                "ipc_handles_pickled": base64.b64encode(pickle.dumps(update_info.ipc_handles)).decode("utf-8"),
+            }
+            future = asyncio.run_coroutine_threadsafe(self._inference_client.update_named_weights(fields), loop)
+            future.result()
 
         if rank == 0:
             await self._inference_client.start_weight_update(is_checkpoint_format=True)
         torch.distributed.barrier()
 
-        for chunk in chunks:
-            # --- pack all tensors in this chunk into one contiguous buffer ---
-            # Chunk tensors share a single dtype by construction (see
-            # weight_extractor_utils.py), so offsets in element units are safe.
-            names: List[str] = []
-            dtype_names: List[str] = []
-            shapes: List[List[int]] = []
-            sizes: List[int] = []
-
-            total_numel = sum(t.numel() for t in chunk.tensors)
-            packed_tensor = torch.empty(
-                total_numel,
-                device=device,
-                dtype=dtype,
-                requires_grad=False,
-            )
-
-            offset = 0
-            for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                size = tensor.numel()
-                packed_tensor[offset : offset + size].copy_(tensor.detach().reshape(-1))
-                offset += size
-                names.append(name)
-                dtype_names.append(dtype_name)
-                shapes.append(list(shape) if not isinstance(shape, list) else shape)
-                sizes.append(size)
-
-            # --- one IPC handle per rank for the packed buffer ---
-            ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
-            local_handle_dict: Dict[str, IpcHandle] = {gpu_uuid: ipc_handle}
-            gathered: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
-            torch.distributed.all_gather_object(gathered, local_handle_dict)
-
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
-
-            if rank == 0:
-                merged_handles: Dict[str, IpcHandle] = {}
-                for d in gathered:
-                    if d is not None:
-                        merged_handles.update(d)
-
-                pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
-                chunk_update_info: Dict[str, Any] = {
-                    "names": names,
-                    "dtype_names": dtype_names,
-                    "shapes": shapes,
-                    "sizes": sizes,
-                    "ipc_handles_pickled": pickled,
-                }
-                await self._inference_client.update_weights_ipc(chunk_update_info)
-
-            # Keep packed_tensor alive past the barrier so the receiver's
-            # rebuilt view has valid backing storage while it copies into
-            # the model. Post-barrier drops the local ref safely.
-            torch.distributed.barrier()
-            torch.cuda.ipc_collect()
-            torch.cuda.synchronize()
+        # Blocking: packs each chunk into a uint8 buffer, all-gathers IPC
+        # handles across ranks, and (rank 0) invokes send_update per chunk.
+        await asyncio.to_thread(
+            IPCWeightTransferEngine.trainer_send_weights,
+            iterator=weight_iterator(),
+            trainer_args=IPCTrainerSendWeightsArgs(send_mode=send_update, packed=True),
+        )
 
         if rank == 0:
             await self._inference_client.finish_weight_update()

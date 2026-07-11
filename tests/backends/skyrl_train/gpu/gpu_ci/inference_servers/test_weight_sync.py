@@ -282,18 +282,15 @@ class TestWeightUpdateFlow:
                 "packed": True,
             }
             print(
-                f"[Step 3] Calling update_weights_nccl with {len(update_info['names'])} names, packed={update_info['packed']}"
+                f"[Step 3] Calling update_named_weights with {len(update_info['names'])} names, packed={update_info['packed']}"
             )
-            # Use SkyRL's chunked weight-sync API (skyrl_start_weight_update ->
-            # update_weights_nccl -> skyrl_finish_weight_update) rather than vLLM's
-            # native /update_weights endpoint, which in vLLM 0.22.0+ requires
-            # vLLM's own native start_weight_update to be called first.
-            # skyrl_start_weight_update is local (layerwise-reload init), so it is
-            # safe to call while the trainer is blocked on the NCCL send; the
-            # actual receive happens in update_weights_nccl.
+            # Drive vLLM's native weight-sync lifecycle. start_weight_update
+            # (layerwise-reload init) is local, so it is safe to call while the
+            # trainer is blocked on the NCCL send; the actual receive happens in
+            # the native /update_weights call below.
             await client.start_weight_update()
-            result = await client.update_weights_nccl(update_info)
-            print(f"[Step 3] update_weights_nccl returned: {list(result.keys())}")
+            result = await client.update_named_weights(update_info)
+            print(f"[Step 3] update_named_weights returned: {list(result.keys())}")
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
             await client.finish_weight_update()
@@ -343,45 +340,38 @@ class IpcTrainer:
     def create_ipc_update_info(self) -> dict:
         """Create a single packed CUDA-IPC buffer for all model parameters.
 
-        Matches SkyRL's ``update_weights_ipc`` contract (the packed format
-        produced by ``CudaIpcTransferStrategy``): all parameters are copied into
-        one contiguous CUDA buffer, a single IPC handle is created for that
-        buffer, and per-parameter ``sizes`` let the receiver slice it back out.
-        This differs from vLLM's native ``/update_weights`` (one handle per
-        parameter), which we no longer use.
+        Produces the native ``IPCWeightTransferUpdateInfo`` packed payload that
+        vLLM's ``packed_ipc_consumer`` expects: all parameters packed into one
+        contiguous uint8 buffer (via vLLM's ``pack_tensors``), a single IPC
+        handle for that buffer, per-parameter byte ``tensor_sizes``, and
+        ``packed=True``. The handle stores only the ``rebuild_cuda_tensor`` args
+        tuple (the consumer uses the global rebuild func).
         """
         from torch.multiprocessing.reductions import reduce_tensor
+        from vllm.distributed.weight_transfer.packed_tensor import pack_tensors
 
         gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
 
-        params = list(self.model.named_parameters())
-        # The model is loaded in a single dtype (bfloat16), so element offsets
-        # into one packed buffer are well-defined across all parameters.
-        dtype = params[0][1].dtype
-        total_numel = sum(p.numel() for _, p in params)
-        packed_tensor = torch.empty(total_numel, device=self.device, dtype=dtype)
-
-        names, dtype_names, shapes, sizes = [], [], [], []
-        offset = 0
-        for name, param in params:
-            size = param.numel()
-            packed_tensor[offset : offset + size].copy_(param.detach().reshape(-1))
-            offset += size
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
-            sizes.append(size)
+        items = [(name, param.detach()) for name, param in self.model.named_parameters()]
+        total_bytes = sum(t.numel() * t.element_size() for _, t in items)
+        packed = pack_tensors(
+            iter(items),
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=max(total_bytes, 1),
+        )
+        assert packed is not None
 
         # Keep the packed buffer alive so the IPC handle stays valid on the receiver.
-        self._tensor_refs = [packed_tensor]
+        self._tensor_refs = [packed.packed_tensor]
 
-        ipc_handle = reduce_tensor(packed_tensor)
-        pickled = base64.b64encode(pickle.dumps({gpu_uuid: ipc_handle})).decode("utf-8")
+        _, ipc_args = reduce_tensor(packed.packed_tensor)
+        pickled = base64.b64encode(pickle.dumps({gpu_uuid: ipc_args})).decode("utf-8")
         return {
-            "names": names,
-            "dtype_names": dtype_names,
-            "shapes": shapes,
-            "sizes": sizes,
+            "names": packed.names,
+            "dtype_names": [str(dt).split(".")[-1] for dt in packed.dtypes],
+            "shapes": packed.shapes,
+            "tensor_sizes": packed.tensor_sizes,
+            "packed": True,
             "ipc_handles_pickled": pickled,
         }
 
@@ -474,11 +464,10 @@ class TestColocatedIpcWeightUpdateFlow:
             update_info = ray.get(trainer.create_ipc_update_info.remote())
             print(f"[Step 3] Created handles for {len(update_info['names'])} parameters")
 
-            # Use SkyRL's chunked weight-sync API (skyrl_start_weight_update ->
-            # update_weights_ipc -> skyrl_finish_weight_update) rather than vLLM's
-            # native /update_weights endpoint.
+            # Drive vLLM's native weight-sync lifecycle (start_weight_update ->
+            # native /update_weights -> finish_weight_update).
             await client.start_weight_update()
-            result = await client.update_weights_ipc(update_info)
+            result = await client.update_named_weights(update_info)
             for server_url, resp_data in result.items():
                 assert resp_data["status"] == 200, f"Server {server_url} IPC update failed: {resp_data}"
             await client.finish_weight_update()
