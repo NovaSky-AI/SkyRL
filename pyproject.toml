@@ -22,6 +22,8 @@ dependencies = [
     "peft==0.18.1",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    "zstandard>=0.23.0",
+    "xxhash>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -125,6 +127,7 @@ fsdp = [
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
+    "transformer-engine-torch==2.11.0; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
@@ -206,10 +209,10 @@ conflicts = [
         { extra = "miniswe" },
     ]
 ]
-# disable build isolation for megatron related dependencies
+# Disable build isolation only for packages that cannot use uv's extra build
+# dependencies. Transformer Engine uses isolated builds below so its undeclared
+# build imports are available without relying on a pre-seeded runtime venv.
 no-build-isolation-package = [
-    "transformer-engine-torch",
-    "transformer-engine",
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
@@ -233,8 +236,8 @@ override-dependencies = [
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
-transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+transformer-engine = [{requirement = "torch", match-runtime = true}, "build-tools", "ninja"]
+transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build-tools", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -275,6 +278,8 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+build-tools = { path = "./third_party/transformer_engine_build_tools" }
+transformer-engine-torch = { path = "./third_party/wheels/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 # vllm 0.23.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
@@ -369,4 +374,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

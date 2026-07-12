@@ -106,6 +106,8 @@ class LayerwiseReloadWorkerMixin:
                 "skyrl_start_weight_update called while a weight update is "
                 "already active. Call skyrl_finish_weight_update first."
             )
+        if getattr(self, "_weight_update_active", False):
+            raise RuntimeError("vLLM native weight update is already active. Call finish_weight_update first.")
 
         # Ensure the get_numel_loaded patch is in effect before layerwise
         # reload runs.
@@ -128,6 +130,12 @@ class LayerwiseReloadWorkerMixin:
 
         self._skyrl_is_checkpoint_format = is_checkpoint_format
         self._skyrl_weight_update_active = True
+        # vLLM's native /update_weights endpoint checks these flags before
+        # calling the configured WeightTransferEngine. Mirroring them lets
+        # SkyRL keep its patched layerwise start/finish while using native
+        # update_weights for transports such as checkpoint-delta.
+        self._is_checkpoint_format = is_checkpoint_format
+        self._weight_update_active = True
 
     def skyrl_finish_weight_update(self) -> None:
         """
@@ -153,3 +161,5 @@ class LayerwiseReloadWorkerMixin:
 
         self._skyrl_weight_update_active = False
         self._skyrl_is_checkpoint_format = True
+        self._weight_update_active = False
+        self._is_checkpoint_format = True

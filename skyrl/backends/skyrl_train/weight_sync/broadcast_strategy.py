@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
+    from skyrl.backends.skyrl_train.weight_sync.weight_extractor import (
+        ExtractorShardInfo,
+    )
     from skyrl.train.config.config import InferenceEngineConfig
 
 import ray
@@ -117,6 +120,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        extractor_shard_info: Optional["ExtractorShardInfo"] = None,
     ) -> None:
         """Send chunks via broadcast or vLLM native NCCL.
 
@@ -200,7 +204,11 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(ie_cfg: "InferenceEngineConfig", inference_world_size: int) -> BroadcastInitInfo:
+    def create_init_info(
+        ie_cfg: "InferenceEngineConfig",
+        inference_world_size: int,
+        base_model_path: Optional[str] = None,
+    ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:

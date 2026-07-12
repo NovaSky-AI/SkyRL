@@ -7,6 +7,8 @@ from skyrl.backends.skyrl_train.weight_sync import (
     CudaIpcInitInfo,
     CudaIpcTransferStrategy,
     CudaIpcWeightUpdateRequest,
+    DeltaInitInfo,
+    DeltaTransferStrategy,
     LoraLoadRequest,
     get_transfer_strategy_cls,
 )
@@ -23,6 +25,8 @@ class TestGetTransferStrategyCls:
             ("nccl", False, BroadcastTransferStrategy),
             ("gloo", True, BroadcastTransferStrategy),
             ("gloo", False, BroadcastTransferStrategy),
+            ("delta", True, DeltaTransferStrategy),
+            ("delta", False, DeltaTransferStrategy),
         ],
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
@@ -98,6 +102,35 @@ class TestCreateInitInfo:
         init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=1)
 
         assert init_info.override_existing_receiver is False
+
+    def test_delta_create_init_info(self):
+        ie_cfg = self._make_ie_cfg(weight_sync_backend="delta", run_engines_locally=False)
+        ie_cfg.delta_weight_sync.sync_dir = "gs://bucket/prefix"
+        ie_cfg.delta_weight_sync.local_checkpoint_dir = "/tmp/receiver"
+        ie_cfg.delta_weight_sync.publisher_local_checkpoint_dir = "/tmp/publisher"
+        ie_cfg.delta_weight_sync.max_file_size_in_gb = 2
+        ie_cfg.delta_weight_sync.max_files_to_keep = 5
+
+        init_info = DeltaTransferStrategy.create_init_info(
+            ie_cfg,
+            base_model_path="Qwen/Qwen2.5-1.5B-Instruct",
+        )
+
+        assert isinstance(init_info, DeltaInitInfo)
+        assert init_info.sync_dir == "gs://bucket/prefix"
+        assert init_info.base_model_path == "Qwen/Qwen2.5-1.5B-Instruct"
+        assert init_info.local_checkpoint_dir == "/tmp/receiver"
+        assert init_info.publisher_local_checkpoint_dir == "/tmp/publisher"
+        assert init_info.max_file_size_in_gb == 2
+        assert init_info.max_files_to_keep == 5
+        assert init_info.version_wait_timeout_s == ie_cfg.delta_weight_sync.version_wait_timeout_s
+        assert init_info.override_existing_receiver is True
+
+    def test_delta_create_init_info_requires_sync_dir(self):
+        ie_cfg = self._make_ie_cfg(weight_sync_backend="delta")
+
+        with pytest.raises(ValueError, match="sync_dir"):
+            DeltaTransferStrategy.create_init_info(ie_cfg, base_model_path="model")
 
 
 class TestBroadcastWeightUpdateRequest:

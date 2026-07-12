@@ -654,6 +654,38 @@ class ChatTemplateConfig(BaseConfig):
 
 
 @dataclass
+class DeltaWeightSyncConfig(BaseConfig):
+    """Disk/cloud checkpoint-delta weight sync configuration."""
+
+    sync_dir: Optional[str] = None
+    """Shared directory/URI where the trainer publishes per-version delta payloads.
+    Supports local paths and ``gs://`` URIs."""
+
+    local_checkpoint_dir: Optional[str] = None
+    """Receiver-side directory used to cache patched checkpoint versions.
+    If unset, a path under ``/tmp/skyrl_delta_checkpoints`` is used."""
+
+    publisher_local_checkpoint_dir: Optional[str] = None
+    """Trainer-side directory used to persist the previous checkpoint version
+    for bounded-memory XOR diff construction. If unset, a path under
+    ``/tmp/skyrl_delta_publisher`` is used."""
+
+    max_file_size_in_gb: float = 1.0
+    """Maximum compressed payload file size before starting a new safetensors file."""
+
+    max_files_to_keep: int = 5
+    """Maximum number of completed local checkpoint versions to retain."""
+
+    prefetch_depth: int = 0
+    """Number of compressed payload entries to prefetch on the receiver. ``0``
+    keeps the iterator synchronous."""
+
+    version_wait_timeout_s: float = 7200.0
+    """Maximum seconds non-writer receiver workers wait for a checkpoint
+    version to be committed by the writer worker."""
+
+
+@dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
 
@@ -666,6 +698,7 @@ class InferenceEngineConfig(BaseConfig):
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
+    delta_weight_sync: DeltaWeightSyncConfig = field(default_factory=DeltaWeightSyncConfig)
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1

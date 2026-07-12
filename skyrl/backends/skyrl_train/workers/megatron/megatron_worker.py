@@ -45,10 +45,12 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
+    ExtractorShardInfo,
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
 )
+from skyrl.backends.skyrl_train.weight_sync.memory_debug import log_memory
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
     LoraSignature,
@@ -256,6 +258,43 @@ class MegatronWeightExtractor(WeightExtractor):
         if self.enable_bucketing:
             self._init_param_buckets()
         self._buckets_initialized = True
+
+    def get_shard_info(self) -> ExtractorShardInfo:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
+        try:
+            dp = mpu.get_data_parallel_rank(with_context_parallel=True)
+            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+            cp = mpu.get_context_parallel_rank()
+            tp = mpu.get_tensor_model_parallel_rank()
+            pp = mpu.get_pipeline_model_parallel_rank()
+            pp_size = mpu.get_pipeline_model_parallel_world_size()
+        except Exception:
+            dp = rank
+            dp_size = world_size
+            cp = 0
+            tp = 0
+            pp = 0
+            pp_size = 1
+
+        # Megatron Bridge's export_hf_weights path gathers/broadcasts the full
+        # HF tensor stream to every rank. For checkpoint-delta publishing, that
+        # makes the stream replicated, so each rank can publish a modulo-shard
+        # of chunks while all ranks still participate in Bridge collectives.
+        return ExtractorShardInfo(
+            is_source_rank=True,
+            replicate=["dp", "sp", "tp", "pp", "cp", "ep", "etp"],
+            split=[],
+            mesh_rank=MeshRank(dp=dp, sp=cp, tp=tp, pp=pp, world_size=world_size, dp_size=dp_size, pp_size=pp_size),
+            replicate_world_size=world_size,
+            source_index_in_replicate_world=rank,
+            rank=rank,
+        )
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
@@ -1325,13 +1364,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        log_memory(logger, "megatron_broadcast_start", rank=rank)
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
+        sender_handles_prefix_cache_reset = bool(
+            getattr(self._weight_transfer_sender, "handles_prefix_cache_reset", False)
+        )
 
         # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
         if (
             use_prefix_cache
+            and not sender_handles_prefix_cache_reset
             and torch.distributed.get_rank() == 0
             and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
         ):
@@ -1339,6 +1384,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
         torch.cuda.empty_cache()
+        log_memory(logger, "megatron_broadcast_after_empty_cache", rank=rank)
 
         if self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora:
             # AdapterStore.swap_to has already made `model_id` the live adapter
@@ -1353,16 +1399,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
             # VMM addresses expandable segments uses.
             with self._expandable_segments_disabled_for_sync():
+                log_memory(logger, "megatron_broadcast_before_weight_metadata", rank=rank)
                 weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+                log_memory(logger, "megatron_broadcast_before_send_chunks", rank=rank)
                 await self._weight_transfer_sender.send_chunks(
                     self.weight_extractor.extract_weights(generator_dtype),
                     weight_metadata=weight_metadata,
+                    extractor_shard_info=self.weight_extractor.get_shard_info(),
                 )
+                log_memory(logger, "megatron_broadcast_after_send_chunks", rank=rank)
 
         if cache_reset_task is not None:
             await cache_reset_task
         torch.cuda.empty_cache()
+        log_memory(logger, "megatron_broadcast_before_barrier", rank=rank)
         torch.distributed.barrier()
+        log_memory(logger, "megatron_broadcast_after_barrier", rank=rank)
+        sender_client = getattr(self._weight_transfer_sender, "_inference_client", None)
+        if inference_engine_client is not sender_client:
+            close_client = getattr(inference_engine_client, "aclose", None)
+            if close_client is not None:
+                await close_client()
+        log_memory(logger, "megatron_broadcast_done", rank=rank)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
@@ -1387,6 +1445,65 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             init_fn = getattr(_opt, "_init_optimizer_states_with_dummy_values", None)
             if init_fn is not None:
                 init_fn()
+
+    def benchmark_apply_sparse_weight_delta(
+        self,
+        sparsity: float = 0.04,
+        delta: float = 1.0e-3,
+        phase: int = 0,
+    ) -> dict[str, float | int]:
+        """Apply a deterministic sparse in-place perturbation for sync benchmarks.
+
+        This is intended for isolated weight-sync benchmarks where we want a
+        real Megatron -> publisher -> receiver update without optimizer init or
+        a training step. It avoids allocating a full random mask by updating a
+        strided subset of each floating-point parameter shard.
+        """
+        if not 0.0 < sparsity <= 1.0:
+            raise ValueError(f"sparsity must be in (0, 1], got {sparsity}")
+        if self.actor_module is None:
+            raise RuntimeError("actor_module is not initialized")
+
+        stride = max(1, round(1.0 / sparsity))
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        log_memory(logger, "megatron_sparse_delta_start", rank=rank, sparsity=sparsity, phase=phase)
+        start_offset = (rank + phase) % stride
+        total_elements = 0
+        updated_elements = 0
+        tensors = 0
+
+        with torch.no_grad():
+            for module in self.actor_module:
+                for _, param in module.named_parameters():
+                    if not param.is_floating_point():
+                        continue
+                    flat = param.data.view(-1)
+                    total_elements += flat.numel()
+                    if flat.numel() <= start_offset:
+                        continue
+                    view = flat[start_offset::stride]
+                    if view.numel() == 0:
+                        continue
+                    view.add_(delta)
+                    updated_elements += view.numel()
+                    tensors += 1
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        result = {
+            "rank": rank,
+            "phase": phase,
+            "stride": stride,
+            "tensors": tensors,
+            "total_elements": total_elements,
+            "updated_elements": updated_elements,
+            "actual_sparsity": (updated_elements / total_elements) if total_elements else 0.0,
+        }
+        log_memory(logger, "megatron_sparse_delta_done", **result)
+        return result
 
     def register_pristine_adapter(self) -> None:
         """Capture the current (freshly-initialised) LoRA state as the

@@ -194,7 +194,10 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+    }, "only nccl and delta are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -723,6 +726,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    for var_name in ["SKYRL_DELTA_MEMORY_LOG", "SKYRL_DELTA_MEMORY_LOG_INTERVAL_TENSORS"]:
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
     # sees the override.

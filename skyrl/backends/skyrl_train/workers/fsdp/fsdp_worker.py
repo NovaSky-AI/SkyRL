@@ -13,7 +13,7 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
-from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
+from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     should_use_meta_init,
@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
+    ExtractorShardInfo,
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
@@ -121,6 +122,23 @@ class FSDPWeightExtractor(WeightExtractor):
             dtype_names.append(dtype_name)
             shapes.append(list(param.shape))
         return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+
+    def get_shard_info(self) -> ExtractorShardInfo:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+        return ExtractorShardInfo(
+            is_source_rank=True,
+            replicate=["dp"],
+            split=[],
+            mesh_rank=MeshRank(dp=rank, sp=0, tp=0, pp=0, world_size=world_size, dp_size=world_size, pp_size=1),
+            replicate_world_size=world_size,
+            source_index_in_replicate_world=rank,
+            rank=rank,
+        )
 
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
         """Gather sharded tensor into full tensor."""
@@ -273,10 +291,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
+        sender_handles_prefix_cache_reset = bool(
+            getattr(self._weight_transfer_sender, "handles_prefix_cache_reset", False)
+        )
 
         # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
         if (
             use_prefix_cache
+            and not sender_handles_prefix_cache_reset
             and torch.distributed.get_rank() == 0
             and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
         ):
@@ -311,12 +333,18 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 await self._weight_transfer_sender.send_chunks(
                     weight_iterator,
                     weight_metadata=weight_metadata,
+                    extractor_shard_info=self.weight_extractor.get_shard_info(),
                 )
 
         if cache_reset_task is not None:
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+        sender_client = getattr(self._weight_transfer_sender, "_inference_client", None)
+        if inference_engine_client is not sender_client:
+            close_client = getattr(inference_engine_client, "aclose", None)
+            if close_client is not None:
+                await close_client()
 
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
