@@ -54,6 +54,7 @@ def call_model_with_fused_lm_head(
         raise NotImplementedError("fused_lm_head_logprob does not support MXFP8 output projection")
     if unwrapped_model.config.use_mup:
         raise NotImplementedError("fused_lm_head_logprob does not support MuP logit scaling")
+    # Standard GPTModel objects directly take `output_processor`, just call the model like normal
     if "output_processor" in inspect.signature(unwrapped_model.forward).parameters:
         return model(
             *args,
@@ -69,10 +70,12 @@ def call_model_with_fused_lm_head(
     if not unwrapped_model.post_process:
         return model(*args, **kwargs)
 
+    # Manually mark output layer as not offloadable; this is normally done by Megatron post-processing, but we disable that
     if unwrapped_model.config.fine_grained_activation_offloading:
         for parameter in unwrapped_model.output_layer.parameters():
             off_interface.mark_not_offloadable(parameter)
 
+    # Disable post-processing since we manually handle the LM head output downstream
     unwrapped_model.post_process = False
     try:
         hidden_states = model(*args, **kwargs)
