@@ -11,6 +11,13 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
+    SERIALIZED_BLOCKWISE_FP8,
+    get_qwen35_slime_parity_ignored_layers,
+    get_serialized_fp8_quantization_config,
+    is_qwen35_config,
+    should_use_serialized_fp8,
+)
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -18,6 +25,89 @@ from skyrl.train.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+    if not model_path:
+        raise ValueError("A model path is required when serialized FP8 weight sync is enabled")
+    try:
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not inspect the model config required to derive serialized FP8 ignored layers: "
+            f"model_path={model_path!r}"
+        ) from exc
+    if not is_qwen35_config(hf_config):
+        raise ValueError(
+            "Serialized FP8 weight sync currently supports only Qwen3.5 checkpoint layouts; "
+            f"model_path={model_path!r}"
+        )
+    return get_qwen35_slime_parity_ignored_layers(hf_config)
+
+
+def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
+    if key in mapping and mapping[key] != expected:
+        raise ValueError(
+            f"{context}.{key} must be {expected!r} when serialized FP8 weight sync is enabled, " f"got {mapping[key]!r}"
+        )
+    mapping[key] = copy.deepcopy(expected)
+
+
+def _apply_serialized_fp8_weight_sync_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> None:
+    """Configure vLLM for checkpoint-format blockwise FP8 weight reloads."""
+
+    mode = ie_cfg.fp8_weight_sync_mode
+    if mode is None:
+        return
+    if not should_use_serialized_fp8(mode):
+        raise ValueError(
+            f"Unsupported fp8_weight_sync_mode={mode!r}. " f"Supported value: {SERIALIZED_BLOCKWISE_FP8!r}."
+        )
+
+    _set_or_validate(engine_kwargs, "quantization", "fp8", context="engine_init_kwargs")
+    # vLLM must build serialized-FP8 modules before SkyRL's first weight sync.
+    # The initial values are immediately overwritten by Megatron weight sync, so
+    # avoid requiring an on-disk FP8 bootstrap checkpoint.
+    _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
+
+    hf_overrides_value = engine_kwargs.get("hf_overrides")
+    hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
+    if not isinstance(hf_overrides, dict):
+        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when serialized FP8 weight sync is enabled")
+
+    qcfg_value = hf_overrides.get("quantization_config")
+    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
+    if not isinstance(qcfg, dict):
+        raise ValueError(
+            "engine_init_kwargs.hf_overrides.quantization_config must be a dict "
+            "when serialized FP8 weight sync is enabled"
+        )
+
+    ignored_layers = _serialized_fp8_ignored_layers(model_path)
+    if ignored_layers:
+        logger.info(
+            "Serialized FP8 weight sync will leave %d vLLM modules unquantized "
+            "to match the Qwen3.5 Slime FP8 sync policy.",
+            len(ignored_layers),
+        )
+
+    for key, value in get_serialized_fp8_quantization_config(
+        ignored_layers=ignored_layers,
+    ).items():
+        _set_or_validate(
+            qcfg,
+            key,
+            value,
+            context="engine_init_kwargs.hf_overrides.quantization_config",
+        )
+    hf_overrides["quantization_config"] = qcfg
+    engine_kwargs["hf_overrides"] = hf_overrides
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -145,6 +235,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
 
     # Add any extra engine_init_kwargs
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _apply_serialized_fp8_weight_sync_defaults(
+        ie_cfg,
+        engine_kwargs,
+        cfg.trainer.policy.model.path,
+    )
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 

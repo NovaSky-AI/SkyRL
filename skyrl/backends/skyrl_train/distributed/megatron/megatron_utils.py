@@ -243,15 +243,12 @@ def offload_megatron_model_to_cpu(models):
                 # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/param_and_grad_buffer.py#L964
                 buffer.offload_to_cpu(move_params=True, move_grads=False)
 
-            # LoRA-aware offloading: offload non-lora base weights that live
-            # outside the fused Megatron buffers (e.g. HF/bridge "to_wrap" weights).
+            # Offload residual weights that live outside the fused Megatron
+            # buffers (e.g. HF/bridge "to_wrap" weights). Some ref-model
+            # parameters may still have requires_grad=True even though the ref
+            # actor has no optimizer, so do not key this cleanup off grad flags.
             for name, param in model_chunk.named_parameters():
-                if (
-                    param.is_cuda
-                    and not param.requires_grad
-                    and "adapter" not in name
-                    and param.data.storage().size() > 0
-                ):
+                if param.is_cuda and "adapter" not in name and param.data.storage().size() > 0:
                     cpu_tensor = param.data.detach().cpu().pin_memory()
                     param._offload_cpu_data = cpu_tensor
                     param._offload_cuda_numel = param.data.numel()
@@ -270,9 +267,9 @@ def load_megatron_model_to_gpu(models):
             for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
                 buffer.reload_from_cpu(move_params=True, move_grads=False)
 
-            # Restore any LoRA-frozen base weights that were offloaded above.
+            # Restore residual parameters that were offloaded above.
             device_id = torch.cuda.current_device()
-            for name, param in model_chunk.named_parameters():
+            for _, param in model_chunk.named_parameters():
                 if hasattr(param, "_offload_cpu_data") and param.data.storage().size() == 0:
                     restored = param._offload_cpu_data.to(device_id, non_blocking=True)
                     param.data = restored
@@ -426,12 +423,11 @@ def preprocess_packed_seqs(
       per row. This is the historical SkyRL behavior used by the RL path
       and the existing SFT path without mini-batch packing.
     - ``sub_seq_lengths is not None``: each row may contain multiple
-      sub-sequences concatenated end-to-end. ``sub_seq_lengths[r]`` lists
-      the per-sub-sequence valid token counts for row ``r``. Tokens
-      ``input_ids[r, :sum(sub_seq_lengths[r])]`` are assumed to be the
-      concatenated sub-sequences in order; any trailing tokens in the row
-      are pad. ``cu_seqlens`` enumerates every sub-sequence across every
-      row.
+      sub-sequences. ``sub_seq_lengths[r]`` lists their valid token counts.
+      Each sub-sequence begins at the next ``align_size`` boundary, so internal
+      alignment padding may separate adjacent sub-sequences; any remaining
+      trailing tokens are pad. ``cu_seqlens`` enumerates every sub-sequence
+      across every row.
 
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
     gets first and last chunks, GPU1 gets second and second last chunks,

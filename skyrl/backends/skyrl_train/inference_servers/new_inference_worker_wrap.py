@@ -24,11 +24,21 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+import gc
+
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
+from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    patch_vllm_fp8_kv_cache_sleep_wake,
+)
+from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
+
+# This module is resolved as vLLM's worker extension before each worker is
+# constructed, so the compatibility patch reaches every engine process.
+patch_vllm_fp8_kv_cache_sleep_wake()
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -48,6 +58,38 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.model_config
         self.device
     """
+
+    def skyrl_cuda_memory_stats(self) -> dict:
+        """Return allocator and device-wide HBM usage for this vLLM worker GPU."""
+        if not torch.cuda.is_available():
+            return {"cuda_available": False}
+
+        device = torch.cuda.current_device()
+        torch.cuda.synchronize(device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        return {
+            "cuda_available": True,
+            "device": device,
+            "allocated_bytes": int(torch.cuda.memory_allocated(device)),
+            "reserved_bytes": int(torch.cuda.memory_reserved(device)),
+            "free_bytes": int(free_bytes),
+            "total_bytes": int(total_bytes),
+            "device_used_bytes": int(total_bytes - free_bytes),
+        }
+
+    def skyrl_release_cuda_memory(self) -> dict:
+        """Release this worker's Python and CUDA allocator caches."""
+        gc.collect()
+        if torch.cuda.is_available():
+            device = torch.cuda.current_device()
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except RuntimeError:
+                pass
+            torch.cuda.synchronize(device)
+        return self.skyrl_cuda_memory_stats()
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """
@@ -86,7 +128,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         handles = pickle.loads(base64.b64decode(pickled))
 
         device_index = torch.cuda.current_device()
-        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
+        physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
         func, args = handles[physical_gpu_id]

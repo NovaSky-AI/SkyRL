@@ -7,6 +7,7 @@ can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config
 
 import copy
 import dataclasses
+import math
 import os
 import typing
 from abc import ABC
@@ -196,6 +197,7 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
     average_in_collective: bool = True
 
 
@@ -353,6 +355,8 @@ class MegatronConfig(BaseConfig):
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
     empty_cuda_cache: Optional[bool] = True
+    cpu_resident_microbatches: bool = False
+    """Keep policy mini-batches on CPU until each Megatron forward step to reduce peak HBM."""
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
@@ -392,6 +396,35 @@ class PlacementConfig(BaseConfig):
     critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
     ref_num_gpus_per_node: int = 1
+    colocated_inference_memory_barrier: bool = False
+    """Sleep colocated inference engines and verify residual HBM before training."""
+    colocated_inference_sleep_level: int = 2
+    colocated_inference_residual_hbm_threshold_gb: float = 2.0
+    colocated_inference_memory_barrier_timeout_s: float = 30.0
+    colocated_inference_memory_barrier_poll_s: float = 1.0
+    colocated_worker_memory_barrier: bool = False
+    """Check inactive colocated worker residual HBM after CPU offload."""
+    colocated_worker_residual_hbm_threshold_gb: float = 2.0
+    colocated_ref_hard_evict_on_breach: bool = False
+    """Kill/restart inactive ref workers when residual HBM remains above threshold."""
+
+    def __post_init__(self) -> None:
+        if type(self.colocated_inference_sleep_level) is not int or self.colocated_inference_sleep_level not in (1, 2):
+            raise ValueError("colocated_inference_sleep_level must be 1 or 2")
+        for name in (
+            "colocated_inference_residual_hbm_threshold_gb",
+            "colocated_worker_residual_hbm_threshold_gb",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        for name in (
+            "colocated_inference_memory_barrier_timeout_s",
+            "colocated_inference_memory_barrier_poll_s",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +735,10 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight-sync FP8 format. ``"serialized_blockwise"`` makes
+    Megatron weight sync send checkpoint-format FP8 weights plus scale tensors to
+    the inference engine instead of sending ``model_dtype`` weights."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
@@ -927,6 +964,12 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    vocab_entropy_chunk_size: Optional[int] = 0
+    """Chunk size along the sequence dimension when computing Megatron vocab entropy.
+    ``0`` auto-sizes from the local vocab shard size and ``vocab_entropy_chunk_memory_mb``.
+    ``None`` preserves the legacy unchunked path."""
+    vocab_entropy_chunk_memory_mb: int = 512
+    """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
     fused_lm_head_logprob: bool = False
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
@@ -971,6 +1014,24 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
                 f"got {self.fused_lm_head_logprob_backend!r}."
+            )
+        if self.vocab_entropy_chunk_size is not None and (
+            isinstance(self.vocab_entropy_chunk_size, bool)
+            or not isinstance(self.vocab_entropy_chunk_size, int)
+            or self.vocab_entropy_chunk_size < 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_size must be a non-negative integer or None, "
+                f"got {self.vocab_entropy_chunk_size!r}."
+            )
+        if (
+            isinstance(self.vocab_entropy_chunk_memory_mb, bool)
+            or not isinstance(self.vocab_entropy_chunk_memory_mb, int)
+            or self.vocab_entropy_chunk_memory_mb <= 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_memory_mb must be a positive integer, "
+                f"got {self.vocab_entropy_chunk_memory_mb!r}."
             )
 
 

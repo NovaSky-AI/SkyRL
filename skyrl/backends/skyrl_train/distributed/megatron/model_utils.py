@@ -1001,6 +1001,8 @@ def vocab_parallel_entropy_packed_sequences(
     loss_mask: Optional[torch.Tensor],
     cp_group: Optional[torch.distributed.ProcessGroup],
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute action-token entropy directly on TP+CP sharded packed logits.
 
@@ -1009,9 +1011,8 @@ def vocab_parallel_entropy_packed_sequences(
         local term is normalized by the global action-token count. Megatron's
         schedule already applies the CP loss scale for two-output loss funcs.
     """
-    entropy_tokens = vocab_parallel_entropy(vocab_parallel_logits).squeeze(0)
-    device = entropy_tokens.device
-    dtype = entropy_tokens.dtype
+    device = vocab_parallel_logits.device
+    dtype = vocab_parallel_logits.dtype
 
     attention_mask = attention_mask.to(device=device, dtype=torch.bool)
     cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
@@ -1055,13 +1056,18 @@ def vocab_parallel_entropy_packed_sequences(
         cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
             cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
         )
-        local_weights = torch.zeros_like(entropy_tokens)
+        local_weights = torch.zeros((int(vocab_parallel_logits.shape[-2]),), dtype=dtype, device=device)
         current_rank_mask = cp_rank_for_token == cp_rank
         local_weights[local_indices[current_rank_mask]] = packed_weights[current_rank_mask]
     else:
         local_weights = packed_weights
 
-    local_entropy_sum = (entropy_tokens * local_weights).sum()
+    local_entropy_sum = vocab_parallel_entropy_weighted_sum(
+        vocab_parallel_logits,
+        local_weights,
+        chunk_size=chunk_size,
+        chunk_memory_mb=chunk_memory_mb,
+    )
     local_count = local_weights.sum()
     global_count = local_count.detach().clone()
     global_entropy_sum = local_entropy_sum.detach().clone()
@@ -1333,7 +1339,48 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return softmax_logits
 
 
-def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
+def _floor_power_of_two(value: int) -> int:
+    return 1 << (value.bit_length() - 1)
+
+
+def _resolve_vocab_entropy_chunk_size(
+    vocab_parallel_logits: torch.Tensor,
+    chunk_size: Optional[int],
+    chunk_memory_mb: int,
+    peak_factor: int = 4,
+) -> Optional[int]:
+    """Resolve the sequence chunk size for vocab entropy.
+
+    ``None`` preserves the legacy unchunked path. ``0`` auto-sizes from the
+    runtime vocab shard and dtype. Positive values are explicit token chunks.
+    """
+    if chunk_size is None:
+        return None
+    if chunk_size < 0:
+        raise ValueError(f"chunk_size must be non-negative or None, got {chunk_size}")
+    if chunk_memory_mb <= 0:
+        raise ValueError(f"chunk_memory_mb must be positive, got {chunk_memory_mb}")
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    if seq_len <= 0:
+        return None
+    if chunk_size > 0:
+        return chunk_size if chunk_size < seq_len else None
+
+    budget_bytes = int(chunk_memory_mb) * 1024 * 1024
+    bytes_per_token = int(vocab_parallel_logits.shape[-1]) * vocab_parallel_logits.element_size() * peak_factor
+    if bytes_per_token <= 0:
+        return None
+
+    auto_chunk = max(1, min(seq_len, budget_bytes // bytes_per_token))
+    auto_chunk = _floor_power_of_two(auto_chunk)
+    return auto_chunk if auto_chunk < seq_len else None
+
+
+def vocab_parallel_entropy(
+    vocab_parallel_logits: torch.Tensor,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
+) -> torch.Tensor:
     """Compute entropy when the logits are sharded in tp ranks
 
     Args:
@@ -1342,4 +1389,38 @@ def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
     Returns: (total_nnz,)
 
     """
-    return _VocabParallelEntropy.apply(vocab_parallel_logits)
+    resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
+    if resolved_chunk_size is None:
+        return _VocabParallelEntropy.apply(vocab_parallel_logits)
+
+    entropy_chunks = []
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    for start in range(0, seq_len, resolved_chunk_size):
+        end = min(start + resolved_chunk_size, seq_len)
+        entropy_chunks.append(_VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :]))
+    return torch.cat(entropy_chunks, dim=-1)
+
+
+def vocab_parallel_entropy_weighted_sum(
+    vocab_parallel_logits: torch.Tensor,
+    weights: torch.Tensor,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
+) -> torch.Tensor:
+    """Compute ``sum(entropy * weights)`` while bounding vocab entropy peaks."""
+    resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
+    if resolved_chunk_size is None:
+        entropy_tokens = _VocabParallelEntropy.apply(vocab_parallel_logits).squeeze(0)
+        return (entropy_tokens * weights).sum()
+
+    # Keep an autograd edge even when every chunk is masked out.
+    local_entropy_sum = vocab_parallel_logits[..., :0, :].sum()
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    for start in range(0, seq_len, resolved_chunk_size):
+        end = min(start + resolved_chunk_size, seq_len)
+        weight_chunk = weights[start:end]
+        if torch.count_nonzero(weight_chunk).item() == 0:
+            continue
+        entropy_chunk = _VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :]).squeeze(0)
+        local_entropy_sum = local_entropy_sum + (entropy_chunk * weight_chunk).sum()
+    return local_entropy_sum

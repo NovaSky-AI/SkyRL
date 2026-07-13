@@ -183,6 +183,24 @@ class RayPPOTrainer:
         cb_input = self._build_callback_input(**fields)
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
+    async def _sleep_inference_engine_for_training(self) -> None:
+        """Sleep colocated rollout engines and enforce the configured HBM barrier."""
+        placement_cfg = self.cfg.trainer.placement
+        if not placement_cfg.colocated_inference_memory_barrier:
+            await self.inference_engine_client.sleep()
+            return
+
+        sleep_for_training = getattr(self.inference_engine_client, "sleep_for_training", None)
+        if not callable(sleep_for_training):
+            raise RuntimeError("The configured inference memory barrier is unsupported by this inference client")
+        await sleep_for_training(
+            phase="training",
+            level=placement_cfg.colocated_inference_sleep_level,
+            residual_hbm_threshold_gb=placement_cfg.colocated_inference_residual_hbm_threshold_gb,
+            timeout_s=placement_cfg.colocated_inference_memory_barrier_timeout_s,
+            poll_s=placement_cfg.colocated_inference_memory_barrier_poll_s,
+        )
+
     @property
     def has_critic(self) -> bool:
         """Check if critic model is configured."""
@@ -332,7 +350,6 @@ class RayPPOTrainer:
                             self._vllm_metrics_scraper.pause()
                     with Timer("step", self.all_timings):
                         # for colocate_all=true, inference engine is always on GPU when starting the training step
-
                         # 0. truncate data to have even shards
                         rand_prompts = self._remove_tail_data(rand_prompts)
                         generator_input, uids = prepare_generator_input(
@@ -369,7 +386,7 @@ class RayPPOTrainer:
 
                         if self.colocate_all:
                             # if we are not continuing sampling, we sleep the inference engine
-                            await self.inference_engine_client.sleep()
+                            await self._sleep_inference_engine_for_training()
 
                         # The train rollout for this step is done generating; close
                         # its metrics window. ``vllm/eval/*`` is collected separately

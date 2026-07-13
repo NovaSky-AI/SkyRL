@@ -1,9 +1,11 @@
 import asyncio
+import gc
 import logging
 import os
 import socket
+import time
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type
@@ -243,9 +245,86 @@ class Worker(DistributedTorchRayActor):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
         raise NotImplementedError()
 
+    def _get_own_nvml_used_bytes(self, device: int) -> Dict[str, Any]:
+        """Return this worker process' NVML memory on the current CUDA device, if available."""
+        try:
+            import pynvml
+
+            props = torch.cuda.get_device_properties(device)
+            raw_gpu_uuid = getattr(props, "uuid", None)
+            if isinstance(raw_gpu_uuid, bytes):
+                gpu_uuid = raw_gpu_uuid.decode("ascii")
+            else:
+                gpu_uuid = str(raw_gpu_uuid) if raw_gpu_uuid else None
+            pynvml.nvmlInit()
+            try:
+                handle = (
+                    pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid)
+                    if gpu_uuid
+                    else pynvml.nvmlDeviceGetHandleByIndex(device)
+                )
+                processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                current_pid = os.getpid()
+                for proc in processes:
+                    if int(proc.pid) == current_pid:
+                        return {"nvml_used_bytes": int(getattr(proc, "usedGpuMemory", 0) or 0)}
+                return {"nvml_error": f"PID {current_pid} was not present in NVML's compute-process list"}
+            finally:
+                with suppress(Exception):
+                    pynvml.nvmlShutdown()
+        except Exception as exc:
+            return {"nvml_error": repr(exc)}
+
+    def cuda_memory_stats(self) -> Dict[str, Any]:
+        """Return best-effort CUDA/NVML memory stats for this worker process."""
+        record: Dict[str, Any] = {
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "cuda_available": torch.cuda.is_available(),
+        }
+        if not torch.cuda.is_available():
+            return record
+
+        device = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device)
+        raw_gpu_uuid = getattr(props, "uuid", None)
+        if isinstance(raw_gpu_uuid, bytes):
+            gpu_uuid = raw_gpu_uuid.decode("ascii")
+        else:
+            gpu_uuid = str(raw_gpu_uuid) if raw_gpu_uuid else None
+        torch.cuda.synchronize(device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        record.update(
+            {
+                "device": device,
+                "gpu_name": getattr(props, "name", None),
+                "gpu_uuid": gpu_uuid,
+                "allocated_bytes": torch.cuda.memory_allocated(device),
+                "reserved_bytes": torch.cuda.memory_reserved(device),
+                "free_bytes": free_bytes,
+                "total_bytes": total_bytes,
+            }
+        )
+        record.update(self._get_own_nvml_used_bytes(device))
+        return record
+
     def empty_cache(self) -> None:
-        """Empty GPU memory cache on Worker's CUDA device"""
-        torch.cuda.empty_cache()
+        """Empty the CUDA allocator cache without adding memory-probe overhead."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def release_cuda_memory(self) -> Dict[str, Any]:
+        """Release Python/CUDA caches and return process-level HBM statistics."""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except RuntimeError:
+                pass
+            torch.cuda.synchronize()
+        return self.cuda_memory_stats()
 
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
@@ -567,6 +646,11 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self._pg = pg
+        self._num_gpus_per_actor = num_gpus_per_actor
+        self._last_init_model_args = None
+        self._last_init_model_kwargs = None
+        self._last_dp_size: Optional[int] = None
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
@@ -678,6 +762,8 @@ class PPORayActorGroup:
         ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
 
     def async_init_model(
@@ -691,7 +777,60 @@ class PPORayActorGroup:
         Returns:
             A list of ray object refs.
         """
+        self._last_init_model_args = args
+        self._last_init_model_kwargs = dict(kwargs)
         return [actor.init_model.remote(*args, **kwargs) for actor in self._actor_handlers]
+
+    @property
+    def is_shutdown(self) -> bool:
+        """Whether this actor group currently has live Ray actor handles."""
+        return len(getattr(self, "_actor_handlers", [])) == 0
+
+    def can_restore_init_model(self) -> bool:
+        """Return whether the actor group can be restarted and reinitialized."""
+        return self._last_init_model_args is not None
+
+    def get_dp_size(self) -> int:
+        """Return the current or last-known data-parallel size for this actor group."""
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
+            return self._last_dp_size
+        if self._last_dp_size is None:
+            raise RuntimeError("Cannot determine data-parallel size before actor group initialization.")
+        return self._last_dp_size
+
+    def shutdown(self) -> None:
+        """Terminate all actors in this group so process-owned CUDA memory is released."""
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
+        actors = list(getattr(self, "_actor_handlers", []))
+        for actor in actors:
+            ray.kill(actor, no_restart=True)
+        for actor in actors:
+            deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    ray.get(actor.get_mesh_rank.remote(), timeout=1.0)
+                except ray.exceptions.RayActorError:
+                    break
+                except ray.exceptions.GetTimeoutError:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Timed out waiting for a hard-evicted Ray actor to terminate")
+        self._actor_handlers = []
+        self.actor_infos = []
+
+    def restart_actors(self) -> None:
+        """Recreate the Ray actors and distributed process group for this actor group."""
+        if not self.is_shutdown:
+            self.shutdown()
+        self._initiate_actors(self._pg, self._num_gpus_per_actor)
+
+    def restore_init_model(self) -> None:
+        """Reinitialize actors with the last init_model arguments."""
+        if not self.can_restore_init_model():
+            raise RuntimeError("Cannot restore actor group: last init_model path is unavailable.")
+        ray.get(self.async_init_model(*self._last_init_model_args, **(self._last_init_model_kwargs or {})))
 
     def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.
