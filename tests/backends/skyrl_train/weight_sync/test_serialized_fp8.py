@@ -7,7 +7,7 @@ from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     SerializedFp8Config,
     batched_moe_expert_spec,
     blockwise_cast_to_fp8,
-    get_qwen35_slime_parity_ignored_layers,
+    get_qwen35_fp8_ignored_layers,
     get_serialized_fp8_quantization_config,
     is_quantizable_weight,
     is_quantizable_weight_shape,
@@ -134,7 +134,7 @@ def test_vllm_serialized_fp8_quantization_config():
     }
 
 
-def test_qwen35_slime_parity_ignored_layers_use_linear_attention_layers():
+def test_qwen35_fp8_ignored_layers_use_linear_attention_layers():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
         layer_types=[
@@ -144,7 +144,7 @@ def test_qwen35_slime_parity_ignored_layers_use_linear_attention_layers():
         ],
     )
 
-    assert get_qwen35_slime_parity_ignored_layers(hf_config) == [
+    assert get_qwen35_fp8_ignored_layers(hf_config) == [
         "model.layers.0.linear_attn.in_proj_b",
         "model.layers.0.linear_attn.in_proj_a",
         "model.language_model.layers.0.linear_attn.in_proj_b",
@@ -163,7 +163,7 @@ def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
         vision_config=SimpleNamespace(depth=2),
     )
 
-    assert get_qwen35_slime_parity_ignored_layers(hf_config) == [
+    assert get_qwen35_fp8_ignored_layers(hf_config) == [
         "model.visual.blocks.0.attn.proj",
         "model.visual.blocks.1.attn.proj",
     ]
@@ -172,7 +172,7 @@ def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
 def test_qwen35_ignored_layers_are_not_inferred_from_unrelated_hybrid_config():
     hf_config = SimpleNamespace(model_type="unrelated_hybrid", layer_types=["linear_attention"])
 
-    assert get_qwen35_slime_parity_ignored_layers(hf_config) == []
+    assert get_qwen35_fp8_ignored_layers(hf_config) == []
 
 
 def test_moe_batched_expert_spec_recognizes_and_splits_gate_up():

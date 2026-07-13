@@ -50,7 +50,7 @@ def use_amax_epsilon_default() -> float:
     return epsilon
 
 
-_SLIME_QWEN35_FP8_WEIGHT_SUFFIXES = (
+_QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".self_attn.q_proj.weight",
     ".self_attn.k_proj.weight",
     ".self_attn.v_proj.weight",
@@ -74,7 +74,7 @@ _SLIME_QWEN35_FP8_WEIGHT_SUFFIXES = (
 # via make_expert_params_mapping), so we un-batch + un-fuse into per-expert 2D linears.
 _QWEN35_MOE_GATE_UP_SUFFIX = ".mlp.experts.gate_up_proj"
 _QWEN35_MOE_DOWN_SUFFIX = ".mlp.experts.down_proj"
-_SLIME_QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (
+_QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (
     ".in_proj_b",
     ".in_proj_a",
 )
@@ -139,11 +139,11 @@ def is_qwen35_config(hf_config: Any) -> bool:
     return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
 
 
-def get_qwen35_slime_parity_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
-    """Return vLLM module prefixes that Slime leaves unquantized for Qwen3.5.
+def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
+    """Return Qwen3.5 vLLM module prefixes excluded from serialized FP8.
 
-    Slime's Qwen3.5 FP8 sync quantizes a narrow Megatron-name allow-list. The
-    GDN ``in_proj_b``/``in_proj_a`` projection is intentionally absent from that
+    Serialized FP8 sync quantizes a narrow Megatron-name allow-list. The GDN
+    ``in_proj_b``/``in_proj_a`` projection is intentionally absent from that
     allow-list, while vLLM would otherwise quantize the fused ``in_proj_ba``
     module under a global FP8 config. vLLM's skip logic checks full module
     prefixes and requires every shard of a fused module to have the same scheme,
@@ -170,7 +170,7 @@ def get_qwen35_slime_parity_ignored_layers(hf_config: Any, model_prefix: str = "
                 layer_prefixes.append(prefix)
 
         for layer_prefix in layer_prefixes:
-            for suffix in _SLIME_QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
+            for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
                 ignored.append(f"{layer_prefix}{suffix}")
 
     # Qwen3.5 text-only RL runs set language_model_only=true, but vLLM 0.23 can
@@ -212,7 +212,7 @@ def is_quantizable_weight(name: str, tensor: torch.Tensor) -> bool:
 def is_quantizable_weight_shape(name: str, shape: Sequence[int]) -> bool:
     if not name.endswith(".weight") or len(shape) != 2:
         return False
-    return name.endswith(_SLIME_QWEN35_FP8_WEIGHT_SUFFIXES)
+    return name.endswith(_QWEN35_FP8_WEIGHT_SUFFIXES)
 
 
 def scale_name_for_weight(name: str) -> str:
@@ -229,8 +229,8 @@ def blockwise_cast_to_fp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a 2D tensor to FP8 with FP32 block scales.
 
-    The returned scale is the dequant scale, matching Slime's
-    ``weight_scale_inv`` convention for blockwise FP8:
+    The returned scale follows the vLLM checkpoint ``weight_scale_inv``
+    convention for blockwise FP8:
 
     ``dequantized_weight ~= qweight.float() * scale``.
 

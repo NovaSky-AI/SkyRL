@@ -13,7 +13,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     SERIALIZED_BLOCKWISE_FP8,
-    get_qwen35_slime_parity_ignored_layers,
+    get_qwen35_fp8_ignored_layers,
     get_serialized_fp8_quantization_config,
     is_qwen35_config,
     should_use_serialized_fp8,
@@ -44,7 +44,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
             "Serialized FP8 weight sync currently supports only Qwen3.5 checkpoint layouts; "
             f"model_path={model_path!r}"
         )
-    return get_qwen35_slime_parity_ignored_layers(hf_config)
+    return get_qwen35_fp8_ignored_layers(hf_config)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -93,7 +93,7 @@ def _apply_serialized_fp8_weight_sync_defaults(
     if ignored_layers:
         logger.info(
             "Serialized FP8 weight sync will leave %d vLLM modules unquantized "
-            "to match the Qwen3.5 Slime FP8 sync policy.",
+            "to match the Qwen3.5 serialized FP8 policy.",
             len(ignored_layers),
         )
 
