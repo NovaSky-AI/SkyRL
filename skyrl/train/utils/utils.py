@@ -20,6 +20,10 @@ from ray.util.placement_group import (
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
+from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
+    SERIALIZED_BLOCKWISE_FP8,
+)
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -197,6 +201,18 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    policy_cfg = cfg.trainer.policy
+    policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
+    if (
+        policy_fp8_param
+        and not policy_cfg.inference_only_init
+        and not policy_cfg.megatron_config.ddp_config.fp8_param_gather
+    ):
+        raise ValueError(
+            "Persistent policy fp8_param training requires "
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true"
+        )
 
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
@@ -522,6 +538,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
+    if ie_cfg.fp8_weight_sync_mode not in (None, SERIALIZED_BLOCKWISE_FP8):
+        raise ValueError(
+            f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; "
+            f"expected {SERIALIZED_BLOCKWISE_FP8!r} or None"
+        )
+    if ie_cfg.fp8_weight_sync_mode == SERIALIZED_BLOCKWISE_FP8:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("serialized_blockwise FP8 weight sync requires trainer.strategy='megatron'")
+        lora_cfg = cfg.trainer.policy.model.lora
+        if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError(
+                "serialized_blockwise FP8 weight sync requires full-weight updates; "
+                "Megatron LoRA with merge_lora=false syncs adapters only"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (
@@ -804,6 +835,52 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
         )
         env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+
+    # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32;
+    # Blackwell launchers explicitly select power-of-two scales.
+    serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == SERIALIZED_BLOCKWISE_FP8
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    policy_transformer_kwargs = cfg.trainer.policy.megatron_config.transformer_config_kwargs
+    ref_transformer_kwargs = cfg.trainer.ref.megatron_config.transformer_config_kwargs
+    policy_fp8_param = is_fp8_enabled(policy_transformer_kwargs.get("fp8_param"))
+    ref_fp8_param = use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8_param"))
+    fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (
+        use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8"))
+    )
+    fp8_contract_enabled = serialized_fp8 or fp8_compute or policy_fp8_param or ref_fp8_param
+
+    fp8_env_defaults: dict[str, str] = {}
+    configured_scale_mode = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")
+    if fp8_contract_enabled or configured_scale_mode is not None:
+        scale_mode = configured_scale_mode or "1"
+        if scale_mode not in {"0", "1"}:
+            raise ValueError("NVTE_FP8_BLOCK_SCALING_FP32_SCALES must be '0' (power-of-2) " "or '1' (FP32 scales).")
+
+        if scale_mode == "0" and (policy_fp8_param or ref_fp8_param):
+            raise ValueError(
+                "Persistent fp8_param requires FP32 block scales. Blackwell only supports "
+                "power-of-2 block scales, so use fp8_param=false on Blackwell."
+            )
+
+        if fp8_contract_enabled:
+            fp8_env_defaults["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = scale_mode
+        if serialized_fp8 and scale_mode == "1":
+            e8m0_mode = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", "0")
+            if e8m0_mode != "0":
+                raise ValueError(
+                    "FP32 block scales require VLLM_USE_DEEP_GEMM_E8M0=0 so vLLM "
+                    "does not requantize them to power-of-2 scales."
+                )
+            fp8_env_defaults["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
+
+    for var_name in (
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+        "NVTE_FP8_BLOCK_AMAX_EPSILON",
+        "VLLM_USE_DEEP_GEMM_E8M0",
+    ):
+        if value := os.environ.get(var_name, fp8_env_defaults.get(var_name)):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     return env_vars
 
