@@ -250,6 +250,7 @@ def offload_megatron_model_to_cpu(models):
                     cpu_tensor = param.data.detach().cpu().pin_memory()
                     param._offload_cpu_data = cpu_tensor
                     param._offload_cuda_numel = param.data.numel()
+                    param.data.storage().resize_(0)
                     param.data = torch.empty(0, dtype=param.data.dtype, device=param.data.device)
         else:
             for _, param in model_chunk.named_parameters():
