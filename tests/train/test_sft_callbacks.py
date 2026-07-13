@@ -324,8 +324,9 @@ def test_sft_train_step_opts_out_of_per_token_outputs(mock_dispatch):
 def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
     """run_eval reads only ``output.metrics["loss"]``; it skips per-token outputs."""
     trainer = _build_minimal_trainer(mock_dispatch)
+    trainer.eval_dataloader = trainer.build_eval_dataloader(_dummy_tokenized())
 
-    metrics, _ = trainer.run_eval(_dummy_tokenized())
+    metrics, _ = trainer.run_eval()
 
     assert "eval_loss" in metrics
     mock_dispatch.forward.assert_called()
