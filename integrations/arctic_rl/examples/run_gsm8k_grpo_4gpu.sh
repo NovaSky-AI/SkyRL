@@ -35,7 +35,7 @@ if [[ ! -f "${DATA_DIR}/train.parquet" || ! -f "${DATA_DIR}/validation.parquet" 
     uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir "${DATA_DIR}"
 fi
 
-# Driver (same shape as examples/train/flash_rl + examples/train_integrations/harbor):
+# Driver (same shape as examples/train_integrations/harbor):
 #   - `--isolated` gets a fresh resolution that ignores the project lock /
 #     vllm-cu129 source pin (arctic-inference needs vLLM 0.18, not 0.23).
 #   - `--with flash-attn@URL` swaps the torch-2.11 wheel in tool.uv.sources for

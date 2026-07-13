@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
 from skyrl.train.config import FSDPConfig, ModelConfig, OptimizerConfig
+from skyrl.utils.tok import check_is_vlm, get_processor
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import (
@@ -582,6 +583,16 @@ class FSDPStrategy(DistributedStrategy):
                 # Save tokenizer if provided
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)
+
+                # This export path bypasses save_hf_configs, so replicate its VLM handling:
+                # AutoProcessor/vLLM can't reload a VLM without preprocessor_config.json.
+                # Guarded so a resolution failure can't abort the save; no-op for text-only.
+                try:
+                    if check_is_vlm(model_to_save.config):
+                        processor = get_processor(model_to_save.config.name_or_path)
+                        processor.save_pretrained(work_dir)
+                except Exception as e:
+                    logger.warning(f"Could not save processor for '{model_to_save.config.name_or_path}'. Error: {e}")
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 

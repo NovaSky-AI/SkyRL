@@ -106,7 +106,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             current_sampling_params: dict = (
                 sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
             )
-            get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+            get_logprobs = current_sampling_params.get("logprobs", None) is not None
             stop_strs = current_sampling_params.get("stop", None)
 
             # ── Accumulators ───────────────────────────────────────────────

@@ -15,10 +15,10 @@ import torch
 from loguru import logger
 from ray.util.placement_group import (
     PlacementGroup,
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -269,6 +269,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints "
             "or negative to keep all checkpoints"
         )
+
+    cfg.trainer.policy.torch_profiler_config.validate(
+        strategy=cfg.trainer.strategy,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        colocate_policy_ref=cfg.trainer.placement.colocate_policy_ref,
+        fsdp_cpu_offload=cfg.trainer.policy.fsdp_config.cpu_offload,
+    )
 
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()

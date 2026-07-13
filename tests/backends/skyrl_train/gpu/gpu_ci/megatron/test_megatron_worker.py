@@ -18,9 +18,9 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.train.config import (
-    MegatronTorchProfilerConfig,
     SkyRLLoraConfig,
     SkyRLTrainConfig,
+    TorchProfilerConfig,
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -684,7 +684,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+    cfg.trainer.policy.torch_profiler_config = TorchProfilerConfig(
         enable=False, ranks=[0], save_path=f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
     )
 
@@ -726,7 +726,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+    cfg.trainer.policy.torch_profiler_config = TorchProfilerConfig(
         enable=False, ranks=[0], save_path="/home/ray/megatron_prof/dp4/"
     )
 

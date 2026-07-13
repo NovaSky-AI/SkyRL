@@ -213,6 +213,23 @@ Some rules for configuring these parameters:
 `optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
 </Callout>
 
+`optimizer_config_kwargs` accepts string values for Megatron `*_dtype` fields:
+
+```yaml
+optimizer_config_kwargs:
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: bf16
+  exp_avg_sq_dtype: fp8
+  main_params_dtype: fp32
+```
+
+Accepted names are case-insensitive: `fp32` (`float32`, `float`), `fp16` (`float16`, `half`), `bf16` (`bfloat16`), and `fp8` (`float8`, `uint8`). `fp8` maps to `torch.uint8`, matching TransformerEngine optimizer state storage.
+
+Field-specific checks:
+
+- `main_params_dtype` (master weights): `fp32`, `fp16`
+- `exp_avg_dtype` / `exp_avg_sq_dtype`: `fp32`, `fp16`, `bf16`, `fp8`
+
 ## Optimizer Configuration
 
 For both the critic and policy model, we provide a common optimizer configuration
@@ -273,6 +290,23 @@ policy:
   use_torch_compile: false  # Enable torch compile for the entropy calculation
   record_memory: false  # Dump memory snapshot for debugging
 
+  torch_profiler_config:    # torch.profiler for policy training
+    enable: false
+    ranks: [0]
+    save_path: null         # required when enable=true; absolute local path
+    skip_first: 10
+    wait: 0
+    warmup: 1
+    active: 1
+    repeat: 1                # 0 = repeat forever
+    activities: ["cpu", "cuda"]
+    record_shapes: true
+    profile_memory: false
+    with_stack: true
+    with_flops: false
+    with_modules: false
+    export_type: "chrome_trace"  # chrome_trace | stacks
+
   model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
 
 ```
@@ -282,6 +316,22 @@ policy:
 - `policy.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 - `policy.use_torch_compile`: Whether to enable torch compile for entropy calculation
 - `policy.record_memory`: Whether to record memory usage. If `True`, this will use PyTorch's [memory snapshotting utility](https://docs.pytorch.org/docs/stable/torch_cuda_memory.html) to record memory usage and dump memory snapshots after each policy model training step.
+
+### Torch Profiler Configuration
+
+`policy.torch_profiler_config` profiles policy training steps for FSDP and Megatron in RL and SFT. It writes one Kineto/[HTA](https://github.com/facebookresearch/HolisticTraceAnalysis)-friendly `*.pt.trace.json` per active window and profiled rank.
+
+Scope: policy workers only. Active windows capture policy-worker operations between profiler steps: in RL, this includes policy log-prob forwards and policy training; in SFT, this includes training and may include eval forwards. Critic/ref workers, the controller, and generation/inference engines are not profiled.
+
+FSDP restriction: profiling is rejected when colocation is enabled without CPU offloading (`policy.fsdp_config.cpu_offload: false` with `placement.colocate_all` or `placement.colocate_policy_ref`).
+
+- `policy.torch_profiler_config.enable`: Enables profiling.
+- `policy.torch_profiler_config.ranks`: Global ranks to profile, for example `[0]`.
+- `policy.torch_profiler_config.save_path`: Required absolute local trace directory. Relative paths land under Ray's `/tmp/ray/.../working_dir_files`; cloud URIs are rejected.
+- `policy.torch_profiler_config.{skip_first,wait,warmup,active,repeat}`: Passed to [`torch.profiler.schedule`](https://docs.pytorch.org/docs/stable/profiler.html#torch.profiler.schedule).
+- `policy.torch_profiler_config.activities`: Subset of `["cpu", "cuda"]`.
+- `policy.torch_profiler_config.{record_shapes,profile_memory,with_stack,with_flops,with_modules}`: Passed to `torch.profiler.profile`.
+- `policy.torch_profiler_config.export_type`: `chrome_trace` for `*.pt.trace.json`; `stacks` for self-CUDA-time stacks (`with_stack: true` required).
 
 ### LoRA Configuration
 

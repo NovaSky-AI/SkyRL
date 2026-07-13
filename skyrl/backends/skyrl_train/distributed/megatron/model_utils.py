@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import Any, Optional
 
 import megatron.core.parallel_state as mpu
@@ -421,6 +422,62 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None
 
 
+def _fused_lm_head_logprob_apply(
+    backend: str,
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    chunk_size: int,
+    tp_group: torch.distributed.ProcessGroup,
+    inference_only: bool,
+) -> torch.Tensor:
+    """Dispatch the fused LM-head token-logprob to the requested backend.
+
+    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
+    uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
+    otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``.
+    """
+    if backend == "triton":
+        try:
+            from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+                TRITON_AVAILABLE,
+                FusedLinearLogprobTriton,
+                is_cuda_available,
+            )
+
+            if not (TRITON_AVAILABLE and is_cuda_available):
+                raise ImportError("triton is not installed or no CUDA device is available")
+            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
+                hidden,
+                weight,
+                target,
+                vocab_start_index,
+                vocab_end_index,
+                chunk_size,
+                tp_group,
+                inference_only,
+            )
+        except (ImportError, RuntimeError) as e:
+            warnings.warn(
+                f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
+                "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
+                stacklevel=2,
+            )
+
+    return FusedLinearChunkedDistributedLogprob.apply(  # type: ignore[no-any-return]
+        hidden,
+        weight,
+        target,
+        vocab_start_index,
+        vocab_end_index,
+        chunk_size,
+        tp_group,
+        inference_only,
+    )
+
+
 def from_parallel_logits_to_logprobs(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
@@ -658,6 +715,7 @@ def from_parallel_hidden_to_logprobs(
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -685,7 +743,8 @@ def from_parallel_hidden_to_logprobs(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    logprobs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    logprobs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         target,
@@ -720,6 +779,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -763,7 +823,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    probs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    probs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         rolled_targets,

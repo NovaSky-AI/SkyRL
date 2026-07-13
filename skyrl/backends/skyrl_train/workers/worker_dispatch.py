@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
+from loguru import logger
 from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -418,6 +419,48 @@ class WorkerDispatch:
         """Update algorithm config fields on all workers for a model."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
+
+    # ------------------------------------------------------------------
+    # torch.profiler control. Avoid _ensure_on_gpu so profiling does not perturb
+    # the colocation offload state.
+    # ------------------------------------------------------------------
+
+    def start_profile(self, model: str) -> None:
+        """Start profiling on ``model`` workers."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile"))
+        except Exception as e:
+            logger.warning(f"[profiler] start_profile dispatch for {model} failed: {e}")
+
+    def profile_step(self, model: str) -> None:
+        """Advance profiling by one global step."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+        except Exception as e:
+            logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
+
+    def stop_profile(self, model: str) -> None:
+        """Stop profiling on ``model`` workers."""
+        if model not in self._actor_groups:
+            return
+        try:
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
+        except Exception as e:
+            logger.warning(f"[profiler] stop_profile dispatch for {model} failed: {e}")
+
+    def dump_profiler_summary(self, model: str) -> Optional[List]:
+        """Collect per-rank last-window kernel summaries for ``model``."""
+        if model not in self._actor_groups:
+            return None
+        try:
+            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"))
+        except Exception as e:
+            logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
+            return None
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""

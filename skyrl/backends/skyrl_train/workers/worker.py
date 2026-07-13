@@ -16,10 +16,10 @@ from loguru import logger
 from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
@@ -234,6 +234,8 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
+        # Populated by init_model when torch profiling is enabled.
+        self.profiler = None
 
         if self.cfg.algorithm.temperature is None:
             raise ValueError("`cfg.algorithm.temperature` must be set")
@@ -292,6 +294,29 @@ class Worker(DistributedTorchRayActor):
     def set_algorithm_config(self, **kwargs) -> None:
         for key, value in kwargs.items():
             setattr(self.cfg.algorithm, key, value)
+
+    # ------------------------------------------------------------------
+    # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
+    # ------------------------------------------------------------------
+
+    def start_profile(self) -> None:
+        """Arm the profiler before the training loop (no-op when disabled)."""
+        if self.profiler is not None:
+            self.profiler.start()
+
+    def profile_step(self) -> None:
+        """Advance the profiler schedule by one global step."""
+        if self.profiler is not None:
+            self.profiler.step()
+
+    def stop_profile(self) -> None:
+        """Stop the profiler after the training loop, flushing any open window."""
+        if self.profiler is not None:
+            self.profiler.stop()
+
+    def dump_profiler_summary(self):
+        """Return this rank's last-window kernel summary, or None."""
+        return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
