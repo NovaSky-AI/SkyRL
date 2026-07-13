@@ -7,8 +7,10 @@ skip, config-pop, and RL-ungated behavior. GPU parity lives in
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import RETURN_PER_TOKEN_OUTPUTS_KEY
 from skyrl.train.config import SkyRLTrainConfig
@@ -17,6 +19,12 @@ from skyrl.train.dataset.replay_buffer import Experience
 NUM_ACTIONS = 4
 BATCH_SIZE = 2
 SEQ_LEN = 6
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _repopulate_policy_loss_registry() -> None:
+    """Restore defaults after registry tests reset global state."""
+    PolicyLossRegistry.repopulate_registry()
 
 
 def _make_cpu_policy_worker() -> PolicyWorkerBase:
