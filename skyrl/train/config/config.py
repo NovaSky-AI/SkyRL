@@ -197,6 +197,7 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
     average_in_collective: bool = True
 
 
@@ -715,6 +716,9 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format. ``"serialized_blockwise"`` sends FP8
+    checkpoint weights and scales instead of ``model_dtype`` tensors."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"

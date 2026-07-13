@@ -421,12 +421,11 @@ def preprocess_packed_seqs(
       per row. This is the historical SkyRL behavior used by the RL path
       and the existing SFT path without mini-batch packing.
     - ``sub_seq_lengths is not None``: each row may contain multiple
-      sub-sequences concatenated end-to-end. ``sub_seq_lengths[r]`` lists
-      the per-sub-sequence valid token counts for row ``r``. Tokens
-      ``input_ids[r, :sum(sub_seq_lengths[r])]`` are assumed to be the
-      concatenated sub-sequences in order; any trailing tokens in the row
-      are pad. ``cu_seqlens`` enumerates every sub-sequence across every
-      row.
+      sub-sequences. ``sub_seq_lengths[r]`` lists their valid token counts.
+      Each sub-sequence begins at the next ``align_size`` boundary, so internal
+      alignment padding may separate adjacent sub-sequences; any remaining
+      trailing tokens are pad. ``cu_seqlens`` enumerates every sub-sequence
+      across every row.
 
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
     gets first and last chunks, GPU1 gets second and second last chunks,

@@ -74,7 +74,8 @@ class PackedDataCollator:
     Flow:
 
     1. Compute per-example sequence lengths.
-    2. FFD-pack with ``bin_capacity = max_tokens_per_microbatch``,
+    2. FFD-pack using each sequence's alignment-padded footprint and
+       ``bin_capacity = max(max_tokens_per_microbatch, align_size)``,
        ``min_bin_count = dp_size``, ``bin_count_multiple = dp_size``.
     3. Round-robin assign bins to DP shards (this happens implicitly inside
        ``MeshDispatch.dispatch`` because the rows are laid out in shard-major
@@ -135,19 +136,22 @@ class PackedDataCollator:
         pp_size = self.pp_size
         cp_size = self.cp_size
         # Each sub-seq's padded length must satisfy these divisibility
-        # constraints, which is why ``align_size`` carries all factors:
+        # constraints, which is why ``align_size`` carries all required factors:
         #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
         #     dim, so each segment must be divisible by ``tp_size``.
         #   - Context Parallelism splits each segment into ``2*cp_size`` equal
         #     load-balanced causal chunks, so each segment must be divisible by
         #     ``2*cp_size``.
-        #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
-        #     rank's local token slab to be 16-aligned; globally this means
-        #     ``16*cp_size``.
+        #   - FP8 requires 16-token local slabs for TP=1. With sequence
+        #     parallelism, TE quantizes all-gather inputs in 128-token blocks,
+        #     so the global segment includes the TP and CP shard factors.
         # This MUST stay in lockstep with the worker's preprocess_packed_seqs
         # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
         align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=self.fp8_enabled)
+
+        def _round_up(x: int, multiple: int) -> int:
+            return ((x + multiple - 1) // multiple) * multiple
 
         dp_size = self.dp_size
 
@@ -177,14 +181,18 @@ class PackedDataCollator:
         # same number of micro-batches. Forcing the global bin count to a
         # multiple of ``dp_size`` makes the per-DP-rank bin count (and thus
         # ``num_microbatches``) identical across ranks.
+        # Pack aligned footprints so per-sequence padding cannot exceed the row
+        # budget. Allow at least one alignment unit per bin.
+        packing_lengths = [_round_up(length, align_size) for length in seq_lengths]
+        packing_capacity = max(bin_capacity, align_size)
         bin_count_multiple = dp_size
         packer = make_seq_packer(
             "first_fit_decreasing",
-            bin_capacity=bin_capacity,
+            bin_capacity=packing_capacity,
             min_bin_count=bin_count_multiple,
             bin_count_multiple=bin_count_multiple,
         )
-        bins: List[List[int]] = packer.pack(seq_lengths)
+        bins: List[List[int]] = packer.pack(packing_lengths)
 
         # Assign bins to DP shards via round-robin (bin_idx % shards).
         # Concretely we want the resulting layout to be shard-major:
@@ -204,9 +212,6 @@ class PackedDataCollator:
         # 3. Compute packed-row lengths (with align_size padding per sub-seq)
         #    and the global max packed length (for PP > 1 uniform padding).
         # ------------------------------------------------------------------
-        def _round_up(x: int, m: int) -> int:
-            return ((x + m - 1) // m) * m
-
         bin_packed_lengths: List[int] = []
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
@@ -242,7 +247,7 @@ class PackedDataCollator:
         n_samples = len(examples)
         logger.info(
             f"sequence packing | packed {n_samples} samples into {num_bins} bins "
-            f"(~{num_bins // dp_size}/DP rank, bin_capacity={bin_capacity} tokens)"
+            f"(~{num_bins // dp_size}/DP rank, bin_capacity={packing_capacity} aligned tokens)"
         )
 
         sequences = torch.full((num_bins, max_packed_len), pad_token_id, dtype=torch.long)
@@ -282,8 +287,7 @@ class PackedDataCollator:
                 # p_local = s - 1 (last token of sub-seq): mask = 0.
                 # Already zero by initialization.
 
-                # Advance row_offset, padding sub-seq to the TP/CP layout
-                # multiple, plus FP8's 16-token local-rank multiple when active.
+                # Match the aligned footprint consumed by preprocess_packed_seqs.
                 row_offset += _round_up(s, align_size)
 
         # The total_nonpad we just counted matches sum(loss_mask). Verify in

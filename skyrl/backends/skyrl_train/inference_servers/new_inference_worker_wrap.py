@@ -29,6 +29,7 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
+from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -86,7 +87,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         handles = pickle.loads(base64.b64decode(pickled))
 
         device_index = torch.cuda.current_device()
-        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
+        physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
         func, args = handles[physical_gpu_id]
