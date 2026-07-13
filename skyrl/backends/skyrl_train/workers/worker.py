@@ -244,8 +244,9 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
     def empty_cache(self) -> None:
-        """Empty GPU memory cache on Worker's CUDA device"""
-        torch.cuda.empty_cache()
+        """Empty this worker's CUDA allocator cache."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
@@ -567,6 +568,9 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self._pg = pg
+        self._num_gpus_per_actor = num_gpus_per_actor
+        self._last_dp_size: Optional[int] = None
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
@@ -678,6 +682,8 @@ class PPORayActorGroup:
         ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
 
     def async_init_model(
@@ -692,6 +698,15 @@ class PPORayActorGroup:
             A list of ray object refs.
         """
         return [actor.init_model.remote(*args, **kwargs) for actor in self._actor_handlers]
+
+    def get_dp_size(self) -> int:
+        """Return the current or last-known data-parallel size for this actor group."""
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
+            return self._last_dp_size
+        if self._last_dp_size is None:
+            raise RuntimeError("Cannot determine data-parallel size before actor group initialization.")
+        return self._last_dp_size
 
     def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.

@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
+from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -125,6 +126,23 @@ def _build_packed_valid_mask(
     return mask.unsqueeze(0)
 
 
+def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
+    """Move all tensors in a nested microbatch to a CUDA device."""
+    if torch.is_tensor(value) or isinstance(value, TensorList):
+        return value.to(device=device, non_blocking=True)
+    if isinstance(value, dict):
+        return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_tensor_tree_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_tensor_tree_to_device(item, device) for item in value)
+    return value
+
+
+def _copy_tensor_dict_to_device(batch: Dict[str, Any], device: int) -> Dict[str, Any]:
+    return {key: _copy_tensor_tree_to_device(value, device) for key, value in batch.items()}
+
+
 def _fused_lm_head_output_processor(**kwargs):
     """GPTModel ``output_processor`` hook for the fused LM-head log-prob path.
 
@@ -162,6 +180,7 @@ class MegatronModelWrapper:
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
         is_vlm: bool = False,
+        cpu_resident_microbatches: bool = False,
     ):
         self.cfg = config
         self.actor_module = actor_module
@@ -169,6 +188,7 @@ class MegatronModelWrapper:
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
         self.is_vlm = is_vlm
+        self.cpu_resident_microbatches = cpu_resident_microbatches
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
@@ -325,6 +345,8 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+            if self.cpu_resident_microbatches:
+                batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
@@ -793,10 +815,16 @@ class MegatronModelWrapper:
                         loss_mask,
                         mpu.get_context_parallel_group(),
                         sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
                     )
                 else:
                     action_logits = logits[:, -num_actions - 1 : -1, :]
-                    entropy_BS = vocab_parallel_entropy(action_logits)
+                    entropy_BS = vocab_parallel_entropy(
+                        action_logits,
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
+                    )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
 
@@ -891,6 +919,8 @@ class MegatronModelWrapper:
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
+            if self.cpu_resident_microbatches:
+                batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))

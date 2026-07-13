@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
+    TrainerConfig,
     _resolve_class_type,
     build_nested_dataclass,
 )
@@ -126,6 +127,25 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+
+
+def test_cli_overrides_cpu_resident_megatron_microbatches():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.megatron_config.cpu_resident_microbatches=true"])
+    assert cfg.trainer.policy.megatron_config.cpu_resident_microbatches is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("vocab_entropy_chunk_size", -1),
+        ("vocab_entropy_chunk_size", True),
+        ("vocab_entropy_chunk_memory_mb", 0),
+        ("vocab_entropy_chunk_memory_mb", True),
+    ],
+)
+def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        TrainerConfig(**{field_name: value})
 
 
 def test_cli_overrides_plus_prefix_rejected():
