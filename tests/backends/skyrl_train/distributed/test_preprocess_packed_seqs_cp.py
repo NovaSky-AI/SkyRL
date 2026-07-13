@@ -144,7 +144,7 @@ class TestPreprocessPackedSeqsShortSequencesCP:
                 assert packed_params.qkv_format == "thd"
 
     def test_remove_left_padding_tp1_aligns_only_for_fp8(self):
-        """Dense TP1 Megatron forwards keep the historical 16-aligned FP8 slabs."""
+        """TP1 applies 16-token alignment only when FP8 is enabled."""
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             remove_left_padding,
         )
@@ -166,8 +166,8 @@ class TestPreprocessPackedSeqsShortSequencesCP:
         assert fp8_ids.shape == (1, 6544)
         assert int(fp8_mask.sum().item()) == 6541
 
-    def test_remove_left_padding_tp_gt_1_fp8_aligns_observed_h100_failure(self):
-        """Regression for 9B TP2 H100 failure: 8552 -> 8704, not 8576."""
+    def test_remove_left_padding_tp_gt_1_fp8_uses_local_128_alignment(self):
+        """TP2 rounds 8,552 tokens to the 8,704-token global alignment."""
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             remove_left_padding,
         )

@@ -485,11 +485,8 @@ class MegatronWorker:
                 "(native GDN thd packing path; vision tower dropped)"
             )
 
-        # Megatron-Bridge normally imports the HF checkpoint through a pre-wrap
-        # hook. Persistent FP8 parameters additionally need the exact converted
-        # BF16 shards to seed MCore's optimizer masters, so load them explicitly
-        # after model construction instead. This lets AutoBridge expose
-        # ``unquantized_state_dict`` for the one-time master reload below.
+        # Defer persistent-FP8 checkpoint import until the bridge can expose
+        # unquantized converted shards for optimizer-master initialization.
         provider = bridge.to_megatron_provider(load_weights=not fp8_param_enabled)
         if fp8_param_enabled:
             provider.perform_initialization = False
@@ -564,15 +561,14 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def _load_deferred_fp8_param_weights(self, *, retain_unquantized_state: bool = False) -> None:
-        """Import persistent-FP8 weights and optionally retain optimizer master sources."""
+        """Load deferred FP8 weights and optionally retain exact master tensors."""
         if not self._deferred_fp8_param_weight_load:
             return
 
         original_export_dtype = self.bridge.export_weight_dtype
         try:
-            # MBridge captures converted, unquantized local tensor shards when
-            # its export dtype is FP8. Only a training policy optimizer needs
-            # that second copy; ref and inference-only workers import directly.
+            # The FP8 export path retains converted, unquantized local shards.
+            # Only policy workers with an optimizer keep this additional copy.
             if retain_unquantized_state:
                 self.bridge.export_weight_dtype = "fp8"
             self.bridge.load_hf_weights(self.actor_module)
@@ -587,14 +583,12 @@ class MegatronWorker:
             self.bridge.export_weight_dtype = original_export_dtype
 
     def _release_fp8_param_unquantized_state(self) -> None:
-        """Drop one-time FP8 import tensors before colocated vLLM wakes up."""
+        """Release temporary checkpoint shards after deferred weight import."""
         if not self._deferred_fp8_param_weight_load:
             return
         self._fp8_param_unquantized_state_dict = None
         if self.bridge is not None:
-            # AutoBridge owns the same dictionary in addition to SkyRL's local
-            # reference. Both must be cleared, otherwise a local BF16 checkpoint
-            # shard remains resident in HBM and vLLM cannot restore its KV cache.
+            # Clear both owners; either reference keeps the unquantized shard in HBM.
             self.bridge.unquantized_state_dict = None
         self._deferred_fp8_param_weight_load = False
         gc.collect()

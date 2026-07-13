@@ -10,7 +10,7 @@ def is_fp8_enabled(fp8: Any) -> bool:
 
 
 def get_packed_seq_align_size(tp_size: int, cp_size: int, fp8_enabled: bool = False) -> int:
-    """Return global per-subsequence padding needed for TP/CP layout and optional FP8."""
+    """Return the global alignment unit for packed TP/CP/FP8 sequences."""
     if tp_size < 1 or cp_size < 1:
         raise ValueError(f"tp_size and cp_size must be positive, got tp_size={tp_size}, cp_size={cp_size}")
     if cp_size > 1:
@@ -24,7 +24,7 @@ def get_packed_seq_align_size(tp_size: int, cp_size: int, fp8_enabled: bool = Fa
 
 
 def get_unpacked_seq_align_size(tp_size: int, fp8_enabled: bool = False) -> int:
-    """Return sequence padding needed when removing microbatch padding without CP."""
+    """Return the alignment unit for unpacked TP/FP8 sequences without CP."""
     if tp_size < 1:
         raise ValueError(f"tp_size must be positive, got {tp_size}")
     if not fp8_enabled:

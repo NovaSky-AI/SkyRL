@@ -34,8 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
 )
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 
-# This module is resolved as vLLM's worker extension before each worker is
-# constructed, so the compatibility patch reaches every engine process.
+# Apply the compatibility patch before vLLM constructs each worker.
 patch_vllm_fp8_kv_cache_sleep_wake()
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"

@@ -186,7 +186,7 @@ class TestSubSeqLengths:
         collator's row layout, which advances ``row_offset += round_up(s,
         align_size)`` between sub-seqs. So with sub-seqs of length 3 and
         5 and tp_size=4, the collator places sub-seq 1 at row column
-        ``align_size`` (after the FP8/TP alignment pad gap), NOT row column 3.
+        ``align_size`` after the FP8/TP alignment gap, not row column 3.
         """
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             preprocess_packed_seqs,
@@ -194,8 +194,8 @@ class TestSubSeqLengths:
 
         batch_size = 1
 
-        # Two sub-seqs of length 3 and 5, each padded to the global footprint
-        # that leaves the TP-local Transformer Engine input 128-aligned.
+        # Each sequence uses a global footprint that leaves TP-local inputs
+        # aligned to 128 tokens.
         align_size = _get_align_size(tp_size=4, cp_size=1, fp8_enabled=True)
         seq_len = 2 * align_size
         # Row layout mirrors what PackedDataCollator produces:

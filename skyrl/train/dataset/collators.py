@@ -142,11 +142,9 @@ class PackedDataCollator:
         #   - Context Parallelism splits each segment into ``2*cp_size`` equal
         #     load-balanced causal chunks, so each segment must be divisible by
         #     ``2*cp_size``.
-        #   - Transformer Engine FP8 GEMMs require local token slabs to be
-        #     aligned. With TP > 1, Megatron sequence parallelism makes TE
-        #     blockwise FP8 quantize the input all-gather source, whose local
-        #     flattened token dim must be 128-aligned. The global row footprint
-        #     therefore carries the TP and CP shard factors.
+        #   - FP8 requires 16-token local slabs for TP=1. With sequence
+        #     parallelism, TE quantizes all-gather inputs in 128-token blocks,
+        #     so the global segment includes the TP and CP shard factors.
         # This MUST stay in lockstep with the worker's preprocess_packed_seqs
         # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
@@ -183,11 +181,8 @@ class PackedDataCollator:
         # same number of micro-batches. Forcing the global bin count to a
         # multiple of ``dp_size`` makes the per-DP-rank bin count (and thus
         # ``num_microbatches``) identical across ranks.
-        # Packing raw lengths can place several short sequences in one bin even
-        # though their independently aligned footprints exceed the configured
-        # budget. Account for the real row cost. A budget smaller than one
-        # alignment unit is raised to one unit so a valid sequence can still be
-        # represented.
+        # Pack aligned footprints so per-sequence padding cannot exceed the row
+        # budget. Allow at least one alignment unit per bin.
         packing_lengths = [_round_up(length, align_size) for length in seq_lengths]
         packing_capacity = max(bin_capacity, align_size)
         bin_count_multiple = dp_size
@@ -292,8 +287,7 @@ class PackedDataCollator:
                 # p_local = s - 1 (last token of sub-seq): mask = 0.
                 # Already zero by initialization.
 
-                # Advance row_offset by the TP/CP/FP8-aligned footprint used by
-                # preprocess_packed_seqs.
+                # Match the aligned footprint consumed by preprocess_packed_seqs.
                 row_offset += _round_up(s, align_size)
 
         # The total_nonpad we just counted matches sum(loss_mask). Verify in

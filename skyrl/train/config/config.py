@@ -356,7 +356,7 @@ class MegatronConfig(BaseConfig):
     )
     empty_cuda_cache: Optional[bool] = True
     cpu_resident_microbatches: bool = False
-    """Keep policy mini-batches on CPU until each Megatron forward step to reduce peak HBM."""
+    """Keep policy batches on CPU and transfer each microbatch before its forward step."""
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False
@@ -400,7 +400,7 @@ class PlacementConfig(BaseConfig):
     """Check inactive colocated worker residual HBM after CPU offload."""
     colocated_worker_residual_hbm_threshold_gb: float = 2.0
     colocated_ref_hard_evict_on_breach: bool = False
-    """Kill/restart inactive ref workers when residual HBM remains above threshold."""
+    """Hard-evict and later restart reference workers that breach the threshold."""
 
     def __post_init__(self) -> None:
         value = self.colocated_worker_residual_hbm_threshold_gb
@@ -717,9 +717,8 @@ class InferenceEngineConfig(BaseConfig):
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
     fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight-sync FP8 format. ``"serialized_blockwise"`` makes
-    Megatron weight sync send checkpoint-format FP8 weights plus scale tensors to
-    the inference engine instead of sending ``model_dtype`` weights."""
+    """Optional rollout weight format. ``"serialized_blockwise"`` sends FP8
+    checkpoint weights and scales instead of ``model_dtype`` tensors."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
@@ -948,7 +947,7 @@ class TrainerConfig(BaseConfig):
     vocab_entropy_chunk_size: Optional[int] = 0
     """Chunk size along the sequence dimension when computing Megatron vocab entropy.
     ``0`` auto-sizes from the local vocab shard size and ``vocab_entropy_chunk_memory_mb``.
-    ``None`` preserves the legacy unchunked path."""
+    ``None`` disables chunking."""
     vocab_entropy_chunk_memory_mb: int = 512
     """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
     fused_lm_head_logprob: bool = False

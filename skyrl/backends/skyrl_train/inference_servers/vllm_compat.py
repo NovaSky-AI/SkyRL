@@ -1,4 +1,4 @@
-"""Small compatibility patches for the installed vLLM runtime."""
+"""Compatibility fixes for vLLM inference workers."""
 
 import logging
 from collections.abc import Iterator, Mapping
@@ -31,18 +31,10 @@ def _has_nested_kv_cache_entries(kv_caches: object) -> bool:
 
 
 def patch_vllm_fp8_kv_cache_sleep_wake(runner_cls: type[Any] | None = None) -> bool:
-    """Handle nested Mamba cache tensors in vLLM 0.23 FP8 sleep/wake.
+    """Patch vLLM 0.23 FP8 cache reset for nested hybrid-model caches.
 
-    vLLM's ``GPUModelRunner.init_fp8_kv_scales`` resets FP8 caches after a
-    ``wake_up(tags=["kv_cache"])`` call.  Its current implementation assumes
-    every ``self.kv_caches`` entry is a tensor.  Hybrid attention/Mamba models
-    such as Qwen3.5 include a list of Mamba state tensors in that list, so the
-    upstream reset fails before the first rollout.
-
-    Keep the upstream reset implementation, including its scale restoration,
-    but present a temporary flat list of tensor leaves for the duration of the
-    call.  Flat attention-only layouts continue through the upstream method
-    unchanged.
+    Qwen3.5 Mamba cache entries are nested, while upstream expects tensors.
+    Flatten them only during reset; flat layouts remain on the upstream path.
     """
     if runner_cls is None:
         try:

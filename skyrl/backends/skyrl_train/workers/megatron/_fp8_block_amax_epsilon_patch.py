@@ -1,4 +1,4 @@
-"""Apply SkyRL's optional amax floor to TE blockwise FP8 recipes."""
+"""Apply an optional amax floor to Transformer Engine blockwise FP8 recipes."""
 
 from __future__ import annotations
 
@@ -30,9 +30,8 @@ def _configured_amax_epsilon() -> float | None:
 def apply_fp8_block_amax_epsilon_patch() -> None:
     """Idempotently set ``amax_epsilon`` on TE 2.11 blockwise QParams.
 
-    The environment variable is optional. Once explicitly enabled, an
-    unsupported TE API or failed verification is fatal because continuing would
-    silently use a different training quantizer than the serialized rollout path.
+    Once configured, fail if the TE API cannot be patched and verified; rollout
+    and training quantizers must use the same amax floor.
     """
 
     epsilon = _configured_amax_epsilon()

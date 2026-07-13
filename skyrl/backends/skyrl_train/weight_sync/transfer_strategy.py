@@ -48,10 +48,7 @@ class WeightTransferSender(ABC):
         Args:
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
-                Serialized FP8 omits this because its metadata is produced during
-                quantization; other sync paths retain the existing batched API.
-            derive_metadata_from_chunks: Derive metadata from each transferred
-                chunk. Required for lazy serialized-FP8 quantization.
+            derive_metadata_from_chunks: Derive metadata from each transferred chunk.
         """
         ...
 

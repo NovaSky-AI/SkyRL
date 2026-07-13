@@ -246,7 +246,7 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
     def _get_own_nvml_used_bytes(self, device: int) -> Dict[str, Any]:
-        """Return this worker process' NVML memory on the current CUDA device, if available."""
+        """Return this process's NVML-reported memory for the selected GPU."""
         try:
             import pynvml
 
@@ -309,7 +309,7 @@ class Worker(DistributedTorchRayActor):
         return record
 
     def empty_cache(self) -> None:
-        """Empty the CUDA allocator cache without adding memory-probe overhead."""
+        """Empty this worker's CUDA allocator cache."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -783,7 +783,7 @@ class PPORayActorGroup:
 
     @property
     def is_shutdown(self) -> bool:
-        """Whether this actor group currently has live Ray actor handles."""
+        """Return True when this group has no live Ray actor handles."""
         return len(getattr(self, "_actor_handlers", [])) == 0
 
     def can_restore_init_model(self) -> bool:

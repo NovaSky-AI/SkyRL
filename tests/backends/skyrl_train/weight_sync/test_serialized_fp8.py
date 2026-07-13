@@ -54,23 +54,17 @@ def test_blockwise_cast_uses_training_amax_epsilon_for_near_zero_blocks(monkeypa
 
 
 def test_blockwise_cast_pow2_scales_match_te_ue8m0_rule():
-    # Megatron-TE Float8BlockScaling (power_2_scale=True) rounds the dequant
-    # scale up to the next power of two.
-    # The serialized rollout scale must use the same rule so the vLLM rollout
-    # weights match the Megatron train-forward weights block-for-block.
+    # TE's UE8M0 mode rounds dequantization scales up to powers of two.
     torch.manual_seed(0)
     weight = torch.randn(256, 384, dtype=torch.float32)
 
     _, pow2_scale = blockwise_cast_to_fp8(weight, [128, 128], power_2_scale=True)
     _, exact_scale = blockwise_cast_to_fp8(weight, [128, 128], power_2_scale=False)
 
-    # Every pow2 scale is an exact power of two.
     log2 = torch.log2(pow2_scale)
     assert torch.allclose(log2, log2.round(), atol=0.0)
-    # And equals ceil-to-pow2 of the exact FP32 scale.
     expected = torch.pow(2.0, torch.ceil(torch.log2(exact_scale)))
     assert torch.allclose(pow2_scale, expected)
-    # Rounding is upward, so it never causes FP8 overflow (scale >= exact scale).
     assert torch.all(pow2_scale >= exact_scale)
 
 
@@ -185,39 +179,35 @@ def test_moe_batched_expert_spec_recognizes_and_splits_gate_up():
 
 def test_moe_shared_expert_quantized_router_and_gate_bf16():
     lin = (256, 256)
-    # shared expert linears are FP8 (vLLM builds them with quant_config)
     assert is_quantizable_weight_shape("model.layers.3.mlp.shared_expert.gate_proj.weight", lin)
     assert is_quantizable_weight_shape("model.layers.3.mlp.shared_expert.up_proj.weight", lin)
     assert is_quantizable_weight_shape("model.layers.3.mlp.shared_expert.down_proj.weight", lin)
-    # router + shared_expert_gate stay BF16 (vLLM builds them with quant_config=None)
     assert not is_quantizable_weight_shape("model.layers.3.mlp.gate.weight", (256, 8))
     assert not is_quantizable_weight_shape("model.layers.3.mlp.shared_expert_gate.weight", (256, 1))
 
 
 def test_batched_moe_experts_unbatch_to_per_expert_fp8_with_pow2_scales():
-    # gate_up_proj: [E, 2*moe_inter, hidden]; down_proj: [E, hidden, moe_inter]
-    E, moe_inter, hidden = 3, 128, 256
+    num_experts, moe_inter, hidden = 3, 128, 256
     config = SerializedFp8Config(weight_block_size=(128, 128), power_2_scale=True)
     base = "model.language_model.layers.7.mlp.experts"
 
     torch.manual_seed(0)
-    gate_up = torch.randn(E, 2 * moe_inter, hidden, dtype=torch.bfloat16)
+    gate_up = torch.randn(num_experts, 2 * moe_inter, hidden, dtype=torch.bfloat16)
     emitted = list(iter_serialized_fp8_tensors(f"{base}.gate_up_proj", gate_up, torch.bfloat16, config))
     by_name = dict(emitted)
-    # per-expert gate_proj + up_proj weights and scales, with the names vLLM's
-    # make_expert_params_mapping matches ("experts.N.gate_proj." prefix).
-    for e in range(E):
+    # Names must match vLLM's per-expert parameter mapping.
+    for e in range(num_experts):
         for proj in ("gate_proj", "up_proj"):
             w = by_name[f"{base}.{e}.{proj}.weight"]
             s = by_name[f"{base}.{e}.{proj}.weight_scale_inv"]
             assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (moe_inter, hidden)
-            assert s.dtype == torch.float32 and tuple(s.shape) == (1, 2)  # ceil(128/128), ceil(256/128)
+            assert s.dtype == torch.float32 and tuple(s.shape) == (1, 2)
             log2 = torch.log2(s)
-            assert torch.allclose(log2, log2.round(), atol=0.0)  # power-of-2 scales
+            assert torch.allclose(log2, log2.round(), atol=0.0)
 
-    down = torch.randn(E, hidden, moe_inter, dtype=torch.bfloat16)
+    down = torch.randn(num_experts, hidden, moe_inter, dtype=torch.bfloat16)
     emitted_d = dict(iter_serialized_fp8_tensors(f"{base}.down_proj", down, torch.bfloat16, config))
-    for e in range(E):
+    for e in range(num_experts):
         w = emitted_d[f"{base}.{e}.down_proj.weight"]
         assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (hidden, moe_inter)
         assert f"{base}.{e}.down_proj.weight_scale_inv" in emitted_d

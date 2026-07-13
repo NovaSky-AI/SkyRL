@@ -127,10 +127,8 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
-            weight_metadata: Existing sync paths provide complete metadata up
-                front. Serialized FP8 omits it because quantization produces
-                mixed-dtype tensors and scale entries lazily per chunk.
-            derive_metadata_from_chunks: Use per-chunk metadata for serialized FP8.
+            weight_metadata: Complete metadata for the batched update path.
+            derive_metadata_from_chunks: Send each chunk with derived metadata.
         """
         if derive_metadata_from_chunks:
             if weight_metadata is not None:
@@ -144,7 +142,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]],
     ) -> None:
-        """Preserve the existing one-update batched path for non-FP8 sync.
+        """Send one metadata-declared update through vLLM's native NCCL path.
 
         All ranks must evaluate the chunks iterator (extract_weights uses
         collective all-gather internally). Only rank 0 sends the gathered
@@ -216,8 +214,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         update_info = {**get_weight_chunk_metadata(chunk), "packed": True}
         update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
 
-        # Run in a thread so the receiver's collective_rpc request can enter
-        # vLLM concurrently with the matching trainer-side NCCL broadcast.
+        # Let the receiver enter its collective while the trainer broadcasts.
         await asyncio.to_thread(
             NCCLWeightTransferEngine.trainer_send_weights,
             iterator=iter(zip(chunk.names, chunk.tensors)),

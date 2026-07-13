@@ -1351,8 +1351,8 @@ def _resolve_vocab_entropy_chunk_size(
 ) -> Optional[int]:
     """Resolve the sequence chunk size for vocab entropy.
 
-    ``None`` preserves the legacy unchunked path. ``0`` auto-sizes from the
-    runtime vocab shard and dtype. Positive values are explicit token chunks.
+    ``None`` disables chunking. ``0`` uses the runtime vocab shard and dtype to
+    choose a size. Positive values specify the number of tokens per chunk.
     """
     if chunk_size is None:
         return None
@@ -1407,7 +1407,7 @@ def vocab_parallel_entropy_weighted_sum(
     chunk_size: Optional[int] = None,
     chunk_memory_mb: int = 512,
 ) -> torch.Tensor:
-    """Compute ``sum(entropy * weights)`` while bounding vocab entropy peaks."""
+    """Compute ``sum(entropy * weights)`` with bounded temporary memory."""
     resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
     if resolved_chunk_size is None:
         entropy_tokens = _VocabParallelEntropy.apply(vocab_parallel_logits).squeeze(0)

@@ -779,8 +779,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         )
         env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
-    # Forward the TE blockwise-scale contract to every Ray actor. Hopper defaults
-    # to FP32 scales; Blackwell launchers must explicitly select power-of-2 scales.
+    # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32;
+    # Blackwell launchers explicitly select power-of-two scales.
     serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == SERIALIZED_BLOCKWISE_FP8
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_transformer_kwargs = cfg.trainer.policy.megatron_config.transformer_config_kwargs
@@ -819,9 +819,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     for var_name in (
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
         "NVTE_FP8_BLOCK_AMAX_EPSILON",
-        # DeepGEMM E8M0 post-processing requantizes arbitrary FP32 block
-        # scales to power-of-two values. It must be disabled when the TE side
-        # explicitly uses FP32 scales so rollout and train weights stay equal.
         "VLLM_USE_DEEP_GEMM_E8M0",
     ):
         if value := os.environ.get(var_name, fp8_env_defaults.get(var_name)):

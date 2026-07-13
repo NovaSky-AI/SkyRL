@@ -150,7 +150,7 @@ class WorkerDispatch:
         return max(measurements) if measurements else None
 
     def _enforce_inactive_worker_memory_barrier(self, model: str, stats: List[Dict[str, Any]]) -> None:
-        """Fail soft-offload residuals into hard ref eviction when configured."""
+        """Enforce the residual-HBM policy after CPU offload."""
         placement = self.cfg.trainer.placement
         if not placement.colocated_worker_memory_barrier:
             return
@@ -195,7 +195,7 @@ class WorkerDispatch:
         self._gpu_state[model] = GPUState()
 
     def _offload_inactive_model(self, model: str) -> None:
-        """Offload an inactive colocated model and enforce residual-memory policy."""
+        """Offload an inactive colocated model and enforce its residual-HBM policy."""
         group = self._actor_groups[model]
         if group.is_shutdown:
             self._gpu_state[model] = GPUState()
@@ -225,9 +225,8 @@ class WorkerDispatch:
 
         group = self._get_colocation_group(model)
 
-        # Offload others before restarting a hard-evicted group. Recreating the
-        # requested model first can transiently place both models on the same
-        # GPU, defeating the eviction and causing an initialization OOM.
+        # Offload peers before restarting an evicted group to avoid a transient
+        # overlap during model initialization.
         for other in group:
             if other != model and other in self._actor_groups:
                 state = self._gpu_state[other]
@@ -236,9 +235,8 @@ class WorkerDispatch:
 
         self._ensure_actor_group_ready(model)
 
-        # Backload only the missing pieces for the requested model. In colocated
-        # runs the model weights often stay resident while the optimizer is
-        # offloaded; reloading both adds unnecessary allocator pressure.
+        # Reload only missing state; model weights may remain resident while the
+        # optimizer is offloaded.
         state = self._gpu_state[model]
         backload_model = need_model and not state.model_on_gpu
         backload_optimizer = need_optimizer and not state.optimizer_on_gpu

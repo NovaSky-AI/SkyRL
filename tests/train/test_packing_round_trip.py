@@ -205,11 +205,9 @@ class TestPreprocessPackedRows:
 
         # cu_seqlens_q (== cu_seqlens_q_padded for THD) enumerates 4 sub-seqs:
         assert params.cu_seqlens_q.tolist() == [i * align_size for i in range(5)]
-        # Verify each sub-seq's *valid* tokens were
-        # read from the *correct intra-row offset* — i.e. preprocess respected
-        # the TP-alignment gap that the collator inserted.
+        # Verify valid tokens are read from offsets produced by alignment padding.
         assert packed.shape == (1, 4 * align_size)
-        assert packed[0, :7].tolist() == row_0_sub_0  # row 0 sub 0
+        assert packed[0, :7].tolist() == row_0_sub_0
         assert packed[0, 7:align_size].tolist() == [0] * (align_size - 7)
         assert packed[0, align_size : align_size + 5].tolist() == row_0_sub_1
         assert packed[0, 2 * align_size : 2 * align_size + 3].tolist() == row_1_sub_0

@@ -1,4 +1,4 @@
-"""Utilities for training with persistent Transformer Engine FP8 parameters."""
+"""Initialize optimizer state for persistent Transformer Engine FP8 parameters."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -9,7 +9,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8
 
 
 def is_fp8_param_enabled(transformer_config_kwargs: Mapping[str, Any]) -> bool:
-    """Read persistent-FP8 enablement from SkyRL's dictionary config."""
+    """Return whether dictionary config enables persistent FP8 parameters."""
     return is_fp8_enabled(transformer_config_kwargs.get("fp8_param", False))
 
 
@@ -17,16 +17,11 @@ def _copy_model_shards_to_main_params(
     megatron_optimizer: Any,
     state_dict: Mapping[str, Any],
 ) -> int:
-    """Reload every MCore master shard after an HF import.
+    """Reload MCore FP32 master shards from converted checkpoint tensors.
 
-    ``DistributedOptimizer._copy_model_params_to_main_params`` has the same
-    state-dict-aware behavior for normal optimizers.  Its
-    ``HybridDeviceOptimizer`` branch returns before updating distributed FP32
-    masters, so CPU-offloaded runs need the equivalent copy here.
-
-    ``state_dict`` contains Megatron-Bridge's exact converted checkpoint tensors.
-    That avoids seeding FP32 masters from dequantized FP8 compute weights and also
-    reloads ordinary BF16 parameters such as embeddings and normalization weights.
+    HybridDeviceOptimizer bypasses Megatron's state-dict-aware reload path.
+    Copying from ``state_dict`` preserves unquantized values for persistent FP8
+    parameters and refreshes ordinary BF16 parameters.
     """
     model_groups = getattr(megatron_optimizer, "model_float16_groups", None)
     main_groups = getattr(megatron_optimizer, "shard_fp32_from_float16_groups", None)
@@ -73,12 +68,11 @@ def _copy_model_shards_to_main_params(
 
 
 def _sync_hybrid_device_optimizer_masters(hybrid_optimizer: Any) -> int:
-    """Synchronize HybridDeviceOptimizer's CPU/secondary master copies.
+    """Refresh HybridDeviceOptimizer's secondary masters after checkpoint import.
 
-    CPU-offloaded parameters are cloned before SkyRL imports the HF checkpoint.
-    MCore's public reload helper leaves those clones unchanged when the exposed
-    distributed shards are already FP32, so the first AdamW step otherwise
-    writes pre-import values back into the persistent FP8 model.
+    CPU copies are created before checkpoint import and are not refreshed by
+    MCore's public reload helper. Stale copies would overwrite weights on the
+    first optimizer step.
     """
     copied = 0
     for cpu_param, gpu_param in getattr(hybrid_optimizer, "cpu_copys_map_gpu_param", {}).items():
@@ -110,15 +104,10 @@ def initialize_fp8_param_optimizer_masters(
     fp8_param_gather: bool,
     state_dict: Mapping[str, Any] | None = None,
 ) -> int:
-    """Seed FP32 optimizer masters from the exact imported checkpoint state.
+    """Initialize optimizer masters from unquantized checkpoint shards.
 
-    Transformer Engine creates persistent FP8 GEMM weights during model
-    construction. Megatron-Bridge intentionally skips random initialization
-    before importing Hugging Face weights.  ``state_dict`` is the bridge's
-    per-rank, unquantized conversion result and is therefore the only exact
-    source for optimizer masters after that import.  CPU-offloaded
-    HybridDeviceOptimizer keeps an additional CPU copy of every master, so
-    both the MCore shard and that copy must be seeded.
+    Persistent FP8 parameters cannot seed exact FP32 masters. For CPU offload,
+    refresh both distributed shards and HybridDeviceOptimizer's secondary copies.
     """
     if not fp8_param:
         return 0

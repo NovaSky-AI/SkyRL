@@ -159,10 +159,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
-            weight_metadata: Unused for IPC; metadata comes from each actual
-                tensor because serialized FP8 chunks contain mixed dtypes.
-            derive_metadata_from_chunks: Unused for IPC; retained for the
-                shared sender interface.
+            weight_metadata: Unused; IPC derives metadata from each tensor.
+            derive_metadata_from_chunks: Accepted for sender interface compatibility.
         """
         await self._send_chunks_vllm_native(chunks, weight_metadata)
 
@@ -225,9 +223,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         if any(tensor.dtype != dtype for tensor in chunk.tensors):
             raise ValueError("CUDA IPC packed chunks must contain a single tensor dtype")
 
-        # --- pack all tensors in this chunk into one contiguous buffer ---
-        # Chunk tensors share a single dtype by construction, so offsets in
-        # element units are safe.
         names: List[str] = []
         dtype_names: List[str] = []
         shapes: List[List[int]] = []
@@ -251,7 +246,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             shapes.append(list(tensor.shape))
             sizes.append(size)
 
-        # --- one IPC handle per rank for the packed buffer ---
         ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
         local_handle_dict: Dict[str, IpcHandle] = {gpu_uuid: ipc_handle}
         gathered: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
@@ -276,9 +270,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             }
             await self._inference_client.update_weights_ipc(chunk_update_info)
 
-        # Keep packed_tensor alive past the barrier so the receiver's
-        # rebuilt view has valid backing storage while it copies into
-        # the model. Post-barrier drops the local ref safely.
+        # Keep the backing tensor alive until the receiver copies from its IPC view.
         torch.distributed.barrier()
         torch.cuda.ipc_collect()
         torch.cuda.synchronize()

@@ -62,7 +62,7 @@ class TestCreateInitInfo:
         )
 
     def test_cuda_ipc_create_init_info(self):
-        """CudaIpcTransferStrategy.create_init_info preserves model dtype metadata."""
+        """Preserve model-dtype metadata in CUDA IPC initialization."""
         ie_cfg = self._make_ie_cfg(model_dtype="torch.float32")
         init_info = CudaIpcTransferStrategy.create_init_info(ie_cfg)
 

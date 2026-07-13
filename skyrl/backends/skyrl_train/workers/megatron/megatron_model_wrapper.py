@@ -84,7 +84,7 @@ def _build_packed_targets(
 
 
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
-    """Move tensors nested inside a microbatch dict to the active CUDA device."""
+    """Move all tensors in a nested microbatch to a CUDA device."""
     if torch.is_tensor(value) or isinstance(value, TensorList):
         return value.to(device=device, non_blocking=True)
     if isinstance(value, dict):

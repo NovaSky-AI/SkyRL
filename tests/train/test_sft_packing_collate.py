@@ -213,16 +213,15 @@ class TestPackingCollator:
         assert sum(subseq_lengths) == 12  # raw, un-padded
 
     def test_fp8_tp_alignment_cost_prevents_overpacking(self):
-        """FFD accounts for each subsequence's global FP8/TP footprint."""
+        """Packing uses each sequence's aligned FP8/TP footprint."""
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4, fp8="hybrid")
         examples = [
             _make_example(7, 3),
             _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # TP4 requires a 512-token global footprint per subsequence. The
-        # configured 128-token budget is raised only enough to fit one aligned
-        # subsequence, so these examples must not be packed into a 1024-token row.
+        # TP4 gives each sequence a 512-token footprint, so the 128-token budget
+        # expands to one footprint without packing both sequences together.
         assert batch["sequences"].shape == (2, 512)
         assert sorted(lengths.tolist() for lengths in batch["sub_seq_lengths"]) == [[5], [7]]
 

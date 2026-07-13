@@ -117,14 +117,11 @@ def cuda_uuid_to_str(uuid: str | bytes) -> str:
 
 
 def iter_single_dtype_chunks(chunk: WeightChunk) -> Iterator[WeightChunk]:
-    """Split one logical chunk into dtype-homogeneous chunks.
+    """Yield dtype-homogeneous subchunks in first-seen dtype order.
 
-    Serialized FP8 checkpoint-format sync includes FP8 weights, FP32 block
-    scales, and BF16 tensors that intentionally remain unquantized. IPC buffers
-    must describe one concrete tensor dtype at a time. Preserve the
-    first-seen dtype order so every training rank follows the same deterministic
-    update sequence. vLLM's NCCL path byte-packs mixed dtypes and does not need
-    this partitioning.
+    CUDA IPC packs tensors into a typed buffer, while serialized FP8 chunks mix
+    FP8 weights, FP32 scales, and unquantized BF16 tensors. vLLM's NCCL path
+    byte-packs mixed dtypes and does not require this split.
     """
     by_dtype: Dict[torch.dtype, Dict[str, list]] = {}
     dtype_order: List[torch.dtype] = []
@@ -151,7 +148,7 @@ def iter_single_dtype_chunks(chunk: WeightChunk) -> Iterator[WeightChunk]:
 
 
 def get_weight_chunk_metadata(chunk: WeightChunk) -> Dict[str, List]:
-    """Return vLLM metadata from the tensors that will actually be transferred."""
+    """Return vLLM metadata for the tensors in a transfer chunk."""
     return {
         "names": list(chunk.names),
         "dtype_names": [torch_dtype_name(tensor.dtype) for tensor in chunk.tensors],

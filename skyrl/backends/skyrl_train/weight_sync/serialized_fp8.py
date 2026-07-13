@@ -1,10 +1,4 @@
-"""Serialized FP8 weight-sync helpers.
-
-This module prepares Megatron-exported HF/vLLM weights for rollout engines that
-expect an FP8 checkpoint-style payload: FP8 weight tensors plus explicit scale
-tensors. The sync payload is quantized from the exported master weights whether
-Megatron uses BF16 or persistent FP8 compute parameters.
-"""
+"""Convert Megatron-exported tensors to vLLM's blockwise FP8 checkpoint format."""
 
 from __future__ import annotations
 
@@ -20,13 +14,11 @@ SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
 
 
 def use_power_2_scales_default() -> bool:
-    """Whether serialized rollout weights should use power-of-2 block scales.
+    """Return whether rollout weights use power-of-two block scales.
 
-    Hopper uses exact FP32 block scales by default. Blackwell requires
-    power-of-2 (UE8M0-representable) block scales and must explicitly set
-    ``NVTE_FP8_BLOCK_SCALING_FP32_SCALES=0``. The rollout weight sync must use
-    the *same* scale format as the Megatron-TE training forward, otherwise the
-    effective rollout and training weights differ by up to 2x per block.
+    The setting must match Transformer Engine. Hopper defaults to FP32 scales;
+    Blackwell launchers select power-of-two scales by setting
+    ``NVTE_FP8_BLOCK_SCALING_FP32_SCALES=0``.
     """
 
     scale_mode = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
@@ -61,17 +53,13 @@ _QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".linear_attn.in_proj_qkv.weight",
     ".linear_attn.in_proj_z.weight",
     ".linear_attn.out_proj.weight",
-    # Qwen3.5-MoE dense-shaped shared expert (vLLM builds it WITH quant_config, so
-    # FP8; the router ``mlp.gate`` and ``shared_expert_gate`` stay BF16 by omission).
+    # Shared-expert linears use FP8; router and shared-expert gates remain BF16.
     ".mlp.shared_expert.gate_proj.weight",
     ".mlp.shared_expert.up_proj.weight",
     ".mlp.shared_expert.down_proj.weight",
 )
-# Qwen3.5-MoE routed experts. Megatron-Bridge exports them as batched 3D tensors
-# ``mlp.experts.gate_up_proj`` [E, 2*moe_inter, hidden] and ``mlp.experts.down_proj``
-# [E, hidden, moe_inter]. vLLM's proven blockwise-FP8 MoE path is per-expert
-# (``experts.N.<proj>.weight`` + ``.weight_scale_inv`` -> fused ``w13/w2_weight_scale_inv``
-# via make_expert_params_mapping), so we un-batch + un-fuse into per-expert 2D linears.
+# Megatron Bridge exports routed experts in batched tensors. Emit vLLM's
+# per-expert projection layout so its loader can assemble fused MoE parameters.
 _QWEN35_MOE_GATE_UP_SUFFIX = ".mlp.experts.gate_up_proj"
 _QWEN35_MOE_DOWN_SUFFIX = ".mlp.experts.down_proj"
 _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (
@@ -118,7 +106,7 @@ def get_serialized_fp8_quantization_config(
     weight_block_size: Sequence[int] = (128, 128),
     ignored_layers: Sequence[str] | None = None,
 ) -> dict:
-    """Return the HF quantization_config needed for vLLM serialized FP8."""
+    """Return vLLM's Hugging Face quantization config for serialized FP8."""
 
     block_m, block_n = _normalize_block_size(weight_block_size)
     qconfig = {
@@ -142,16 +130,9 @@ def is_qwen35_config(hf_config: Any) -> bool:
 def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
     """Return Qwen3.5 vLLM module prefixes excluded from serialized FP8.
 
-    Serialized FP8 sync quantizes a narrow Megatron-name allow-list. The GDN
-    ``in_proj_b``/``in_proj_a`` projection is intentionally absent from that
-    allow-list, while vLLM would otherwise quantize the fused ``in_proj_ba``
-    module under a global FP8 config. vLLM's skip logic checks full module
-    prefixes and requires every shard of a fused module to have the same scheme,
-    so emit both shard prefixes for each linear-attention layer.
-
-    The Qwen3.5 text model and full conditional-generation wrapper use
-    different checkpoint prefix families. vLLM applies its HF-to-vLLM mapper
-    to these ignored-layer names before matching runtime modules.
+    Serialized sync excludes GDN ``in_proj_a`` and ``in_proj_b``. vLLM requires
+    every shard of the fused module to share a quantization scheme, so both
+    prefixes are ignored for text-only and conditional-generation checkpoints.
     """
 
     text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
@@ -173,11 +154,9 @@ def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -
             for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
                 ignored.append(f"{layer_prefix}{suffix}")
 
-    # Qwen3.5 text-only RL runs set language_model_only=true, but vLLM 0.23 can
-    # still instantiate the unused vision tower before the multimodal limits take
-    # effect. Its row-parallel attention output projection is 1152 wide and fails
-    # the 128-wide FP8 block divisibility check under TP2, so keep it BF16. vLLM's
-    # FP8 ignore matcher is exact-match by default.
+    # vLLM 0.23 may instantiate the vision tower for text-only runs. Its TP2
+    # attention output is incompatible with 128-wide blocks, and ignore matching
+    # requires each block's exact module prefix.
     vision_config = getattr(hf_config, "vision_config", None) or getattr(hf_config, "visual_config", None)
     vision_depth = 0
     if vision_config is not None:
@@ -227,19 +206,11 @@ def blockwise_cast_to_fp8(
     power_2_scale: bool = False,
     amax_epsilon: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a 2D tensor to FP8 with FP32 block scales.
+    """Quantize a 2D tensor to vLLM's blockwise E4M3 checkpoint format.
 
-    The returned scale follows the vLLM checkpoint ``weight_scale_inv``
-    convention for blockwise FP8:
-
-    ``dequantized_weight ~= qweight.float() * scale``.
-
-    Exact FP32 scales are the Hopper default and require Megatron-TE to use
-    ``NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1``. When ``power_2_scale`` is True,
-    the dequant scale is rounded up with the same
-    ``2**ceil(log2(amax/fp8_max))`` rule used by UE8M0 kernels; this is the
-    required Blackwell mode. Mixing the scale modes between rollout and
-    training makes their effective weights disagree by up to 2x per block.
+    Returns ``weight_scale_inv`` such that
+    ``weight ~= qweight.float() * scale``. Power-of-two mode rounds scales up
+    to match Transformer Engine's UE8M0 rule.
     """
 
     if weight.ndim != 2:
@@ -262,14 +233,10 @@ def blockwise_cast_to_fp8(
 
     blocks = padded.view(padded_rows // block_m, block_m, padded_cols // block_n, block_n)
     blocks = blocks.permute(0, 2, 1, 3)
-    # Keep the serialized rollout quantizer on the same amax floor as TE's
-    # training weight quantizer. The tiny fallback only handles an all-zero
-    # block when TE's optional floor is disabled.
+    # Match TE's amax floor, with a nonzero fallback for all-zero blocks.
     scale = blocks.abs().amax(dim=(2, 3)).clamp(min=max(amax_epsilon, 1e-10)) / fp8_info.max
     if power_2_scale:
-        # Round the dequant scale up to the next power of two so the rollout
-        # engine and the Megatron-TE training forward quantize weights against
-        # identical block scales. Rounding up keeps amax / scale <= fp8_max.
+        # Rounding up preserves range and matches TE's power-of-two scale rule.
         scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
     q_blocks = (blocks / scale[:, :, None, None]).clamp(min=fp8_info.min, max=fp8_info.max)
     q_blocks = q_blocks.to(torch.float8_e4m3fn)
@@ -279,13 +246,9 @@ def blockwise_cast_to_fp8(
 
 
 def batched_moe_expert_spec(name: str) -> tuple[str, tuple[str, ...], bool] | None:
-    """Recognize a batched Qwen3.5-MoE expert tensor exported by Megatron-Bridge.
+    """Parse a Megatron Bridge batched Qwen3.5 MoE tensor name.
 
-    Returns ``(experts_base, proj_names, is_gate_up)`` where ``experts_base`` is the
-    ``...mlp.experts`` prefix and per-expert HF names are
-    ``f"{experts_base}.{expert_idx}.{proj}.weight"``. ``gate_up_proj`` is split along
-    the output dim into ``gate_proj`` (first half) and ``up_proj`` (second half),
-    matching vLLM's ``stacked``/``expert`` mappings. Returns ``None`` for non-experts.
+    Returns ``(experts_base, projection_names, split_gate_up)`` or ``None``.
     """
 
     if name.endswith(_QWEN35_MOE_GATE_UP_SUFFIX):
@@ -296,7 +259,7 @@ def batched_moe_expert_spec(name: str) -> tuple[str, tuple[str, ...], bool] | No
 
 
 def _per_expert_2d_slices(mat: torch.Tensor, is_gate_up: bool) -> list[torch.Tensor]:
-    """Split one expert's 2D matrix into the per-projection 2D linears."""
+    """Split fused gate/up weights; return other expert weights unchanged."""
     if is_gate_up:
         if mat.shape[0] % 2 != 0:
             raise ValueError("Batched MoE gate_up_proj output dimension must be even, " f"got shape={tuple(mat.shape)}")
@@ -310,7 +273,7 @@ def iter_batched_moe_expert_fp8_tensors(
     tensor: torch.Tensor,
     config: SerializedFp8Config,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Un-batch a 3D expert tensor into per-expert FP8 blockwise weights + scales."""
+    """Convert a batched expert tensor to per-expert FP8 weights and scales."""
     spec = batched_moe_expert_spec(name)
     if spec is None:
         raise ValueError(f"Not a batched MoE expert tensor: {name}")
@@ -338,7 +301,7 @@ def iter_serialized_fp8_tensors(
     target_dtype: torch.dtype,
     config: SerializedFp8Config,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield one or more tensors for a single exported HF weight."""
+    """Yield vLLM checkpoint tensors for one Megatron-exported weight."""
 
     if batched_moe_expert_spec(name) is not None:
         yield from iter_batched_moe_expert_fp8_tensors(name, tensor, config)

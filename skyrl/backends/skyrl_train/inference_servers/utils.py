@@ -71,9 +71,8 @@ def _apply_serialized_fp8_weight_sync_defaults(
         )
 
     _set_or_validate(engine_kwargs, "quantization", "fp8", context="engine_init_kwargs")
-    # vLLM must build serialized-FP8 modules before SkyRL's first weight sync.
-    # The initial values are immediately overwritten by Megatron weight sync, so
-    # avoid requiring an on-disk FP8 bootstrap checkpoint.
+    # Build FP8 modules without a bootstrap checkpoint; the first full-weight
+    # sync replaces the dummy values.
     _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
 
     hf_overrides_value = engine_kwargs.get("hf_overrides")
