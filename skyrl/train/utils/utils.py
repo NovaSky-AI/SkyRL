@@ -256,6 +256,22 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+    placement = cfg.trainer.placement
+    if placement.colocated_worker_memory_barrier and not (placement.colocate_all or placement.colocate_policy_ref):
+        raise ValueError("colocated_worker_memory_barrier=true requires colocate_all=true or colocate_policy_ref=true")
+    if placement.colocated_ref_hard_evict_on_breach:
+        if not placement.colocated_worker_memory_barrier:
+            raise ValueError("colocated_ref_hard_evict_on_breach=true requires colocated_worker_memory_barrier=true")
+        if not use_ref_model:
+            raise ValueError("colocated_ref_hard_evict_on_breach=true requires an enabled reference model")
+        if not (placement.colocate_all or placement.colocate_policy_ref):
+            raise ValueError("colocated_ref_hard_evict_on_breach=true requires the reference model to be colocated")
+        if cfg.trainer.update_ref_every_epoch:
+            raise ValueError(
+                "colocated_ref_hard_evict_on_breach is incompatible with update_ref_every_epoch: "
+                "restarting the ref actor reloads the original checkpoint"
+            )
+
     if cfg.trainer.policy.language_model_only:
         assert (
             cfg.generator.inference_engine.language_model_only

@@ -12,7 +12,9 @@ from omegaconf import OmegaConf
 
 from skyrl.train.config.config import (
     BaseConfig,
+    PlacementConfig,
     SkyRLTrainConfig,
+    TrainerConfig,
     _resolve_class_type,
     build_nested_dataclass,
 )
@@ -126,6 +128,65 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+
+
+def test_cli_overrides_cpu_resident_megatron_microbatches():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.megatron_config.cpu_resident_microbatches=true"])
+    assert cfg.trainer.policy.megatron_config.cpu_resident_microbatches is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("colocated_worker_residual_hbm_threshold_gb", -1),
+        ("colocated_worker_residual_hbm_threshold_gb", float("inf")),
+    ],
+)
+def test_placement_config_rejects_invalid_worker_memory_barrier_values(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        PlacementConfig(**{field_name: value})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("vocab_entropy_chunk_size", -1),
+        ("vocab_entropy_chunk_size", True),
+        ("vocab_entropy_chunk_memory_mb", 0),
+        ("vocab_entropy_chunk_memory_mb", True),
+    ],
+)
+def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        TrainerConfig(**{field_name: value})
+
+
+def test_hard_ref_evict_requires_worker_memory_barrier():
+    cfg = _make_validated_test_config()
+    cfg.trainer.placement.colocated_ref_hard_evict_on_breach = True
+
+    with pytest.raises(ValueError, match="requires colocated_worker_memory_barrier=true"):
+        validate_cfg(cfg)
+
+
+def test_worker_memory_barrier_requires_colocated_workers():
+    cfg = _make_validated_test_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.placement.colocate_policy_ref = False
+    cfg.trainer.placement.colocated_worker_memory_barrier = True
+
+    with pytest.raises(ValueError, match="requires colocate_all=true or colocate_policy_ref=true"):
+        validate_cfg(cfg)
+
+
+def test_hard_ref_evict_rejects_mutable_reference_model():
+    cfg = _make_validated_test_config()
+    cfg.trainer.placement.colocated_worker_memory_barrier = True
+    cfg.trainer.placement.colocated_ref_hard_evict_on_breach = True
+    cfg.trainer.update_ref_every_epoch = True
+
+    with pytest.raises(ValueError, match="incompatible with update_ref_every_epoch"):
+        validate_cfg(cfg)
 
 
 def test_cli_overrides_plus_prefix_rejected():

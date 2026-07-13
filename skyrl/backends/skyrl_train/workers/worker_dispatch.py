@@ -110,16 +110,16 @@ class WorkerDispatch:
         """Get LCM of all models' dp_size."""
         import math
 
-        dp_size = self._actor_groups["policy"].actor_infos[0].rank.dp_size
+        dp_size = self._actor_groups["policy"].get_dp_size()
         if "critic" in self._actor_groups:
-            dp_size = math.lcm(dp_size, self._actor_groups["critic"].actor_infos[0].rank.dp_size)
+            dp_size = math.lcm(dp_size, self._actor_groups["critic"].get_dp_size())
         if "ref" in self._actor_groups:
-            dp_size = math.lcm(dp_size, self._actor_groups["ref"].actor_infos[0].rank.dp_size)
+            dp_size = math.lcm(dp_size, self._actor_groups["ref"].get_dp_size())
         return dp_size
 
     def dp_size(self, model: str) -> int:
         """Return the data-parallel size for ``model`` (e.g. "policy")."""
-        return self._actor_groups[model].actor_infos[0].rank.dp_size
+        return self._actor_groups[model].get_dp_size()
 
     def _should_manage_offload(self, model: str) -> bool:
         """Check if we need to manage offload for this model."""
@@ -137,6 +137,84 @@ class WorkerDispatch:
             return [m for m in ["policy", "ref"] if m in self._actor_groups]
         return [model]
 
+    @staticmethod
+    def _worker_residual_hbm_bytes(stats: Dict[str, Any]) -> Optional[int]:
+        """Best-effort residual HBM for a worker process after offload."""
+        if stats.get("nvml_used_bytes") is None:
+            return None
+        measurements = [
+            int(stats[key])
+            for key in ("nvml_used_bytes", "reserved_bytes", "allocated_bytes")
+            if stats.get(key) is not None
+        ]
+        return max(measurements) if measurements else None
+
+    def _enforce_inactive_worker_memory_barrier(self, model: str, stats: List[Dict[str, Any]]) -> None:
+        """Enforce the residual-HBM policy after CPU offload."""
+        placement = self.cfg.trainer.placement
+        if not placement.colocated_worker_memory_barrier:
+            return
+        if not stats:
+            raise RuntimeError(f"Inactive colocated worker barrier for {model} received no memory statistics")
+
+        threshold = placement.colocated_worker_residual_hbm_threshold_gb * (1024**3)
+        measurements = [self._worker_residual_hbm_bytes(record) for record in stats]
+        missing_measurements = sum(value is None for value in measurements)
+        available_measurements = [value for value in measurements if value is not None]
+        max_residual = max(available_measurements) if available_measurements else None
+        if missing_measurements == 0 and max_residual is not None:
+            logger.info(
+                f"Inactive colocated worker barrier model={model} "
+                f"max_residual={max_residual / (1024**3):.2f} GiB "
+                f"threshold={threshold / (1024**3):.2f} GiB"
+            )
+            if max_residual <= threshold:
+                return
+
+        if model != "ref" or not placement.colocated_ref_hard_evict_on_breach:
+            detail = (
+                f"still holds {max_residual / (1024**3):.2f} GiB HBM"
+                if max_residual is not None and missing_measurements == 0
+                else f"has {missing_measurements} missing memory measurement(s)"
+            )
+            raise RuntimeError(f"Inactive colocated worker model={model} {detail} after CPU offload")
+
+        group = self._actor_groups[model]
+        if not group.can_restore_init_model():
+            raise RuntimeError(
+                f"Cannot hard-evict inactive colocated {model} worker because init_model arguments were not captured"
+            )
+
+        reason = (
+            f"residual HBM was {max_residual / (1024**3):.2f} GiB"
+            if max_residual is not None and missing_measurements == 0
+            else f"{missing_measurements} memory measurement(s) were unavailable"
+        )
+        logger.warning(f"Hard-evicting inactive colocated {model} workers because {reason}.")
+        group.shutdown()
+        self._gpu_state[model] = GPUState()
+
+    def _offload_inactive_model(self, model: str) -> None:
+        """Offload an inactive colocated model and enforce its residual-HBM policy."""
+        group = self._actor_groups[model]
+        if group.is_shutdown:
+            self._gpu_state[model] = GPUState()
+            return
+        group.offload_to_cpu()
+        self._gpu_state[model] = GPUState()
+        if self.cfg.trainer.placement.colocated_worker_memory_barrier:
+            self._enforce_inactive_worker_memory_barrier(model, self.release_cuda_memory(model))
+
+    def _ensure_actor_group_ready(self, model: str) -> None:
+        """Restart a hard-evicted actor group before the model is used again."""
+        group = self._actor_groups[model]
+        if not group.is_shutdown:
+            return
+        logger.info(f"Restarting hard-evicted colocated {model} actors.")
+        group.restart_actors()
+        group.restore_init_model()
+        self._gpu_state[model] = GPUState(model_on_gpu=True, optimizer_on_gpu=(model != "ref"))
+
     def _ensure_on_gpu(self, model: str, need_optimizer: bool = True, need_model: bool = True) -> None:
         """Ensure model is on GPU, offloading others in same colocation group if needed."""
         if not self._should_manage_offload(model):
@@ -147,26 +225,30 @@ class WorkerDispatch:
 
         group = self._get_colocation_group(model)
 
-        # Offload others in the same colocation group
+        # Offload peers before restarting an evicted group to avoid a transient
+        # overlap during model initialization.
         for other in group:
             if other != model and other in self._actor_groups:
                 state = self._gpu_state[other]
                 if state.model_on_gpu or state.optimizer_on_gpu:
-                    self._actor_groups[other].offload_to_cpu()
-                    self._gpu_state[other] = GPUState()
+                    self._offload_inactive_model(other)
 
-        # Backload requested model
+        self._ensure_actor_group_ready(model)
+
+        # Reload only missing state; model weights may remain resident while the
+        # optimizer is offloaded.
         state = self._gpu_state[model]
-        needs_backload = (need_model and not state.model_on_gpu) or (need_optimizer and not state.optimizer_on_gpu)
+        backload_model = need_model and not state.model_on_gpu
+        backload_optimizer = need_optimizer and not state.optimizer_on_gpu
 
-        if needs_backload:
+        if backload_model or backload_optimizer:
             self._actor_groups[model].backload_to_gpu(
-                backload_optimizer=need_optimizer,
-                backload_model=need_model,
+                backload_optimizer=backload_optimizer,
+                backload_model=backload_model,
             )
-            if need_model:
+            if backload_model:
                 self._gpu_state[model].model_on_gpu = True
-            if need_optimizer:
+            if backload_optimizer:
                 self._gpu_state[model].optimizer_on_gpu = True
 
     def _offload(self, model: str, offload_optimizer: bool = True, offload_model: bool = True) -> None:
@@ -516,8 +598,7 @@ class WorkerDispatch:
                 if other != model and other in self._actor_groups:
                     state = self._gpu_state[other]
                     if state.model_on_gpu or state.optimizer_on_gpu:
-                        self._actor_groups[other].offload_to_cpu()
-                        self._gpu_state[other] = GPUState()
+                        self._offload_inactive_model(other)
 
         kwargs = {"model_path": model_path}
         if num_training_steps is not None:
@@ -545,6 +626,10 @@ class WorkerDispatch:
             for group in self._actor_groups.values():
                 refs.extend(group.async_run_ray_method("pass_through", "empty_cache"))
             ray.get(refs)
+
+    def release_cuda_memory(self, model: str) -> List[Dict[str, Any]]:
+        """Release worker caches and collect process-level HBM measurements."""
+        return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "release_cuda_memory"))
 
     def get_node_ids(self) -> List[str]:
         """Get unique node IDs from all actor groups."""
