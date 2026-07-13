@@ -258,11 +258,25 @@ class Worker(DistributedTorchRayActor):
                 gpu_uuid = str(raw_gpu_uuid) if raw_gpu_uuid else None
             pynvml.nvmlInit()
             try:
-                handle = (
-                    pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid)
-                    if gpu_uuid
-                    else pynvml.nvmlDeviceGetHandleByIndex(device)
-                )
+                if gpu_uuid:
+                    handle = pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid)
+                else:
+                    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+                    nvml_identifier = str(device)
+                    if visible_devices is not None:
+                        identifiers = [value.strip() for value in visible_devices.split(",") if value.strip()]
+                        if device >= len(identifiers):
+                            raise RuntimeError(
+                                f"CUDA device {device} is absent from CUDA_VISIBLE_DEVICES={visible_devices!r}"
+                            )
+                        nvml_identifier = identifiers[device]
+
+                    try:
+                        physical_device = int(nvml_identifier)
+                    except ValueError:
+                        handle = pynvml.nvmlDeviceGetHandleByUUID(nvml_identifier)
+                    else:
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device)
                 processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
                 current_pid = os.getpid()
                 for proc in processes:

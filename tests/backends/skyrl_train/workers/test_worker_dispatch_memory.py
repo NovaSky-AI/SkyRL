@@ -1,9 +1,12 @@
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 import ray
+import torch
 
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup, Worker
 from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState, WorkerDispatch
 
 
@@ -24,6 +27,34 @@ class _FakeActorGroup:
 
     def shutdown(self):
         self.shutdown_called = True
+
+
+@pytest.mark.parametrize(
+    ("visible_devices", "expected_handle"),
+    [("3,7", ("index", 3)), ("GPU-first,GPU-second", ("uuid", "GPU-first"))],
+)
+def test_nvml_memory_maps_cuda_visible_device(monkeypatch, visible_devices, expected_handle):
+    requested_handles = []
+
+    def get_handle(kind, identifier):
+        requested_handles.append((kind, identifier))
+        return object()
+
+    pynvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetHandleByIndex=lambda index: get_handle("index", index),
+        nvmlDeviceGetHandleByUUID=lambda uuid: get_handle("uuid", uuid),
+        nvmlDeviceGetComputeRunningProcesses=lambda _handle: [SimpleNamespace(pid=os.getpid(), usedGpuMemory=123)],
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(uuid=None))
+
+    result = Worker._get_own_nvml_used_bytes(object(), 0)
+
+    assert result == {"nvml_used_bytes": 123}
+    assert requested_handles == [expected_handle]
 
 
 def _dispatch(*, hard_evict: bool = False, barrier: bool = True):
