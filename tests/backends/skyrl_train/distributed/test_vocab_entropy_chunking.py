@@ -62,6 +62,18 @@ def test_vocab_entropy_weighted_sum_chunking_matches_unchunked(monkeypatch):
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("logits_shape", [(5, 7), (2, 5, 7)])
+def test_vocab_entropy_weighted_sum_supports_2d_and_batched_logits(monkeypatch, logits_shape):
+    monkeypatch.setattr(model_utils._VocabParallelEntropy, "apply", _local_entropy)
+    logits = torch.randn(*logits_shape, dtype=torch.float64)
+    weights = torch.linspace(0.25, 1.25, logits_shape[-2], dtype=torch.float64)
+    expected = (_local_entropy(logits) * weights).sum()
+
+    for chunk_size in (None, 1, 3):
+        actual = model_utils.vocab_parallel_entropy_weighted_sum(logits, weights, chunk_size=chunk_size)
+        torch.testing.assert_close(actual, expected)
+
+
 def test_vocab_entropy_weighted_sum_all_masked_keeps_zero_gradient(monkeypatch):
     monkeypatch.setattr(model_utils._VocabParallelEntropy, "apply", _local_entropy)
     logits = torch.randn(1, 7, 11, dtype=torch.float64, requires_grad=True)

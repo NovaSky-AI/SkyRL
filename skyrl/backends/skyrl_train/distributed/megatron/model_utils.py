@@ -1410,7 +1410,7 @@ def vocab_parallel_entropy_weighted_sum(
     """Compute ``sum(entropy * weights)`` with bounded temporary memory."""
     resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
     if resolved_chunk_size is None:
-        entropy_tokens = _VocabParallelEntropy.apply(vocab_parallel_logits).squeeze(0)
+        entropy_tokens = _VocabParallelEntropy.apply(vocab_parallel_logits)
         return (entropy_tokens * weights).sum()
 
     # Keep an autograd edge even when every chunk is masked out.
@@ -1421,6 +1421,6 @@ def vocab_parallel_entropy_weighted_sum(
         weight_chunk = weights[start:end]
         if torch.count_nonzero(weight_chunk).item() == 0:
             continue
-        entropy_chunk = _VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :]).squeeze(0)
+        entropy_chunk = _VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :])
         local_entropy_sum = local_entropy_sum + (entropy_chunk * weight_chunk).sum()
     return local_entropy_sum
