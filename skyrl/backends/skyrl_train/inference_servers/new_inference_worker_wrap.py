@@ -110,6 +110,14 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
+                # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
+                # drafter is a separate module and must be reloaded from the same
+                # checkpoint-format weights (see spec_decode_utils).
+                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+                    _reload_spec_decode_drafter,
+                )
+
+                _reload_spec_decode_drafter(self.model_runner, weights)
             else:
                 for name, weight in weights:
                     param = model.get_parameter(name)
@@ -148,13 +156,23 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
+
+        def _load_weights(weights):
+            weights = list(weights)
+            loaded = model.load_weights(weights=weights)
+            _reload_spec_decode_drafter(self.model_runner, weights)
+            return loaded
 
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
-                load_weights=model.load_weights,
+                load_weights=_load_weights,
             )
 
         torch.accelerator.synchronize()
