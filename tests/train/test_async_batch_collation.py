@@ -184,8 +184,8 @@ def test_async_collation_matches_serial_packed_collator(monkeypatch):
     _assert_batch_sequences_equal(serial, collated)
 
 
-def test_async_collation_matches_serial_uneven_wraparound(monkeypatch):
-    """Collate-ahead matches serial when batch slicing wraps unevenly."""
+def test_async_collation_matches_serial_with_partial_tail(monkeypatch):
+    """Collate-ahead matches serial across padded partial tail batches."""
     n_examples, batch_size, num_steps = 5, 2, 9
 
     def factory(cfg):
@@ -194,6 +194,48 @@ def test_async_collation_matches_serial_uneven_wraparound(monkeypatch):
     serial, collated = _run_pair(monkeypatch, factory, n_examples, batch_size, num_steps)
     assert len(serial) == num_steps
     _assert_batch_sequences_equal(serial, collated)
+
+
+def test_checkpoint_state_excludes_collated_ahead_batch(monkeypatch):
+    """A step-N checkpoint resumes at the already-collated step-N+1 batch."""
+    cfg = _build_test_sft_config(num_steps=2, batch_size=2)
+    cfg.async_batch_collation = True
+    cfg.ckpt_interval = 1
+    data = _distinct_tokenized(6)
+    trainer = _make_trainer(cfg, DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1))
+    monkeypatch.setattr(trainer, "load_dataset", lambda: copy.deepcopy(data))
+    monkeypatch.setattr(trainer, "load_eval_dataset", lambda: None)
+    monkeypatch.setattr(trainer, "load_checkpoint", lambda: 0)
+
+    batches = []
+    real_train_step = trainer.train_step
+
+    def _capture_train_step(batch, step):
+        batches.append(_snapshot_batch(batch))
+        return real_train_step(batch, step)
+
+    checkpoint_states = []
+
+    def _capture_checkpoint_state():
+        checkpoint_states.append(copy.deepcopy(trainer._checkpoint_dataloader_state))
+        return "unused"
+
+    monkeypatch.setattr(trainer, "train_step", _capture_train_step)
+    monkeypatch.setattr(trainer, "save_checkpoint", _capture_checkpoint_state)
+    trainer.train()
+
+    assert checkpoint_states[0] is not None
+    resumed = _make_trainer(
+        cfg,
+        DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1),
+    )
+    resumed.train_dataloader = resumed.build_train_dataloader(copy.deepcopy(data))
+    resumed.train_dataloader.load_state_dict(checkpoint_states[0])
+    resumed_batch = next(iter(resumed.train_dataloader))
+    _assert_batch_sequences_equal(
+        [{"step": 2, "snap": batches[1]}],
+        [{"step": 2, "snap": _snapshot_batch(resumed_batch)}],
+    )
 
 
 # Unit tests for the AsyncBatchCollator invariants.

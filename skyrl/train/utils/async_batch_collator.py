@@ -1,9 +1,7 @@
 """Single-slot async double-buffer for deterministic per-step collation."""
 
-from __future__ import annotations
-
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 
 class AsyncBatchCollator:
@@ -16,8 +14,8 @@ class AsyncBatchCollator:
     def __init__(self, compute: Callable[[int], Any], thread_name_prefix: str = "batch-collate"):
         self._compute = compute
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name_prefix)
-        self._future: Optional[Future] = None
-        self._pending_step: Optional[int] = None
+        self._future: Future | None = None
+        self._pending_step: int | None = None
 
     def submit(self, step: int) -> None:
         """Schedule ``compute(step)``; call ``get`` before submitting again."""
@@ -31,7 +29,7 @@ class AsyncBatchCollator:
     def has_pending(self) -> bool:
         return self._future is not None
 
-    def pending_step(self) -> Optional[int]:
+    def pending_step(self) -> int | None:
         return self._pending_step
 
     def get(self, expected_step: int) -> Any:

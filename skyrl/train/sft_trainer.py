@@ -2070,7 +2070,11 @@ class SFTTrainer:
             dataloader_save_path = os.path.join(global_step_folder, "data.pt")
             try:
                 with io.open_file(dataloader_save_path, "wb") as f:
-                    dataloader_state = self._checkpoint_dataloader_state or self.train_dataloader.state_dict()
+                    dataloader_state = (
+                        self._checkpoint_dataloader_state
+                        if self._checkpoint_dataloader_state is not None
+                        else self.train_dataloader.state_dict()
+                    )
                     torch.save(dataloader_state, f)
                 logger.info(f"Saved dataloader state to {dataloader_save_path}")
             except Exception as e:
