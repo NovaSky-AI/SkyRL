@@ -28,13 +28,20 @@ from skyrl.backends.skyrl_train.inference_servers.setup import (
 from skyrl.train.config import SkyRLTrainConfig
 
 
-def test_residual_hbm_uses_largest_available_metric():
+def test_residual_hbm_uses_process_owned_metrics_only():
     assert (
         _residual_hbm_bytes(
-            {"device_used_bytes": 456, "nvml_used_bytes": 0, "reserved_bytes": 123, "allocated_bytes": 45}
+            {
+                "device_used_bytes": 60 * 1024**3,
+                "nvml_used_bytes": 100,
+                "reserved_bytes": 43 * 1024**3,
+                "allocated_bytes": 42 * 1024**3,
+            }
         )
-        == 456
+        == 100
     )
+    assert _residual_hbm_bytes({"device_used_bytes": 456}) is None
+    assert _residual_hbm_bytes({"reserved_bytes": 456, "allocated_bytes": 123}) is None
     assert _residual_hbm_bytes({"nvml_error": "unavailable"}) is None
 
 
@@ -80,8 +87,10 @@ async def test_sleep_for_training_passes_only_with_complete_low_memory_stats(mon
 
     async def memory_stats():
         return {
-            "server-0": {"body": {"results": [{"device_used_bytes": 128, "reserved_bytes": 64}]}},
-            "server-1": {"body": {"results": [{"allocated_bytes": 32}]}},
+            "server-0": {
+                "body": {"results": [{"device_used_bytes": 8 * 1024**3, "nvml_used_bytes": 128, "reserved_bytes": 64}]}
+            },
+            "server-1": {"body": {"results": [{"process_used_bytes": 48, "allocated_bytes": 32}]}},
         }
 
     monkeypatch.setattr(client, "reset_prefix_cache", result)

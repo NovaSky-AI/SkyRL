@@ -104,18 +104,12 @@ logger = logging.getLogger(__name__)
 
 
 def _residual_hbm_bytes(record: Dict[str, Any]) -> Optional[int]:
-    """Best-effort residual HBM for a slept inference server process."""
+    """Return process-owned residual HBM without counting colocated actors."""
     measurements = [
-        int(record[key])
-        for key in (
-            "device_used_bytes",
-            "process_used_bytes",
-            "nvml_used_bytes",
-            "reserved_bytes",
-            "allocated_bytes",
-        )
-        if record.get(key) is not None
+        int(record[key]) for key in ("process_used_bytes", "nvml_used_bytes") if record.get(key) is not None
     ]
+    # vLLM's CuMem allocator retains unmapped virtual allocations in PyTorch's
+    # allocated/reserved counters after sleep, so they are diagnostics only.
     return max(measurements) if measurements else None
 
 
@@ -1097,7 +1091,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         )
 
     async def cuda_memory_stats(self) -> Dict[str, Any]:
-        """Return device-wide HBM stats from every vLLM engine worker."""
+        """Return process-owned HBM stats from every vLLM engine worker."""
         return await self._call_all_servers(
             "/collective_rpc",
             {"method": "skyrl_cuda_memory_stats"},

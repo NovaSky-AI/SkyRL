@@ -3,26 +3,24 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 )
 
 
-def test_worker_cuda_memory_stats_reports_device_wide_usage(monkeypatch):
+def test_worker_cuda_memory_stats_reports_process_owned_usage(monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap as worker_module
 
     monkeypatch.setattr(worker_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(worker_module.torch.cuda, "current_device", lambda: 2)
     monkeypatch.setattr(worker_module.torch.cuda, "synchronize", lambda _device: None)
-    monkeypatch.setattr(worker_module.torch.cuda, "mem_get_info", lambda _device: (300, 1000))
     monkeypatch.setattr(worker_module.torch.cuda, "memory_allocated", lambda _device: 100)
     monkeypatch.setattr(worker_module.torch.cuda, "memory_reserved", lambda _device: 200)
 
     worker = object.__new__(NewInferenceWorkerWrap)
+    monkeypatch.setattr(worker, "_skyrl_own_nvml_used_bytes", lambda _device: {"nvml_used_bytes": 250})
 
     assert worker.skyrl_cuda_memory_stats() == {
         "cuda_available": True,
         "device": 2,
         "allocated_bytes": 100,
         "reserved_bytes": 200,
-        "free_bytes": 300,
-        "total_bytes": 1000,
-        "device_used_bytes": 700,
+        "nvml_used_bytes": 250,
     }
 
 

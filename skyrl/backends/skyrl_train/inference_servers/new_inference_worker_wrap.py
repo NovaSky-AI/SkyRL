@@ -25,6 +25,8 @@ Usage:
 """
 
 import gc
+import os
+from contextlib import suppress
 
 import torch
 
@@ -59,23 +61,48 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.device
     """
 
+    @staticmethod
+    def _skyrl_own_nvml_used_bytes(device: int) -> dict:
+        """Return HBM owned by this worker process, excluding colocated actors."""
+        try:
+            import pynvml
+
+            props = torch.cuda.get_device_properties(device)
+            raw_gpu_uuid = getattr(props, "uuid", None)
+            gpu_uuid = cuda_uuid_to_str(raw_gpu_uuid) if raw_gpu_uuid is not None else None
+            pynvml.nvmlInit()
+            try:
+                handle = (
+                    pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid)
+                    if gpu_uuid
+                    else pynvml.nvmlDeviceGetHandleByIndex(device)
+                )
+                current_pid = os.getpid()
+                for process in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
+                    if int(process.pid) == current_pid:
+                        return {"nvml_used_bytes": int(getattr(process, "usedGpuMemory", 0) or 0)}
+                return {"nvml_error": f"PID {current_pid} was not present in NVML's compute-process list"}
+            finally:
+                with suppress(Exception):
+                    pynvml.nvmlShutdown()
+        except Exception as exc:
+            return {"nvml_error": repr(exc)}
+
     def skyrl_cuda_memory_stats(self) -> dict:
-        """Return allocator and device-wide HBM usage for this vLLM worker GPU."""
+        """Return process-owned HBM usage for this vLLM worker."""
         if not torch.cuda.is_available():
             return {"cuda_available": False}
 
         device = torch.cuda.current_device()
         torch.cuda.synchronize(device)
-        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
-        return {
+        record = {
             "cuda_available": True,
             "device": device,
             "allocated_bytes": int(torch.cuda.memory_allocated(device)),
             "reserved_bytes": int(torch.cuda.memory_reserved(device)),
-            "free_bytes": int(free_bytes),
-            "total_bytes": int(total_bytes),
-            "device_used_bytes": int(total_bytes - free_bytes),
         }
+        record.update(self._skyrl_own_nvml_used_bytes(device))
+        return record
 
     def skyrl_release_cuda_memory(self) -> dict:
         """Release this worker's Python and CUDA allocator caches."""
