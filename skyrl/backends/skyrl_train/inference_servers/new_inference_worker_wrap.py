@@ -31,10 +31,16 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
+from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    patch_vllm_fp8_kv_cache_sleep_wake,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
 )
+
+# Apply the compatibility patch before vLLM constructs each worker.
+patch_vllm_fp8_kv_cache_sleep_wake()
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
