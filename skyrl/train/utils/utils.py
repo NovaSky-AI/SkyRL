@@ -273,8 +273,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
     placement = cfg.trainer.placement
-    if placement.colocated_inference_memory_barrier and not placement.colocate_all:
-        raise ValueError("colocated_inference_memory_barrier=true requires colocate_all=true")
     if placement.colocated_worker_memory_barrier and not (placement.colocate_all or placement.colocate_policy_ref):
         raise ValueError("colocated_worker_memory_barrier=true requires colocate_all=true or colocate_policy_ref=true")
     if placement.colocated_ref_hard_evict_on_breach:

@@ -48,14 +48,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
-    Iterator,
     List,
     Literal,
     Optional,
@@ -101,29 +99,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _residual_hbm_bytes(record: Dict[str, Any]) -> Optional[int]:
-    """Return process-owned residual HBM without counting colocated actors."""
-    measurements = [
-        int(record[key]) for key in ("process_used_bytes", "nvml_used_bytes") if record.get(key) is not None
-    ]
-    # vLLM's CuMem allocator retains unmapped virtual allocations in PyTorch's
-    # allocated/reserved counters after sleep, so they are diagnostics only.
-    return max(measurements) if measurements else None
-
-
-def _iter_worker_hbm_records(responses: Dict[str, Any]) -> Iterator[Tuple[str, Optional[Dict[str, Any]]]]:
-    """Yield one memory record per vLLM worker from collective-RPC responses."""
-    for url, response in responses.items():
-        body = response.get("body") if isinstance(response, dict) else None
-        results = body.get("results") if isinstance(body, dict) else None
-        if not isinstance(results, list) or not results:
-            yield url, None
-            continue
-        for worker_idx, record in enumerate(results):
-            label = f"{url}#worker{worker_idx}"
-            yield label, record if isinstance(record, dict) else None
 
 
 def _extract_session_id_and_body(
@@ -1082,105 +1057,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
             Dict mapping server_url to response.
         """
         return await self._call_all_servers("/reset_prefix_cache", {"reset_running_requests": reset_running_requests})
-
-    async def release_cuda_memory(self) -> Dict[str, Any]:
-        """Ask every vLLM engine worker to release its CUDA allocator cache."""
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_release_cuda_memory"},
-        )
-
-    async def cuda_memory_stats(self) -> Dict[str, Any]:
-        """Return process-owned HBM stats from every vLLM engine worker."""
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_cuda_memory_stats"},
-        )
-
-    async def sleep_for_training(
-        self,
-        *,
-        phase: str = "training",
-        level: int = 2,
-        residual_hbm_threshold_gb: float = 2.0,
-        timeout_s: float = 30.0,
-        poll_s: float = 1.0,
-    ) -> Dict[str, Any]:
-        """Sleep rollout servers and wait for residual HBM to drop below a threshold."""
-
-        start = time.monotonic()
-        try:
-            reset_result = await self.reset_prefix_cache(reset_running_requests=False)
-        except Exception as exc:
-            logger.warning("Failed to reset inference prefix cache before %s sleep: %s", phase, exc)
-            reset_result = {"error": repr(exc)}
-
-        sleep_result = await self.sleep(level=level)
-
-        try:
-            release_result = await self.release_cuda_memory()
-        except Exception as exc:
-            logger.warning("Failed to request inference CUDA cleanup after sleep: %s", exc)
-            release_result = {"error": repr(exc)}
-
-        threshold_bytes = max(0.0, float(residual_hbm_threshold_gb)) * (1024**3)
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        poll_interval = max(0.1, float(poll_s))
-        last_stats: Dict[str, Any] = {}
-        last_over_threshold: List[Tuple[str, int]] = []
-        last_unknown: List[str] = []
-        last_stats_error: Optional[Exception] = None
-
-        while True:
-            last_stats_error = None
-            try:
-                last_stats = await self.cuda_memory_stats()
-            except Exception as exc:
-                last_stats_error = exc
-                logger.warning("Failed to fetch inference CUDA memory stats after sleep: %s", exc)
-                last_stats = {"error": repr(exc)}
-
-            if last_stats_error is None:
-                measurements: List[Tuple[str, int]] = []
-                last_unknown = []
-                for worker_label, record in _iter_worker_hbm_records(last_stats):
-                    residual = _residual_hbm_bytes(record) if record is not None else None
-                    if residual is None:
-                        last_unknown.append(worker_label)
-                    else:
-                        measurements.append((worker_label, residual))
-
-                last_over_threshold = [(url, residual) for url, residual in measurements if residual > threshold_bytes]
-                if measurements and not last_unknown and not last_over_threshold:
-                    elapsed = time.monotonic() - start
-                    logger.info(
-                        "Inference sleep barrier passed for %s in %.3fs; threshold=%.2f GiB",
-                        phase,
-                        elapsed,
-                        threshold_bytes / (1024**3),
-                    )
-                    return {
-                        "reset_prefix_cache": reset_result,
-                        "sleep": sleep_result,
-                        "release_cuda_memory": release_result,
-                        "cuda_memory_stats": last_stats,
-                    }
-
-            if time.monotonic() >= deadline:
-                over_summary = ", ".join(f"{url}={used / (1024**3):.2f}GiB" for url, used in last_over_threshold)
-                message = (
-                    f"Inference sleep barrier timed out for {phase}: threshold="
-                    f"{threshold_bytes / (1024**3):.2f} GiB"
-                )
-                if over_summary:
-                    message = f"{message}; over_threshold={over_summary}"
-                if last_unknown:
-                    message = f"{message}; missing_measurements={','.join(last_unknown)}"
-                if last_stats_error is not None:
-                    message = f"{message}; stats_error={last_stats_error!r}"
-                raise RuntimeError(message)
-
-            await asyncio.sleep(poll_interval)
 
     # ---------------------------
     # Weight Sync (control plane - fan-out)

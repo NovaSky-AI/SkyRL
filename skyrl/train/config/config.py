@@ -396,12 +396,6 @@ class PlacementConfig(BaseConfig):
     critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
     ref_num_gpus_per_node: int = 1
-    colocated_inference_memory_barrier: bool = False
-    """Sleep colocated inference engines and verify residual HBM before training."""
-    colocated_inference_sleep_level: int = 2
-    colocated_inference_residual_hbm_threshold_gb: float = 2.0
-    colocated_inference_memory_barrier_timeout_s: float = 30.0
-    colocated_inference_memory_barrier_poll_s: float = 1.0
     colocated_worker_memory_barrier: bool = False
     """Check inactive colocated worker residual HBM after CPU offload."""
     colocated_worker_residual_hbm_threshold_gb: float = 2.0
@@ -409,22 +403,9 @@ class PlacementConfig(BaseConfig):
     """Kill/restart inactive ref workers when residual HBM remains above threshold."""
 
     def __post_init__(self) -> None:
-        if type(self.colocated_inference_sleep_level) is not int or self.colocated_inference_sleep_level not in (1, 2):
-            raise ValueError("colocated_inference_sleep_level must be 1 or 2")
-        for name in (
-            "colocated_inference_residual_hbm_threshold_gb",
-            "colocated_worker_residual_hbm_threshold_gb",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-                raise ValueError(f"{name} must be finite and non-negative")
-        for name in (
-            "colocated_inference_memory_barrier_timeout_s",
-            "colocated_inference_memory_barrier_poll_s",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
+        value = self.colocated_worker_residual_hbm_threshold_gb
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("colocated_worker_residual_hbm_threshold_gb must be finite and non-negative")
 
 
 # ---------------------------------------------------------------------------

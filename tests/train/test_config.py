@@ -145,26 +145,14 @@ def test_cli_overrides_cpu_resident_megatron_microbatches():
     assert cfg.trainer.policy.megatron_config.cpu_resident_microbatches is True
 
 
-@pytest.mark.parametrize("sleep_level", [0, 3, True, "2"])
-def test_placement_config_rejects_invalid_inference_sleep_level(sleep_level):
-    with pytest.raises(ValueError, match="colocated_inference_sleep_level"):
-        PlacementConfig(colocated_inference_sleep_level=sleep_level)
-
-
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [
-        ("colocated_inference_residual_hbm_threshold_gb", -1),
-        ("colocated_inference_residual_hbm_threshold_gb", float("nan")),
         ("colocated_worker_residual_hbm_threshold_gb", -1),
         ("colocated_worker_residual_hbm_threshold_gb", float("inf")),
-        ("colocated_inference_memory_barrier_timeout_s", 0),
-        ("colocated_inference_memory_barrier_timeout_s", float("nan")),
-        ("colocated_inference_memory_barrier_poll_s", 0),
-        ("colocated_inference_memory_barrier_poll_s", float("inf")),
     ],
 )
-def test_placement_config_rejects_invalid_memory_barrier_values(field_name, value):
+def test_placement_config_rejects_invalid_worker_memory_barrier_values(field_name, value):
     with pytest.raises(ValueError, match=field_name):
         PlacementConfig(**{field_name: value})
 
@@ -271,15 +259,6 @@ def test_hard_ref_evict_requires_worker_memory_barrier():
     cfg.trainer.placement.colocated_ref_hard_evict_on_breach = True
 
     with pytest.raises(ValueError, match="requires colocated_worker_memory_barrier=true"):
-        validate_cfg(cfg)
-
-
-def test_inference_memory_barrier_requires_full_colocation():
-    cfg = _make_validated_test_config()
-    cfg.trainer.placement.colocate_all = False
-    cfg.trainer.placement.colocated_inference_memory_barrier = True
-
-    with pytest.raises(ValueError, match="requires colocate_all=true"):
         validate_cfg(cfg)
 
 
