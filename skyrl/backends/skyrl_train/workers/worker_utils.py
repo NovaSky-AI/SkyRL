@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -128,6 +128,13 @@ class BaseBatchIterator:
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Reorder and combine output batches to form a single output."""
         raise NotImplementedError
+
+    def reorder_loss_fn_outputs(self, per_microbatch_outputs: List[List[Any]]) -> List[Any]:
+        """Flatten per-microbatch ``loss_fn_outputs`` into a single list in input-sample order.
+
+        Sample-based splitting preserves order, so a flat concatenation suffices.
+        """
+        return [output for microbatch in per_microbatch_outputs for output in microbatch]
 
     @staticmethod
     def batch_to_experience(batch: TrainingInputBatch):
@@ -401,6 +408,25 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         reordered_batch = type(ref_microbatch)(reordered_data)
         reordered_batch.metadata = ref_microbatch.metadata
         return reordered_batch
+
+    def reorder_loss_fn_outputs(self, per_microbatch_outputs: List[List[Any]]) -> List[Any]:
+        """Reorder per-microbatch ``loss_fn_outputs`` back to the original input-sample order.
+
+        ``per_microbatch_outputs[i]`` holds the outputs for microbatch ``i`` (real
+        microbatches first, in packed order, followed by any padding microbatches).
+        Padding microbatches and intra-microbatch padding samples are dropped: only real
+        samples appear in ``self._microbatches``, and real samples precede padding within a
+        microbatch, so indexing by ``sample_idx`` naturally skips them.
+        """
+        if not any(per_microbatch_outputs):
+            return []
+
+        reordered: List[Any] = [None] * len(self._token_counts)
+        for microbatch_idx, original_indices in enumerate(self._microbatches):
+            outputs = per_microbatch_outputs[microbatch_idx]
+            for sample_idx, original_idx in enumerate(original_indices):
+                reordered[original_idx] = outputs[sample_idx]
+        return reordered
 
 
 def get_microbatch_iterator(

@@ -1198,12 +1198,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
 
-        # Aggregate metrics across micro-batches
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        # Aggregate metrics across micro-batches. Collect loss_fn_outputs per micro-batch
+        # (packed order, including intra-microbatch and whole-microbatch padding) so
+        # token-based batching can reorder them back to the input-sample order below.
+        per_microbatch_loss_fn_outputs = []
         for m_batch, metrics in zip(micro_buffer, metrics_list):
+            # metrics is None on non-last pipeline stages; append [] to keep the per-microbatch
+            # alignment with micro_buffer that the reorder below relies on.
+            if metrics is None:
+                per_microbatch_loss_fn_outputs.append([])
+                continue
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            per_microbatch_loss_fn_outputs.append(metrics.pop("loss_fn_outputs", []))
             # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
@@ -1212,6 +1218,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        if microbatch_iterator is not None:
+            all_loss_fn_outputs = microbatch_iterator.reorder_loss_fn_outputs(per_microbatch_loss_fn_outputs)
+        else:
+            all_loss_fn_outputs = [output for microbatch in per_microbatch_loss_fn_outputs for output in microbatch]
 
         # TODO: SFT path still averages metrics across microbatches and workers.
         # This needs to be unified with the RL path which sums.

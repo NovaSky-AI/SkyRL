@@ -784,7 +784,8 @@ class PolicyWorkerBase(Worker):
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        # Collected per-microbatch (in iteration order) then reordered to input-sample order.
+        per_microbatch_loss_fn_outputs = []
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -794,11 +795,13 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            per_microbatch_loss_fn_outputs.append(metrics.pop("loss_fn_outputs", []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching yields microbatches in packed order; restore input-sample order.
+        all_loss_fn_outputs = microbatch_iterator.reorder_loss_fn_outputs(per_microbatch_loss_fn_outputs)
 
         # TODO: SFT path still averages metrics across microbatches and workers.
         # This needs to be unified with the RL path which sums.

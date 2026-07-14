@@ -160,6 +160,33 @@ class TestTokenBasedBatchIterator:
         for i in range(batch.batch_size):
             assert torch.equal(reordered["sequences"][i], batch["sequences"][i])
 
+    def test_reorder_loss_fn_outputs(self):
+        """reorder_loss_fn_outputs restores input-sample order and drops padding entries."""
+        batch = self._make_batch([10, 3, 8, 5])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
+        # Packing reorders samples (e.g. [[0], [2], [3, 1]]); a naive flatten would be wrong.
+        assert [i for mb in iterator._microbatches for i in mb] != list(range(batch.batch_size))
+
+        # Mimic the worker: real samples first (tagged with their original index), then an
+        # intra-microbatch padding sample appended at the tail.
+        per_microbatch_outputs = []
+        for mb_indices in iterator._microbatches:
+            outputs = [{"orig": idx} for idx in mb_indices]
+            outputs.append({"orig": "pad"})
+            per_microbatch_outputs.append(outputs)
+        # A whole padding microbatch appended to equalize the DP microbatch count.
+        per_microbatch_outputs.append([{"orig": "pad"}])
+
+        reordered = iterator.reorder_loss_fn_outputs(per_microbatch_outputs)
+        assert reordered == [{"orig": i} for i in range(batch.batch_size)]
+
+    def test_reorder_loss_fn_outputs_empty(self):
+        """No loss_fn_outputs produced (all microbatches empty) -> empty result."""
+        batch = self._make_batch([10, 3, 8, 5])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
+        empty = [[] for _ in iterator._microbatches]
+        assert iterator.reorder_loss_fn_outputs(empty) == []
+
     def test_get_microbatch_iterator_factory(self):
         batch = self._make_batch([10, 10, 5, 5])
 
