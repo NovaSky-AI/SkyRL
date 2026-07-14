@@ -800,14 +800,10 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # TODO: SFT path still averages metrics across microbatches and workers.
-        # This needs to be unified with the RL path which sums.
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        # Reduce across microbatches and all-reduce metrics across DP ranks
-        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
-        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        # Reduce across microbatches and all-reduce metrics across DP ranks.
+        # Loss metrics are pre-scaled sums, so keep the same sum-reduction
+        # shape for RL and SFT.
+        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
 
         # Token-based batching diagnostics: total microbatches this rank ran and how many
         # were purely-padding (added to equalize the microbatch count across DP ranks).
@@ -818,7 +814,7 @@ class PolicyWorkerBase(Worker):
             result["num_padding_microbatches"] = float(getattr(microbatch_iterator, "num_padding_microbatches", 0))
 
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
@@ -906,8 +902,12 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            unscaled_loss = policy_loss
-            loss = unscaled_loss * microbatch_weight
+            # Match the RL path: policy_loss is already a pre-scaled sum, so
+            # compensate for DP's gradient average by multiplying before
+            # backward and logging the uncorrected value.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+            loss = policy_loss * grad_sum_correction_factor
+            unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -946,7 +946,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": loss.item(),
+                "loss": unscaled_loss.item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
@@ -1088,13 +1088,9 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # SFT path averages metrics across microbatches and DP ranks (mirror forward_backward).
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
