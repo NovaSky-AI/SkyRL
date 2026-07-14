@@ -1041,12 +1041,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         group = mpu.get_data_parallel_group(with_context_parallel=False)
-        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
         clear_router_replay()
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
@@ -1213,15 +1210,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # TODO: SFT path still averages metrics across microbatches and workers.
-        # This needs to be unified with the RL path which sums.
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
-        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
-        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        # NOTE: Sum loss metrics because scaling is already applied before the worker reduction.
+        status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
 
@@ -1234,7 +1226,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             status["num_padding_microbatches"] = float(num_padding_microbatches)
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
-        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
         # Collect MoE aux metrics averaged across microbatches (all-reduced across ranks
         # inside get_moe_metrics) aggregating after per-microbatch scalar metrics.

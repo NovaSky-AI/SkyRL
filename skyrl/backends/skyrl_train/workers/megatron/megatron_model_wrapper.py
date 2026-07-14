@@ -562,7 +562,13 @@ class MegatronModelWrapper:
 
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
-                loss = policy_loss
+                # Match the RL path: Megatron divides by num_microbatches and
+                # data parallel all-reduce averages gradients across dp_size.
+                # The SFT policy loss is already a pre-scaled sum, so multiply
+                # before backward and log the uncorrected value.
+                grad_sum_correction_factor = num_microbatches * dp_size
+                loss = policy_loss * grad_sum_correction_factor
+                unscaled_loss = loss / grad_sum_correction_factor
 
                 # Compute elementwise loss for Tinker API (per-token NLL)
                 with torch.no_grad():
@@ -579,7 +585,7 @@ class MegatronModelWrapper:
                 if action_mask is not None:
                     valid_lens_t = action_mask.sum(dim=-1).long()
                 elif loss_mask is not None:
-                    valid_lens_t = loss_mask.sum(dim=-1).long()
+                    valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
                 else:
                     valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
@@ -601,7 +607,7 @@ class MegatronModelWrapper:
                     )
 
                 metrics = {
-                    "loss": loss.item(),
+                    "loss": unscaled_loss.detach().item(),
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
@@ -702,7 +708,7 @@ class MegatronModelWrapper:
             if action_mask is not None:
                 valid_lens = action_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
-                valid_lens = loss_mask.sum(dim=1).int().tolist()
+                valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:
                 valid_lens = [seq_len] * batch_size
 

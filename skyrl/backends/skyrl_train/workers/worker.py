@@ -926,7 +926,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens_t = action_mask.sum(dim=-1).long()
             elif loss_mask is not None:
-                valid_lens_t = loss_mask.sum(dim=-1).long()
+                valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
             else:
                 valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
@@ -996,7 +996,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens = action_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
-                valid_lens = loss_mask.sum(dim=1).int().tolist()
+                valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:
                 valid_lens = [seq_len] * batch_size
 
@@ -1161,7 +1161,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens_t = action_mask.sum(dim=-1).long()
             elif loss_mask is not None:
-                valid_lens_t = loss_mask.sum(dim=-1).long()
+                valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
             else:
                 valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
