@@ -324,6 +324,12 @@ vllm-router = [
 ]
 
 
+[tool.pytest.ini_options]
+markers = [
+    "megatron: tests that require the Megatron extra",
+]
+
+
 [tool.black]
 line-length = 120
 include = '\.pyi?$'
@@ -381,4 +387,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-
