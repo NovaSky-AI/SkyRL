@@ -187,7 +187,9 @@ def ensure_gsm8k_data(args: argparse.Namespace) -> tuple[Path, Path]:
     return train_path, val_path
 
 
-def prompt_tokens_for_messages(tokenizer: Any, messages: list[dict[str, str]], max_prompt_length: int) -> list[int] | None:
+def prompt_tokens_for_messages(
+    tokenizer: Any, messages: list[dict[str, str]], max_prompt_length: int
+) -> list[int] | None:
     tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False, tokenize=True)
     token_list = list(tokens["input_ids"] if isinstance(tokens, Mapping) else tokens)
     if len(token_list) > max_prompt_length:
