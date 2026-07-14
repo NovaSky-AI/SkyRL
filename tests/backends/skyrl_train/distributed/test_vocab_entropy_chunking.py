@@ -92,6 +92,12 @@ def test_vocab_entropy_auto_chunk_respects_memory_budget():
     assert model_utils._resolve_vocab_entropy_chunk_size(logits, 0, 1) == 2
 
 
+def test_vocab_entropy_auto_chunk_accounts_for_leading_dimensions():
+    logits = torch.empty(2, 2, 10, 65536, dtype=torch.bfloat16)
+
+    assert model_utils._resolve_vocab_entropy_chunk_size(logits, 0, 4) == 2
+
+
 @pytest.mark.parametrize(("chunk_size", "memory_mb"), [(-1, 1), (0, 0)])
 def test_vocab_entropy_chunk_resolver_rejects_invalid_values(chunk_size, memory_mb):
     with pytest.raises(ValueError):

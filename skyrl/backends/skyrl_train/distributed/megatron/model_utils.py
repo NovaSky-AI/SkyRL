@@ -17,6 +17,7 @@
 # limitations under the License.
 
 import warnings
+from math import prod
 from typing import Any, Optional
 
 import megatron.core.parallel_state as mpu
@@ -1367,7 +1368,10 @@ def _resolve_vocab_entropy_chunk_size(
         return chunk_size if chunk_size < seq_len else None
 
     budget_bytes = int(chunk_memory_mb) * 1024 * 1024
-    bytes_per_token = int(vocab_parallel_logits.shape[-1]) * vocab_parallel_logits.element_size() * peak_factor
+    leading_elements = prod(vocab_parallel_logits.shape[:-2])
+    bytes_per_token = (
+        leading_elements * int(vocab_parallel_logits.shape[-1]) * vocab_parallel_logits.element_size() * peak_factor
+    )
     if bytes_per_token <= 0:
         return None
 
