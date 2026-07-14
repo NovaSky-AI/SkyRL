@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 from cloudpathlib import AnyPath
@@ -35,6 +36,45 @@ def test_process_unload_model():
     result = engine.process_unload_model(model_id, types.UnloadModelInput())
     assert result.status == "unloaded"
     assert not engine.backend.has_model(model_id)
+
+
+def test_adapter_export_returns_backend_name_and_path():
+    engine = object.__new__(TinkerEngine)
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+    engine.backend.export_adapter.return_value = "/shared/adapters/model_step_4"
+
+    result = engine.process_save_weights_for_sampler(
+        "model",
+        types.SaveWeightsForSamplerInput(
+            path="step_4",
+            mode="export_adapter",
+            adapter_name="model_step_4",
+        ),
+    )
+
+    engine.backend.export_adapter.assert_called_once_with("model", "model_step_4")
+    engine.backend.save_sampler_checkpoint.assert_not_called()
+    assert result.adapter_name == "model_step_4"
+    assert result.adapter_path == "/shared/adapters/model_step_4"
+
+
+def test_adapter_load_uses_requested_name_and_path():
+    engine = object.__new__(TinkerEngine)
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+
+    result = engine.process_load_adapter(
+        "model",
+        types.LoadAdapterInput(
+            adapter_name="rollout_model",
+            adapter_path="/shared/adapters/model_step_4",
+        ),
+    )
+
+    engine.backend.load_adapter.assert_called_once_with("rollout_model", "/shared/adapters/model_step_4")
+    assert result.adapter_name == "rollout_model"
+    assert result.adapter_path == "/shared/adapters/model_step_4"
 
 
 def test_cleanup_stale_sessions():

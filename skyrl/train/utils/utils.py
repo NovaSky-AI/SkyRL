@@ -540,6 +540,18 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     Raises:
         ValueError: If colocated mode is used with external URLs.
     """
+    if not cfg.generator.inference_engine.enabled:
+        if cfg.generator.inference_engine.run_engines_locally:
+            raise ValueError("generator.inference_engine.run_engines_locally must be false when inference is disabled")
+        if (
+            cfg.generator.inference_engine.external_proxy_url is not None
+            or cfg.generator.inference_engine.external_server_urls is not None
+        ):
+            raise ValueError("External inference URLs are not accepted when inference is disabled")
+        if cfg.trainer.placement.colocate_all:
+            raise ValueError("colocate_all must be false when inference is disabled")
+        return
+
     is_colocated = cfg.trainer.placement.colocate_all
     has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
     has_external_servers = cfg.generator.inference_engine.external_server_urls is not None

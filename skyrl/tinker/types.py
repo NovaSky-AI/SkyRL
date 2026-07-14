@@ -20,6 +20,7 @@ class RequestType(str, Enum):
     FORWARD = "forward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
+    LOAD_ADAPTER = "load_adapter"
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
@@ -188,12 +189,27 @@ class SaveWeightsForSamplerInput(BaseModel):
     sampling_session_seq_id: int | None = None
     seq_id: int | None = None
     sampling_session_id: str | None = None
+    mode: Literal["sync", "export_adapter"] = "sync"
+    adapter_name: str | None = None
 
 
 class SaveWeightsForSamplerOutput(BaseModel):
     path: str | None = None
     type: str
     sampling_session_id: str | None = None
+    adapter_name: str | None = None
+    adapter_path: str | None = None
+
+
+class LoadAdapterInput(BaseModel):
+    adapter_name: str
+    adapter_path: str
+
+
+class LoadAdapterOutput(BaseModel):
+    adapter_name: str
+    adapter_path: str
+    type: str = "load_adapter"
 
 
 class SaveWeightsInput(BaseModel):

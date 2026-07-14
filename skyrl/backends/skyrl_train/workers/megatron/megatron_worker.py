@@ -1375,18 +1375,29 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             with open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(adapter_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine.
-            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-                RemoteInferenceClient,
-            )
+            if inference_engine_client is not None:
+                from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                    RemoteInferenceClient,
+                )
 
-            if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
-            else:
-                lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
-                await inference_engine_client.update_named_weights(lora_request)
+                if isinstance(inference_engine_client, RemoteInferenceClient):
+                    await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
+                else:
+                    lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
+                    await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
+
+    async def export_adapter(self, adapter_name: str) -> str:
+        if not self._is_lora or self.cfg.policy.megatron_config.lora_config.merge_lora:
+            raise RuntimeError("export_adapter requires unmerged LoRA training")
+        lora_name, lora_sync_path = self._resolve_lora_sync_target(adapter_name)
+        await self._save_lora_adapters_and_sync(
+            lora_sync_path,
+            None,
+            lora_name=lora_name,
+        )
+        return lora_sync_path
 
     async def broadcast_to_inference_engines(
         self,

@@ -702,6 +702,7 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
+    enabled: bool = True
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"

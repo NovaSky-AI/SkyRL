@@ -102,6 +102,22 @@ def test_datum_to_types_preserves_values_and_returns():
     assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
 
 
+def test_adapter_export_requires_a_versioned_path():
+    with pytest.raises(ValidationError, match="path.*required"):
+        api.SaveWeightsForSamplerRequest(model_id="model", mode="export_adapter")
+
+
+def test_adapter_export_rejects_sampling_session_ids():
+    with pytest.raises(ValidationError, match="sampling session IDs"):
+        api.SaveWeightsForSamplerRequest(
+            model_id="model",
+            path="step_4",
+            mode="export_adapter",
+            sampling_session_seq_id=1,
+            seq_id=2,
+        )
+
+
 # --- ModelInputChunk discriminator tests (api) ---
 
 _api_adapter = TypeAdapter(api.ModelInputChunk)

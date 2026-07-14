@@ -15,7 +15,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import VLLMRenderer
+from skyrl.backends.renderer import VLLMRenderer, render_model_input
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -378,6 +378,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if not self._cfg.generator.inference_engine.enabled:
+            raise RuntimeError("Inference engines are disabled for this service")
         if self._inference_engines_initialized:
             return
 
@@ -539,10 +541,13 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        if self._renderer is None:
-            self._ensure_inference_engines()
-            self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
-        rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        if not self._cfg.generator.inference_engine.enabled:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
+        else:
+            if self._renderer is None:
+                self._ensure_inference_engines()
+                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
 
         all_input_ids = [r.prompt_ids for r in rendered_inputs]
 
@@ -1200,6 +1205,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
                 self._create_tar_from_directory(hf_dir, output_path)
             logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
+
         else:
             # Hot path: write a lightweight marker so the engine's checkpoint
             # bookkeeping stays consistent.  Actual weights live in GPU memory.
@@ -1210,3 +1216,16 @@ class SkyRLTrainBackend(AbstractBackend):
                 info.size = len(marker)
                 tar.addfile(info, io.BytesIO(marker))
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
+
+    def export_adapter(self, model_id: str, adapter_name: str) -> str:
+        self._validate_model_state(model_id)
+        if self._get_role(model_id) != "policy":
+            raise ValueError("export_adapter is only supported for policy models")
+        if self._base_lora_signature is None:
+            raise ValueError("export_adapter requires LoRA training")
+        return asyncio.run(self._dispatch.export_adapter(model_id, adapter_name))
+
+    def load_adapter(self, adapter_name: str, adapter_path: str) -> None:
+        self._ensure_inference_engines()
+        asyncio.run(self._inference_engine_client.load_lora_adapter(adapter_name, adapter_path))
+        self._inference_engine_client.increment_weight_version()

@@ -650,3 +650,22 @@ class WorkerDispatch:
         # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
         # (see `GeneratorConfig.use_cache_salt`).
         self._inference_engine_client.increment_weight_version()
+
+    async def export_adapter(self, model_id: str, adapter_name: str) -> str:
+        """Export one policy adapter without creating inference engines."""
+        self._prepare_for_weight_sync()
+        try:
+            self.ensure_active_adapter("policy", model_id)
+            adapter_paths = ray.get(
+                self._actor_groups["policy"].async_run_ray_method(
+                    "pass_through",
+                    "export_adapter",
+                    adapter_name,
+                )
+            )
+        finally:
+            self._finish_weight_sync()
+        unique_paths = set(adapter_paths)
+        if len(unique_paths) != 1:
+            raise RuntimeError(f"Policy workers returned different adapter paths: {adapter_paths}")
+        return unique_paths.pop()

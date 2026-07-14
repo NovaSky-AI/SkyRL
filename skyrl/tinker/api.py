@@ -524,12 +524,25 @@ class SaveWeightsForSamplerRequest(BaseModel):
     sampling_session_seq_id: int | None = None
     seq_id: int | None = None
     type: Literal["save_weights_for_sampler"] = "save_weights_for_sampler"
+    mode: Literal["sync", "export_adapter"] = "sync"
 
     @model_validator(mode="after")
     def check_path_or_ids(self):
+        if self.mode == "export_adapter":
+            if not self.path:
+                raise ValueError("'path' is required when mode='export_adapter'")
+            if self.sampling_session_seq_id is not None or self.seq_id is not None:
+                raise ValueError("sampling session IDs are not accepted when mode='export_adapter'")
+            return self
         if not self.path and (self.sampling_session_seq_id is None or self.seq_id is None):
             raise ValueError("Either 'path' or both 'sampling_session_seq_id' and 'seq_id' must be provided")
         return self
+
+
+class LoadAdapterRequest(BaseModel):
+    model_id: str
+    adapter_name: str = Field(pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    adapter_path: str
 
 
 class SamplingParams(BaseModel):
@@ -1030,7 +1043,10 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     checkpoint_id = request.path or f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
     sampling_session_id = None
-    if request.sampling_session_seq_id is not None and request.seq_id is not None:
+    adapter_name = None
+    if request.mode == "export_adapter":
+        adapter_name = f"{request.model_id}_{checkpoint_id}"
+    elif request.sampling_session_seq_id is not None and request.seq_id is not None:
         # Create the sampling session using the model's session
         sampling_session_id = f"sampling_{uuid4().hex[:8]}"
         sampling_db = SamplingSessionDB(
@@ -1042,13 +1058,13 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         )
         session.add(sampling_db)
 
-    # Create pending checkpoint entry
-    await create_checkpoint(
-        session=session,
-        model_id=request.model_id,
-        checkpoint_id=checkpoint_id,
-        checkpoint_type=types.CheckpointType.SAMPLER,
-    )
+    if request.mode == "sync":
+        await create_checkpoint(
+            session=session,
+            model_id=request.model_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_type=types.CheckpointType.SAMPLER,
+        )
 
     request_id = await create_future(
         session=session,
@@ -1059,11 +1075,30 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             sampling_session_seq_id=request.sampling_session_seq_id,
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
+            mode=request.mode,
+            adapter_name=adapter_name,
         ),
     )
 
     await session.commit()
 
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/load_adapter", response_model=FutureResponse)
+async def load_adapter(request: LoadAdapterRequest, session: AsyncSession = Depends(get_session)):
+    """Loads a LoRA adapter into this service's inference engines."""
+    await get_model(session, request.model_id)
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.LOAD_ADAPTER,
+        model_id=request.model_id,
+        request_data=types.LoadAdapterInput(
+            adapter_name=request.adapter_name,
+            adapter_path=request.adapter_path,
+        ),
+    )
+    await session.commit()
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 

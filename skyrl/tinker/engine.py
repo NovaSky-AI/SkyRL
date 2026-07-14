@@ -639,6 +639,16 @@ class TinkerEngine:
         if not self.backend.has_model(model_id):
             return _model_not_found_error(model_id)
 
+        if request_data.mode == "export_adapter":
+            if request_data.adapter_name is None:
+                raise ValueError("adapter_name is required for adapter export")
+            adapter_path = self.backend.export_adapter(model_id, request_data.adapter_name)
+            return types.SaveWeightsForSamplerOutput(
+                type="save_weights_for_sampler",
+                adapter_name=request_data.adapter_name,
+                adapter_path=adapter_path,
+            )
+
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
@@ -662,6 +672,17 @@ class TinkerEngine:
             path=output_path_str,
             type="save_weights_for_sampler",
             sampling_session_id=request_data.sampling_session_id,
+        )
+
+    def process_load_adapter(
+        self, model_id: str, request_data: types.LoadAdapterInput
+    ) -> types.LoadAdapterOutput | types.ErrorResponse:
+        if not self.backend.has_model(model_id):
+            return _model_not_found_error(model_id)
+        self.backend.load_adapter(request_data.adapter_name, request_data.adapter_path)
+        return types.LoadAdapterOutput(
+            adapter_name=request_data.adapter_name,
+            adapter_path=request_data.adapter_path,
         )
 
     def _complete_futures(self, results: dict[str, BaseModel]):
@@ -695,6 +716,8 @@ class TinkerEngine:
                 return self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
+            case types.RequestType.LOAD_ADAPTER:
+                return self.process_load_adapter(model_id, types.LoadAdapterInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS:
                 return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:

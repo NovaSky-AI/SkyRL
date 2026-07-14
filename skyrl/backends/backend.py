@@ -150,6 +150,14 @@ class AbstractBackend(ABC):
         """
         pass
 
+    def export_adapter(self, model_id: str, adapter_name: str) -> str:
+        """Export a named adapter and return its shared filesystem path."""
+        raise NotImplementedError(f"{type(self).__name__} does not support adapter export")
+
+    def load_adapter(self, adapter_name: str, adapter_path: str) -> None:
+        """Load a named adapter from a shared filesystem path."""
+        raise NotImplementedError(f"{type(self).__name__} does not support adapter loading")
+
     @abstractmethod
     def has_model(self, model_id: str) -> bool:
         """Check if a model is registered with the backend.
